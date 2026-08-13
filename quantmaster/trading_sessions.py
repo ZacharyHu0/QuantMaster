@@ -7,6 +7,7 @@ validated local market data.  With neither source it returns a safe skip.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -108,6 +109,35 @@ class SessionExpectationResolver:
             AssetClass.STOCK, Frequency.DAILY, start.isoformat(), end.isoformat(),
         )
 
+    @staticmethod
+    def _validated_stockdb_sessions(start: date, end: date) -> list[str]:
+        """Read only a self-consistent v2 StockDB acceptance marker.
+
+        Older markers recorded updater completion rather than accepted market
+        data, so they must never be reinterpreted as session evidence.
+        """
+
+        marker_path = get_config().free_stockdb_root / ".quantmaster-update.json"
+        if not marker_path.is_file():
+            return []
+        try:
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            validation = marker.get("validation")
+            session = date.fromisoformat(str(marker.get("validated_session") or ""))
+        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if (
+            marker.get("schema_version") != 2
+            or not isinstance(validation, dict)
+            or validation.get("accepted") is not True
+            or str(marker.get("target_session") or "") != session.isoformat()
+            or str(validation.get("target_session") or "") != session.isoformat()
+            or str(validation.get("actual_session") or "") != session.isoformat()
+            or not start <= session <= end
+        ):
+            return []
+        return [session.isoformat()]
+
     def resolve(self, now: datetime | None = None) -> SessionExpectation:
         current = _normalize_now(now)
         cutoff = current.date()
@@ -115,18 +145,39 @@ class SessionExpectationResolver:
             cutoff -= timedelta(days=1)
         start = cutoff - timedelta(days=45)
         failures: list[str] = []
+        candidates: list[SessionExpectation] = []
         try:
             session = _latest_not_after(self._official_sessions(start, cutoff), cutoff)
             if session:
-                return SessionExpectation(session, "tushare:SSE", True, "官方交易日历")
+                candidates.append(SessionExpectation(
+                    session, "tushare:SSE", True, "官方交易日历",
+                ))
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             failures.append(f"官方日历不可用：{str(exc)[:160]}")
         try:
             session = _latest_not_after(self._research_sessions(start, cutoff), cutoff)
             if session:
-                return SessionExpectation(session, "research_lake", True, "已验证本地交易分区")
+                candidates.append(SessionExpectation(
+                    session, "research_lake", True, "已验证本地交易分区",
+                ))
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             failures.append(f"研究湖日历不可用：{str(exc)[:160]}")
+        try:
+            session = _latest_not_after(
+                self._validated_stockdb_sessions(start, cutoff), cutoff,
+            )
+            if session:
+                candidates.append(SessionExpectation(
+                    session, "stockdb:validated", True, "StockDB 严格验收记录",
+                ))
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            failures.append(f"StockDB 验收记录不可用：{str(exc)[:160]}")
+        if candidates:
+            source_priority = {"tushare:SSE": 2, "stockdb:validated": 1, "research_lake": 0}
+            return max(
+                candidates,
+                key=lambda item: (item.session, source_priority.get(item.source, -1)),
+            )
         action = "请配置 Tushare 交易日历或先完成一次全市场日线同步"
         detail = "；".join(failures)
         return SessionExpectation(

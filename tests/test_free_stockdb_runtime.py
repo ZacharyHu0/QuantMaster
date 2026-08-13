@@ -251,6 +251,67 @@ def test_vendor_date_validation_uses_shanghai_market_date(monkeypatch) -> None:
     assert FreeStockDBRuntime._valid_date("2026-08-11") == ""
 
 
+def test_newer_vendor_date_nominates_strict_validation_target(monkeypatch) -> None:
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(
+        runtime, "check_vendor_notice",
+        lambda **_kwargs: {"data_date": "2026-08-13"},
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.market_date",
+        lambda: pd.Timestamp("2026-08-13").date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.trading_sessions.resolve_session_target",
+        lambda: SimpleNamespace(ready=True, session="2026-08-12", source="research_lake"),
+    )
+
+    assert runtime._target_session() == ("2026-08-13", "free-stockdb-vendor")
+
+
+def test_vendor_target_does_not_advance_marker_when_validation_fails(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    marker = tmp_path / ".quantmaster-update.json"
+    marker.write_text(json.dumps({
+        "schema_version": 2, "validated_session": "2026-08-12",
+    }), encoding="utf-8")
+    monkeypatch.setattr(runtime, "_marker_path", lambda: marker)
+    monkeypatch.setattr(runtime, "_target_session", lambda **_kwargs: (
+        "2026-08-13", "free-stockdb-vendor",
+    ))
+    monkeypatch.setattr(runtime, "_validate_data", lambda _target: {
+        "target_session": "2026-08-13", "actual_session": "2026-08-12",
+        "accepted": False, "complete": False, "warnings": [], "issues": ["stale"],
+    })
+    monkeypatch.setattr(runtime, "_paths", lambda: (
+        tmp_path, tmp_path / "stockdb.exe", tmp_path / "missing-updater.exe",
+    ))
+
+    assert runtime.update_now("manual") is False
+    assert runtime._last_update_date() == "2026-08-12"
+
+
+def test_vendor_target_never_moves_newer_resolver_backward(monkeypatch) -> None:
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(
+        runtime, "check_vendor_notice", lambda **_kwargs: {"data_date": "2026-08-12"},
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.market_date",
+        lambda: pd.Timestamp("2026-08-13").date(),
+    )
+    monkeypatch.setattr(
+        "quantmaster.trading_sessions.resolve_session_target",
+        lambda: SimpleNamespace(
+            ready=True, session="2026-08-13", source="stockdb:validated",
+        ),
+    )
+
+    assert runtime._target_session() == ("2026-08-13", "stockdb:validated")
+
+
 def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     cache_path = tmp_path / "vendor-notice.json"

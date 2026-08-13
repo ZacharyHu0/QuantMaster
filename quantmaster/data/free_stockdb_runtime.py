@@ -858,15 +858,15 @@ class FreeStockDBRuntime:
 
             expectation = resolve_session_target()
             if expectation.ready and expectation.session:
-                if vendor_date and vendor_date == expectation.session:
+                if vendor_date and vendor_date >= expectation.session:
                     return vendor_date, "free-stockdb-vendor"
                 return expectation.session, expectation.source
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
         if vendor_date:
-            logger.warning(
-                "忽略没有已完成交易日证据约束的 vendor data_date=%s", vendor_date,
-            )
+            # The announcement nominates a validation target only.  Promotion
+            # still requires _validate_data to accept the real local slice.
+            return vendor_date, "free-stockdb-vendor"
         return "", "unavailable"
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:

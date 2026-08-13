@@ -1,5 +1,6 @@
 """Evidence-based A-share session resolution around long holidays."""
 
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -117,3 +118,73 @@ def test_unverified_bar_majority_cannot_invent_a_holiday_session():
     ]
     assert result.ready is False
     assert result.session == ""
+
+
+def test_newer_strict_stockdb_marker_advances_stale_research_lake(
+    isolated_config, monkeypatch,
+):
+    isolated_config.data.free_stockdb_root = str(isolated_config.data_root / "stockdb-runtime")
+    root = isolated_config.free_stockdb_root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": "2026-08-13",
+        "target_session": "2026-08-13",
+        "validation": {
+            "accepted": True,
+            "target_session": "2026-08-13",
+            "actual_session": "2026-08-13",
+        },
+    }), encoding="utf-8")
+    resolver = ResearchFallbackResolver([])
+    monkeypatch.setattr(
+        resolver, "_research_sessions", lambda _start, _end: ["2026-08-12"],
+    )
+
+    result = resolver.resolve(
+        datetime(2026, 8, 13, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.session == "2026-08-13"
+    assert result.source == "stockdb:validated"
+
+
+def test_stockdb_marker_is_fail_closed_and_obeys_close_cutoff(
+    isolated_config, monkeypatch,
+):
+    isolated_config.data.free_stockdb_root = str(isolated_config.data_root / "stockdb-runtime")
+    root = isolated_config.free_stockdb_root
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / ".quantmaster-update.json"
+    resolver = FixtureResolver([])
+    monkeypatch.setattr(resolver, "_research_sessions", lambda _start, _end: [])
+    base = {
+        "schema_version": 2,
+        "validated_session": "2026-08-13",
+        "target_session": "2026-08-13",
+        "validation": {
+            "accepted": True,
+            "target_session": "2026-08-13",
+            "actual_session": "2026-08-13",
+        },
+    }
+
+    marker.write_text(json.dumps(base), encoding="utf-8")
+    before_cutoff = resolver.resolve(
+        datetime(2026, 8, 13, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert before_cutoff.ready is False
+
+    for invalid in (
+        {**base, "schema_version": 1},
+        {**base, "validation": {**base["validation"], "accepted": False}},
+        {**base, "validation": {**base["validation"], "actual_session": "2026-08-12"}},
+    ):
+        marker.write_text(json.dumps(invalid), encoding="utf-8")
+        assert resolver.resolve(
+            datetime(2026, 8, 13, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+        ).ready is False
+    marker.write_text("{broken", encoding="utf-8")
+    assert resolver.resolve(
+        datetime(2026, 8, 13, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    ).ready is False
