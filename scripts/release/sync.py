@@ -25,6 +25,7 @@ RELEASE_FILE = "quantmaster/release.py"
 CHANGELOG_FILE = "CHANGELOG.md"
 PENDING_MARKER = "quantmaster-release-sync.json"
 CI_RECOVERY_MARKER = "quantmaster-ci-recovery.json"
+RELEASE_CANDIDATE_MARKER = "quantmaster-release-candidate.json"
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 CHANGELOG_PATTERN = re.compile(
     r"^## v(?P<version>\d+\.\d+\.\d+)[（(](?P<date>\d{4}-\d{2}-\d{2})[）)]",
@@ -206,6 +207,47 @@ def ci_recovery_marker() -> Path:
     return git_path(CI_RECOVERY_MARKER)
 
 
+def release_candidate_marker() -> Path:
+    """Return the repository-wide, untracked release candidate state path."""
+    value = git_text(["rev-parse", "--git-common-dir"])
+    common = Path(value)
+    if not common.is_absolute():
+        common = ROOT / common
+    return common / RELEASE_CANDIDATE_MARKER
+
+
+def _write_json_atomically(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def read_release_candidate() -> tuple[dict[str, str] | None, list[str]]:
+    """Read and structurally validate the single frozen candidate, if any."""
+    marker = release_candidate_marker()
+    if not marker.exists():
+        return None, []
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, [f"发布候选状态无法读取：{exc}"]
+    if not isinstance(value, dict):
+        return None, ["发布候选状态必须是 JSON 对象"]
+    required = {"commit", "version", "release_date", "created_at"}
+    errors = [f"发布候选状态缺少字段：{key}" for key in sorted(required - value.keys())]
+    candidate = {key: value.get(key, "") for key in required}
+    for key, item in candidate.items():
+        if not isinstance(item, str) or not item:
+            errors.append(f"发布候选状态字段 {key} 必须是非空字符串")
+    commit = candidate.get("commit", "")
+    if isinstance(commit, str) and not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        errors.append("发布候选 commit 必须是完整的小写 Git SHA")
+    return candidate if not errors else None, errors
+
+
 def write_pending(commit: str, version: str, error: str = "") -> None:
     marker = pending_marker()
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -300,22 +342,33 @@ def verify_previous_release_synced() -> list[str]:
 
 
 def verify_previous_release_tag(version: str) -> list[str]:
-    """Require an immutable local tag for HEAD before beginning the next release."""
+    """Require the version tag to identify consistent metadata in main history."""
     if current_branch() != "main" or not version:
         return []
     tag = f"v{version}"
     target = git_text(["rev-list", "-n", "1", tag], required=False)
-    head = git_text(["rev-parse", "HEAD"])
     if not target:
+        head = git_text(["rev-parse", "HEAD"])
         recovered, recovery_errors = ci_recovery_errors(version, head)
         if recovered:
             return []
         if recovery_errors:
             return recovery_errors
         return [f"缺少上一版本不可变 tag {tag}；先完成该版本发布"]
-    if target != head:
-        return [f"上一版本 tag {tag} 未指向当前 HEAD：{target[:12]} != {head[:12]}"]
-    return []
+    tracking = git_text(["rev-parse", "refs/remotes/origin/main"], required=False)
+    errors: list[str] = []
+    if not tracking:
+        errors.append("缺少 origin/main 跟踪引用；先运行 `git fetch origin main --tags`")
+    elif run_git(["merge-base", "--is-ancestor", target, tracking]).returncode:
+        errors.append(f"上一版本 tag {tag} 的提交不在 origin/main 历史中")
+    try:
+        tagged_version, metadata_errors = committed_release_errors(target)
+        errors.extend(metadata_errors)
+        if tagged_version != version:
+            errors.append(f"{tag} 提交中的 VERSION 不匹配：{tagged_version} != {version}")
+    except RuntimeError as exc:
+        errors.append(f"无法读取 {tag} 发布元数据：{exc}")
+    return errors
 
 
 def is_next_patch(previous: str, candidate: str) -> bool:
@@ -412,6 +465,168 @@ def committed_release_errors(revision: str = "HEAD") -> tuple[str, list[str]]:
     return version, validate_metadata(
         release_source, changelog_source, require_today=False,
     )
+
+
+def candidate_errors(candidate: dict[str, str]) -> list[str]:
+    """Validate frozen evidence without requiring it to equal any current HEAD."""
+    commit = candidate["commit"]
+    errors: list[str] = []
+    resolved = git_text(["rev-parse", "--verify", f"{commit}^{{commit}}"], required=False)
+    if resolved != commit:
+        return [f"发布候选提交不可用或 SHA 不匹配：{commit}"]
+    tracking = git_text(["rev-parse", "refs/remotes/origin/main"], required=False)
+    if not tracking:
+        errors.append("缺少 origin/main 跟踪引用；先运行 `git fetch origin main --tags`")
+    elif run_git(["merge-base", "--is-ancestor", commit, tracking]).returncode:
+        errors.append(f"发布候选 {commit[:12]} 不在 origin/main 历史中")
+    try:
+        version, metadata_errors = committed_release_errors(commit)
+        errors.extend(metadata_errors)
+        release_date = release_assignments(read_committed(RELEASE_FILE, commit)).get(
+            "RELEASE_DATE", "",
+        )
+        if version != candidate["version"]:
+            errors.append(
+                f"候选 VERSION 与冻结状态不匹配：{version} != {candidate['version']}"
+            )
+        if release_date != candidate["release_date"]:
+            errors.append(
+                "候选 RELEASE_DATE 与冻结状态不匹配："
+                f"{release_date} != {candidate['release_date']}"
+            )
+    except (RuntimeError, SyntaxError, ValueError) as exc:
+        errors.append(f"无法读取候选发布元数据：{exc}")
+    return errors
+
+
+def _candidate_metadata(commit: str) -> tuple[str, str, list[str]]:
+    try:
+        version, errors = committed_release_errors(commit)
+        release_date = release_assignments(read_committed(RELEASE_FILE, commit)).get(
+            "RELEASE_DATE", "",
+        )
+        return version, release_date, errors
+    except (RuntimeError, SyntaxError, ValueError) as exc:
+        return "", "", [f"无法读取候选发布元数据：{exc}"]
+
+
+def _existing_candidate_result(
+    existing: dict[str, str], resolved: str,
+) -> int | None:
+    if existing["commit"] != resolved:
+        return print_errors(
+            [
+                f"已有未完成候选 v{existing['version']} {existing['commit']}；"
+                "先 publish，或由 owner 处理该状态"
+            ],
+            "同一时间只允许一个发布候选",
+        )
+    errors = candidate_errors(existing)
+    if print_errors(errors, "现有发布候选无效"):
+        return 1
+    print(
+        f"[QuantMaster] 发布候选已冻结：v{existing['version']} "
+        f"{existing['commit']}（重复 cut 未改变状态）"
+    )
+    return 0
+
+
+def cut_release_candidate(revision: str = "refs/remotes/origin/main") -> int:
+    """Freeze one pushed main-history commit for human release confirmation."""
+    existing, state_errors = read_release_candidate()
+    if print_errors(state_errors, "发布候选状态损坏"):
+        return 1
+    resolved = git_text(["rev-parse", "--verify", f"{revision}^{{commit}}"], required=False)
+    if not resolved:
+        return print_errors([f"无法解析候选提交：{revision}"], "无法冻结发布候选")
+    if existing is not None:
+        return int(_existing_candidate_result(existing, resolved))
+    tracking = git_text(["rev-parse", "refs/remotes/origin/main"], required=False)
+    errors: list[str] = []
+    if not tracking:
+        errors.append("缺少 origin/main 跟踪引用；先运行 `git fetch origin main --tags`")
+    elif run_git(["merge-base", "--is-ancestor", resolved, tracking]).returncode:
+        errors.append(f"候选 {resolved[:12]} 不在 origin/main 历史中")
+    version, release_date, metadata_errors = _candidate_metadata(resolved)
+    errors.extend(metadata_errors)
+    tag = f"v{version}"
+    tag_target = git_text(["rev-list", "-n", "1", tag], required=False) if version else ""
+    if tag_target:
+        errors.append(f"{tag} 已存在并指向 {tag_target[:12]}；不能冻结为新候选")
+    if print_errors(errors, "无法冻结发布候选"):
+        return 1
+    candidate = {
+        "commit": resolved,
+        "version": version,
+        "release_date": release_date,
+        "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+    }
+    _write_json_atomically(release_candidate_marker(), candidate)
+    print(f"[QuantMaster] 已冻结发布候选：v{version} {resolved}")
+    print("[QuantMaster] 未创建或推送 tag；人工确认必须绑定以上完整 SHA。")
+    return 0
+
+
+def _remote_tag_target(tag: str) -> tuple[str, bool, str]:
+    result = run_git(["ls-remote", "--tags", "origin", f"refs/tags/{tag}^{{}}", f"refs/tags/{tag}"])
+    if result.returncode:
+        return "", False, result.stderr.strip() or result.stdout.strip() or "无法查询远端 tag"
+    refs = {
+        line.split()[1]: line.split()[0]
+        for line in result.stdout.splitlines()
+        if len(line.split()) == 2
+    }
+    peeled = refs.get(f"refs/tags/{tag}^{{}}")
+    direct = refs.get(f"refs/tags/{tag}")
+    return peeled or direct or "", bool(peeled), ""
+
+
+def _candidate_tag_errors(tag: str, commit: str) -> tuple[str, list[str]]:
+    errors: list[str] = []
+    local_target = git_text(["rev-list", "-n", "1", tag], required=False)
+    if local_target and local_target != commit:
+        errors.append(f"本地 {tag} 指向 {local_target[:12]}，不是候选 {commit[:12]}")
+    elif local_target and git_text(["cat-file", "-t", tag], required=False) != "tag":
+        errors.append(f"本地 {tag} 不是 annotated tag")
+    remote_target, remote_annotated, remote_error = _remote_tag_target(tag)
+    if remote_error:
+        errors.append(remote_error)
+    elif remote_target and remote_target != commit:
+        errors.append(f"远端 {tag} 指向 {remote_target[:12]}，不是候选 {commit[:12]}")
+    elif remote_target and not remote_annotated:
+        errors.append(f"远端 {tag} 不是 annotated tag")
+    return remote_target, errors
+
+
+def publish_release_candidate() -> int:
+    """Explicitly create and push an annotated tag at the frozen candidate SHA."""
+    candidate, errors = read_release_candidate()
+    if candidate is None:
+        errors = errors or ["没有未完成的发布候选；先运行 cut"]
+        return print_errors(errors, "无法发布候选")
+    errors.extend(candidate_errors(candidate))
+    commit = candidate["commit"]
+    version = candidate["version"]
+    tag = f"v{version}"
+    remote_target, tag_errors = _candidate_tag_errors(tag, commit)
+    errors.extend(tag_errors)
+    if print_errors(errors, "无法发布候选"):
+        return 1
+    if remote_target == commit:
+        release_candidate_marker().unlink()
+        print(f"[QuantMaster] {tag} 已在 origin 精确指向候选 {commit}；候选已完成。")
+        return 0
+    if not git_text(["rev-list", "-n", "1", tag], required=False):
+        created = run_git(["tag", "-a", tag, commit, "-m", f"QuantMaster {version}"])
+        if created.returncode:
+            return print_errors([created.stderr.strip()], "创建 annotated tag 失败")
+    pushed = run_git(["push", "origin", f"refs/tags/{tag}"])
+    if pushed.returncode:
+        return print_errors([pushed.stderr.strip()], "推送发布 tag 失败")
+    release_candidate_marker().unlink()
+    print(f"[QuantMaster] 已发布 {tag}：annotated tag 精确指向候选 {commit}")
+    print("[QuantMaster] 仅推送 tag；GitHub Release 由 tag workflow 创建。")
+    return 0
 
 
 def release_changed_in_head() -> bool:
@@ -703,6 +918,7 @@ def status() -> int:
     local, tracking = local_and_tracking_heads()
     marker = pending_marker()
     recovery_marker = ci_recovery_marker()
+    candidate, candidate_state_errors = read_release_candidate()
     hooks_path = config_value("core.hooksPath")
     print(f"branch: {branch}")
     print(f"version: {version}")
@@ -712,16 +928,28 @@ def status() -> int:
     print(f"auto-push: {'on' if auto_push_enabled() else 'off'}")
     print(f"pending: {'yes' if marker.exists() else 'no'}")
     print(f"ci-recovery: {'yes' if recovery_marker.exists() else 'no'}")
+    print(f"candidate: {candidate['commit'] if candidate else '(none)'}")
+    if candidate:
+        main_advanced = bool(
+            tracking and candidate["commit"] != tracking
+            and not run_git(["merge-base", "--is-ancestor", candidate["commit"], tracking]).returncode
+        )
+        print(f"candidate-version: {candidate['version']}")
+        print(f"main-advanced-since-cut: {'yes' if main_advanced else 'no'}")
     errors = list(metadata_errors)
-    if branch == "main" and local != tracking:
-        errors.append("main 尚未与 origin/main 同步")
+    errors.extend(candidate_state_errors)
+    if candidate:
+        errors.extend(candidate_errors(candidate))
     if marker.exists():
         errors.append(f"存在待同步标记：{marker}")
     if recovery_marker.exists():
         recovered, recovery_errors = ci_recovery_errors(version, local)
         if not recovered:
             errors.extend(recovery_errors or [f"CI 恢复标记无效：{recovery_marker}"])
-    return print_errors(errors, "发布同步状态异常")
+    result = print_errors(errors, "发布同步状态异常")
+    if not result and branch == "main" and local != tracking:
+        print("[QuantMaster] main 与 origin/main 不同；这不会使冻结候选失效。")
+    return result
 
 
 def check_worktree() -> int:
@@ -759,6 +987,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers.add_parser("check", help="检查工作区发布元数据")
     subparsers.add_parser("status", help="显示本地与 origin/main 同步状态")
+    cut_parser = subparsers.add_parser("cut", help="冻结一个已推送的发布候选 SHA")
+    cut_parser.add_argument(
+        "--commit", default="refs/remotes/origin/main",
+        help="origin/main 历史中的提交（默认 origin/main）",
+    )
+    subparsers.add_parser("publish", help="显式发布当前冻结候选的 annotated tag")
     subparsers.add_parser("push", help="重试推送当前 main 发布提交")
     recovery_parser = subparsers.add_parser(
         "recover-ci",
@@ -780,6 +1014,8 @@ def main(argv: list[str] | None = None) -> int:
         "install": lambda: install_hooks(args),
         "check": check_worktree,
         "status": status,
+        "cut": lambda: cut_release_candidate(args.commit),
+        "publish": publish_release_candidate,
         "push": push_current_release,
         "recover-ci": lambda: authorize_ci_recovery(args.run_id, replace=args.replace),
         "replace-failed": replace_failed_release,

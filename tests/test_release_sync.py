@@ -11,10 +11,12 @@ from scripts.release.sync import (
     CHANGELOG_FILE,
     RELEASE_FILE,
     ci_recovery_errors,
+    cut_release_candidate,
     github_https_push_url,
     is_next_patch,
     post_commit,
     pre_commit,
+    publish_release_candidate,
     push_config_variants,
     release_assignments,
     release_today,
@@ -93,13 +95,21 @@ def test_historical_metadata_allows_past_date_but_rejects_future_date():
     assert any("不得晚于" in error for error in errors)
 
 
-def test_previous_release_tag_must_point_to_head(monkeypatch):
+def test_previous_release_tag_may_be_a_main_history_ancestor(monkeypatch):
     from scripts.release import sync as release_sync
 
     monkeypatch.setattr(release_sync, "current_branch", lambda: "main")
-    values = {("rev-list", "-n", "1", "v1.2.3"): "abc", ("rev-parse", "HEAD"): "def"}
+    values = {
+        ("rev-list", "-n", "1", "v1.2.3"): "abc",
+        ("rev-parse", "refs/remotes/origin/main"): "def",
+    }
     monkeypatch.setattr(release_sync, "git_text", lambda args, required=True: values[tuple(args)])
-    assert "未指向" in verify_previous_release_tag("1.2.3")[0]
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda revision: ("1.2.3", []))
+    assert verify_previous_release_tag("1.2.3") == []
 
 
 def test_exact_ci_failure_recovery_allows_missing_previous_tag(monkeypatch):
@@ -114,6 +124,198 @@ def test_exact_ci_failure_recovery_allows_missing_previous_tag(monkeypatch):
         lambda: ({"version": "1.2.3", "commit": "abc", "run_id": 12345}, ""),
     )
     assert verify_previous_release_tag("1.2.3") == []
+
+
+def _candidate(commit: str = "a" * 40) -> dict[str, str]:
+    return {
+        "commit": commit,
+        "version": "1.2.3",
+        "release_date": "2026-07-27",
+        "created_at": "2026-07-27T00:00:00+00:00",
+    }
+
+
+def test_cut_freezes_full_sha_without_creating_or_pushing_tag(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    commit = "a" * 40
+    marker = tmp_path / "candidate.json"
+    monkeypatch.setattr(release_sync, "release_candidate_marker", lambda: marker)
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (None, []))
+    values = {
+        ("rev-parse", "--verify", "refs/remotes/origin/main^{commit}"): commit,
+        ("rev-parse", "refs/remotes/origin/main"): commit,
+        ("rev-list", "-n", "1", "v1.2.3"): "",
+    }
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: values[tuple(args)],
+    )
+    calls = []
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda revision: ("1.2.3", []))
+    monkeypatch.setattr(
+        release_sync, "read_committed",
+        lambda path, revision="HEAD": valid_sources()[0],
+    )
+
+    assert cut_release_candidate() == 0
+    state = json.loads(marker.read_text(encoding="utf-8"))
+    assert state["commit"] == commit
+    assert all(call[0] not in {"tag", "push"} for call in calls)
+
+
+def test_cut_is_idempotent_for_same_valid_candidate(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (candidate, []))
+    monkeypatch.setattr(
+        release_sync, "git_text",
+        lambda args, required=True: candidate["commit"],
+    )
+    monkeypatch.setattr(release_sync, "candidate_errors", lambda value: [])
+    assert cut_release_candidate() == 0
+
+
+def test_cut_rejects_a_second_unfinished_candidate(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (_candidate("a" * 40), []))
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: "b" * 40,
+    )
+    assert cut_release_candidate() == 1
+
+
+def test_candidate_remains_valid_when_origin_main_advances(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    values = {
+        ("rev-parse", "--verify", f"{candidate['commit']}^{{commit}}"): candidate["commit"],
+        ("rev-parse", "refs/remotes/origin/main"): "b" * 40,
+    }
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: values[tuple(args)],
+    )
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda revision: ("1.2.3", []))
+    monkeypatch.setattr(
+        release_sync, "read_committed", lambda path, revision="HEAD": valid_sources()[0],
+    )
+    assert release_sync.candidate_errors(candidate) == []
+
+
+def test_candidate_rejects_commit_outside_origin_main(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    monkeypatch.setattr(
+        release_sync, "git_text",
+        lambda args, required=True: (
+            candidate["commit"] if "--verify" in args else "b" * 40
+        ),
+    )
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "not ancestor"),
+    )
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda revision: ("1.2.3", []))
+    monkeypatch.setattr(
+        release_sync, "read_committed", lambda path, revision="HEAD": valid_sources()[0],
+    )
+    assert any("不在 origin/main 历史" in error for error in release_sync.candidate_errors(candidate))
+
+
+def test_candidate_rejects_frozen_metadata_mismatch(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    monkeypatch.setattr(
+        release_sync, "git_text",
+        lambda args, required=True: candidate["commit"] if "--verify" in args else "b" * 40,
+    )
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    monkeypatch.setattr(release_sync, "committed_release_errors", lambda revision: ("1.2.4", []))
+    monkeypatch.setattr(
+        release_sync, "read_committed", lambda path, revision="HEAD": valid_sources()[0],
+    )
+    assert any("VERSION" in error for error in release_sync.candidate_errors(candidate))
+
+
+def test_corrupt_candidate_state_fails_explicitly(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    marker = tmp_path / "candidate.json"
+    marker.write_text("{broken", encoding="utf-8")
+    monkeypatch.setattr(release_sync, "release_candidate_marker", lambda: marker)
+    candidate, errors = release_sync.read_release_candidate()
+    assert candidate is None
+    assert "无法读取" in errors[0]
+
+
+def test_publish_tags_frozen_sha_even_when_head_differs(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    marker = tmp_path / "candidate.json"
+    marker.write_text("state", encoding="utf-8")
+    monkeypatch.setattr(release_sync, "release_candidate_marker", lambda: marker)
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (candidate, []))
+    monkeypatch.setattr(release_sync, "candidate_errors", lambda value: [])
+    monkeypatch.setattr(
+        release_sync, "git_text", lambda args, required=True: "" if args[0] == "rev-list" else "b" * 40,
+    )
+    monkeypatch.setattr(release_sync, "_remote_tag_target", lambda tag: ("", False, ""))
+    calls = []
+    monkeypatch.setattr(
+        release_sync, "run_git",
+        lambda args, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0, "", ""),
+    )
+    assert publish_release_candidate() == 0
+    assert ["tag", "-a", "v1.2.3", candidate["commit"], "-m", "QuantMaster 1.2.3"] in calls
+    assert ["push", "origin", "refs/tags/v1.2.3"] in calls
+    assert not marker.exists()
+
+
+def test_publish_rejects_tag_pointing_elsewhere(monkeypatch):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (candidate, []))
+    monkeypatch.setattr(release_sync, "candidate_errors", lambda value: [])
+    monkeypatch.setattr(release_sync, "git_text", lambda args, required=True: "b" * 40)
+    monkeypatch.setattr(release_sync, "_remote_tag_target", lambda tag: ("b" * 40, True, ""))
+    assert publish_release_candidate() == 1
+
+
+def test_publish_is_safe_to_retry_after_remote_push(monkeypatch, tmp_path):
+    from scripts.release import sync as release_sync
+
+    candidate = _candidate()
+    marker = tmp_path / "candidate.json"
+    marker.write_text("state", encoding="utf-8")
+    monkeypatch.setattr(release_sync, "release_candidate_marker", lambda: marker)
+    monkeypatch.setattr(release_sync, "read_release_candidate", lambda: (candidate, []))
+    monkeypatch.setattr(release_sync, "candidate_errors", lambda value: [])
+    monkeypatch.setattr(
+        release_sync, "git_text",
+        lambda args, required=True: "tag" if args[0] == "cat-file" else candidate["commit"],
+    )
+    monkeypatch.setattr(
+        release_sync, "_remote_tag_target", lambda tag: (candidate["commit"], True, ""),
+    )
+    assert publish_release_candidate() == 0
+    assert not marker.exists()
 
 
 def test_ci_failure_recovery_rejects_mismatched_commit(monkeypatch):

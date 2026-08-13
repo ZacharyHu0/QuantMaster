@@ -29,6 +29,7 @@ jobs:
           git fetch origin main --tags --force
           target_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
           git merge-base --is-ancestor "$target_commit" origin/main
+          python scripts/release/sync.py check
           app_version="$(python -c 'from quantmaster.release import VERSION; print(VERSION)')"
           test "$RELEASE_TAG" = "v${app_version}"
 
