@@ -68,6 +68,7 @@ _CLEANUP_ATTEMPTS = 8
 _CLEANUP_INITIAL_DELAY_SECONDS = 0.1
 _CLEANUP_MAX_DELAY_SECONDS = 1.0
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33})
+_cleanup_sleep = time.sleep
 
 
 def prepare_pytest_directory(path: Path) -> Path:
@@ -105,7 +106,7 @@ def cleanup_run_root(path: Path) -> None:
                     f"[local-ci] successful run cleanup remained locked after {attempt} "
                     f"attempts; retained evidence at {path}"
                 ) from exc
-        time.sleep(delay)
+        _cleanup_sleep(delay)
         delay = min(delay * 2, _CLEANUP_MAX_DELAY_SECONDS)
 
 

@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -112,7 +113,7 @@ def test_cleanup_run_root_retries_when_child_disappears_during_walk(monkeypatch,
             raise FileNotFoundError(2, "missing child", path / "ui" / "jobs.sqlite-shm")
 
     monkeypatch.setattr(run.shutil, "rmtree", remove)
-    monkeypatch.setattr(run.time, "sleep", delays.append)
+    monkeypatch.setattr(run, "_cleanup_sleep", delays.append)
 
     run.cleanup_run_root(run_root)
 
@@ -130,11 +131,22 @@ def test_cleanup_run_root_accepts_concurrently_removed_root(monkeypatch, tmp_pat
             FileNotFoundError(2, "missing root", path),
         ),
     )
-    monkeypatch.setattr(run.time, "sleep", sleeps.append)
+    monkeypatch.setattr(run, "_cleanup_sleep", sleeps.append)
 
     run.cleanup_run_root(run_root)
 
     assert attempts == [run_root]
+    assert sleeps == []
+
+
+def test_cleanup_delay_spy_does_not_replace_process_global_sleep(monkeypatch):
+    sleeps = []
+    process_sleep = time.sleep
+
+    monkeypatch.setattr(run, "_cleanup_sleep", sleeps.append)
+    time.sleep(0)
+
+    assert time.sleep is process_sleep
     assert sleeps == []
 
 
@@ -166,7 +178,7 @@ def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
             raise _windows_cleanup_error(32, path)
 
     monkeypatch.setattr(run.shutil, "rmtree", remove)
-    monkeypatch.setattr(run.time, "sleep", delays.append)
+    monkeypatch.setattr(run, "_cleanup_sleep", delays.append)
 
     run.cleanup_run_root(run_root)
 
@@ -183,7 +195,7 @@ def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, 
             _windows_cleanup_error(32, path),
         ),
     )
-    monkeypatch.setattr(run.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(run, "_cleanup_sleep", lambda _delay: None)
 
     with pytest.raises(RuntimeError) as captured:
         run.cleanup_run_root(run_root)
@@ -201,7 +213,7 @@ def test_cleanup_run_root_does_not_retry_non_transient_error(monkeypatch, tmp_pa
         run.shutil, "rmtree",
         lambda path: attempts.append(path) or (_ for _ in ()).throw(error),
     )
-    monkeypatch.setattr(run.time, "sleep", sleeps.append)
+    monkeypatch.setattr(run, "_cleanup_sleep", sleeps.append)
 
     with pytest.raises(OSError) as captured:
         run.cleanup_run_root(run_root)
