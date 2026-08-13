@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.15.0"
+VERSION = "1.15.1"
 RELEASE_DATE = "2026-08-13"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "设置与迁移安全性",
+                "items": (
+                    (
+                        "设置检查和候选配置预览会保留用户已配置的候选值，避免诊断或预览流程"
+                        "用当前生效值覆盖尚待确认的修改。"
+                    ),
+                    (
+                        "旧版契约迁移的验证备份移到实时数据目录之外，恢复与清理流程不会把"
+                        "备份误识别为待迁移的活动数据。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.15.0",
+        "date": "2026-08-13",
         "sections": (
             {
                 "title": "持久化调度与运行时治理",
