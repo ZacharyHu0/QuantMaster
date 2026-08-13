@@ -35,6 +35,11 @@ from quantmaster.data.base import (
     guess_market,
     validate_frequency,
 )
+from quantmaster.data.cache_freshness import (
+    BarRefreshBatchStore,
+    CachePurpose,
+    assess_daily_freshness,
+)
 from quantmaster.data.resilience import (
     bypass_endpoint_cache,
     data_priority,
@@ -42,7 +47,7 @@ from quantmaster.data.resilience import (
     remote_io_allowed,
 )
 from quantmaster.data.storage import BarStore, IntradayBarStore
-from quantmaster.trading_sessions import market_date, market_now
+from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +273,9 @@ def _assess_daily_frame(
         index = index.tz_localize(None)
     index = index.normalize()
     valid_index = index[~index.isna()]
+    future_rows = int((valid_index > requested_end).sum())
+    if future_rows:
+        issues.append(f"存在 {future_rows} 行晚于 as_of {requested_end.date()} 的未来数据")
     observed_start = valid_index.min() if len(valid_index) else pd.NaT
     observed_end = valid_index.max() if len(valid_index) else pd.NaT
     duplicate_rows = int(index.duplicated(keep=False).sum())
@@ -342,7 +350,8 @@ def _assess_daily_frame(
         partial = True
         issues.append("缺少权威交易日历，仅完成边界与结构校验")
     blocking = bool(
-        duplicate_rows or sparse_cadence or missing_columns or invalid_numeric or invalid_semantics
+        duplicate_rows or future_rows or sparse_cadence or missing_columns
+        or invalid_numeric or invalid_semantics
         or any("响应起点" in item or "响应终点" in item or "覆盖率仅" in item for item in issues)
     )
     status: QualityStatus
@@ -368,6 +377,7 @@ def _assess_daily_frame(
         adjustment=adjustment,
         units=units,
         duplicate_rows=duplicate_rows,
+        future_rows=future_rows,
         requested_symbols=(symbol,) if symbol else (),
         observed_symbols=(symbol,) if symbol else (),
     )
@@ -672,6 +682,7 @@ def _bar_envelope(
     store: BarStore,
     frequency: str,
     metadata: dict[str, Any] | None = None,
+    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame]:
     metadata = metadata if metadata is not None else store.metadata(symbol) or {}
     source = str(metadata.get("last_source") or "local-cache")
@@ -684,6 +695,50 @@ def _bar_envelope(
         quality = _assess_intraday_frame(
             frame, start, end, symbol=symbol, frequency=frequency,
             source=source, stale=stale,
+        )
+    if frequency == "1d":
+        # Use only already-published local session evidence here.  Page reads
+        # must never contact a provider merely to decide whether stale bytes
+        # can be displayed.
+        expected = SessionExpectation()
+        current = pd.Timestamp(market_now())
+        sessions, calendar_source = _local_sessions(
+            (current - pd.Timedelta(days=45)).tz_localize(None).normalize(),
+            current.tz_localize(None).normalize(),
+        )
+        if len(sessions):
+            expected = SessionExpectation(
+                sessions.max().date().isoformat(), calendar_source, True,
+                "已发布本地交易日证据",
+            )
+        freshness = assess_daily_freshness(
+            symbol=symbol,
+            frame=frame,
+            requested_end=end,
+            checked_at=float(metadata.get("checked_at") or 0),
+            purpose=purpose,
+            expectation=expected,
+            display_ttl_seconds=get_config().data.cache_days * 86400,
+        )
+        freshness_stale = freshness.state in {"stale", "unchecked"}
+        quality = replace(
+            quality,
+            status=(
+                "degraded"
+                if freshness_stale and quality.status == "verified"
+                else "unavailable" if freshness.future_rows else quality.status
+            ),
+            stale=quality.stale or freshness_stale,
+            issues=tuple(dict.fromkeys((
+                *quality.issues,
+                *((freshness.refresh_reason,) if freshness.refresh_reason else ()),
+            ))),
+            freshness_state=freshness.state,
+            age_seconds=freshness.age_seconds,
+            stale_while_revalidate=freshness.stale_while_revalidate,
+            refresh_reason=freshness.refresh_reason,
+            expected_session=freshness.expected_session,
+            future_rows=max(quality.future_rows, freshness.future_rows),
         )
     try:
         raw_provenance = json.loads(str(metadata.get("source_chain_json") or "[]"))
@@ -1728,6 +1783,7 @@ def refresh_history(
     mode: RefreshMode | str | None = None,
     work_class: str = "normal",
     source_name: str = "",
+    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame]:
     """Refresh daily bars in a worker context and return their evidence.
 
@@ -1748,6 +1804,7 @@ def refresh_history(
     )
     return _bar_envelope(
         frame, symbol=symbol, start=start, end=end, store=resolved_store, frequency="1d",
+        purpose=purpose,
     )
 
 
@@ -1756,6 +1813,8 @@ def read_history(
     start: str,
     end: str,
     store: BarStore | None = None,
+    *,
+    purpose: CachePurpose | str = CachePurpose.DISPLAY,
 ) -> BarDataEnvelope[pd.DataFrame]:
     """Read daily bars from the local cache only.
 
@@ -1785,6 +1844,7 @@ def read_history(
             end=end,
             store=resolved_store,
             frequency="1d",
+            purpose=purpose,
         )
 
 
@@ -2027,6 +2087,33 @@ def _load_bar_panel_frame(
     frames: dict[str, pd.DataFrame] = {}
     failures: list[tuple[str, str]] = []
     total = len(symbols)
+    batch_store: BarRefreshBatchStore | None = None
+    batch_id = ""
+    attempt_symbols = tuple(symbols)
+    if symbols:
+        active_store = daily_store if daily_store is not None else intraday_store
+        assert active_store is not None
+        batch_root = active_store.root
+        batch_store = BarRefreshBatchStore(batch_root)
+        batch_id, attempt_symbols, resumed = batch_store.begin_or_resume(
+            symbols,
+            start,
+            end,
+            frequency=frequency,
+            provider=provider or get_config().data.primary_provider,
+        )
+        if resumed:
+            # Already-published successes remain immediately usable; only
+            # durable pending items consume workers/provider requests.
+            local_store = daily_store if daily_store is not None else intraday_store
+            assert local_store is not None
+            for symbol in symbols:
+                if symbol in attempt_symbols:
+                    continue
+                cached = local_store.get(symbol)
+                sliced = _cached_slice(cached, start, end)
+                if sliced is not None:
+                    frames[symbol] = sliced
 
     def notify_progress(completed: int, symbol: str, success: bool) -> None:
         if progress is None:
@@ -2048,7 +2135,7 @@ def _load_bar_panel_frame(
     ):
         batch_symbols = [
             symbol
-            for symbol in symbols
+            for symbol in attempt_symbols
             if guess_market(symbol) == Market.CN
             and ((cached := daily_store.get(symbol)) is None or cached.empty)
         ]
@@ -2136,6 +2223,8 @@ def _load_bar_panel_frame(
                                 continue
                             accepted_symbol, accepted_frame = result
                             frames[accepted_symbol] = accepted_frame
+                            if batch_store is not None:
+                                batch_store.record_success(batch_id, accepted_symbol)
                             notify_progress(len(frames), accepted_symbol, True)
             except (httpx.HTTPError, ImportError, OSError, RuntimeError, TypeError, ValueError):
                 logger.debug("free-stockdb 批量预取失败，回退逐标的加载", exc_info=True)
@@ -2164,7 +2253,7 @@ def _load_bar_panel_frame(
             priority=priority,
         )
 
-    pending = [symbol for symbol in symbols if symbol not in frames]
+    pending = [symbol for symbol in attempt_symbols if symbol not in frames]
     workers = min(max(1, int(max_workers)), 8, max(1, len(pending)))
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bar-panel") as executor:
         futures = {executor.submit(one, symbol): symbol for symbol in pending}
@@ -2181,6 +2270,18 @@ def _load_bar_panel_frame(
                     success = True
             except Exception as exc:
                 failures.append((symbol, str(exc)))
+                if batch_store is not None:
+                    batch_store.record_failure(
+                        batch_id, symbol, str(exc), type(exc).__name__.casefold(),
+                    )
+            else:
+                if batch_store is not None:
+                    if success:
+                        batch_store.record_success(batch_id, symbol)
+                    else:
+                        batch_store.record_failure(
+                            batch_id, symbol, "返回结果未包含可用行情", "empty_or_missing",
+                        )
             notify_progress(completed, symbol, success)
     if failures:
         samples = "；".join(f"{symbol}: {error}" for symbol, error in failures[:5])
@@ -2224,6 +2325,7 @@ def refresh_bar_panel(
     work_class: str = "normal",
     concurrency: int = 8,
     source_name: str = "",
+    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
     """Refresh a panel without silently shrinking the requested universe."""
     normalized = validate_frequency(frequency)
@@ -2258,6 +2360,15 @@ def refresh_bar_panel(
     ))
     issues: list[str] = []
     provenance: list[dict[str, object]] = []
+    batch_summary = BarRefreshBatchStore(store.root).latest_exact(
+        requested,
+        start,
+        end,
+        frequency=normalized,
+        provider=source_name or get_config().data.primary_provider,
+    )
+    if batch_summary:
+        provenance.append({"refresh_batch": batch_summary})
     per_symbol: list[BarDataQuality] = []
     for symbol in observed:
         cached = store.get(symbol)
@@ -2269,6 +2380,7 @@ def refresh_bar_panel(
             end=end,
             store=store,
             frequency=normalized,
+            purpose=purpose,
         )
         per_symbol.append(envelope.quality)
         issues.extend(f"{symbol}: {item}" for item in envelope.quality.issues)
@@ -2330,6 +2442,24 @@ def refresh_bar_panel(
         requested_symbols=requested,
         observed_symbols=observed,
         missing_symbols=missing,
+        freshness_state=(
+            "stale" if stale
+            else "fresh" if per_symbol and all(item.freshness_state == "fresh" for item in per_symbol)
+            else "unknown"
+        ),
+        age_seconds=max(
+            (item.age_seconds for item in per_symbol if item.age_seconds is not None),
+            default=None,
+        ),
+        stale_while_revalidate=any(item.stale_while_revalidate for item in per_symbol),
+        refresh_reason="；".join(dict.fromkeys(
+            item.refresh_reason for item in per_symbol if item.refresh_reason
+        )),
+        expected_session=max(
+            (item.expected_session for item in per_symbol if item.expected_session),
+            default="",
+        ),
+        future_rows=sum(item.future_rows for item in per_symbol),
     )
     return BarDataEnvelope(data, quality, tuple(provenance))
 
@@ -2346,6 +2476,7 @@ def refresh_panel(
     work_class: str = "normal",
     concurrency: int = 8,
     source_name: str = "",
+    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
     """Refresh a daily panel; page handlers must use :func:`read_panel`."""
     return refresh_bar_panel(
@@ -2360,6 +2491,7 @@ def refresh_panel(
         work_class=work_class,
         concurrency=concurrency,
         source_name=source_name,
+        purpose=purpose,
     )
 
 
@@ -2371,6 +2503,7 @@ def read_panel(
     *,
     store: BarStore | None = None,
     progress: Callable[[int, int, str, bool], None] | None = None,
+    purpose: CachePurpose | str = CachePurpose.DISPLAY,
 ) -> BarDataEnvelope[pd.DataFrame | dict[str, pd.DataFrame]]:
     """Compose a daily panel from local bar files only.
 
@@ -2403,6 +2536,7 @@ def read_panel(
                 store=resolved_store,
                 frequency="1d",
                 metadata=metadata_by_symbol.get(symbol, {}),
+                purpose=purpose,
             )
             envelopes[symbol] = envelope
             if not envelope.data.empty:
@@ -2467,6 +2601,24 @@ def read_panel(
         requested_symbols=requested,
         observed_symbols=observed,
         missing_symbols=missing,
+        freshness_state=(
+            "stale" if stale
+            else "fresh" if qualities and all(item.freshness_state == "fresh" for item in qualities)
+            else "unknown"
+        ),
+        age_seconds=max(
+            (item.age_seconds for item in qualities if item.age_seconds is not None),
+            default=None,
+        ),
+        stale_while_revalidate=any(item.stale_while_revalidate for item in qualities),
+        refresh_reason="；".join(dict.fromkeys(
+            item.refresh_reason for item in qualities if item.refresh_reason
+        )),
+        expected_session=max(
+            (item.expected_session for item in qualities if item.expected_session),
+            default="",
+        ),
+        future_rows=sum(item.future_rows for item in qualities),
     )
     provenance = tuple(
         {"symbol": symbol, "quality": envelope.quality.to_dict(), "read_mode": "local_only"}

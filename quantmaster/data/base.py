@@ -98,6 +98,12 @@ class BarDataQuality:
     requested_symbols: tuple[str, ...] = ()
     observed_symbols: tuple[str, ...] = ()
     missing_symbols: tuple[str, ...] = ()
+    freshness_state: str = "unknown"
+    age_seconds: float | None = None
+    stale_while_revalidate: bool = False
+    refresh_reason: str = ""
+    expected_session: str = ""
+    future_rows: int = 0
 
     @property
     def analysis_eligible(self) -> bool:
@@ -107,7 +113,11 @@ class BarDataQuality:
     @property
     def formal_eligible(self) -> bool:
         """Whether the result may enter formal history without another quality gate."""
-        return self.status == "verified" and not self.stale and not self.partial
+        freshness_ok = self.freshness_state in {"unknown", "fresh"}
+        return (
+            self.status == "verified" and not self.stale and not self.partial
+            and freshness_ok and self.future_rows == 0
+        )
 
     @property
     def preview_eligible(self) -> bool:
@@ -150,6 +160,12 @@ class BarDataQuality:
             "requested_symbols": list(self.requested_symbols),
             "observed_symbols": list(self.observed_symbols),
             "missing_symbols": list(self.missing_symbols),
+            "freshness_state": self.freshness_state,
+            "age_seconds": self.age_seconds,
+            "stale_while_revalidate": self.stale_while_revalidate,
+            "refresh_reason": self.refresh_reason,
+            "expected_session": self.expected_session,
+            "future_rows": self.future_rows,
             "analysis_eligible": self.analysis_eligible,
             "formal_eligible": self.formal_eligible,
             "preview_eligible": self.preview_eligible,
