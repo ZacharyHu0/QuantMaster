@@ -913,6 +913,10 @@ def test_official_parsers_accept_articles_and_reject_navigation(
 
 
 def test_pboc_listing_date_may_be_a_sibling_of_the_anchor_parent(monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.ai.news_providers.time.time",
+        lambda: pd.Timestamp("2026-08-07T12:00:00+08:00").timestamp(),
+    )
     href = "/goutongjiaoliu/113456/113469/2026080708481628617/index.html"
     listing = (
         '<table><tr><td><font class="newslist_style">'
