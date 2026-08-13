@@ -3072,8 +3072,14 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         category_filter.select_option("行业主题")
         asset_tabs = page.locator(".etf-asset-tabs [role='tab']")
         asset_tabs.first.focus()
-        page.keyboard.press("ArrowRight")
+        with page.expect_response(
+            lambda response: "/rotation/etfs/overview?" in response.url
+            and "asset=overseas_equity" in response.url
+        ) as asset_response:
+            page.keyboard.press("ArrowRight")
+        asset_response.value.finished()
         playwright_sync.expect(asset_tabs.nth(1)).to_have_attribute("aria-selected", "true")
+        playwright_sync.expect(asset_tabs.nth(1)).to_be_focused()
         playwright_sync.expect(page.locator("[data-rotation-etf-category]")).to_have_value("")
         asset_tabs.first.click()
 
@@ -3116,7 +3122,13 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
 
         page.set_viewport_size({"width": 1024, "height": 768})
         page.evaluate("document.documentElement.style.zoom = '2'")
+        playwright_sync.expect(page.locator(".rotation-etf-research-table")).to_have_count(2)
+        page.wait_for_timeout(150)
         _wait_for_document_fit(page)
+        assert page.locator("#rotation-etf-view .rotation-table-wrap").evaluate_all(
+            "nodes => nodes.every(node => node.getBoundingClientRect().right <= "
+            "document.querySelector('#rotation-etf-view').getBoundingClientRect().right + 1)"
+        )
         page.evaluate("document.documentElement.style.zoom = ''")
 
         page.set_viewport_size({"width": 390, "height": 844})

@@ -70,9 +70,27 @@
   let etfQuery = '';
   let etfCategory = '';
   let etfAsset = 'equity';
+  let pendingEtfAssetFocus = '';
   let etfState = '';
   let requestVersion = 0;
   let searchTimer = 0;
+
+  document.addEventListener('pointerdown', event=>{
+    if (pendingEtfAssetFocus && !event.target.closest?.('[data-etf-asset]')) pendingEtfAssetFocus='';
+  }, true);
+
+  function restorePendingEtfAssetFocus() {
+    if (!pendingEtfAssetFocus) return;
+    const active = document.activeElement;
+    if (active !== document.body && active !== document.documentElement && active?.isConnected) {
+      pendingEtfAssetFocus = '';
+      return;
+    }
+    const asset = pendingEtfAssetFocus;
+    pendingEtfAssetFocus = '';
+    const target = document.querySelector(`[data-etf-asset="${asset}"]`);
+    target?.focus({preventScroll:true});
+  }
   try {
     const savedWindow = Number(localStorage.getItem(WINDOW_KEY));
     if (WINDOWS.includes(savedWindow)) activeWindow = savedWindow;
@@ -1123,7 +1141,11 @@
       <aside class="etf-queues"><div class="rotation-section-head"><div><h3>状态队列</h3><p>“候选”只表示阶段条件成立，不冒充严格确认。</p></div></div>${queueGroups.map(([label,ids]) => `<section><h4>${label}<span>${ids.length}</span></h4><div>${ids.map(id => { const item=sectorLookup.get(id); return item ? `<button type="button" data-etf-sector="${esc(id)}"><strong>${esc(item.sector_name)}</strong><span>趋势 ${number(item.trend_strength,0)} · ${item.display_position==null?'位置待补':percent(item.display_position,0)}</span></button>` : ''; }).join('') || '<p>本期无满足条件的板块</p>'}</div></section>`).join('')}</aside></section>
       <section class="rotation-section etf-sector-library"><div class="rotation-section-head"><div><h3>板块研究表</h3><p>完整板块保留在表格；地图只展示确认、候选、风险及活跃度优先的重点板块。</p></div><output>${etfSectorCatalog.length} 个</output></div><div id="rotation-etf-sector-results"></div></section>
       <section class="rotation-section etf-product-library"><div class="rotation-section-head"><div><h3>ETF 产品库</h3><p>与板块表独立搜索、筛选和分页；每页最多 50 行。</p></div><output>${etfProductPagination.total || 0} 只</output></div><div class="rotation-filterbar etf-product-filters"><label>搜索产品<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="名称、代码、板块或指数"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory===value?'selected':''}>${esc(value)}</option>`).join('')}</select></label><label>状态<select data-rotation-etf-state><option value="">全部状态</option>${Object.entries(ETF_STATE_LABELS).filter(([key])=>key!=='not_applicable').map(([value,label]) => `<option value="${value}" ${etfState===value?'selected':''}>${label}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="trend" ${etfSort==='trend'?'selected':''}>趋势强度</option><option value="activity" ${etfSort==='activity'?'selected':''}>活跃度</option><option value="position" ${etfSort==='position'?'selected':''}>研究位置</option><option value="amount" ${etfSort==='amount'?'selected':''}>成交额</option><option value="return" ${etfSort==='return'?'selected':''}>20 日收益</option><option value="name" ${etfSort==='name'?'selected':''}>名称</option></select></label></div><div id="rotation-etf-product-results"></div></section>${issuesMarkup(meta)}`;
-    drawEtfSectorTable(); drawEtfProductTable(); drawEtfMap();
+      drawEtfSectorTable(); drawEtfProductTable(); drawEtfMap();
+      if (pendingEtfAssetFocus) {
+        const asset = pendingEtfAssetFocus;
+        if (asset === etfAsset) requestAnimationFrame(restorePendingEtfAssetFocus);
+      }
   }
 
   async function loadEtfHistory() {
@@ -1648,7 +1670,16 @@
     const etfAssetButton = event.target.closest('[data-etf-asset]');
     if (etfAssetButton) {
       etfAsset=etfAssetButton.dataset.etfAsset; etfCategory=''; etfState='';
-      etfSort=etfAsset==='money'?'amount':'trend'; etfSectorPage=1; etfProductPage=1; loadCurrent(); return;
+      etfAssetButton.closest('[role="tablist"]')?.querySelectorAll('[role="tab"]').forEach(tab=>{
+        const selected=tab===etfAssetButton;
+        tab.setAttribute('aria-selected',String(selected)); tab.tabIndex=selected?0:-1;
+      });
+      const category=document.querySelector('[data-rotation-etf-category]');
+      const state=document.querySelector('[data-rotation-etf-state]');
+      if (category) category.value='';
+      if (state) state.value='';
+      etfSort=etfAsset==='money'?'amount':'trend'; etfSectorPage=1; etfProductPage=1;
+      loadCurrent().finally(restorePendingEtfAssetFocus); return;
     }
     const etfCoverage = event.target.closest('[data-etf-coverage]');
     if (etfCoverage) { loadEtfCoverage(); return; }
@@ -1710,7 +1741,8 @@
       const tabs=[...etfAssetTab.closest('[role="tablist"]').querySelectorAll('[role="tab"]')];
       const index=tabs.indexOf(etfAssetTab);
       const nextIndex=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
-      event.preventDefault(); tabs[nextIndex].focus(); tabs[nextIndex].click(); return;
+      event.preventDefault(); pendingEtfAssetFocus=tabs[nextIndex].dataset.etfAsset;
+      tabs[nextIndex].focus(); tabs[nextIndex].click(); return;
     }
     const industryTab = event.target.closest('.rotation-industry-level-tabs [role="tab"]');
     if (industryTab && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {

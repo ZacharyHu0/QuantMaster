@@ -639,7 +639,7 @@
 .rotation-callout[data-tone="warning"] strong { color:var(--s4); }
 .rotation-callout[data-tone="error"] strong { color:var(--bad); }
 
-.rotation-table-wrap { max-width:100%; overflow-x:auto; border-top:1px solid var(--axis); }
+.rotation-table-wrap { width:100%; min-width:0; max-width:100%; overflow-x:auto; border-top:1px solid var(--axis); }
 .rotation-table { min-width:760px; }
 .rotation-table th { padding:7px 8px; font-size:10px; }
 .rotation-table td { padding:8px; font-size:11px; vertical-align:middle; }
@@ -819,6 +819,12 @@
   .etf-summary,.etf-asset-tabs button,.etf-queues button,.etf-map-select select,
   .etf-drawer-tabs button,.rotation-etf-more-menu button,.rotation-etf-more-menu a,
   .rotation-status-copy { min-height:44px; }
+}
+
+@media (max-width:1099px) {
+  .etf-radar-grid { grid-template-columns:1fr; }
+  .etf-product-filters { grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr)); }
+  #rotation-etf-view .rotation-table-wrap { contain:inline-size; }
 }
 
 @media (max-width:959px) {
