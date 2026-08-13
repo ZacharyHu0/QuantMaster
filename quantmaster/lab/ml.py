@@ -1205,80 +1205,26 @@ def artifact_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _artifact_manifest(model: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+def predict_panel(
+    panel: dict[str, pd.DataFrame], model: dict[str, Any], horizon: int | None = None,
+) -> pd.DataFrame:
+    """Load the sole current Lab model schema and return date×symbol predictions."""
     manifest_name = str(model.get("manifest") or "")
     if not manifest_name:
-        raise ValueError("学习模型没有推理清单")
+        raise ValueError("学习模型没有 schema v2 推理清单")
     root = Path(get_config().data_root).resolve()
     manifest_path = confined_path(root, manifest_name, label="模型清单")
     if not manifest_path.is_file():
         raise FileNotFoundError(f"模型清单不存在：{manifest_name}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    artifact_path = confined_path(root, manifest.get("artifact"), label="模型工件")
-    if not artifact_path.is_file():
-        raise FileNotFoundError("模型工件不存在或路径不安全")
-    expected = str(manifest.get("artifact_sha256") or "")
-    actual = artifact_sha256(artifact_path)
-    if not expected or actual != expected:
-        raise ValueError("模型工件完整性校验失败")
-    return manifest, artifact_path
+    if manifest.get("schema_version") != 2:
+        raise ValueError("学习模型需要一次性迁移；运行时仅接受 schema v2")
+    available = [int(value) for value in manifest.get("horizons") or []]
+    if not available:
+        raise ValueError("schema v2 模型未声明预测周期")
+    selected = horizon or (3 if 3 in available else available[0])
+    if selected not in available:
+        raise ValueError(f"schema v2 模型不支持 {selected} 日预测")
+    from quantmaster.lab.multihorizon import predict_multi_bundle
 
-
-def predict_panel(
-    panel: dict[str, pd.DataFrame], model: dict[str, Any], horizon: int | None = None,
-) -> pd.DataFrame:
-    """Load a versioned Lab artifact and return date×symbol predictions."""
-    manifest_name = str(model.get("manifest") or "")
-    if manifest_name:
-        root = Path(get_config().data_root).resolve()
-        candidate = confined_path(root, manifest_name, label="模型清单")
-        if candidate.is_file():
-            preview = json.loads(candidate.read_text(encoding="utf-8"))
-            if int(preview.get("schema_version", 1)) == 2:
-                from quantmaster.lab.multihorizon import predict_multi_bundle
-
-                available = [int(value) for value in preview.get("horizons") or []]
-                selected = horizon or (3 if 3 in available else available[0])
-                return predict_multi_bundle(
-                    panel, model, horizon=selected,
-                ).expected_excess[selected]
-    manifest, artifact_path = _artifact_manifest(model)
-    sequence_length = int(manifest.get("sequence_length", 20))
-    samples, metadata, feature_names = make_inference_samples(
-        panel, sequence_length=sequence_length,
-        minimum_coverage=float(manifest.get("minimum_feature_coverage", 0.80)),
-    )
-    if feature_names != list(manifest.get("features") or []):
-        raise ValueError("模型特征模式与当前运行时不一致")
-    kind = str(manifest.get("kind") or "")
-    if kind == "ridge":
-        artifact = np.load(artifact_path)
-        coefficient = np.asarray(artifact["coef"], dtype=float)
-        intercept = float(np.asarray(artifact["intercept"], dtype=float).reshape(-1)[0])
-        predicted = samples[:, -1, :] @ coefficient + intercept
-    else:
-        try:
-            import torch
-        except ImportError as exc:
-            raise RuntimeError("当前环境未安装 PyTorch，学习模型已回退") from exc
-        checkpoint = torch.load(artifact_path, map_location="cpu", weights_only=False)
-        model_class = _torch_models(samples.shape[-1], samples.shape[1]).get(kind)
-        if model_class is None:
-            raise ValueError(f"不支持的学习模型工件：{kind}")
-        network = model_class()
-        network.load_state_dict(checkpoint["state_dict"])
-        network.eval()
-        with torch.no_grad():
-            predicted = network(torch.from_numpy(samples)).detach().cpu().numpy()
-    index = pd.DatetimeIndex(panel["close"].index)
-    columns = panel["close"].columns
-    result = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
-    for item, value in zip(metadata, np.asarray(predicted, dtype=float), strict=True):
-        date = pd.Timestamp(item["date"])
-        symbol = item["symbol"]
-        if date in result.index and symbol in result.columns:
-            result.at[date, symbol] = float(value)
-    validation_start = manifest.get("validation_start")
-    if validation_start:
-        result.loc[result.index < pd.Timestamp(validation_start)] = np.nan
-    return result
+    return predict_multi_bundle(panel, model, horizon=selected).expected_excess[selected]

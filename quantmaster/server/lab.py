@@ -93,7 +93,7 @@ class FactorCreate(ContractModel):
 
 class JobCreate(ContractModel):
     kind: Literal[
-        "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+        "prepare_data", "validate", "discover_genetic", "discover_llm",
         "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
     ]
     params: dict[str, Any] = Field(default_factory=dict)
@@ -101,7 +101,7 @@ class JobCreate(ContractModel):
 
 class PreflightCreate(ContractModel):
     operation: Literal[
-        "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+        "prepare_data", "validate", "discover_genetic", "discover_llm",
         "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
         "approve", "deploy",
     ]

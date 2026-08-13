@@ -196,7 +196,7 @@ class LabVersionStrategy(Strategy):
         if expected_manifest and hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest:
             raise ValueError("学习模型 manifest 完整性校验失败")
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-        if int(manifest.get("schema_version", 0)) < 2:
+        if manifest.get("schema_version") != 2:
             raise ValueError("LabVersionStrategy 只接受带滚动 OOF 的 schema v2 模型")
         prediction_path = (root / str(manifest.get("prediction_artifact") or "")).resolve()
         if not prediction_path.is_relative_to(root) or not prediction_path.is_file():

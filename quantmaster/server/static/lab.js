@@ -707,7 +707,7 @@
     const research = state.overview?.research || {};
     const horizons = (research.horizons || [3]).map(Number);
     const preferred = horizons.includes(3) ? 3 : horizons[0];
-    for (const id of ['lab-discovery-form', 'lab-train-form', 'lab-optimize-form']) {
+    for (const id of ['lab-discovery-form', 'lab-optimize-form']) {
       const form = document.getElementById(id);
       if (!form) continue;
       if (research.universe) form.elements.universe.value = research.universe;
@@ -759,15 +759,6 @@
       `<button type="button" class="lab-model-card ${state.selectedModel === key && available.has(key) ? 'active' : ''} ${available.has(key) ? 'available' : ''}" data-model="${key}" aria-disabled="${available.has(key) ? 'false' : 'true'}">
         <b>${meta[0]}</b><span>${available.has(key) ? 'READY' : 'OPTIONAL'}</span><p>${meta[1]}</p></button>`
     ).join('');
-    const form = document.getElementById('lab-train-form');
-    if (form) {
-      form.elements.model.value = state.selectedModel;
-      document.getElementById('lab-selected-model').textContent = modelMeta[state.selectedModel]?.[0] || 'MODEL';
-      const submit = form.querySelector('[type=submit]');
-      const canTrain = available.has(state.selectedModel);
-      submit.disabled = !canTrain;
-      submit.textContent = canTrain ? '开始训练' : '先安装模型后端';
-    }
   }
 
   function renderJobList(targetId, jobs) {
@@ -1514,7 +1505,7 @@
       event.preventDefault();
       resolvePreflight(false);
     });
-    for (const id of ['lab-discovery-form', 'lab-train-form']) {
+    for (const id of ['lab-discovery-form']) {
       document.getElementById(id)?.addEventListener('input', () => { state.formsDirty = true; });
     }
     document.getElementById('tab-lab').addEventListener('click', async event => {
@@ -1656,8 +1647,6 @@
           return;
         }
         state.selectedModel = model.dataset.model;
-        document.querySelector('#lab-train-form [name=model]').value = state.selectedModel;
-        document.getElementById('lab-selected-model').textContent = modelMeta[state.selectedModel][0];
         renderModels();
       }
       const filter = event.target.closest('[data-status]');
@@ -1816,26 +1805,6 @@
         state.formsDirty = false;
         setView('automation');
       } catch (error) { showError('发现任务未能创建', error); }
-    });
-
-    document.getElementById('lab-train-form').addEventListener('submit', async event => {
-      event.preventDefault();
-      const form = new FormData(event.target);
-      const available = new Set(state.overview?.capabilities?.models?.available_models || []);
-      if (!available.has(form.get('model'))) {
-        document.getElementById('lab-ml-setup')?.focus();
-        return;
-      }
-      try {
-        const job = await enqueue('train', {
-          model:form.get('model'), universe:form.get('universe'), start:form.get('start'),
-          end:new Date().toISOString().slice(0,10), horizon:+form.get('horizon'),
-          sequence_length:+form.get('sequence_length'), config:{epochs:+form.get('epochs')},
-        });
-        if (!job) return;
-        state.formsDirty = false;
-        setView('automation');
-      } catch (error) { showError('训练任务未能创建', error); }
     });
 
     document.getElementById('lab-optimize-form').addEventListener('submit', async event => {

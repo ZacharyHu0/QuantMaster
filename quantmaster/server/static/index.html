@@ -645,18 +645,10 @@
         </div>
         <section class="lab-ml-setup" id="lab-ml-setup" aria-live="polite" tabindex="-1"></section>
         <div class="lab-model-grid" id="lab-model-grid"></div>
-        <form class="lab-block lab-form lab-experiment-form" id="lab-train-form">
-          <div class="lab-block-head"><div><span>NEW EXPERIMENT</span><h4>训练配置</h4></div><span class="lab-selected-model" id="lab-selected-model">RIDGE</span></div>
-          <input type="hidden" name="model" value="ridge">
-          <div class="lab-form-grid lab-form-grid-5">
-            <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="all"><option value="demo">demo</option><option value="csi800">csi800</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-            <label>研究起点<input name="start" type="date" value="2022-01-01"></label>
-            <label>预测周期<select name="horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
-            <label>序列长度<input name="sequence_length" type="number" value="20" min="1" max="120"></label>
-            <label>最大轮次<input name="epochs" type="number" value="30" min="1" max="500"></label>
-          </div>
-          <div class="lab-form-footer"><p>深度模型是可选安装；标准桌面环境保持轻量。工件保存到本地实验目录。</p><button class="lab-button lab-button-primary" type="submit">开始训练</button></div>
-        </form>
+        <section class="lab-block lab-form lab-experiment-form">
+          <div class="lab-block-head"><div><span>CURRENT MODEL CONTRACT</span><h4>共享多周期 schema v2</h4></div></div>
+          <div class="lab-form-footer"><p>单周期 schema v1 已退役。新模型统一由滚动优化生成，包含 OOF、校准、OOD 与可验证实时工件。</p><button class="lab-button lab-button-primary" type="button" data-lab-go="optimization">前往滚动优化</button></div>
+        </section>
         <div class="lab-block">
           <div class="lab-block-head"><div><span>EXPERIMENT LEDGER</span><h4>最近实验</h4></div></div>
           <div id="lab-experiment-list"><div class="lab-empty">尚无模型实验</div></div>

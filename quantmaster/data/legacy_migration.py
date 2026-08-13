@@ -116,6 +116,7 @@ def register_builtin_migrations() -> None:
     from quantmaster.data.startup_schema_migration import startup_schema_migrator
     from quantmaster.data.store_schema_migration import store_schema_migrator
     from quantmaster.decision.migration import decision_legacy_migrator
+    from quantmaster.lab.model_migration import lab_model_artifact_migrator
 
     for migrator in (
         market_data_legacy_migrator,
@@ -127,6 +128,7 @@ def register_builtin_migrations() -> None:
         startup_schema_migrator,
         store_schema_migrator,
         remaining_schema_migrator,
+        lab_model_artifact_migrator,
     ):
         existing = _MIGRATORS.get(migrator.name)
         if existing is None:

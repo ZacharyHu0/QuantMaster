@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # and publication steps.
 # Keep this as an exact ratchet: later work must lower the number when refactoring
 # and cannot add another complex entry point unnoticed.
-BASELINE = 168
+BASELINE = 166
 
 
 def main() -> int:

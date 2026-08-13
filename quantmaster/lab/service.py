@@ -566,7 +566,7 @@ class LabService:
 
     def enqueue(self, kind: str, params: dict[str, Any]) -> dict:
         allowed = {
-            "prepare_data", "validate", "discover_genetic", "discover_llm", "train",
+            "prepare_data", "validate", "discover_genetic", "discover_llm",
             "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
         }
         if kind not in allowed:
@@ -1508,6 +1508,12 @@ class LabService:
         sequence_length: int = 20, config: dict | None = None, progress=None,
         cancelled=None,
     ) -> dict:
+        raise LabError(
+            "LAB_MODEL_SCHEMA_RETIRED",
+            "单周期训练工件合同已退役，不再写入 schema v1",
+            action="使用共享多周期优化生成唯一 schema v2 模型",
+            status_code=409,
+        )
         from quantmaster.lab.ml import artifact_sha256, make_indexed_samples, train_indexed
         from quantmaster.lab.models import utc_now
         from quantmaster.lab.validation import validate_factor_values
@@ -2627,8 +2633,6 @@ class LabService:
             return self.discover_llm(progress=progress, cancelled=cancelled, **params)
         if kind == "discover_python":
             return self.discover_python(progress=progress, cancelled=cancelled, **params)
-        if kind == "train":
-            return self.train_model(progress=progress, cancelled=cancelled, **params)
         if kind == "optimize":
             return self.optimize_study(progress=progress, cancelled=cancelled, **params)
         if kind == "bias_audit":

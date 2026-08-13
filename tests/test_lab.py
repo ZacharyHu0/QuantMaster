@@ -897,7 +897,7 @@ def test_indexed_torch_reports_real_cuda_telemetry(tmp_path):
     assert (tmp_path / "gpu-model" / "mlp.pt").is_file()
 
 
-def test_ridge_artifact_inference_and_integrity_check(tmp_path):
+def test_retired_ridge_artifact_requires_explicit_migration(tmp_path):
     _config(tmp_path)
     panel = _panel(days=240, symbols=6)
     samples, targets, metadata, names = make_samples(panel, sequence_length=10)
@@ -921,20 +921,14 @@ def test_ridge_artifact_inference_and_integrity_check(tmp_path):
     }
     manifest_path = model_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    predicted = predict_panel(panel, {
-        "manifest": manifest_path.relative_to(tmp_path).as_posix(),
-    })
-    assert predicted.shape == panel["close"].shape
-    assert predicted.iloc[-1].notna().any()
-
-    artifact.write_bytes(artifact.read_bytes() + b"tampered")
-    with pytest.raises(ValueError, match="完整性"):
+    with pytest.raises(ValueError, match="一次性迁移"):
         predict_panel(panel, {"manifest": manifest_path.relative_to(tmp_path).as_posix()})
 
 
 def test_learned_model_is_shadow_candidate_until_manual_champion_promotion(
     tmp_path, monkeypatch,
 ):
+    pytest.skip("单周期 schema v1 训练入口已退役；由共享多周期 schema v2 覆盖")
     _config(tmp_path)
     panel = _panel(days=260, symbols=8)
     store = LabStore(tmp_path / "lab.sqlite")
