@@ -119,7 +119,7 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
 def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_path):
     from scripts.dev import pytest_windows_acl
 
-    monkeypatch.setattr(pytest_windows_acl.os, "name", "nt")
+    monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="nt"))
     basetemp = tmp_path / "pytest" / "run"
     factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
     cache = tmp_path / "pytest" / "cache"
@@ -140,7 +140,7 @@ def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_pa
 def test_windows_pytest_plugin_is_inert_on_other_platforms(monkeypatch, tmp_path):
     from scripts.dev import pytest_windows_acl
 
-    monkeypatch.setattr(pytest_windows_acl.os, "name", "posix")
+    monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="posix"))
     basetemp = tmp_path / "pytest" / "run"
     factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
     cache = tmp_path / "pytest" / "cache"
