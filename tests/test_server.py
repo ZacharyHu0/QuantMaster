@@ -1076,8 +1076,7 @@ class TestBasics:
             ),
         )
         monkeypatch.setattr(
-            app_module,
-            "_sync_reference_market",
+            "quantmaster.data.reference_market.refresh_reference_panel",
             lambda symbols, start, end, refresh, store: (
                 {symbol: frame for symbol in symbols},
                 {},
@@ -1182,7 +1181,10 @@ class TestBasics:
                 },
             })
 
-        monkeypatch.setattr(app_module, "_sync_reference_market", failed_reference_sync)
+        monkeypatch.setattr(
+            "quantmaster.data.reference_market.refresh_reference_panel",
+            failed_reference_sync,
+        )
         events = []
         result = app_module._market_overview_data(
             "2026-07-01", lambda *args: events.append(args))
@@ -1201,8 +1203,7 @@ class TestBasics:
             "商品与汇率": {symbol: "美元指数"},
         })
         monkeypatch.setattr(
-            app_module,
-            "_sync_reference_market",
+            "quantmaster.data.reference_market.refresh_reference_panel",
             lambda symbols, start, end, refresh, store: ({}, {
                 symbol: {
                     "error_code": "all_sources_unavailable",
