@@ -68,8 +68,11 @@ Only after development is complete may the task enter the integration phase. The
 3. Aligns the completed task to that integration baseline once.
 4. Resolves conflicts inside the task worktree and commits the resolved task state.
 5. Runs focused checks for conflict-sensitive areas and one final `tasks.py ready` on that state.
-6. Immediately integrates the validated commit, without returning to feature development or
-   repeatedly chasing unrelated new `main` progress.
+6. Pushes the validated task commit, updates its Draft PR with the exact evidence, and marks it
+   ready for review.
+7. After required GitHub Actions checks pass, the agent squash-merges the PR as one independently
+   revertible `main` commit without returning to feature development or repeatedly chasing
+   unrelated new `main` progress.
 
 The selected integration baseline remains fixed for this integration attempt. If a genuine
 dependency or conflicting change lands before integration can complete, report that concrete event
@@ -131,3 +134,48 @@ to abandon it. Cleanup reports must use the category names above rather than con
 When cleanup or feature work exposes an independent lifecycle-tool defect, stop and report the
 blocker and expected extra validation cost. Fix it in a separate task with a regression test. Do not
 silently turn a cleanup into a tooling refactor or combine unrelated fixes in one integration.
+
+## 8. Separate development from the stable application
+
+The stable application and task worktrees are different execution environments:
+
+- A stable instance runs an immutable, package-validated `main` slot. It never imports Python or
+  static assets from the primary checkout or a task worktree.
+- A task development server runs only from its own worktree, using the primary checkout's absolute
+  `.venv` interpreter and task-local ports, configuration, data, logs, and control database under
+  `.artifacts/worktrees/<slug>/runtime/dev`.
+- A development server may read an explicitly configured stable StockDB, but it must use an
+  unmanaged, read-only connection and cannot update, stop, or replace the stable instance.
+- Integrating a task into `main` does not activate it. A candidate becomes eligible only after the
+  package lane passes for the exact `main` commit, and the owner activates that candidate manually.
+- Activation replaces the complete application generation (Web, runtime, compute workers, and
+  static assets). A source reload is not an update mechanism.
+
+These rules keep the instance used for daily work alive while source files, dependencies, and task
+servers change independently.
+
+## 9. Use GitHub as the management record
+
+Every task starts from a GitHub Issue that states its scope, non-goals, public seam, data and
+rollback risk, performance budgets, and acceptance checks. The task branch and PR link that Issue;
+the PR description remains the authoritative validation report.
+
+The normal flow is:
+
+1. Create or select the Issue, then create the isolated `codex/<slug>` task worktree.
+2. Push the first coherent commit and open a Draft PR with `Closes #<issue>`.
+3. Record exact tests and `tasks.py check` evidence as the implementation changes.
+4. Complete the one-time integration alignment and `tasks.py ready` gate, then mark the PR ready.
+5. Let GitHub Actions run the required lanes. The agent resolves review findings in the same task
+   branch, revalidates changed evidence, and squash-merges the PR when all gates pass.
+6. Remove the integrated task worktree through `tasks.py remove` and update the parent Epic.
+
+Use GitHub Discussions for architecture proposals and evidence-backed choices that do not belong to
+one implementation diff. In particular, irreversible migrations, required features that exceed a
+hard package budget, or inconclusive SciPy/Rust benchmarks pause only the affected task and receive
+a decision post with alternatives, measured evidence, rollback limits, and a recommended option.
+
+Ordinary PR merges do not create tags. The agent owns merge and tag mechanics, but the current tag
+workflow publishes a GitHub Release; therefore it pushes a release tag only after the owner
+explicitly confirms that Release. Version metadata, candidate freezing, and tag publication continue
+to follow the repository release synchronization contract.

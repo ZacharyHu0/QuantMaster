@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 重构总 Epic #1
+    url: https://github.com/ZacharyHu0/QuantMaster/issues/1
+    about: 查看重构阶段、依赖关系和已拆分任务。
+  - name: 阶段 1 基线 #2
+    url: https://github.com/ZacharyHu0/QuantMaster/issues/2
+    about: 查看 v1.15.4 基线、预算和第一阶段验收。
+  - name: 架构 RFC Discussion #3
+    url: https://github.com/ZacharyHu0/QuantMaster/discussions/3
+    about: 对不可调和的产品、架构或迁移取舍进行 grill-with-doc 决策。
