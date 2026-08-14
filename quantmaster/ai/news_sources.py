@@ -1540,7 +1540,7 @@ def _parse_rss(source: dict[str, Any], content: bytes, base_url: str,
         if not title:
             continue
         published, published_epoch = normalize_published_at(
-            getattr(entry, "published", "") or getattr(entry, "updated", "") or "",
+            getattr(entry, "published", "") or "",
         )
         link = urljoin(base_url, str(getattr(entry, "link", "") or ""))
         provider_id = str(getattr(entry, "id", "") or getattr(entry, "guid", "") or link)

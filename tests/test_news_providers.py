@@ -36,6 +36,7 @@ from quantmaster.ai.news_sources import (
     _allow_builtin_fake_ip,
     _ensure_public_url,
     _fetch_bytes,
+    _parse_rss,
     fetch_declarative_source,
 )
 
@@ -1714,6 +1715,17 @@ def test_store_keeps_published_and_fetched_times_separate(tmp_path):
     assert row["published_at_epoch"] == 1786237200.0
     assert row["fetched_at"] == 1786240800.0
 
+    refetched = NewsItem(
+        source="unit", provider_item_id="provider-1", title="时点契约", content="正文",
+        published_at="2026-08-09T01:00:00+00:00", published_at_epoch=1786237200.0,
+        fetched_at=1786327200.0,
+    )
+    assert store.save([refetched]) == 0
+    row = store.recent()[0]
+    assert row["published_at"] == "2026-08-09T01:00:00+00:00"
+    assert row["published_at_epoch"] == 1786237200.0
+    assert row["fetched_at"] == 1786327200.0
+
 
 def test_same_provider_id_revision_updates_current_and_archives_previous(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
@@ -1771,6 +1783,50 @@ def test_same_provider_id_revision_updates_current_and_archives_previous(tmp_pat
     assert source_store.cleanup_raw(0) == 0
     assert (tmp_path / first_raw).exists()
     assert (tmp_path / second_raw).exists()
+
+
+def test_revision_does_not_replace_original_publication(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    first = NewsItem(
+        source="unit", provider_item_id="stable-1", title="original", content="v1",
+        published_at="2026-08-09T01:00:00+00:00", published_at_epoch=1786237200.0,
+        fetched_at=1786240800.0,
+    )
+    revised = NewsItem(
+        source="unit", provider_item_id="stable-1", title="revised", content="v2",
+        published_at="2026-08-10T01:00:00+00:00", published_at_epoch=1786323600.0,
+        fetched_at=1786327200.0,
+    )
+
+    assert store.save([first]) == 1
+    assert store.save([revised]) == 1
+    current = store.recent()[0]
+
+    assert current["title"] == "revised"
+    assert current["content"] == "v2"
+    assert current["published_at"] == "2026-08-09T01:00:00+00:00"
+    assert current["published_at_epoch"] == 1786237200.0
+
+
+def test_rss_updated_without_published_is_not_reinterpreted_as_publication():
+    content = b"""<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <title>fixture</title><updated>2026-08-10T01:00:00Z</updated>
+      <entry><title>old article revised</title><id>item-1</id>
+      <link href="https://example.com/item-1"/>
+      <updated>2026-08-10T01:00:00Z</updated><summary>revision</summary></entry>
+    </feed>"""
+
+    rows = _parse_rss(
+        {"id": "fixture", "item_limit": 10, "is_official": False},
+        content,
+        "https://example.com/feed",
+        "raw/fixture",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].published_at == ""
+    assert rows[0].published_at_epoch == 0.0
 
 
 def test_detail_failure_cannot_downgrade_existing_verified_full_article(tmp_path):

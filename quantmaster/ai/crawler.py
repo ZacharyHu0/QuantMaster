@@ -574,8 +574,9 @@ class NewsStore:
                         )
                         conn.execute(
                             "UPDATE news SET title=?,content=?,content_hash=?,url=?,last_seen_at=?,"
-                            "fetched_at=MAX(fetched_at,?),published_at=CASE WHEN ?<>'' THEN ? "
-                            "ELSE published_at END,published_at_epoch=CASE WHEN ?>0 THEN ? "
+                            "fetched_at=MAX(fetched_at,?),published_at=CASE "
+                            "WHEN published_at='' AND ?<>'' THEN ? ELSE published_at END,"
+                            "published_at_epoch=CASE WHEN published_at_epoch<=0 AND ?>0 THEN ? "
                             "ELSE published_at_epoch END,raw_cache_key=?,evidence_binding_hash=?,"
                             "parser_version=?,ingest_window_id=?,ingest_batch_id=?,"
                             "is_official=?,content_scope=?,"
@@ -637,8 +638,10 @@ class NewsStore:
                     conn.execute(
                         "UPDATE news SET content=COALESCE(?,content),url=CASE WHEN ?<>'' THEN ? ELSE url END,"
                         "last_seen_at=?,fetched_at=MAX(fetched_at,?),"
-                        "published_at=CASE WHEN ?<>'' THEN ? ELSE published_at END,"
-                        "published_at_epoch=CASE WHEN ?>0 THEN ? ELSE published_at_epoch END,"
+                        "published_at=CASE WHEN published_at='' AND ?<>'' THEN ? "
+                        "ELSE published_at END,"
+                        "published_at_epoch=CASE WHEN published_at_epoch<=0 AND ?>0 THEN ? "
+                        "ELSE published_at_epoch END,"
                         "provider_item_id=CASE WHEN ?<>'' THEN ? ELSE provider_item_id END,"
                         "raw_cache_key=CASE WHEN ?<>'' AND ?<>'' THEN ? ELSE raw_cache_key END,"
                         "evidence_binding_hash=CASE WHEN ?<>'' AND ?<>'' THEN ? "
