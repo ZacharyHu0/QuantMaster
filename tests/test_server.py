@@ -1092,7 +1092,7 @@ class TestBasics:
         assert snapshot["picks"] == []
 
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
-        from quantmaster.server import app as app_module
+        from quantmaster.market import overview as market_overview
 
         dates = pd.bdate_range("2026-07-20", periods=3)
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
@@ -1114,7 +1114,7 @@ class TestBasics:
         )
         events = []
 
-        result = app_module._market_overview_data(
+        result = market_overview.build_market_overview_data(
             "2026-07-01", lambda *args: events.append(args))
         partials = [args[3] for args in events if len(args) > 3 and args[3]]
         final_count = sum(len(items) for items in result["groups"].values())
@@ -1124,9 +1124,9 @@ class TestBasics:
         assert all(partial["item"]["nav"] for partial in partials)
 
     def test_market_overview_includes_tech_focused_major_indexes(self):
-        from quantmaster.server import app as app_module
+        from quantmaster.market import overview as market_overview
 
-        indexes = app_module._market_groups()["A股指数"]
+        indexes = market_overview._market_groups()["A股指数"]
 
         assert indexes["000688.SH"] == "科创50"
         assert indexes["000698.SH"] == "科创100"
@@ -1134,9 +1134,9 @@ class TestBasics:
         assert indexes["399673.SZ"] == "创业板50"
 
     def test_market_overview_route_reads_only_a_published_snapshot(self, monkeypatch, isolated_config):
+        from quantmaster.market import overview as market_overview
         from quantmaster.market import overview_snapshot
         from quantmaster.runtime.derived import DerivedArtifactCatalog
-        from quantmaster.server import app as app_module
 
         payload = {
             "meta": {"as_of": "2026-08-10", "stale": False, "stale_reasons": []},
@@ -1149,7 +1149,9 @@ class TestBasics:
             return DerivedArtifactCatalog(root, read_only=bool(kwargs.get("read_only")))
 
         monkeypatch.setattr(overview_snapshot, "DerivedArtifactCatalog", catalog_factory)
-        monkeypatch.setattr(app_module, "_market_overview_data", lambda **_kwargs: payload)
+        monkeypatch.setattr(
+            market_overview, "build_market_overview_data", lambda **_kwargs: payload,
+        )
         published = overview_snapshot.publish_market_overview_snapshot()
         assert published["id"]
         cached = overview_snapshot.read_market_overview_snapshot()
@@ -1161,7 +1163,7 @@ class TestBasics:
         def must_not_rebuild(**_kwargs):
             raise AssertionError("页面 GET 不得扫描 BarStore 或重建市场快照")
 
-        monkeypatch.setattr(app_module, "_market_overview_data", must_not_rebuild)
+        monkeypatch.setattr(market_overview, "build_market_overview_data", must_not_rebuild)
         response = TestClient(app).get("/api/v1/market/overview")
 
         assert response.status_code == 200, response.text
@@ -1192,12 +1194,12 @@ class TestBasics:
 
     def test_market_overview_emits_local_cache_before_failed_sync(self, monkeypatch):
         from quantmaster.data.storage import BarStore
-        from quantmaster.server import app as app_module
+        from quantmaster.market import overview as market_overview
 
         symbol = "SPX.INDEX"
         dates = pd.bdate_range("2026-07-20", periods=3)
         BarStore().put(symbol, pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates))
-        monkeypatch.setattr(app_module, "_market_groups", lambda: {
+        monkeypatch.setattr(market_overview, "_market_groups", lambda: {
             "全球市场": {symbol: "标普500"},
         })
         def failed_reference_sync(symbols, start, end, refresh, store):
@@ -1216,7 +1218,7 @@ class TestBasics:
             failed_reference_sync,
         )
         events = []
-        result = app_module._market_overview_data(
+        result = market_overview.build_market_overview_data(
             "2026-07-01", lambda *args: events.append(args))
 
         partials = [event[3] for event in events if len(event) > 3 and event[3]]
@@ -1225,11 +1227,11 @@ class TestBasics:
         assert result["groups"]["全球市场"][0]["cache_status"] == "stale"
 
     def test_market_overview_exposes_unavailable_reference_details(self, monkeypatch):
-        from quantmaster.server import app as app_module
+        from quantmaster.market import overview as market_overview
 
         symbol = "DXY.INDEX"
-        monkeypatch.setattr(app_module, "_personal_market_symbols", lambda: ({}, {}))
-        monkeypatch.setattr(app_module, "_market_groups", lambda: {
+        monkeypatch.setattr(market_overview, "_personal_market_symbols", lambda: ({}, {}))
+        monkeypatch.setattr(market_overview, "_market_groups", lambda: {
             "商品与汇率": {symbol: "美元指数"},
         })
         monkeypatch.setattr(
@@ -1243,7 +1245,7 @@ class TestBasics:
             }),
         )
 
-        result = app_module._market_overview_data("2026-07-01")
+        result = market_overview.build_market_overview_data("2026-07-01")
 
         assert result["groups"]["商品与汇率"] == []
         assert result["group_statuses"]["商品与汇率"]["unavailable"] == 1

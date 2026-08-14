@@ -61,6 +61,17 @@ def test_lab_modules_do_not_hide_server_dependencies_inside_functions():
     assert not violations, "Lab domain depends on server transport:\n" + "\n".join(violations)
 
 
+def test_market_capability_has_no_deep_transport_dependency():
+    violations = []
+    for path in (PACKAGE_ROOT / "market").rglob("*.py"):
+        for imported in _all_imports(path):
+            if imported == "quantmaster.cli" or imported.startswith("quantmaster.server"):
+                violations.append(
+                    f"{path.relative_to(PACKAGE_ROOT).as_posix()} -> {imported}",
+                )
+    assert not violations, "market capability depends on transport:\n" + "\n".join(violations)
+
+
 def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
     existing_runtime_adapters = {
         ("llm.py", "quantmaster.ai.llm"),

@@ -8,6 +8,7 @@ validated local market data.  With neither source it returns a safe skip.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -18,6 +19,7 @@ from quantmaster.config import get_config
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAILY_SIGNAL_CUTOFF = wall_time(15, 0)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,18 @@ def market_now(value: datetime | None = None) -> datetime:
 def market_date(value: datetime | None = None) -> date:
     """Return the Shanghai market calendar date for an optional instant."""
     return market_now(value).date()
+
+
+def default_close_data_end(as_of: str | None = None) -> str:
+    """Resolve a close-data endpoint default without using today's wall date."""
+    if as_of:
+        return str(as_of)
+    expectation = resolve_session_target()
+    if expectation.ready and expectation.session:
+        return expectation.session
+    fallback = (market_date() - timedelta(days=1)).isoformat()
+    logger.warning("交易日历不可用，使用非当天探测日期 %s：%s", fallback, expectation.reason)
+    return fallback
 
 
 def daily_signal_cutoff(value: date | str) -> datetime:
