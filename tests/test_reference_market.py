@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quantmaster.data.reference_market import fetch_reference
+from quantmaster.data.reference_market import (
+    ReferenceFetch,
+    ReferenceMarketUnavailable,
+    fetch_reference,
+    refresh_reference_panel,
+)
 from quantmaster.data.storage import BarStore
 
 
@@ -133,3 +138,58 @@ def test_refresh_reference_symbol_uses_dedicated_route_and_writes_cache(tmp_path
     assert calls == [("GC.CONTINUOUS", "2026-07-20", "2026-07-24")]
     assert result.data.index.equals(raw.index)
     assert store.metadata("GC.CONTINUOUS")["last_source"] == "sina:foreign-futures"
+
+
+def test_refresh_reference_panel_reuses_fresh_complete_cache(tmp_path, monkeypatch):
+    symbol = "SPX.INDEX"
+    frame = _frame().assign(volume=0.0).set_index("date")
+    store = BarStore(root=tmp_path / "bars")
+    store.put(
+        symbol,
+        frame,
+        request_start="2026-07-20",
+        request_end="2026-07-24",
+        source="sina:us-index",
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.reference_market.fetch_reference",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("fresh cache should win")),
+    )
+
+    frames, failures = refresh_reference_panel(
+        [symbol], "2026-07-20", "2026-07-24", "auto", store,
+    )
+
+    assert failures == {}
+    assert frames[symbol].equals(frame)
+
+
+def test_refresh_reference_panel_isolates_provider_failure(tmp_path, monkeypatch):
+    ready, failed = "SPX.INDEX", "DXY.INDEX"
+    frame = _frame().assign(volume=0.0).set_index("date")
+    store = BarStore(root=tmp_path / "bars")
+    store.put(
+        failed,
+        frame,
+        request_start="2026-07-20",
+        request_end="2026-07-24",
+        source="yfinance",
+    )
+
+    def fetch(symbol: str, _start: str, _end: str) -> ReferenceFetch:
+        if symbol == failed:
+            raise ReferenceMarketUnavailable(symbol, [{
+                "source": "yfinance", "code": "offline", "detail": "offline",
+            }])
+        return ReferenceFetch(frame=frame, source="sina:us-index", attempts=())
+
+    monkeypatch.setattr("quantmaster.data.reference_market.fetch_reference", fetch)
+    frames, failures = refresh_reference_panel(
+        [ready, failed], "2026-07-20", "2026-07-24", "incremental", store,
+    )
+
+    assert ready not in failures, failures
+    assert set(frames) == {ready, failed}
+    assert failures[failed]["error_code"] == "all_sources_unavailable"
+    assert store.metadata(failed)["last_status"] == "stale"
+    assert store.metadata(ready)["last_source"] == "sina:us-index"
