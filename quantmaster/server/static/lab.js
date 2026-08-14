@@ -1797,10 +1797,20 @@
         return;
       }
       try {
-        let job;
-        if (method === 'llm') job = await enqueue('discover_llm', {...base, count:+form.get('top'), rounds:+form.get('rounds')});
-        else if (method === 'python') job = await enqueue('discover_python', {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')});
-        else job = await enqueue('discover_genetic', {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')});
+        let operation;
+        let params;
+        if (method === 'llm') {
+          operation = 'discover_llm';
+          params = {...base, count:+form.get('top'), rounds:+form.get('rounds')};
+        } else if (method === 'python') {
+          operation = 'discover_python';
+          params = {...base, rounds:+form.get('rounds'), candidate_limit:+form.get('candidates'), finalists:+form.get('finalists')};
+        } else {
+          operation = 'discover_genetic';
+          params = {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')};
+        }
+        if (!await confirmPreflight(operation, params, kindLabel[operation] || '创建发现任务')) return;
+        const job = await enqueue(operation, params);
         if (!job) return;
         state.formsDirty = false;
         setView('automation');

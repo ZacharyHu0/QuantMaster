@@ -10,11 +10,14 @@ from fastapi.testclient import TestClient
 
 from quantmaster.ai.llm import LLMError
 from quantmaster.config import Config, set_config
+from quantmaster.data.research import ResearchDataBundle
+from quantmaster.data.research_features import registered_features
 from quantmaster.factors.mining.llm_miner import LLMFactorMiner
 from quantmaster.factors.mining.python_miner import PythonFactorMiner
 from quantmaster.factors.python_artifact import (
     PythonFactorPolicyError,
     RestrictedPythonRunner,
+    execute_python_factor_artifact,
     validate_python_factor,
     write_python_factor_artifact,
 )
@@ -1325,6 +1328,33 @@ def test_restricted_python_policy_and_subprocess_contract():
         with pytest.raises(PythonFactorPolicyError):
             validate_python_factor(unsafe)
 
+    parameterized_shift = (
+        "def compute(features, params):\n"
+        "    return features['close'].shift(params['lag'])\n"
+    )
+    assert validate_python_factor(parameterized_shift)["shift_params"] == ["lag"]
+    with pytest.raises(PythonFactorPolicyError, match="非负整数"):
+        RestrictedPythonRunner(timeout_seconds=15).execute(
+            parameterized_shift, {"close": panel["close"]}, {"lag": -1},
+        )
+    causal = RestrictedPythonRunner(timeout_seconds=15).execute(
+        parameterized_shift, {"close": panel["close"]}, {"lag": 1},
+    )
+    assert causal.index.equals(panel["close"].index)
+    with pytest.raises(PythonFactorPolicyError, match="diff"):
+        validate_python_factor(
+            "def compute(features, params):\n"
+            "    return features['close'].diff(-1)\n"
+        )
+    parameterized_change = (
+        "def compute(features, params):\n"
+        "    return features['close'].pct_change(params['lag'])\n"
+    )
+    with pytest.raises(PythonFactorPolicyError, match=r"pct_change.*非负整数"):
+        RestrictedPythonRunner(timeout_seconds=15).execute(
+            parameterized_change, {"close": panel["close"]}, {"lag": -1},
+        )
+
 
 def test_python_artifact_and_mining_ledger_are_content_addressed(tmp_path):
     _config(tmp_path)
@@ -1348,6 +1378,38 @@ def test_python_artifact_and_mining_ledger_are_content_addressed(tmp_path):
     loaded = store.mining_run(run["id"])
     assert loaded["candidates"][0]["proposal"]["name"] == "动量"
     assert loaded["candidates"][0]["metrics"]["valid_metrics"]["rank_ic"] == 0.02
+
+    incomplete = {key: value for key, value in artifact.items() if key != "source_sha256"}
+    with pytest.raises(PythonFactorPolicyError, match="source_sha256"):
+        execute_python_factor_artifact(tmp_path, incomplete, {"close": _panel(days=20)["close"]})
+
+
+def test_registered_membership_is_not_claimed_as_runtime_compatible():
+    bundle = ResearchDataBundle.from_legacy_panel(_panel(days=20, symbols=3))
+    bundle.membership = pd.DataFrame(
+        True, index=bundle.signal["close"].index, columns=bundle.signal["close"].columns,
+    )
+    _features, catalog = registered_features(bundle)
+    descriptor = next(item for item in catalog if item.name == "membership")
+    assert descriptor.runtime_compatible is False
+
+
+def test_python_decision_refuses_missing_membership_instead_of_using_all_true(tmp_path):
+    _config(tmp_path)
+    source = (
+        "def compute(features, params):\n"
+        "    return features['membership']\n"
+    )
+    artifact = write_python_factor_artifact(
+        tmp_path, source=source, params={}, manifest={"required_features": ["membership"]},
+    )
+    from quantmaster.decision.hybrid import _python_component
+
+    with pytest.raises(ValueError, match="缺少 PIT membership"):
+        _python_component(
+            {"close": _panel(days=20, symbols=3)["close"]},
+            {"spec": {"required_features": ["membership"], "artifact": artifact}},
+        )
 
 
 def test_sealed_three_way_split_has_purges_and_minimum_holdouts():
@@ -1378,6 +1440,85 @@ def test_python_miner_freezes_order_before_sealed_test():
     assert len(report.finalists) == 1
     assert report.finalists[0].pareto_rank == 1
     assert report.finalists[0].test_metrics["days"] > 200
+
+
+def test_python_miner_supplies_declared_warmup_history_but_scores_only_sealed_rows():
+    panel = _panel(days=1100, symbols=6)
+    source = "def compute(features, params):\n    return features['close'].pct_change(5)\n"
+    split = sealed_three_way_split(panel["close"].index, purge_gap=7)
+
+    class _CaptureRunner:
+        def __init__(self):
+            self.windows = []
+
+        def execute(self, _source, features, _params):
+            self.windows.append((features["close"].index[0], features["close"].index[-1]))
+            return features["close"].pct_change(5)
+
+    runner = _CaptureRunner()
+    client = _SequenceLLMClient([{"candidates": [{
+        "name": "五日动量", "hypothesis": "短期趋势延续", "objective": "稳定 RankIC",
+        "required_features": ["close"], "warmup": 20, "parameters": [], "code": source,
+    }]}])
+    report = PythonFactorMiner(client=client, runner=runner).mine_report(
+        {"close": panel["close"]}, [{
+            "name": "close", "group": "price_volume_v2", "description": "收盘价",
+            "pit_grade": "derived", "coverage": 1.0, "available": True,
+        }], rounds=1, candidate_limit=1, finalists=1,
+    )
+    valid_start = pd.Timestamp(split["valid"]["start"])
+    test_start = pd.Timestamp(split["test"]["start"])
+    valid_end = pd.Timestamp(split["valid"]["end"])
+    test_end = pd.Timestamp(split["test"]["end"])
+    assert any(first < valid_start and last == valid_end for first, last in runner.windows)
+    assert any(first < test_start and last == test_end for first, last in runner.windows)
+    assert report.finalists[0].test_metrics["days"] > 200
+
+
+def test_python_miner_excludes_candidates_that_fail_sealed_test():
+    panel = _panel(days=1100, symbols=6)
+    source = "def compute(features, params):\n    return features['close'].pct_change(5)\n"
+    split = sealed_three_way_split(panel["close"].index, purge_gap=7)
+    test_end = pd.Timestamp(split["test"]["end"])
+
+    class _FailOnTestRunner:
+        def execute(self, _source, features, _params):
+            if pd.Timestamp(features["close"].index.max()) == test_end:
+                raise PythonFactorPolicyError("sealed TEST 不可执行")
+            return features["close"].pct_change(5)
+
+    client = _SequenceLLMClient([{"candidates": [{
+        "name": "五日动量", "hypothesis": "短期趋势延续", "objective": "稳定 RankIC",
+        "required_features": ["close"], "warmup": 20, "parameters": [], "code": source,
+    }]}])
+    report = PythonFactorMiner(client=client, runner=_FailOnTestRunner()).mine_report(
+        {"close": panel["close"]}, [{
+            "name": "close", "group": "price_volume_v2", "description": "收盘价",
+            "pit_grade": "derived", "coverage": 1.0, "available": True,
+        }], rounds=1, candidate_limit=1, finalists=1,
+    )
+    assert report.finalists == []
+    assert report.candidates[0].status == "test_failed"
+    assert any(item["code"] == "sealed_test_failed" for item in report.warnings)
+
+
+def test_python_miner_rejects_malformed_llm_fields_without_aborting_round():
+    panel = _panel(days=1100, symbols=6)
+    source = "def compute(features, params):\n    return features['close'].pct_change(5)\n"
+    source_two = "def compute(features, params):\n    return features['close'].pct_change(6)\n"
+    client = _SequenceLLMClient([{"candidates": [
+        {"name": "坏候选", "required_features": "close", "warmup": "not-a-number", "code": source},
+        {"name": "好候选", "required_features": ["close"], "warmup": 20, "code": source_two},
+    ]}])
+    report = PythonFactorMiner(client=client).mine_report(
+        {"close": panel["close"]}, [{
+            "name": "close", "group": "price_volume_v2", "description": "收盘价",
+            "pit_grade": "derived", "coverage": 1.0, "available": True,
+        }], rounds=1, candidate_limit=2, finalists=1,
+    )
+    assert report.candidates[0].status == "rejected"
+    assert "候选字段无效" in report.candidates[0].error
+    assert report.finalists and report.finalists[0].name == "好候选"
 
 
 def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path, monkeypatch):

@@ -68,7 +68,7 @@ def registered_features(
             "strict" if bundle.tier == "production" else "research_only", False)
     if bundle.membership is not None:
         add("membership", bundle.membership.astype(float), "market_context_v1",
-            "当日 PIT 指数成分", "strict")
+            "当日 PIT 指数成分", "strict", False)
     add("news_sentiment", bundle.signal.get("news_sentiment"), "news_v2",
         "处理完成后按资讯发布时间回填的新闻情绪", "research_only")
     return values, descriptors

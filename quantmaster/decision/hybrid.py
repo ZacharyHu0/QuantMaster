@@ -555,7 +555,13 @@ def _python_component(
         ).reindex_like(close)
     if "membership" in required:
         close = panel["close"]
-        bundle.membership = pd.DataFrame(True, index=close.index, columns=close.columns)
+        membership = panel.get("membership")
+        if not isinstance(membership, pd.DataFrame) or membership.empty:
+            raise ValueError("正式决策缺少 PIT membership，拒绝用全量成分替代")
+        membership = membership.reindex(index=close.index, columns=close.columns)
+        if membership.isna().any().any():
+            raise ValueError("正式决策 membership 覆盖不足，拒绝静默补全")
+        bundle.membership = membership.astype(bool)
     features, _catalog = registered_features(bundle)
     if evidence_sink is not None:
         for name in sorted(required):
