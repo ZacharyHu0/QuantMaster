@@ -290,6 +290,9 @@ def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
 
 def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
     artifacts = tmp_path / "artifacts"
+    exe = artifacts / "packages" / "desktop" / "QuantMaster.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
     external_calls = []
     project_calls = []
     monkeypatch.setattr(run, "ARTIFACTS", artifacts)
@@ -325,6 +328,11 @@ def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
     ]
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
     assert all(label != "PyInstaller smoke" for label, _command, _kwargs in project_calls)
+    help_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE help")
+    doctor_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE doctor")
+    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
+        assert Path(help_env[name]).is_absolute()
+        assert help_env[name] == doctor_env[name]
 
 
 def test_full_shards_use_three_way_parallelism(monkeypatch):

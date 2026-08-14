@@ -396,7 +396,6 @@ def main() -> int:
                         str(ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
                     ],
                 )
-                run_external("EXE help", [str(exe), "--help"])
                 with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
                     exe_env = os.environ.copy()
                     instance = Path(raw_temp)
@@ -405,6 +404,7 @@ def main() -> int:
                     exe_env["QM_FREE_STOCKDB_ROOT"] = str(
                         instance / "runtime" / "free-stockdb"
                     )
+                    run_external("EXE help", [str(exe), "--help"], env=exe_env)
                     run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
             else:
                 print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")
