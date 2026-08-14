@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from quantmaster.config import Config, set_config
+from quantmaster.lab.errors import LabError
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.worker import LabWorker
 
@@ -107,3 +110,36 @@ def test_reclaimed_lab_job_rejects_stale_worker_updates(tmp_path):
     current = store.job(job["id"])
     assert current["worker"] == "worker-b"
     assert current["status"] == "running"
+
+
+def test_scheduled_python_mining_releases_slot_when_enqueue_is_blocked(tmp_path):
+    cfg = Config()
+    cfg.data.root = str(tmp_path)
+    cfg.lab.ai_python_mining_enabled = True
+    cfg.lab.universe = "demo"
+    cfg.lab.start = "2023-01-01"
+    cfg.lab.horizons = [3]
+    cfg.lab.weekly_days = [datetime.now(ZoneInfo(cfg.automation.timezone)).isoweekday()]
+    set_config(cfg)
+    store = LabStore(tmp_path / "lab.sqlite")
+
+    class _Service:
+        def __init__(self):
+            self.store = store
+
+        def create_study(self, _payload):
+            return {"id": "optimization"}
+
+        def enqueue(self, kind, _params):
+            if kind == "discover_python":
+                raise LabError("PREFLIGHT_BLOCKED", "测试阻塞")
+            return {"id": "job"}
+
+    worker = LabWorker(service=_Service())
+    now = datetime.now(ZoneInfo(cfg.automation.timezone))
+    week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
+    try:
+        worker._enqueue_heavy_research()
+        assert store.reserve_schedule(f"python:{week}") is True
+    finally:
+        set_config(None)

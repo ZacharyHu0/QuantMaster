@@ -329,14 +329,24 @@ class LabWorker:
             except (LabError, OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
                 failure = classify_lab_error(exc)
                 logger.info("Quant Lab scheduled optimization skipped code=%s", failure.code)
-        if (cfg.ai_python_mining_enabled
-                and self.service.store.reserve_schedule(f"python:{week}")):
-            self.service.enqueue("discover_python", {
-                "universe": cfg.universe, "start": cfg.start, "end": day,
-                "horizon": 3 if 3 in cfg.horizons else cfg.horizons[0],
-                "rounds": 3, "candidate_limit": 24, "finalists": 3,
-                "_scheduled": True,
-            })
+        python_slot = f"python:{week}"
+        if cfg.ai_python_mining_enabled and self.service.store.reserve_schedule(python_slot):
+            try:
+                self.service.enqueue("discover_python", {
+                    "universe": cfg.universe, "start": cfg.start, "end": day,
+                    "horizon": 3 if 3 in cfg.horizons else cfg.horizons[0],
+                    "rounds": 3, "candidate_limit": 24, "finalists": 3,
+                    "_scheduled": True,
+                })
+            except (LabError, OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
+                # A reservation is only a claim on an enqueue attempt.  Keep a
+                # preflight/data/LLM failure retryable during the same week.
+                try:
+                    self.service.store.release_schedule(python_slot)
+                except sqlite3.Error:
+                    logger.exception("Quant Lab failed to release Python AutoMiner slot=%s", python_slot)
+                failure = classify_lab_error(exc)
+                logger.info("Quant Lab scheduled Python AutoMiner skipped code=%s", failure.code)
 
     def _start_scheduler_locked(self) -> None:
         try:

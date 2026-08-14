@@ -1501,6 +1501,14 @@ class LabStore:
             ).rowcount
         return bool(changed)
 
+    def release_schedule(self, slot: str) -> bool:
+        """释放一个入队失败的调度时隙，使后续调度仍可重试。"""
+        with self._conn() as conn:
+            changed = conn.execute(
+                "DELETE FROM lab_schedule_slots WHERE slot=?", (slot,),
+            ).rowcount
+        return bool(changed)
+
     def scheduled_usage_hours(self) -> float:
         """当前 UTC 自然日已消耗的自动研究计算小时数。"""
         with self._conn() as conn:

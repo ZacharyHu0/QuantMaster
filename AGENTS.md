@@ -154,6 +154,16 @@
 
 - The canonical detailed procedure is [docs/github-workflow.md](docs/github-workflow.md). This
   section is the hard gate for agents; do not rely on chat context or an untracked local process.
+- GitHub workflow is a completion hard gate, not optional bookkeeping: do not implement or declare
+  a feature, bug, or refactor complete from a detached checkout, the primary checkout, or a
+  local-only branch. Before implementation, create and populate the Issue, start the official
+  `codex/<task-slug>` worktree, and record the fixed development baseline. After the first coherent
+  task commit, push that branch and open a Draft PR with `Closes #<issue>`, then synchronize the
+  Issue, PR, owner, labels, milestone, Project status, parent/blocked relationships, and CI
+  evidence. Local tests and screenshots are verification evidence only; they never substitute for
+  the required GitHub Issue/PR/Project/CI records. If GitHub authentication, network access, or
+  required repository metadata is unavailable, stop at the explicit `Blocked` state and report the
+  missing record instead of silently finishing locally.
 - Every feature, bug, or independent refactor must have a GitHub Issue before implementation. The
   Issue records scope, non-goals, the public seam, data or migration risk, performance budgets, and
   acceptance checks; the task branch and worktree slug must be linked from it. Set the owner,
