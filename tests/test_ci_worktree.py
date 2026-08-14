@@ -260,6 +260,81 @@ def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
     assert captured["env"]["MYPY_CACHE_DIR"] == str(artifacts / "cache" / "mypy")
 
 
+def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
+    packages = tmp_path / "packages"
+    wheel = packages / "python" / "quantmaster-1.0.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.touch()
+    artifacts = tmp_path / "artifacts"
+    python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    calls = []
+    monkeypatch.setattr(run, "PACKAGE_ROOT", packages)
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(run, "PYTHON", python)
+    monkeypatch.setattr(
+        run, "run_external",
+        lambda label, command, **kwargs: calls.append((label, command, kwargs)),
+    )
+
+    run.smoke_fresh_wheel()
+
+    label, command, kwargs = calls[0]
+    assert label == "fresh wheel install"
+    assert command[:5] == ["uv", "pip", "install", "--python", str(python)]
+    assert command[5:7] == ["--no-deps", "--target"]
+    assert Path(command[7]).name == "site"
+    assert Path(command[8]).name == wheel.name
+    assert Path(command[7]).parent == Path(command[8]).parent == kwargs["cwd"]
+    assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
+
+
+def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    exe = artifacts / "packages" / "desktop" / "QuantMaster.exe"
+    exe.parent.mkdir(parents=True)
+    exe.touch()
+    external_calls = []
+    project_calls = []
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(run, "PACKAGE_ROOT", artifacts / "packages")
+    monkeypatch.setattr(run, "RUN_ROOT", artifacts / "pytest" / "run")
+    monkeypatch.setattr(run, "PYTEST_CACHE", artifacts / "pytest" / "cache")
+    monkeypatch.setattr(
+        run, "parse_args",
+        lambda: run.argparse.Namespace(
+            fast=False, full=False, ui=False, package=True, rust=False, all=False,
+            serial=False, refresh_durations=False,
+        ),
+    )
+    monkeypatch.setattr(run, "prepare_pytest_directory", lambda path: path)
+    monkeypatch.setattr(run, "cleanup_run_root", lambda path: None)
+    monkeypatch.setattr(run, "smoke_fresh_wheel", lambda: None)
+    monkeypatch.setattr(
+        run, "run",
+        lambda label, command, **kwargs: project_calls.append((label, command, kwargs)),
+    )
+    monkeypatch.setattr(
+        run, "run_external",
+        lambda label, command, **kwargs: external_calls.append((label, command, kwargs)),
+    )
+
+    assert run.main() == 0
+
+    label, command, kwargs = next(call for call in external_calls if call[0] == "PyInstaller smoke")
+    assert label == "PyInstaller smoke"
+    assert command[:10] == [
+        "uv", "run", "--no-project", "--python", str(run.PYTHON),
+        "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
+    ]
+    assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
+    assert all(label != "PyInstaller smoke" for label, _command, _kwargs in project_calls)
+    help_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE help")
+    doctor_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE doctor")
+    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
+        assert Path(help_env[name]).is_absolute()
+        assert help_env[name] == doctor_env[name]
+
+
 def test_full_shards_use_three_way_parallelism(monkeypatch):
     observed = {}
 

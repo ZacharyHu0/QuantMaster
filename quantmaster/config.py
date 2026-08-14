@@ -9,6 +9,7 @@ YAML；环境变量仍是明确的运行时 override，并由设置页展示来�
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,36 @@ import yaml
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATHS = [WORKSPACE_ROOT / "config.yaml"]
+_installed_data_defaults: tuple[str, str] | None = None
+
+
+def _is_packaged_windows() -> bool:
+    return os.name == "nt" and bool(getattr(sys, "frozen", False))
+
+
+def configure_installed_instance() -> None:
+    """Install persistent per-user defaults for a frozen Windows process."""
+
+    if not _is_packaged_windows():
+        return
+    roots: dict[str, Path] = {}
+    for name in ("APPDATA", "LOCALAPPDATA"):
+        value = os.environ.get(name, "").strip()
+        path = Path(value)
+        if not value or not path.is_absolute():
+            raise RuntimeError(f"{name}必须是绝对路径")
+        roots[name] = path
+    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
+        value = os.environ.get(name, "").strip()
+        if value and not Path(value).is_absolute():
+            raise RuntimeError(f"{name}必须是绝对路径")
+
+    config_path = roots["APPDATA"] / "QuantMaster" / "config.yaml"
+    data_root = roots["LOCALAPPDATA"] / "QuantMaster" / "data"
+    stockdb_root = roots["LOCALAPPDATA"] / "QuantMaster" / "runtime" / "free-stockdb"
+    global _installed_data_defaults
+    DEFAULT_CONFIG_PATHS[:] = [config_path]
+    _installed_data_defaults = (str(data_root), str(stockdb_root))
 
 
 @dataclass
@@ -373,6 +404,8 @@ def load_config(
     credential backend used to make every settings render block or fail.
     """
     cfg = Config()
+    if _installed_data_defaults is not None:
+        cfg.data.root, cfg.data.free_stockdb_root = _installed_data_defaults
     explicit = path or os.environ.get("QM_CONFIG_PATH", "").strip()
     if explicit:
         configured = Path(explicit).expanduser()

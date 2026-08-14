@@ -1734,8 +1734,8 @@ def main(argv: list[str] | None = None) -> int:
 
         return _worker(raw_argv[1], raw_argv[2])
     parsed_argv, verbose = _extract_verbose(raw_argv)
-    configure_logging(verbose=verbose)
     args = build_parser().parse_args(parsed_argv)
+    configure_logging(verbose=verbose)
     args.verbose = verbose
     try:
         result = args.func(args)
