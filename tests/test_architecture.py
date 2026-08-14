@@ -32,7 +32,7 @@ def _resolved_import_from(path: Path, node: ast.ImportFrom) -> set[str]:
     if node.level:
         package = list(path.relative_to(PACKAGE_ROOT.parent).with_suffix("").parts[:-1])
         parents = node.level - 1
-        if parents > len(package):
+        if parents >= len(package):
             return set()
         parts.extend(package[:len(package) - parents])
     if node.module:
@@ -105,6 +105,13 @@ def test_import_resolver_canonicalizes_market_transport_import_forms():
             item for item in ast.walk(ast.parse(source)) if isinstance(item, ast.ImportFrom)
         )
         assert expected in _resolved_import_from(fixture, node)
+
+    invalid = next(
+        item
+        for item in ast.walk(ast.parse("from ...server import app"))
+        if isinstance(item, ast.ImportFrom)
+    )
+    assert _resolved_import_from(fixture, invalid) == set()
 
 
 def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
