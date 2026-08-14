@@ -2016,9 +2016,18 @@ class PaperService:
             cursor = str(
                 order.get("last_processed_at") or cycle["execution_date"] or cycle["signal_date"]
             )
+            # Injected panels are fixtures with one explicitly supplied observation
+            # instant.  Production cache frames must carry per-row first-observed
+            # evidence; assigning decision_at here would make late backfills appear
+            # to have been known in the past.
+            observed_values = open_prices.attrs.get("first_observed_at", {})
             bars = [
                 DailyBarEvidence(
-                    symbol, pd.Timestamp(value).date(), float(raw), decision_at,
+                    symbol, pd.Timestamp(value).date(), float(raw),
+                    observed_at if observed_at is not None else pd.Timestamp(
+                        observed_values.get((symbol, pd.Timestamp(value).date()))
+                        or observed_values.get(f"{symbol}:{pd.Timestamp(value).date()}")
+                    ).to_pydatetime(),
                     "panel-fixture" if observed_at is not None else "local-cache",
                     NumericSemantics(
                         instrument=symbol,
@@ -2044,7 +2053,11 @@ class PaperService:
                     ),
                 )
                 for value, raw in open_prices.get(symbol, pd.Series(dtype=float)).items()
-                if pd.notna(raw)
+                if pd.notna(raw) and (
+                    observed_at is not None
+                    or observed_values.get((symbol, pd.Timestamp(value).date()))
+                    or observed_values.get(f"{symbol}:{pd.Timestamp(value).date()}")
+                )
             ]
             selected = select_next_open_bar(
                 bars, after_session=cursor, decision_at=decision_at, evidence=calendar,

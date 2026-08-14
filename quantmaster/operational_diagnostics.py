@@ -9,6 +9,49 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _market_session_metrics(stockdb_status: dict[str, Any]) -> dict[str, Any]:
+    validation = dict(stockdb_status.get("validation") or {})
+    if not validation:
+        return {}
+    complete = bool(validation.get("complete"))
+    accepted = bool(validation.get("accepted"))
+    return {
+        "CN": {
+            "market_timezone": "Asia/Shanghai",
+            "session_date": str(
+                validation.get("target_session")
+                or stockdb_status.get("target_session") or ""
+            ),
+            "latest_complete_session": (
+                str(validation.get("actual_session") or "") if complete else ""
+            ),
+            "completion_state": (
+                "current_session_complete" if complete else
+                "current_session_partial" if accepted else
+                "current_session_closed_waiting_provider"
+            ),
+            "coverage_ratio": validation.get("symbol_ratio"),
+            "missing_symbol_count": int(validation.get("missing_symbol_count") or 0),
+            "diagnostic_code": (
+                "" if complete else "SESSION_PARTIAL" if accepted
+                else "SESSION_CLOSED_WAIT_PROVIDER"
+            ),
+            "provider_published_at": "",
+            "ingested_at": str(stockdb_status.get("updated_at") or ""),
+        },
+        "HK": {
+            "market_timezone": "Asia/Hong_Kong",
+            "completion_state": "calendar_unavailable",
+            "diagnostic_code": "CALENDAR_UNVERIFIED",
+        },
+        "US": {
+            "market_timezone": "America/New_York",
+            "completion_state": "calendar_unavailable",
+            "diagnostic_code": "CALENDAR_UNVERIFIED",
+        },
+    }
+
+
 def _database_schema_metrics() -> dict[str, dict[str, Any]]:
     from quantmaster.ai.news_storage import NEWS_SCHEMA_VERSION
     from quantmaster.automation.store import AUTOMATION_SCHEMA_VERSION
@@ -89,6 +132,9 @@ def collect_operational_metrics() -> dict[str, Any]:
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
 
     result["free_stockdb_runtime"] = free_stockdb_runtime.status()
+    stockdb_status = result["free_stockdb_runtime"]
+    if market_sessions := _market_session_metrics(stockdb_status):
+        result["market_sessions"] = market_sessions
 
     from quantmaster.backtest.paper_accounts import PaperStore
 

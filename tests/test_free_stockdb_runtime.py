@@ -561,7 +561,7 @@ def test_partial_target_session_finishes_with_warning_instead_of_blocking(
     assert runtime.status()["update_result"] == "success"
     assert "可继续扫描或稍后重试" in runtime.status()["message"]
     assert emitted == [(
-        "update_succeeded", "2026-08-10",
+        "market_session_partial", "2026-08-10",
         {"target_session": "2026-08-10", "validation": validation,
          "trigger": "manual"},
     )]
@@ -604,7 +604,7 @@ def test_partial_session_event_submits_only_market_temperature_refresh(
     )
 
     FreeStockDBRuntime()._deliver_event({
-        "kind": "market_session_available",
+        "kind": "market_session_partial",
         "payload": {"target_session": "2026-08-10"},
     })
 

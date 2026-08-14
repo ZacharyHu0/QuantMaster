@@ -474,6 +474,12 @@ class NewsStore:
         value["first_seen_at"] = (
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)) if epoch else ""
         )
+        for field_name in ("fetched_at", "content_version_at", "analysis_updated_at"):
+            field_epoch = float(value.get(field_name) or 0)
+            value[f"{field_name}_iso"] = (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(field_epoch))
+                if field_epoch else ""
+            )
         if (
             value.get("analysis_status") in {"failed", "dead_letter"}
             and str(value.get("analysis_error") or "").strip()
@@ -1158,13 +1164,22 @@ class NewsStore:
             ).fetchone()
         return self._decode(row) if row else None
 
-    def factor_rows(self, start_epoch: float | None = None,
-                    end_epoch: float | None = None) -> list[dict]:
-        """Return completed formal analyses in the requested publication window.
+    def factor_rows(
+        self,
+        start_epoch: float | None = None,
+        end_epoch: float | None = None,
+        *,
+        knowledge_mode: str = "strict_observed",
+    ) -> list[dict]:
+        """Return formal analyses visible under an explicit knowledge contract.
 
-        Processing timestamps remain part of the evidence contract, but never move
-        an event out of the window in which it was published.
+        ``strict_observed`` reconstructs what this installation could actually
+        know by ``end_epoch``.  ``trusted_published`` is an explicit research-only
+        view of trustworthy public release times; callers must not describe it as
+        a replay of system knowledge.
         """
+        if knowledge_mode not in {"strict_observed", "trusted_published"}:
+            raise ValueError("knowledge_mode 只支持 strict_observed 或 trusted_published")
         clauses = [
             "n.analysis_status='complete'",
             "n.content_scope IN ('full_text','full_article','feed_summary')",
@@ -1212,6 +1227,13 @@ class NewsStore:
         if end_epoch is not None:
             clauses.append("n.published_at_epoch<=?")
             params.append(end_epoch)
+            if knowledge_mode == "strict_observed":
+                clauses.extend((
+                    "n.first_seen_at>0 AND n.first_seen_at<=?",
+                    "n.content_version_at>0 AND n.content_version_at<=?",
+                    "n.analysis_updated_at>0 AND n.analysis_updated_at<=?",
+                ))
+                params.extend((end_epoch, end_epoch, end_epoch))
         with self._conn() as conn:
             register_news_raw_verifier(conn)
             rows = conn.execute(
@@ -1232,6 +1254,8 @@ class NewsStore:
             value["symbols"] = json.loads(value.get("symbols") or "[]")
             value["formal_eligible"] = True
             value["formal_ineligible_reasons"] = []
+            value["knowledge_mode"] = knowledge_mode
+            value["research_only"] = knowledge_mode == "trusted_published"
             result.append(value)
         return result
 

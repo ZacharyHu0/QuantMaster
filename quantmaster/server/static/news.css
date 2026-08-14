@@ -364,7 +364,14 @@
 .news-event.expanded .news-event-detail { display: grid; }
 .news-detail-copy { grid-column: 1 / -1; padding-top: 12px; border-top: 1px solid var(--border); color: var(--ink-2); font-size: 12px; white-space: pre-wrap; }
 .news-detail-metric span { display: block; color: var(--muted); font-size: 10px; }
-.news-detail-metric strong { font-size: 12px; font-weight: 560; }
+.news-detail-metric { min-width: 0; }
+.news-detail-metric strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 560;
+}
+[data-time-diagnostic] { max-width: 100%; overflow-wrap: anywhere; }
 .news-detail-link { grid-column: 1 / -1; color: var(--s1); font-size: 11px; word-break: break-all; }
 
 .news-failure-panel {

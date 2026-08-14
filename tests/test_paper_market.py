@@ -144,6 +144,20 @@ def test_recovery_cursor_never_skips_gap_or_uses_future_bar():
         )
 
 
+def test_late_backfill_cannot_execute_at_historical_open() -> None:
+    calendar = evidence(PaperMarket.CN, ["2026-08-10", "2026-08-11"])
+    late = DailyBarEvidence(
+        "600000.SH", pd.Timestamp("2026-08-11").date(), 10.0,
+        datetime.fromisoformat("2026-08-12T09:00:00+08:00"), "late-backfill",
+    )
+    with pytest.raises(ValueError, match="未来行情"):
+        select_next_open_bar(
+            [late], after_session="2026-08-10",
+            decision_at=datetime.fromisoformat("2026-08-11T10:00:00+08:00"),
+            evidence=calendar,
+        )
+
+
 @pytest.mark.parametrize(
     ("symbol", "market"),
     [("600000.SH", PaperMarket.CN), ("00700.HK", PaperMarket.HK), ("AAPL.US", PaperMarket.US)],

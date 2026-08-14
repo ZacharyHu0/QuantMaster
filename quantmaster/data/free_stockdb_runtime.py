@@ -1062,10 +1062,19 @@ class FreeStockDBRuntime:
             reset_etf_research_service()
         except (ImportError, RuntimeError):
             logger.warning("free-stockdb 更新后重置盘后数据源失败", exc_info=True)
-        self._emit_update_event("update_succeeded", target, {
+        event_kind = (
+            "update_succeeded"
+            if bool(validation.get("complete"))
+            else "market_session_partial"
+        )
+        self._emit_update_event(event_kind, target, {
             "target_session": target, "validation": validation, "trigger": trigger,
         })
-        logger.info("free-stockdb 数据已验证至 %s", target)
+        logger.info(
+            "free-stockdb %s至 %s",
+            "完整数据已验证" if event_kind == "update_succeeded" else "部分数据已接收",
+            target,
+        )
         return True
 
     def _finish_failure(
@@ -1463,7 +1472,9 @@ class FreeStockDBRuntime:
         kind = str(event.get("kind") or "")
         payload = dict(event.get("payload") or {})
         cfg = get_config()
-        if kind in {"update_succeeded", "market_session_available"}:
+        if kind in {
+            "update_succeeded", "market_session_available", "market_session_partial",
+        }:
             target = str(payload.get("target_session") or "")
             if (
                 kind == "update_succeeded"
@@ -1502,7 +1513,7 @@ class FreeStockDBRuntime:
                     )
             logger.info(
                 "free-stockdb %s，已提交 %s 观察刷新",
-                "验收完成" if kind == "update_succeeded" else "目标交易日数据可用",
+                "验收完成" if kind == "update_succeeded" else "目标交易日部分数据可用",
                 target or "最近完成交易日",
             )
             return

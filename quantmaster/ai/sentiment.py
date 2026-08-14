@@ -17,6 +17,7 @@ _MINIMUM_HISTORY_COVERAGE = 0.70
 _SANDBOX_FAST_SOURCE_WEIGHT = 0.25
 
 NewsFactorTier = Literal["production", "sandbox"]
+NewsKnowledgeMode = Literal["strict_observed", "trusted_published"]
 
 
 def _factor_tier(value: str) -> NewsFactorTier:
@@ -241,6 +242,7 @@ def quality_sentiment_panel(
     min_confidence: float | None = None,
     *,
     tier: NewsFactorTier = "production",
+    knowledge_mode: NewsKnowledgeMode = "strict_observed",
 ) -> pd.DataFrame:
     """构造可回测的质量加权个股消息面因子。
 
@@ -270,7 +272,7 @@ def quality_sentiment_panel(
         index[-1] + pd.Timedelta(days=2)
     ).tz_localize("Asia/Shanghai").timestamp()
     rows = (
-        store.factor_rows(start_epoch, end_epoch)
+        store.factor_rows(start_epoch, end_epoch, knowledge_mode=knowledge_mode)
         if selected_tier == "production"
         else store.sandbox_factor_rows(start_epoch, end_epoch)
     )
@@ -362,6 +364,10 @@ def quality_sentiment_panel(
             previous_value, previous_day = current, day
     result.attrs["news_factor"] = _factor_metadata(
         index, list(used_rows.values()), tier=selected_tier,
+    )
+    result.attrs["news_factor"]["knowledge_mode"] = knowledge_mode
+    result.attrs["news_factor"]["research_only"] = (
+        knowledge_mode == "trusted_published"
     )
     return result
 

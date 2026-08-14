@@ -18,6 +18,7 @@ from quantmaster.ai.news_contracts import (
     FetchedArticle,
     NewsContractError,
     evaluate_freshness,
+    normalize_published_at,
     read_raw_evidence,
 )
 from quantmaster.ai.news_providers import (
@@ -41,6 +42,15 @@ from quantmaster.ai.news_sources import (
 
 def _source(source_id: str) -> dict:
     return next(dict(item) for item in BUILTIN_SOURCES if item["id"] == source_id)
+
+
+@pytest.mark.parametrize("value", ["20260809", 1786240800000])
+def test_shared_published_parser_rejects_ambiguous_numeric_formats(value) -> None:
+    with pytest.raises(NewsContractError, match=r"数字|纯数字") as error:
+        normalize_published_at(value)
+    assert error.value.code in {
+        "ambiguous_published_at_format", "ambiguous_published_at_unit",
+    }
 
 
 def _official_url(source_id: str, suffix: str) -> str:
@@ -1872,7 +1882,7 @@ def test_v3_title_identity_migration_preserves_archive_and_removes_constraint(tm
         ).fetchone()[0] == "3"
 
 
-def test_historical_factors_backfill_analysis_to_publication_window(tmp_path):
+def test_historical_factors_require_analysis_visible_by_observed_cutoff(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     now = time.time()
     first_seen = now - 7200
@@ -1899,13 +1909,18 @@ def test_historical_factors_backfill_analysis_to_publication_window(tmp_path):
     )
     assert store.update_analysis(item_id, analyzed)
     historical = store.factor_rows(end_epoch=as_of)
-    assert len(historical) == 1
-    assert historical[0]["sentiment"] == 0.8
+    assert historical == []
+    published_research = store.factor_rows(
+        end_epoch=as_of, knowledge_mode="trusted_published",
+    )
+    assert len(published_research) == 1
+    assert published_research[0]["sentiment"] == 0.8
+    assert published_research[0]["research_only"] is True
     assert store.market_sentiment(as_of=as_of, days=1)["event_count"] == 0
     assert len(store.factor_rows(end_epoch=now + 10)) == 1
 
 
-def test_historical_factor_uses_latest_analysis_at_original_publication_time(tmp_path):
+def test_historical_factor_never_rewrites_past_with_latest_analysis(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     now = time.time()
     first_seen = now - 7200
@@ -1946,8 +1961,12 @@ def test_historical_factor_uses_latest_analysis_at_original_publication_time(tmp
     )
     assert store.update_analysis(item_id, reanalyzed)
     historical = store.factor_rows(end_epoch=as_of)
-    assert len(historical) == 1
-    assert historical[0]["sentiment"] == -0.7
+    assert historical == []
+    published_research = store.factor_rows(
+        end_epoch=as_of, knowledge_mode="trusted_published",
+    )
+    assert len(published_research) == 1
+    assert published_research[0]["sentiment"] == -0.7
     current = store.factor_rows(end_epoch=now + 10)
     assert len(current) == 1
     assert current[0]["sentiment"] == -0.7

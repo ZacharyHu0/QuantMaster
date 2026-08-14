@@ -271,8 +271,14 @@ def normalize_published_at(value: Any, *, default_timezone: str = "Asia/Shanghai
     parsed: datetime | None = None
     if isinstance(value, (int, float)):
         number = float(value)
-        if number > 10_000_000_000:
-            number /= 1000.0
+        # Provider adapters must declare Unix units before reaching this shared
+        # boundary.  Guessing seconds versus milliseconds corrupts YYYYMMDD and
+        # silently turns provider schema drift into plausible old timestamps.
+        if not (100_000_000 <= number < 10_000_000_000):
+            raise NewsContractError(
+                "数字发布时间缺少明确的 Unix 秒契约",
+                code="ambiguous_published_at_unit",
+            )
         try:
             parsed = datetime.fromtimestamp(number, UTC)
         except (OSError, OverflowError, ValueError):
@@ -280,7 +286,10 @@ def normalize_published_at(value: Any, *, default_timezone: str = "Asia/Shanghai
     else:
         text = str(value).strip()
         if text.isdigit():
-            return normalize_published_at(int(text), default_timezone=default_timezone)
+            raise NewsContractError(
+                "纯数字发布时间必须由 provider adapter 按声明格式解析",
+                code="ambiguous_published_at_format",
+            )
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:

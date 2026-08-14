@@ -268,7 +268,14 @@
   }
 
   function eventTemplate(item) {
-    const timestamp = localDate(item.first_seen_at || item.published_at);
+    const timestamp = localDate(item.published_at);
+    const published = localDate(item.published_at);
+    const firstObserved = localDate(item.first_seen_at);
+    const fetched = localDate(item.fetched_at_iso);
+    const contentUpdated = localDate(item.content_version_at_iso);
+    const timeDiagnostic = item.published_at
+      ? ''
+      : '<span class="news-tag" data-time-diagnostic="TIME_UNINTERPRETABLE">发布时间未知</span>';
     const sentiment = item.sentiment == null ? null : Number(item.sentiment);
     const sentimentClass = sentiment == null ? 'missing' : sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
     const score = item.alert_importance_score == null ? null : Math.round(Number(item.alert_importance_score));
@@ -285,10 +292,10 @@
     const updated = state.updatedIds.has(Number(item.id)) ? ' stream-updated' : '';
     return `<article class="news-event${updated}" data-news-id="${Number(item.id)}" data-content-truncated="${Boolean(item.content_truncated)}">
       <button class="news-event-main" type="button" aria-expanded="false">
-        <span class="news-event-time"><strong>${html(timestamp.time)}</strong>${html(timestamp.day)}</span>
+        <span class="news-event-time"><strong>${html(item.published_at ? timestamp.time : '未知')}</strong>${html(item.published_at ? timestamp.day : '发布时间')}</span>
         <span><span class="news-event-title">${html(item.title)}</span>
           <span class="news-event-summary">${html(item.summary || item.content || '等待结构化摘要')}</span>
-          <span class="news-event-meta"><span class="news-tag">${html(sourceName(item))}</span>${tags}</span>
+          <span class="news-event-meta"><span class="news-tag">${html(sourceName(item))}</span>${timeDiagnostic}${tags}</span>
         </span>
         <span class="news-event-score ${sentimentClass}"><strong>${sentiment == null ? '待更新' : `${sentiment > 0 ? '+' : ''}${sentiment.toFixed(2)}`}</strong><span>${score == null ? '等待补齐' : `${score} IMP`}</span></span>
       </button>
@@ -298,7 +305,10 @@
         <div class="news-detail-metric"><span>置信度</span><strong>${item.confidence == null ? '无法计算' : `${Math.round(Number(item.confidence) * 100)}%`}</strong></div>
         <div class="news-detail-metric"><span>影响范围</span><strong>${html(item.scope || '待判断')}</strong></div>
         <div class="news-detail-metric"><span>相关板块</span><strong>${html(sectors.join('、') || '未映射')}</strong></div>
-        <div class="news-detail-metric"><span>首次获取</span><strong>${html(item.first_seen_at || '—')}</strong></div>
+        <div class="news-detail-metric"><span>发布 · Asia/Shanghai</span><strong>${html(item.published_at ? `${published.day} ${published.time}` : '未知 · TIME_UNINTERPRETABLE')}</strong></div>
+        <div class="news-detail-metric"><span>首次观测 · Asia/Shanghai</span><strong>${html(item.first_seen_at ? `${firstObserved.day} ${firstObserved.time}` : '—')}</strong></div>
+        <div class="news-detail-metric"><span>最近抓取 · Asia/Shanghai</span><strong>${html(item.fetched_at_iso ? `${fetched.day} ${fetched.time}` : '—')}</strong></div>
+        <div class="news-detail-metric"><span>内容版本进入系统 · Asia/Shanghai</span><strong>${html(item.content_version_at_iso ? `${contentUpdated.day} ${contentUpdated.time}` : '—')}</strong></div>
         ${link ? `<a class="news-detail-link" href="${link}" target="_blank" rel="noopener noreferrer">查看原始来源 ↗</a>` : ''}
       </div>
     </article>`;
