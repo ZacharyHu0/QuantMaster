@@ -1917,8 +1917,8 @@ class LabService:
         from quantmaster.data.tushare_source import TushareSource
 
         source = TushareSource()
-        dates = pd.bdate_range(start, end)
         daily: dict[str, pd.DataFrame] = {}
+        quarterly: dict[str, pd.DataFrame] = {}
         roe: dict[str, pd.DataFrame] = {}
         missing_daily, missing_roe = [], []
         for number, symbol in enumerate(symbols, start=1):
@@ -1929,7 +1929,7 @@ class LabService:
                 missing_daily.append(symbol)
             values = source.quarterly_roe(symbol, str(max(1990, int(start[:4]) - 1)))
             if not values.empty:
-                roe[symbol] = quarterly_to_daily(values, dates)
+                quarterly[symbol] = values
             else:
                 missing_roe.append(symbol)
             if progress:
@@ -1948,6 +1948,17 @@ class LabService:
                     f"公告日 ROE 缺失 {len(missing_roe)} 只: {', '.join(missing_roe[:5])}"
                 )
             raise RuntimeError("production PIT 基本面门禁未通过；" + "；".join(detail))
+        # 每日指标返回的日期是本次 provider 响应实际覆盖的交易 session。
+        # date-only ann_date 必须基于这份证据选择下一 session，不能用 BDay
+        # 猜测法定节假日；没有 session 证据时 production 研究直接失败。
+        dates = pd.DatetimeIndex([])
+        for frame in daily.values():
+            dates = dates.union(pd.DatetimeIndex(frame.index))
+        dates = dates[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))].sort_values()
+        if dates.empty:
+            raise RuntimeError("production PIT 基本面缺少真实交易 session 索引")
+        for symbol, values in quarterly.items():
+            roe[symbol] = quarterly_to_daily(values, dates)
         result: dict[str, pd.DataFrame] = {}
         for field in ("pe_ttm", "pb", "dv_ratio", "total_mv"):
             result[field] = pd.DataFrame({

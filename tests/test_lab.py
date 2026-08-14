@@ -211,6 +211,47 @@ def test_point_in_time_membership_updates_indexes_independently():
     assert mask.loc["2024-01-05", ["BBB", "CCC"]].all()
 
 
+def test_production_fundamentals_use_observed_sessions_for_date_only_announcements(
+    tmp_path, monkeypatch,
+):
+    """五一休市不能被 BDay 猜成 session，ann_date 当天也不能盘中可见。"""
+    _config(tmp_path)
+    sessions = pd.DatetimeIndex(["2023-04-28", "2023-05-04", "2023-05-05"])
+    indicators = pd.DataFrame(
+        {
+            "pe_ttm": 10.0,
+            "pb": 2.0,
+            "dv_ratio": 3.0,
+            "total_mv": 1e8,
+        },
+        index=sessions,
+    )
+    quarterly = pd.DataFrame(
+        {
+            "report_date": pd.to_datetime(["2022-12-31"]),
+            "roe": [9.5],
+            "update_flag": ["0"],
+        },
+        index=pd.DatetimeIndex(["2023-04-28"], name="ann_date"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.daily_indicators",
+        lambda self, symbol, start, end: indicators,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.quarterly_roe",
+        lambda self, symbol, start_year: quarterly,
+    )
+
+    result = LabService._pit_fundamentals(
+        ["600000.SH"], "2023-04-28", "2023-05-05", production=True,
+    )
+
+    assert result["roe"].index.equals(sessions)
+    assert pd.isna(result["roe"].loc["2023-04-28", "600000.SH"])
+    assert result["roe"].loc["2023-05-04", "600000.SH"] == 9.5
+
+
 def test_csi800_as_of_uses_latest_known_snapshot_without_lookahead():
     class Source:
         def index_weights(self, index_code, start, end):

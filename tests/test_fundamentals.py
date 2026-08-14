@@ -18,6 +18,7 @@ from quantmaster.data.fundamentals import (
 from quantmaster.factors.analysis import analyze_factor
 from quantmaster.factors.engine import compute_factor
 from quantmaster.factors.fundamental import make_fundamental_factors, resolve_factor
+from quantmaster.temporal import TemporalContractError
 
 DATES = pd.bdate_range("2023-01-02", "2023-12-29")
 
@@ -98,18 +99,20 @@ class TestQuarterlyToDaily:
         assert daily.loc["2023-06-30", "roe"] == 10.0
 
     def test_visible_only_after_lag(self):
-        """报告期 + 45 天后才可见：5-12（周五）仍 NaN，5-15（周一）起为 10。"""
+        """日期级可见证据不能冒充 00:00，最早从下一 session 使用。"""
         daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=45)
-        assert pd.isna(daily.loc["2023-05-12", "roe"])
-        assert daily.loc["2023-05-15", "roe"] == 10.0
+        assert pd.isna(daily.loc["2023-05-15", "roe"])
+        assert daily.loc["2023-05-16", "roe"] == 10.0
 
     def test_ffill_between_publications(self):
         """两次披露之间 ffill 保持旧值，披露日切换为新值。"""
         daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=45)
         assert daily.loc["2023-07-03", "roe"] == 10.0          # Q2 尚未披露
-        assert daily.loc["2023-08-14", "roe"] == 12.0          # 6-30 + 45 天
+        assert daily.loc["2023-08-14", "roe"] == 10.0          # 日期证据尚未跨 session
+        assert daily.loc["2023-08-15", "roe"] == 12.0
         assert daily.loc["2023-11-13", "roe"] == 12.0          # Q3 尚未披露
-        assert daily.loc["2023-11-14", "roe"] == 8.0           # 9-30 + 45 天
+        assert daily.loc["2023-11-14", "roe"] == 12.0
+        assert daily.loc["2023-11-15", "roe"] == 8.0
 
     def test_weekend_publication_not_lost(self):
         """可见日落在周末（3-31 + 43 = 周六 5-13）时，下个交易日起生效而非丢失。"""
@@ -117,10 +120,63 @@ class TestQuarterlyToDaily:
         assert pd.isna(daily.loc["2023-05-12", "roe"])
         assert daily.loc["2023-05-15", "roe"] == 10.0
 
-    def test_zero_lag_visible_on_report_date(self):
-        """lag_days=0 时报告期当天即可见（用于验证滞后逻辑本身）。"""
+    def test_zero_lag_still_waits_until_next_session(self):
+        """即使研究显式设零滞后，date-only 报告期也不能冒充当日 00:00。"""
         daily = quarterly_to_daily(make_quarterly(), DATES, lag_days=0)
-        assert daily.loc["2023-03-31", "roe"] == 10.0
+        assert pd.isna(daily.loc["2023-03-31", "roe"])
+        assert daily.loc["2023-04-03", "roe"] == 10.0
+
+    def test_ann_date_uses_next_real_session_and_keeps_report_period_separate(self):
+        """ann_date 只控制披露可见性，report_date 只说明报告期。"""
+        quarterly = pd.DataFrame(
+            {
+                "report_date": pd.to_datetime(["2022-12-31"]),
+                "roe": [9.5],
+                "update_flag": ["0"],
+            },
+            index=pd.DatetimeIndex(["2023-04-28"], name="ann_date"),
+        )
+        # 调用方的真实 session 索引跳过周末和五一休市；实现不能用自然日/BDay
+        # 猜出 5 月 1 日或把 4 月 28 日当成午夜已知。
+        sessions = pd.DatetimeIndex(["2023-04-28", "2023-05-04", "2023-05-05"])
+        daily = quarterly_to_daily(quarterly, sessions)
+
+        assert pd.isna(daily.loc["2023-04-28", "roe"])
+        assert daily.loc["2023-05-04", "roe"] == 9.5
+
+    def test_precise_published_at_uses_aware_cutoff(self):
+        quarterly = pd.DataFrame(
+            {
+                "published_at": ["2023-04-28T10:00:00+08:00"],
+                "report_period": pd.to_datetime(["2022-12-31"]),
+                "roe": [9.5],
+            }
+        )
+        cutoffs = pd.DatetimeIndex([
+            "2023-04-28T09:00:00+08:00",
+            "2023-04-28T11:00:00+08:00",
+        ])
+        daily = quarterly_to_daily(quarterly, cutoffs)
+
+        assert pd.isna(daily.iloc[0]["roe"])
+        assert daily.iloc[1]["roe"] == 9.5
+
+    def test_precise_published_at_rejects_date_only_cutoff(self):
+        quarterly = pd.DataFrame({
+            "published_at": ["2023-04-28T10:00:00+08:00"],
+            "roe": [9.5],
+        })
+        with pytest.raises(TemporalContractError, match="cutoff"):
+            quarterly_to_daily(quarterly, pd.DatetimeIndex(["2023-04-28"]))
+
+    def test_precise_published_at_rejects_missing_timezone(self):
+        quarterly = pd.DataFrame({
+            "published_at": ["2023-04-28T10:00:00"],
+            "roe": [9.5],
+        })
+        cutoffs = pd.DatetimeIndex(["2023-04-28T11:00:00+08:00"])
+        with pytest.raises(TemporalContractError, match="时区"):
+            quarterly_to_daily(quarterly, cutoffs)
 
     def test_empty_input(self):
         """空季度数据返回同形状的全 NaN 面板，不报错。"""

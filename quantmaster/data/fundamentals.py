@@ -28,6 +28,7 @@ from quantmaster.config import get_config
 from quantmaster.data.akshare_source import _require_akshare
 from quantmaster.data.resilience import akshare_call
 from quantmaster.data.storage import BarStore
+from quantmaster.temporal import TemporalContractError
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,58 @@ def extract_roe(raw: pd.DataFrame) -> pd.DataFrame:
 DISCLOSURE_LAG_DAYS = {3: 31, 6: 62, 9: 31, 12: 120}
 
 
+def _session_dates(dates: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Return the distinct market-local session dates represented by ``dates``.
+
+    ``dates`` is the caller's already selected trading-session index.  Reusing it
+    avoids inventing sessions with ``BDay`` (which is wrong on exchange holidays).
+    """
+    if dates.tz is None:
+        local = dates.normalize()
+    else:
+        local = dates.tz_convert("Asia/Shanghai").tz_localize(None).normalize()
+    return pd.DatetimeIndex(local.unique()).sort_values()
+
+
+def _next_session_visibility(
+    availability_dates: pd.DatetimeIndex,
+    dates: pd.DatetimeIndex,
+) -> pd.DatetimeIndex:
+    """Map date-only evidence to the first later requested trading session.
+
+    A provider date is not an instant.  In particular, interpreting an
+    ``ann_date`` as 00:00 would expose a report to an intraday decision made
+    before the announcement.  The earliest safe date-only policy is therefore
+    the next session represented by the caller's verified market index.
+    """
+    sessions = _session_dates(dates)
+    mapped: list[pd.Timestamp] = []
+    for raw in availability_dates:
+        day = pd.Timestamp(raw)
+        if day.tzinfo is not None:
+            day = day.tz_convert("Asia/Shanghai").tz_localize(None)
+        day = day.normalize()
+        later = sessions[sessions > day]
+        mapped.append(later[0] if len(later) else pd.NaT)
+    return pd.DatetimeIndex(mapped)
+
+
+def _precise_publication_index(values: pd.Series) -> pd.DatetimeIndex:
+    """Parse provider publication instants without accepting naive timestamps."""
+    result: list[pd.Timestamp] = []
+    for value in values:
+        if pd.isna(value):
+            raise TemporalContractError("published_at 缺失，不能用于正式财务研究")
+        try:
+            instant = pd.Timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise TemporalContractError("published_at 不是可识别的精确时刻") from exc
+        if instant.tzinfo is None or instant.utcoffset() is None:
+            raise TemporalContractError("published_at 必须包含时区")
+        result.append(instant.tz_convert("UTC"))
+    return pd.DatetimeIndex(result)
+
+
 def quarterly_to_daily(
     quarterly_df: pd.DataFrame,
     dates: pd.DatetimeIndex,
@@ -235,7 +288,10 @@ def quarterly_to_daily(
     """季度数据（报告期索引）对齐到日频，显式加入财报发布滞后。
 
     步骤：
-    1. 报告期 + 披露滞后 = 「可见日」。lag_days=None（默认）按报告期月份
+    1. ``report_date`` 只表示报告期，绝不直接作为发布时间。报告期 + 披露
+       滞后得到保守的日期级证据；``ann_date`` 同样只是日期。两者均从调用方
+       提供的真实交易索引选择严格晚于该日期的首个 session，禁止默认为
+       当日 00:00。lag_days=None（默认）按报告期月份
        使用 A 股披露截止日（DISCLOSURE_LAG_DAYS：季报 31 / 半年报 62 /
        年报 120 天）；传入整数则统一使用该滞后（仅建议研究实验用，统一值
        会让年报/半年报在真实披露前就「可见」，构成未来函数）。
@@ -255,24 +311,47 @@ def quarterly_to_daily(
         columns = list(quarterly_df.columns) if quarterly_df is not None else []
         return pd.DataFrame(index=dates, columns=columns, dtype=float)
     published = quarterly_df.copy()
-    # Tushare PIT 数据以真实公告日为索引，并保留 report_date/update_flag。
-    # 其他数据源仍按报告期和法定截止日做保守对齐。
-    pit_announcements = published.index.name == "ann_date" or "report_date" in published.columns
-    if pit_announcements:
-        published.index = pd.to_datetime(published.index)
-        published = published.drop(columns=["report_date", "update_flag"], errors="ignore")
+    # 精确发布时间只能与同样精确、带时区的 cutoff 索引比较。日期索引无法
+    # 表达盘中 cutoff，若在这里默认为收盘或午夜都会制造未来数据。
+    if "published_at" in published.columns:
+        if dates.tz is None:
+            raise TemporalContractError(
+                "精确 published_at 需要带时区的 cutoff 索引，日期索引不能代表盘中 cutoff"
+            )
+        published.index = _precise_publication_index(published.pop("published_at"))
+        target_index = dates.tz_convert("UTC")
+    # Tushare 当前 fina_indicator 只有 date-only ann_date。最早从下一条真实
+    # session 可见，不能在公告日盘中使用。
+    elif published.index.name == "ann_date":
+        announcement_dates = pd.to_datetime(published.index, errors="coerce")
+        if announcement_dates.isna().any():
+            raise TemporalContractError("ann_date 不是可识别的业务日期")
+        if any(pd.Timestamp(value).time() != pd.Timestamp(value).normalize().time()
+               for value in announcement_dates):
+            raise TemporalContractError("ann_date 必须是日期，精确时刻应使用 published_at")
+        published.index = _next_session_visibility(announcement_dates, dates)
+        published = published.loc[~published.index.isna()]
+        target_index = dates
     else:
         report_dates = pd.to_datetime(published.index)
         if lag_days is None:
             lags = pd.Series(report_dates.month, index=report_dates).map(
                 DISCLOSURE_LAG_DAYS).fillna(120).astype(int)
-            published.index = report_dates + pd.to_timedelta(lags.to_numpy(), unit="D")
+            availability_dates = report_dates + pd.to_timedelta(lags.to_numpy(), unit="D")
         else:
-            published.index = report_dates + pd.Timedelta(days=int(lag_days))
+            availability_dates = report_dates + pd.Timedelta(days=int(lag_days))
+        published.index = _next_session_visibility(availability_dates, dates)
+        published = published.loc[~published.index.isna()]
+        target_index = dates
+    published = published.drop(
+        columns=["report_date", "report_period", "update_flag", "ann_date"], errors="ignore",
+    )
     published = published.sort_index()
     published = published[~published.index.duplicated(keep="last")]
-    combined = published.reindex(published.index.union(dates)).ffill()
-    return combined.reindex(dates).astype(float)
+    combined = published.reindex(published.index.union(target_index)).ffill()
+    result = combined.reindex(target_index).astype(float)
+    result.index = dates
+    return result
 
 
 def _load_cached_or_fetch(
