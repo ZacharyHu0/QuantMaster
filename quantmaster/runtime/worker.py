@@ -16,10 +16,12 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from quantmaster.config import get_config
-from quantmaster.runtime.worker_ipc import RuntimeCommandServer
+from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
+from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
+from quantmaster.runtime.worker_ipc import RuntimeCommandServer, WorkerCommandError
 
 logger = logging.getLogger(__name__)
 WORKER_HEARTBEAT_SECONDS = 1.0
@@ -82,12 +84,35 @@ def runtime_worker_status() -> dict[str, Any]:
     }
 
 
+class WorkerPlan(Protocol):
+    """Concrete worker wiring supplied by the application composition root."""
+
+    def settings_projection(self) -> tuple[int, int]: ...
+
+    def start(self, *, bootstrap_rotation: bool) -> None: ...
+
+    def drain(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+    def idle(self) -> bool: ...
+
+    def handle_command(
+        self, operation: str, payload: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def stop(self, enter_phase: Callable[[str, float], None]) -> None: ...
+
+
 class RuntimeWorker:
     """Start and stop the persistent background services once per process."""
 
-    def __init__(self) -> None:
+    def __init__(self, plan_factory: Callable[[], WorkerPlan] | None = None) -> None:
         self._lock = threading.RLock()
         self._started = False
+        self._plan_factory = plan_factory
+        self._plan: WorkerPlan | None = None
+        self._maintenance_lease: Any = None
         self._unregister_maintenance: Callable[[], None] | None = None
         self._worker_id = uuid.uuid4().hex
         self._heartbeat_stop = threading.Event()
@@ -95,8 +120,6 @@ class RuntimeWorker:
         self._command_server: RuntimeCommandServer | None = None
         self._command_error = ""
         self._generation = uuid.uuid4().hex[:12]
-        from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
-
         self._lifecycle = RuntimeLifecycle("runtime-worker", self._generation)
         self._config_revision = 0
         self._config_generation = 0
@@ -174,35 +197,65 @@ class RuntimeWorker:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             pass
 
-    def _reconcile_settings_projection(self) -> None:
-        """Pull only the newest persisted settings state for this generation."""
-        from quantmaster.server.management import settings_manager
-        from quantmaster.settings_runtime import public_state
-
-        latest_config = public_state(settings_manager.path)
-        self._config_revision = int(latest_config["persisted_revision"])
-        self._config_generation = int(latest_config["latest_generation"])
-
-    def _apply_latest_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        from quantmaster.config import load_config, set_config
-        from quantmaster.server.management import settings_manager
-        from quantmaster.settings_runtime import persisted_revision
-
-        revision = int(payload.get("revision") or 0)
-        generation = int(payload.get("generation") or 0)
-        latest = persisted_revision(settings_manager.path)
-        if revision < latest:
-            return {
-                "status": "superseded", "revision": revision,
-                "latest_revision": latest, "generation": generation,
-            }
-        set_config(load_config())
-        self._config_revision = latest
-        self._config_generation = max(self._config_generation, generation)
-        return {
-            "status": "effective", "revision": latest,
-            "generation": self._config_generation,
-        }
+    def _handle_command(
+        self, operation: str, payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            if operation == "maintenance.enter":
+                if self._maintenance_lease is not None:
+                    raise ValueError("已有维护租约")
+                self._maintenance_lease = maintenance_barrier.enter(
+                    str(payload.get("reason") or "external maintenance"),
+                    timeout=float(payload.get("timeout") or 30),
+                )
+                return {
+                    "token": self._maintenance_lease.token,
+                    "worker_id": self._worker_id,
+                    "pid": os.getpid(),
+                    **maintenance_barrier.status(),
+                }
+            if operation == "maintenance.status":
+                token = str(payload.get("token") or "")
+                return {
+                    "valid": bool(
+                        self._maintenance_lease is not None
+                        and self._maintenance_lease.token == token
+                        and maintenance_barrier.frozen
+                    ),
+                    "worker_id": self._worker_id,
+                    "pid": os.getpid(),
+                    **maintenance_barrier.status(),
+                }
+            if operation == "maintenance.exit":
+                token = str(payload.get("token") or "")
+                if self._maintenance_lease is None or self._maintenance_lease.token != token:
+                    raise ValueError("维护租约 token 无效")
+                lease, self._maintenance_lease = self._maintenance_lease, None
+                maintenance_barrier.exit(lease)
+                return {"released": True, **maintenance_barrier.status()}
+            plan = self._plan
+            if plan is None:
+                raise RuntimeError("runtime-worker plan 尚未启动")
+            result = plan.handle_command(operation, payload)
+            if (
+                operation == "settings.apply.latest"
+                and result.get("status") == "effective"
+            ):
+                self._config_revision = int(
+                    result.get("latest_revision") or result.get("revision") or 0,
+                )
+                self._config_generation = max(
+                    self._config_generation, int(result.get("generation") or 0),
+                )
+            return result
+        except KeyError as exc:
+            raise WorkerCommandError("job_not_found", "数据刷新任务不存在") from exc
+        except ValueError as exc:
+            raise WorkerCommandError("command_conflict", str(exc)) from exc
+        except WorkerCommandError:
+            raise
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise WorkerCommandError("worker_command_failed", str(exc)) from exc
 
     def start(self, *, bootstrap_rotation: bool) -> bool:
         with self._lock:
@@ -211,8 +264,6 @@ class RuntimeWorker:
             if self._lifecycle.snapshot()["state"] == "stopped":
                 # A deliberate in-process restart is a new generation.  It
                 # cannot reuse the stopped generation's task registry.
-                from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
-
                 self._generation = uuid.uuid4().hex[:12]
                 self._lifecycle = RuntimeLifecycle("runtime-worker", self._generation)
             self._command_error = ""
@@ -220,217 +271,32 @@ class RuntimeWorker:
             # readers only receive the pure ``Config.data_root`` path and
             # must report a cold snapshot instead of creating it themselves.
             get_config().ensure_data_root()
-            self._reconcile_settings_projection()
-
-            from quantmaster.after_close.jobs import get_after_close_jobs
-            from quantmaster.ai.news_jobs import get_news_jobs
-            from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
-            from quantmaster.automation.runtime import get_runtime
-            from quantmaster.backtest.paper_automation import get_paper_automation_worker
-            from quantmaster.backtest.workbench import get_backtest_worker
-            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-            from quantmaster.data.instruments import InstrumentStore
-            from quantmaster.data.maintenance import data_refresh_manager
-            from quantmaster.data.repair import get_data_repair_manager
-            from quantmaster.lab.capabilities import publish_capabilities
-            from quantmaster.lab.llm_jobs import get_lab_llm_jobs
-            from quantmaster.lab.worker import get_worker
-            from quantmaster.market import get_cnn_fear_greed_refresher
-            from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
-            from quantmaster.research.jobs import get_research_job_manager
-            from quantmaster.rotation.etf_jobs import get_etf_research_jobs
-            from quantmaster.rotation.service import get_rotation_worker
-            from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
-            from quantmaster.runtime.worker_ipc import RuntimeCommandServer, WorkerCommandError
-            from quantmaster.server.diagnostics import start_diagnostics_sampler
-            from quantmaster.server.settings_jobs import get_settings_jobs
-
-            # This installs only the bundled offline catalogue.  It must not
-            # trigger a remote catalogue refresh at worker startup.
-            InstrumentStore()
-            runtime = get_runtime()
-            worker = get_worker()
-            backtest_worker = get_backtest_worker()
-            research_worker = get_research_job_manager()
-            rotation_worker = get_rotation_worker()
-            repair_worker = get_data_repair_manager()
-            stock_analysis_worker = get_stock_analysis_jobs()
-            after_close_worker = get_after_close_jobs()
-            etf_research_worker = get_etf_research_jobs()
-            news_worker = get_news_jobs()
-            settings_worker = get_settings_jobs()
-            lab_llm_worker = get_lab_llm_jobs()
-            cnn_fear_greed_refresher = get_cnn_fear_greed_refresher()
-
-            def publish_lab_capabilities() -> None:
-                try:
-                    publish_capabilities()
-                except (OSError, RuntimeError, ValueError, TypeError):
-                    logger.warning("Quant Lab 能力快照发布失败", exc_info=True)
-
-            def publish_market_overview() -> None:
-                try:
-                    publish_market_overview_snapshot()
-                except (OSError, RuntimeError, ValueError, TypeError):
-                    logger.warning("市场总览快照发布失败", exc_info=True)
-
-            maintenance_lease = None
-
-            def handle_command(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
-                """Perform Web-submitted data mutations in this worker only."""
-
-                nonlocal maintenance_lease
-
-                try:
-                    if operation == "maintenance.enter":
-                        if maintenance_lease is not None:
-                            raise ValueError("已有维护租约")
-                        maintenance_lease = maintenance_barrier.enter(
-                            str(payload.get("reason") or "external maintenance"),
-                            timeout=float(payload.get("timeout") or 30),
-                        )
-                        return {
-                            "token": maintenance_lease.token,
-                            "worker_id": self._worker_id,
-                            "pid": os.getpid(),
-                            **maintenance_barrier.status(),
-                        }
-                    if operation == "maintenance.status":
-                        token = str(payload.get("token") or "")
-                        return {
-                            "valid": bool(
-                                maintenance_lease is not None
-                                and maintenance_lease.token == token
-                                and maintenance_barrier.frozen
-                            ),
-                            "worker_id": self._worker_id,
-                            "pid": os.getpid(),
-                            **maintenance_barrier.status(),
-                        }
-                    if operation == "maintenance.exit":
-                        token = str(payload.get("token") or "")
-                        if maintenance_lease is None or maintenance_lease.token != token:
-                            raise ValueError("维护租约 token 无效")
-                        lease, maintenance_lease = maintenance_lease, None
-                        maintenance_barrier.exit(lease)
-                        return {"released": True, **maintenance_barrier.status()}
-                    if operation == "data.refresh.preview":
-                        return data_refresh_manager.preview(
-                            str(payload.get("scope") or "market"),
-                            str(payload.get("universe") or ""),
-                            str(payload.get("start") or ""),
-                        )
-                    if operation == "data.refresh.create":
-                        return data_refresh_manager.create(
-                            str(payload.get("scope") or "market"),
-                            str(payload.get("universe") or ""),
-                            str(payload.get("start") or ""),
-                        )
-                    if operation == "data.refresh.cancel":
-                        return data_refresh_manager.cancel(str(payload.get("job_id") or ""))
-                    if operation == "data.refresh.retry":
-                        return data_refresh_manager.resume(str(payload.get("job_id") or ""))
-                    if operation == "automation.apply_config":
-                        from quantmaster.config import load_config, set_config
-
-                        set_config(load_config())
-                        changed = [str(value) for value in payload.get("changed_fields") or []]
-                        return runtime.apply_config(changed)
-                    if operation == "settings.apply.latest":
-                        return self._apply_latest_settings(payload)
-                    if operation == "settings.diagnostic.create":
-                        from quantmaster.settings import SettingsDocument
-
-                        document = SettingsDocument.model_validate(payload.get("document") or {})
-                        task, created = settings_worker._submit_diagnostic_local(
-                            str(payload.get("kind") or ""),
-                            document,
-                            api_key=str(payload.get("api_key") or ""),
-                        )
-                        return {"task": task, "created": created}
-                except KeyError as exc:
-                    raise WorkerCommandError("job_not_found", "数据刷新任务不存在") from exc
-                except ValueError as exc:
-                    raise WorkerCommandError("command_conflict", str(exc)) from exc
-                except (FileNotFoundError, RuntimeError) as exc:
-                    raise WorkerCommandError("worker_command_failed", str(exc)) from exc
-                raise WorkerCommandError("unknown_command", "后台执行器不支持该命令")
-
-            def drain() -> None:
-                cnn_fear_greed_refresher.stop()
-                get_paper_automation_worker().stop()
-                rotation_worker.stop()
-                repair_worker.shutdown()
-                data_refresh_manager.shutdown()
-                research_worker.shutdown()
-                backtest_worker.stop()
-                worker.stop()
-                runtime.stop()
-                stock_analysis_worker.pause()
-                after_close_worker.pause()
-                etf_research_worker.pause()
-                news_worker.pause()
-                settings_worker.pause()
-                lab_llm_worker.runtime.pause()
-
-            def resume() -> None:
-                cnn_fear_greed_refresher.start()
-                stock_analysis_worker.resume()
-                after_close_worker.resume()
-                etf_research_worker.resume()
-                news_worker.resume()
-                settings_worker.resume()
-                lab_llm_worker.runtime.resume()
-                runtime.start()
-                research_worker.start()
-                data_refresh_manager.start()
-                repair_worker.start()
-                backtest_worker.start()
-                get_paper_automation_worker().start()
-                rotation_worker.start()
-                if get_config().lab.enabled:
-                    worker.start()
-                threading.Thread(
-                    target=publish_market_overview,
-                    name="quant-market-overview-publish",
-                    daemon=True,
-                ).start()
-
+            if self._plan_factory is None:
+                raise RuntimeError("runtime-worker 需要 composition root 提供 worker plan")
+            plan = self._plan_factory()
+            self._plan = plan
+            self._config_revision, self._config_generation = plan.settings_projection()
             self._unregister_maintenance = maintenance_barrier.register(
                 MaintenanceParticipant(
                     name=f"runtime-worker:{uuid.uuid4().hex}",
-                    drain=drain,
-                    resume=resume,
-                    idle=lambda: (
-                        not data_refresh_manager.active
-                        and rotation_worker.idle
-                        and get_paper_automation_worker().idle
-                        and stock_analysis_worker.idle
-                        and after_close_worker.idle
-                        and etf_research_worker.idle
-                        and news_worker.idle
-                        and settings_worker.idle
-                        and lab_llm_worker.runtime.idle
-                    ),
+                    drain=plan.drain,
+                    resume=plan.resume,
+                    idle=plan.idle,
                 )
             )
-            runtime.start()
-            research_worker.start()
-            stock_analysis_worker.start()
-            after_close_worker.start()
-            etf_research_worker.start()
-            news_worker.start()
-            settings_worker.start()
-            lab_llm_worker.runtime.start()
-            start_diagnostics_sampler()
-            free_stockdb_runtime.start_event_bridge()
-            data_refresh_manager.start()
-            repair_worker.start()
-            backtest_worker.start()
-            get_paper_automation_worker().start()
-            rotation_worker.start(bootstrap_local=bootstrap_rotation)
-            cnn_fear_greed_refresher.start()
-            command_server = RuntimeCommandServer(handle_command)
+            try:
+                plan.start(bootstrap_rotation=bootstrap_rotation)
+            except BaseException:
+                try:
+                    plan.stop(lambda _name, _deadline: None)
+                except (OSError, RuntimeError, ValueError, TypeError):
+                    logger.exception("runtime-worker plan 部分启动清理失败")
+                finally:
+                    self._unregister_maintenance()
+                    self._unregister_maintenance = None
+                    self._plan = None
+                raise
+            command_server = RuntimeCommandServer(self._handle_command)
             try:
                 command_server.start()
             except OSError as exc:
@@ -447,25 +313,6 @@ class RuntimeWorker:
                 )
             else:
                 self._command_server = command_server
-            # Market cards are a precomputed local projection.  Do this on
-            # the runtime worker so a browser's first GET can never scan the
-            # BarStore or create a per-request executor.
-            threading.Thread(
-                target=publish_market_overview,
-                name="quant-market-overview-publish",
-                daemon=True,
-            ).start()
-            if get_config().lab.enabled:
-                worker.start()
-                # GPU/runtime inspection is intentionally outside the Web
-                # process and detached from worker readiness.  Until it
-                # completes, pages render a clear cold capability state
-                # instead of blocking.
-                threading.Thread(
-                    target=publish_lab_capabilities,
-                    name="quant-lab-capabilities-publish",
-                    daemon=True,
-                ).start()
             self._started = True
             self._start_heartbeat()
             logger.info("QuantMaster runtime-worker 已启动（Web 代次可独立重载）")
@@ -475,55 +322,16 @@ class RuntimeWorker:
         with self._lock:
             if not self._started:
                 return
-            from quantmaster.after_close.jobs import shutdown_after_close_jobs
-            from quantmaster.ai.news_jobs import shutdown_news_jobs
-            from quantmaster.analysis.stock_jobs import shutdown_stock_analysis_jobs
-            from quantmaster.automation.runtime import get_runtime
-            from quantmaster.backtest.paper_automation import get_paper_automation_worker
-            from quantmaster.backtest.workbench import get_backtest_worker
-            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-            from quantmaster.data.maintenance import data_refresh_manager
-            from quantmaster.data.repair import get_data_repair_manager
-            from quantmaster.lab.llm_jobs import shutdown_lab_llm_jobs
-            from quantmaster.lab.worker import get_worker
-            from quantmaster.market import get_cnn_fear_greed_refresher
-            from quantmaster.research.jobs import get_research_job_manager
-            from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
-            from quantmaster.rotation.service import get_rotation_worker
-            from quantmaster.server.diagnostics import stop_diagnostics_sampler
-            from quantmaster.server.settings_jobs import shutdown_settings_jobs
-
             # Phase 1: fence admission before touching any producer, lease or
             # client.  Every component below owns only its process generation.
             self._lifecycle.begin_shutdown()
             command_server, self._command_server = self._command_server, None
             if command_server is not None:
                 command_server.stop()
-            self._lifecycle.enter_phase("stop_producers", 5.0)
             self._stop_heartbeat()
-            stop_diagnostics_sampler()
-            free_stockdb_runtime.stop_event_bridge()
-            get_cnn_fear_greed_refresher().stop()
-            # Scheduler/channel owners stop before durable workers so no
-            # heartbeat, outbox or provider retry can submit during drain.
-            get_runtime().close()
-            get_paper_automation_worker().stop()
-            self._lifecycle.enter_phase("drain_atomic", 10.0)
-            get_rotation_worker().shutdown()
-            get_data_repair_manager().shutdown()
-            data_refresh_manager.shutdown()
-            get_research_job_manager().shutdown()
-            get_backtest_worker().stop()
-            get_worker().stop()
-            # Unified runtimes interrupt their own leases/checkpoints and
-            # leave queued work for the next durable worker generation.
-            self._lifecycle.enter_phase("persist_and_release", 10.0)
-            shutdown_stock_analysis_jobs()
-            shutdown_after_close_jobs()
-            shutdown_etf_research_jobs()
-            shutdown_news_jobs()
-            shutdown_settings_jobs()
-            shutdown_lab_llm_jobs()
+            plan, self._plan = self._plan, None
+            if plan is not None:
+                plan.stop(self._lifecycle.enter_phase)
             if self._unregister_maintenance is not None:
                 self._unregister_maintenance()
                 self._unregister_maintenance = None
@@ -538,15 +346,3 @@ class RuntimeWorker:
         status["in_process_started"] = self._started
         status["lifecycle"] = self._lifecycle.snapshot()
         return status
-
-
-_WORKER: RuntimeWorker | None = None
-_WORKER_LOCK = threading.Lock()
-
-
-def get_runtime_worker() -> RuntimeWorker:
-    global _WORKER
-    with _WORKER_LOCK:
-        if _WORKER is None:
-            _WORKER = RuntimeWorker()
-        return _WORKER

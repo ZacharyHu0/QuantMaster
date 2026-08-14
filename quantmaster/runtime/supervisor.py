@@ -39,7 +39,7 @@ def _supervisor_status_path() -> Path:
     return get_config().data_root / "runtime-worker-supervisor.json"
 
 
-def _publish_supervisor_status(status: str, *, detail: str = "") -> None:
+def publish_worker_supervisor_status(status: str, *, detail: str = "") -> None:
     """Persist bootstrap state without depending on the SQLite task ledger."""
 
     path = _supervisor_status_path()
@@ -64,44 +64,6 @@ def _publish_supervisor_status(status: str, *, detail: str = "") -> None:
         temp.unlink(missing_ok=True)
 
 
-def _supervisor_main(stop_event: _StopEvent, bootstrap_rotation: bool) -> None:
-    """Spawn target kept importable for Windows ``spawn`` semantics."""
-
-    from quantmaster.runtime.windows_app import initialize_windows_app_process
-
-    initialize_windows_app_process()
-    os.environ["QM_WORKER_SUPERVISOR"] = "1"
-    os.environ.pop("QM_WEB_PROCESS", None)
-    from quantmaster.runtime.worker import get_runtime_worker
-
-    worker = get_runtime_worker()
-    state, detail = "stopped", ""
-    try:
-        _publish_supervisor_status("starting")
-        worker.start(bootstrap_rotation=bootstrap_rotation)
-        state = "running"
-        _publish_supervisor_status(state)
-        while not stop_event.wait(0.5):
-            pass
-    except BaseException as exc:
-        state = "failed"
-        detail = f"{type(exc).__name__}: {exc}"
-        try:
-            _publish_supervisor_status(state, detail=detail)
-        except OSError:
-            logger.exception("runtime-worker 启动失败且无法写入诊断状态")
-        logger.exception("runtime-worker 启动失败")
-        raise
-    finally:
-        try:
-            worker.stop()
-        finally:
-            try:
-                _publish_supervisor_status(state, detail=detail)
-            except OSError:
-                logger.warning("runtime-worker 监督状态写入失败", exc_info=True)
-
-
 class WorkerSupervisor:
     """Own one process and a cross-process lock for a data-root.
 
@@ -115,7 +77,7 @@ class WorkerSupervisor:
         self,
         root: Path | None = None,
         *,
-        target: Callable[[_StopEvent, bool], None] | None = None,
+        target: Callable[[_StopEvent, bool], None],
     ) -> None:
         self.root = Path(root) if root is not None else get_config().data_root
         self.root.mkdir(parents=True, exist_ok=True)
@@ -126,7 +88,7 @@ class WorkerSupervisor:
         self._process: BaseProcess | None = None
         self._stop_event: _StopEvent | None = None
         self._owned = False
-        self._target = target or _supervisor_main
+        self._target = target
         self._restart_attempts = 0
         self._next_restart_at = 0.0
         self._last_spawn_at = 0.0
@@ -316,26 +278,3 @@ class WorkerSupervisor:
                 process.join(timeout=3.0)
         if owned:
             self._release_lock()
-
-
-_SUPERVISOR: WorkerSupervisor | None = None
-_SUPERVISOR_LOCK = threading.Lock()
-
-
-def get_worker_supervisor() -> WorkerSupervisor:
-    global _SUPERVISOR
-    with _SUPERVISOR_LOCK:
-        root = get_config().data_root
-        if _SUPERVISOR is None or _SUPERVISOR.root != root:
-            if _SUPERVISOR is not None:
-                _SUPERVISOR.stop()
-            _SUPERVISOR = WorkerSupervisor(root)
-        return _SUPERVISOR
-
-
-def reset_worker_supervisor_for_tests() -> None:
-    global _SUPERVISOR
-    with _SUPERVISOR_LOCK:
-        value, _SUPERVISOR = _SUPERVISOR, None
-    if value is not None:
-        value.stop(2.0)

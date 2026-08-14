@@ -27,6 +27,17 @@ def _top_level_imports(path: Path) -> set[str]:
     return imports
 
 
+def _all_imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+        elif isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+    return imports
+
+
 def test_domain_and_runtime_modules_do_not_depend_on_server_transport():
     violations = []
     for path in PACKAGE_ROOT.rglob("*.py"):
@@ -37,6 +48,30 @@ def test_domain_and_runtime_modules_do_not_depend_on_server_transport():
             if imported == "quantmaster.server" or imported.startswith("quantmaster.server."):
                 violations.append(f"{relative.as_posix()} -> {imported}")
     assert not violations, "transport dependency leaked into domain:\n" + "\n".join(violations)
+
+
+def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
+    existing_runtime_adapters = {
+        ("llm.py", "quantmaster.ai.llm"),
+        ("sqlite_recovery.py", "quantmaster.data.free_stockdb_runtime"),
+    }
+    foundation = {
+        "quantmaster.config",
+        "quantmaster.logging_config",
+        "quantmaster.release",
+    }
+    violations = []
+    runtime_root = PACKAGE_ROOT / "runtime"
+    for path in runtime_root.glob("*.py"):
+        for imported in _all_imports(path):
+            if not imported.startswith("quantmaster."):
+                continue
+            if imported.startswith("quantmaster.runtime.") or imported in foundation:
+                continue
+            if (path.name, imported) in existing_runtime_adapters:
+                continue
+            violations.append(f"runtime/{path.name} -> {imported}")
+    assert not violations, "runtime wiring must live in bootstrap:\n" + "\n".join(violations)
 
 
 def test_quantmaster_has_no_top_level_import_cycles():

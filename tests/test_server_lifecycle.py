@@ -11,8 +11,8 @@ from quantmaster.server import lifecycle
 
 
 def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):
+    from quantmaster.bootstrap import get_worker_supervisor
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.runtime.supervisor import get_worker_supervisor
     from quantmaster.server import app as server_app
 
     calls = []
@@ -43,9 +43,8 @@ def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):
 
 
 def test_app_lifespan_forwards_rotation_bootstrap_to_disabled_fallback(monkeypatch):
+    from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.runtime.supervisor import get_worker_supervisor
-    from quantmaster.runtime.worker import get_runtime_worker
     from quantmaster.server import app as server_app
 
     calls = []

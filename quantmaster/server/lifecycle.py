@@ -813,10 +813,9 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     """在独立监督进程中热重载主站，同时保持 free-stockdb 持续运行。"""
     import uvicorn
 
+    from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
     from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
     from quantmaster.data.maintenance import data_refresh_manager
-    from quantmaster.runtime.supervisor import get_worker_supervisor
-    from quantmaster.runtime.worker import get_runtime_worker
 
     worker_flag = "QM_SERVER_RELOAD_WORKER"
     verbose_flag = "QM_SERVER_RELOAD_VERBOSE"
