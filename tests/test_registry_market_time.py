@@ -72,6 +72,34 @@ def test_hk_uses_hong_kong_timezone_and_hk_lunch_window() -> None:
     assert not any("桶覆盖率" in issue for issue in quality.issues)
 
 
+def test_intraday_start_labels_map_to_end_buckets_and_flag_off_grid() -> None:
+    day = pd.Timestamp("2026-08-07")
+    expected: set[pd.Timestamp] = set()
+    observed: set[pd.Timestamp] = set()
+
+    off_grid_rows = registry._add_intraday_window_evidence(
+        pd.DatetimeIndex([
+            day + pd.Timedelta(hours=9, minutes=30),
+            day + pd.Timedelta(hours=9, minutes=35),
+            day + pd.Timedelta(hours=9, minutes=37),
+        ]),
+        expected,
+        observed,
+        session_start=day + pd.Timedelta(hours=9, minutes=30),
+        session_end=day + pd.Timedelta(hours=11, minutes=30),
+        requested_start=day + pd.Timedelta(hours=9, minutes=30),
+        requested_end=day + pd.Timedelta(hours=11, minutes=30),
+        frequency_minutes=5,
+    )
+
+    assert day + pd.Timedelta(hours=9, minutes=35) in expected
+    assert observed == {
+        day + pd.Timedelta(hours=9, minutes=35),
+        day + pd.Timedelta(hours=9, minutes=40),
+    }
+    assert off_grid_rows == 1
+
+
 @pytest.mark.parametrize(
     ("session", "utc_stamp"),
     [

@@ -674,6 +674,274 @@ def _shanghai_wall_time(value: object) -> pd.Timestamp:
     return stamp
 
 
+def _intraday_index_assessment(
+    frame: pd.DataFrame,
+    zone: ZoneInfo | None,
+) -> tuple[pd.DatetimeIndex, str, bool, int, list[str]]:
+    raw_index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
+    timezone = str(zone) if zone is not None else "unknown"
+    issues: list[str] = []
+    time_unzoned = False
+    if raw_index.tz is None:
+        provider_timezone = str(frame.attrs.get("timezone") or "").strip()
+        try:
+            provider_zone = ZoneInfo(provider_timezone) if provider_timezone else None
+        except ZoneInfoNotFoundError:
+            provider_zone = None
+        if provider_zone is None or zone is None:
+            issues.append("TIME_UNZONED: 分钟行情没有可解释的 IANA provider 时区")
+            time_unzoned = True
+            wall_index = raw_index
+        else:
+            wall_index = raw_index.tz_localize(provider_zone).tz_convert(zone).tz_localize(None)
+    else:
+        wall_index = (
+            raw_index.tz_convert(zone).tz_localize(None)
+            if zone is not None else raw_index.tz_convert("UTC").tz_localize(None)
+        )
+    valid_index = wall_index[~wall_index.isna()]
+    duplicate_rows = int(valid_index.duplicated(keep=False).sum())
+    if duplicate_rows:
+        issues.append(f"存在 {duplicate_rows} 行重复分钟时间戳")
+    return valid_index, timezone, time_unzoned, duplicate_rows, issues
+
+
+def _intraday_row_assessment(
+    frame: pd.DataFrame,
+) -> tuple[list[str], list[str], int, int]:
+    issues: list[str] = []
+    missing_columns = [column for column in OHLCV_COLUMNS if column not in frame]
+    if missing_columns:
+        issues.append("缺少必需列：" + "、".join(missing_columns))
+        return issues, missing_columns, 0, 0
+    numeric = frame[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
+    finite = numeric.map(math.isfinite).all(axis=1)
+    invalid_numeric = int((~finite).sum())
+    if invalid_numeric:
+        issues.append(
+            f"存在 {invalid_numeric} 行无法识别的开盘、最高、最低、收盘或成交量"
+        )
+    prices = numeric[["open", "high", "low", "close"]]
+    semantic = (
+        prices.gt(0).all(axis=1)
+        & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
+        & numeric["low"].le(prices[["open", "close"]].min(axis=1))
+        & numeric["high"].ge(numeric["low"])
+        & numeric["volume"].ge(0)
+    )
+    invalid_semantics = int((finite & ~semantic).sum())
+    if invalid_semantics:
+        issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
+    return issues, missing_columns, invalid_numeric, invalid_semantics
+
+
+def _intraday_requested_range(
+    start: str,
+    end: str,
+    *,
+    symbol: str,
+    frequency: str,
+    request_zone: ZoneInfo,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    requested_start = _market_wall_time(start, request_zone)
+    requested_end = _market_wall_time(end, request_zone)
+    if frequency == "1d":
+        current_date = market_now().astimezone(request_zone).date()
+        requested_end = min(requested_end.normalize(), pd.Timestamp(current_date))
+        requested_start, requested_end = _instrument_range(
+            symbol, requested_start.normalize(), requested_end,
+        )
+    if len(str(end).strip()) <= 10:
+        requested_end += pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+    return requested_start, min(
+        requested_end, _market_wall_time(market_now(), request_zone),
+    )
+
+
+def _intraday_boundary_assessment(
+    valid_index: pd.DatetimeIndex,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+) -> tuple[Any, Any, bool, list[str]]:
+    observed_start = valid_index.min() if len(valid_index) else pd.NaT
+    observed_end = valid_index.max() if len(valid_index) else pd.NaT
+    if pd.isna(observed_start) or pd.isna(observed_end):
+        return observed_start, observed_end, True, ["分钟行情没有有效时间戳"]
+    issues: list[str] = []
+    span = requested_end - requested_start
+    start_tolerance = pd.Timedelta(days=4 if span >= pd.Timedelta(days=4) else 1)
+    if observed_start - requested_start > start_tolerance:
+        issues.append(
+            f"响应起点 {observed_start.isoformat()} 严重晚于请求起点 {requested_start.isoformat()}"
+        )
+    if requested_end - observed_end > pd.Timedelta(days=4):
+        issues.append(
+            f"响应终点 {observed_end.isoformat()} 严重早于请求终点 {requested_end.isoformat()}"
+        )
+    return observed_start, observed_end, bool(issues), issues
+
+
+def _add_intraday_window_evidence(
+    unique_index: pd.DatetimeIndex,
+    expected_buckets: set[pd.Timestamp],
+    observed_buckets: set[pd.Timestamp],
+    *,
+    session_start: pd.Timestamp,
+    session_end: pd.Timestamp,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+    frequency_minutes: int,
+) -> int:
+    window_start = max(session_start, requested_start)
+    window_end = min(session_end, requested_end)
+    if window_end <= window_start:
+        return 0
+    expected_grid = pd.date_range(
+        session_start + pd.Timedelta(minutes=frequency_minutes),
+        session_end,
+        freq=f"{frequency_minutes}min",
+    )
+    expected_buckets.update(
+        pd.Timestamp(value)
+        for value in expected_grid[
+            (expected_grid > window_start) & (expected_grid <= window_end)
+        ]
+    )
+    window_values = unique_index[
+        (unique_index >= session_start) & (unique_index <= session_end)
+    ]
+    start_labeled = session_start in window_values and session_end not in window_values
+    off_grid_rows = 0
+    for stamp in window_values:
+        offset_minutes = (stamp - session_start).total_seconds() / 60
+        aligned = (
+            stamp.second == 0
+            and stamp.microsecond == 0
+            and offset_minutes % frequency_minutes == 0
+        )
+        if not aligned:
+            off_grid_rows += 1
+        if start_labeled:
+            bucket = stamp + pd.Timedelta(minutes=frequency_minutes)
+        else:
+            steps = max(1, math.ceil(offset_minutes / frequency_minutes))
+            bucket = session_start + pd.Timedelta(
+                minutes=steps * frequency_minutes,
+            )
+        if bucket in expected_buckets:
+            observed_buckets.add(bucket)
+    return off_grid_rows
+
+
+def _intraday_bucket_assessment(
+    market: Market,
+    sessions: pd.DatetimeIndex,
+    valid_index: pd.DatetimeIndex,
+    *,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+    frequency_minutes: int,
+) -> tuple[float | None, int, int, int]:
+    unique_index = pd.DatetimeIndex(valid_index.unique()).sort_values()
+    expected_buckets: set[pd.Timestamp] = set()
+    observed_buckets: set[pd.Timestamp] = set()
+    off_grid_rows = 0
+    for session in sessions:
+        day = pd.Timestamp(session).normalize()
+        for session_start, session_end in _trading_windows(market, day):
+            off_grid_rows += _add_intraday_window_evidence(
+                unique_index,
+                expected_buckets,
+                observed_buckets,
+                session_start=session_start,
+                session_end=session_end,
+                requested_start=requested_start,
+                requested_end=requested_end,
+                frequency_minutes=frequency_minutes,
+            )
+    coverage = (
+        min(1.0, len(observed_buckets) / len(expected_buckets))
+        if expected_buckets
+        else None
+    )
+    return coverage, len(observed_buckets), len(expected_buckets), off_grid_rows
+
+
+def _intraday_coverage_assessment(
+    market: Market,
+    sessions: pd.DatetimeIndex,
+    calendar_complete: bool,
+    valid_index: pd.DatetimeIndex,
+    *,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+    frequency: str,
+    frequency_minutes: int,
+) -> tuple[float | None, bool, list[str]]:
+    if not len(sessions) or not len(valid_index):
+        return None, True, ["缺少独立交易日历，无法验证分钟历史覆盖"]
+    observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
+    coverage_ratio = len(sessions.intersection(observed_dates)) / len(sessions)
+    partial = coverage_ratio < 1.0
+    issues = (
+        [f"有证据交易日覆盖率仅 {coverage_ratio:.1%}"]
+        if partial
+        else []
+    )
+    if frequency_minutes > 0:
+        bucket_coverage, observed, expected, off_grid_rows = (
+            _intraday_bucket_assessment(
+                market,
+                sessions,
+                valid_index,
+                requested_start=requested_start,
+                requested_end=requested_end,
+                frequency_minutes=frequency_minutes,
+            )
+        )
+        if bucket_coverage is not None:
+            coverage_ratio = min(coverage_ratio, bucket_coverage)
+            if bucket_coverage < 1.0:
+                partial = True
+                issues.append(
+                    f"{frequency} 交易时段桶覆盖率仅 {bucket_coverage:.1%}"
+                    f"（{observed}/{expected}）"
+                )
+        if off_grid_rows:
+            issues.append(f"存在 {off_grid_rows} 行未对齐 {frequency} 桶边界的时间戳")
+    if not calendar_complete and market in {Market.HK, Market.US}:
+        partial = True
+        issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
+    return coverage_ratio, partial, issues
+
+
+def _intraday_quality_status(
+    *,
+    duplicate_rows: int,
+    missing_columns: list[str],
+    invalid_numeric: int,
+    invalid_semantics: int,
+    boundary_failure: bool,
+    coverage_ratio: float | None,
+    frequency_minutes: int,
+    issues: list[str],
+    time_unzoned: bool,
+    unsupported_market: bool,
+    partial: bool,
+) -> QualityStatus:
+    blocking = bool(
+        duplicate_rows or missing_columns or invalid_numeric or invalid_semantics
+        or boundary_failure
+        or (coverage_ratio is not None and coverage_ratio < 0.80)
+        or frequency_minutes <= 0
+        or any("未对齐" in item for item in issues)
+        or time_unzoned or unsupported_market
+    )
+    if blocking:
+        return "unavailable"
+    return "degraded" if issues or partial else "verified"
+
+
 def _assess_intraday_frame(
     frame: pd.DataFrame | None,
     start: str,
@@ -708,88 +976,26 @@ def _assess_intraday_frame(
             timezone="unknown", adjustment="none", units=units,
             requested_symbols=(symbol,), missing_symbols=(symbol,),
         )
-    raw_index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
-    timezone = str(zone) if zone is not None else "unknown"
-    time_unzoned = False
-    if raw_index.tz is None:
-        provider_timezone = str(frame.attrs.get("timezone") or "").strip()
-        try:
-            provider_zone = ZoneInfo(provider_timezone) if provider_timezone else None
-        except ZoneInfoNotFoundError:
-            provider_zone = None
-        if provider_zone is None or zone is None:
-            issues.append("TIME_UNZONED: 分钟行情没有可解释的 IANA provider 时区")
-            time_unzoned = True
-            wall_index = raw_index
-        else:
-            wall_index = raw_index.tz_localize(provider_zone).tz_convert(zone).tz_localize(None)
-    else:
-        wall_index = (
-            raw_index.tz_convert(zone).tz_localize(None)
-            if zone is not None else raw_index.tz_convert("UTC").tz_localize(None)
-        )
-    valid_index = wall_index[~wall_index.isna()]
-    duplicate_rows = int(valid_index.duplicated(keep=False).sum())
-    if duplicate_rows:
-        issues.append(f"存在 {duplicate_rows} 行重复分钟时间戳")
-    missing_columns = [column for column in OHLCV_COLUMNS if column not in frame]
-    if missing_columns:
-        issues.append("缺少必需列：" + "、".join(missing_columns))
-    invalid_numeric = 0
-    invalid_semantics = 0
-    if not missing_columns:
-        numeric = frame[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
-        finite = numeric.map(math.isfinite).all(axis=1)
-        invalid_numeric = int((~finite).sum())
-        if invalid_numeric:
-            issues.append(
-                f"存在 {invalid_numeric} 行无法识别的开盘、最高、最低、收盘或成交量"
-            )
-        prices = numeric[["open", "high", "low", "close"]]
-        semantic = (
-            prices.gt(0).all(axis=1)
-            & numeric["high"].ge(prices[["open", "close"]].max(axis=1))
-            & numeric["low"].le(prices[["open", "close"]].min(axis=1))
-            & numeric["high"].ge(numeric["low"])
-            & numeric["volume"].ge(0)
-        )
-        invalid_semantics = int((finite & ~semantic).sum())
-        if invalid_semantics:
-            issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
+    valid_index, timezone, time_unzoned, duplicate_rows, index_issues = (
+        _intraday_index_assessment(frame, zone)
+    )
+    issues.extend(index_issues)
+    row_issues, missing_columns, invalid_numeric, invalid_semantics = (
+        _intraday_row_assessment(frame)
+    )
+    issues.extend(row_issues)
     request_zone = zone or ZoneInfo("UTC")
-    requested_start = _market_wall_time(start, request_zone)
-    requested_end = _market_wall_time(end, request_zone)
-    if frequency == "1d":
-        current_date = market_now().astimezone(request_zone).date()
-        requested_end = min(requested_end.normalize(), pd.Timestamp(current_date))
-        requested_start, requested_end = _instrument_range(
-            symbol, requested_start.normalize(), requested_end,
-        )
-    if len(str(end).strip()) <= 10:
-        requested_end += pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-    requested_end = min(requested_end, _market_wall_time(market_now(), request_zone))
-    observed_start = valid_index.min() if len(valid_index) else pd.NaT
-    observed_end = valid_index.max() if len(valid_index) else pd.NaT
-    boundary_failure = False
-    if pd.isna(observed_start) or pd.isna(observed_end):
-        issues.append("分钟行情没有有效时间戳")
-        boundary_failure = True
-    else:
-        span = requested_end - requested_start
-        start_tolerance = pd.Timedelta(days=4 if span >= pd.Timedelta(days=4) else 1)
-        if observed_start - requested_start > start_tolerance:
-            issues.append(
-                f"响应起点 {observed_start.isoformat()} 严重晚于请求起点 {requested_start.isoformat()}"
-            )
-            boundary_failure = True
-        if requested_end - observed_end > pd.Timedelta(days=4):
-            issues.append(
-                f"响应终点 {observed_end.isoformat()} 严重早于请求终点 {requested_end.isoformat()}"
-            )
-            boundary_failure = True
-    coverage_ratio: float | None = None
-    bucket_coverage: float | None = None
-    partial = boundary_failure or stale
+    requested_start, requested_end = _intraday_requested_range(
+        start,
+        end,
+        symbol=symbol,
+        frequency=frequency,
+        request_zone=request_zone,
+    )
+    observed_start, observed_end, boundary_failure, boundary_issues = (
+        _intraday_boundary_assessment(valid_index, requested_start, requested_end)
+    )
+    issues.extend(boundary_issues)
     observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
     sessions, calendar_source, calendar_complete = _market_sessions(
         market,
@@ -797,88 +1003,34 @@ def _assess_intraday_frame(
         requested_end.normalize(),
         observed_dates=observed_dates,
     )
-    if len(sessions) and len(valid_index):
-        observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
-        session_coverage = len(sessions.intersection(observed_dates)) / len(sessions)
-        coverage_ratio = session_coverage
-        if session_coverage < 1.0:
-            partial = True
-            issues.append(f"有证据交易日覆盖率仅 {session_coverage:.1%}")
-        if frequency_minutes > 0:
-            unique_index = pd.DatetimeIndex(valid_index.unique()).sort_values()
-            expected_buckets: set[pd.Timestamp] = set()
-            observed_buckets: set[pd.Timestamp] = set()
-            off_grid_rows = 0
-            for session in sessions:
-                day = pd.Timestamp(session).normalize()
-                for session_start, session_end in _trading_windows(market, day):
-                    window_start = max(session_start, requested_start)
-                    window_end = min(session_end, requested_end)
-                    if window_end <= window_start:
-                        continue
-                    expected_grid = pd.date_range(
-                        session_start + pd.Timedelta(minutes=frequency_minutes),
-                        session_end,
-                        freq=f"{frequency_minutes}min",
-                    )
-                    expected_buckets.update(
-                        pd.Timestamp(value)
-                        for value in expected_grid[
-                            (expected_grid > window_start) & (expected_grid <= window_end)
-                        ]
-                    )
-                    window_values = unique_index[
-                        (unique_index >= session_start) & (unique_index <= session_end)
-                    ]
-                    start_labeled = (
-                        session_start in window_values and session_end not in window_values
-                    )
-                    for stamp in window_values:
-                        offset_minutes = (stamp - session_start).total_seconds() / 60
-                        aligned = (
-                            stamp.second == 0
-                            and stamp.microsecond == 0
-                            and offset_minutes % frequency_minutes == 0
-                        )
-                        if not aligned:
-                            off_grid_rows += 1
-                        if start_labeled:
-                            bucket = stamp + pd.Timedelta(minutes=frequency_minutes)
-                        else:
-                            steps = max(1, math.ceil(offset_minutes / frequency_minutes))
-                            bucket = session_start + pd.Timedelta(
-                                minutes=steps * frequency_minutes,
-                            )
-                        if bucket in expected_buckets:
-                            observed_buckets.add(bucket)
-            if expected_buckets:
-                bucket_coverage = min(1.0, len(observed_buckets) / len(expected_buckets))
-                coverage_ratio = min(coverage_ratio, bucket_coverage)
-                if bucket_coverage < 1.0:
-                    partial = True
-                    issues.append(
-                        f"{frequency} 交易时段桶覆盖率仅 {bucket_coverage:.1%}"
-                        f"（{len(observed_buckets)}/{len(expected_buckets)}）"
-                    )
-            if off_grid_rows:
-                issues.append(f"存在 {off_grid_rows} 行未对齐 {frequency} 桶边界的时间戳")
-        if not calendar_complete and market in {Market.HK, Market.US}:
-            partial = True
-            issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
-    else:
-        partial = True
-        issues.append("缺少独立交易日历，无法验证分钟历史覆盖")
+    coverage_ratio, coverage_partial, coverage_issues = (
+        _intraday_coverage_assessment(
+            market,
+            sessions,
+            calendar_complete,
+            valid_index,
+            requested_start=requested_start,
+            requested_end=requested_end,
+            frequency=frequency,
+            frequency_minutes=frequency_minutes,
+        )
+    )
+    issues.extend(coverage_issues)
+    partial = boundary_failure or stale or coverage_partial
     if stale:
         issues.append("行情刷新失败，正在使用旧分钟缓存")
-    blocking = bool(
-        duplicate_rows or missing_columns or invalid_numeric or invalid_semantics or boundary_failure
-        or (coverage_ratio is not None and coverage_ratio < 0.80)
-        or frequency_minutes <= 0
-        or any("未对齐" in item for item in issues)
-        or time_unzoned or unsupported_market
-    )
-    status: QualityStatus = (
-        "unavailable" if blocking else "degraded" if issues or partial else "verified"
+    status = _intraday_quality_status(
+        duplicate_rows=duplicate_rows,
+        missing_columns=missing_columns,
+        invalid_numeric=invalid_numeric,
+        invalid_semantics=invalid_semantics,
+        boundary_failure=boundary_failure,
+        coverage_ratio=coverage_ratio,
+        frequency_minutes=frequency_minutes,
+        issues=issues,
+        time_unzoned=time_unzoned,
+        unsupported_market=unsupported_market,
+        partial=partial,
     )
     return BarDataQuality(
         status,
