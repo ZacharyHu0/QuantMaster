@@ -33,6 +33,11 @@ from quantmaster.data.resilience import (
     endpoint_cache_bypassed,
     provider_call,
 )
+from quantmaster.temporal import (
+    ProviderDateFormat,
+    TemporalContractError,
+    parse_provider_date,
+)
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
@@ -41,6 +46,36 @@ _CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 class TushareProviderError(RuntimeError):
     """Normalize the SDK's untyped provider exceptions at the source boundary."""
+
+
+def _parse_tushare_dates(
+    values: pd.Series,
+    *,
+    field: str,
+    allow_missing: bool = False,
+) -> pd.Series:
+    """Parse Tushare's documented YYYYMMDD fields without pandas inference."""
+    parsed: list[object] = []
+    for position, raw in enumerate(values.tolist()):
+        if pd.isna(raw) or str(raw).strip() == "":
+            if allow_missing:
+                parsed.append(pd.NaT)
+                continue
+            raise ProviderContractChanged(
+                f"Tushare {field}[{position}] 缺失 [missing_provider_date]"
+            )
+        try:
+            parsed.append(pd.Timestamp(parse_provider_date(
+                raw,
+                field=f"Tushare.{field}[{position}]",
+                provider_format=ProviderDateFormat.YYYYMMDD,
+            )))
+        except TemporalContractError as exc:
+            raise ProviderContractChanged(
+                f"Tushare {field}[{position}] 无法按 YYYYMMDD 解析 "
+                f"[{exc.code}]: {exc}"
+            ) from exc
+    return pd.Series(parsed, index=values.index, dtype="datetime64[ns]")
 
 
 def _require_tushare():
@@ -206,6 +241,11 @@ class TushareSource(DataSource):
         if raw is None or raw.empty:
             return pd.DataFrame()
         frame = raw.rename(columns={"trade_date": "date", "vol": "volume"}).copy()
+        if "date" not in frame:
+            raise ProviderContractChanged(
+                "Tushare 日线响应缺少 trade_date [missing_required_field]"
+            )
+        frame["date"] = _parse_tushare_dates(frame["date"], field="trade_date")
         # Tushare 日线 volume=手、amount=千元；统一成股、元，与 AKShare 一致。
         if "volume" in frame:
             frame["volume"] = pd.to_numeric(frame["volume"], errors="coerce") * 100
@@ -245,8 +285,10 @@ class TushareSource(DataSource):
         merged = raw.merge(
             factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
         )
-        merged["trade_date"] = pd.to_datetime(merged["trade_date"])
-        merged = merged.sort_values("trade_date")
+        merged["_parsed_trade_date"] = _parse_tushare_dates(
+            merged["trade_date"], field="trade_date"
+        )
+        merged = merged.sort_values("_parsed_trade_date")
         factor = pd.to_numeric(merged["adj_factor"], errors="coerce")
         latest = factor.dropna().iloc[-1] if factor.notna().any() else None
         if latest is None or latest == 0:
@@ -254,6 +296,7 @@ class TushareSource(DataSource):
         ratio = factor / latest
         for column in ("open", "high", "low", "close"):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
+        merged = merged.drop(columns="_parsed_trade_date")
         return self._normalize_market_frame(merged).loc[start:end]
 
     def cached_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
@@ -303,8 +346,10 @@ class TushareSource(DataSource):
         )
         if merged.empty:
             return None
-        merged["trade_date"] = pd.to_datetime(merged["trade_date"])
-        merged = merged.sort_values("trade_date")
+        merged["_parsed_trade_date"] = _parse_tushare_dates(
+            merged["trade_date"], field="trade_date"
+        )
+        merged = merged.sort_values("_parsed_trade_date")
         factor = pd.to_numeric(merged["adj_factor"], errors="coerce")
         latest = factor.dropna().iloc[-1] if factor.notna().any() else None
         if latest is None or latest == 0:
@@ -312,6 +357,7 @@ class TushareSource(DataSource):
         ratio = factor / latest
         for column in ("open", "high", "low", "close"):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
+        merged = merged.drop(columns="_parsed_trade_date")
         return self._normalize_market_frame(merged).loc[start:end]
 
     def research_daily(
@@ -349,7 +395,9 @@ class TushareSource(DataSource):
         ).merge(
             limits[["trade_date", "up_limit", "down_limit"]], on="trade_date", how="left",
         )
-        merged["trade_date"] = pd.to_datetime(merged["trade_date"])
+        merged["trade_date"] = _parse_tushare_dates(
+            merged["trade_date"], field="trade_date"
+        )
         merged = merged.sort_values("trade_date").set_index("trade_date")
         merged.index.name = "date"
         numeric = ("open", "high", "low", "close", "vol", "amount", "adj_factor",
@@ -420,7 +468,9 @@ class TushareSource(DataSource):
         if frame.empty or "cal_date" not in frame:
             raise RuntimeError("交易日历为空")
         enabled = frame.loc[pd.to_numeric(frame.get("is_open"), errors="coerce") == 1]
-        return pd.DatetimeIndex(pd.to_datetime(enabled["cal_date"])).normalize().sort_values()
+        return pd.DatetimeIndex(
+            _parse_tushare_dates(enabled["cal_date"], field="cal_date")
+        ).normalize().sort_values()
 
     def suspension_snapshot(self, trade_date: str) -> dict[str, object]:
         """Return an official full-day suspension set for one exact session."""
@@ -493,7 +543,9 @@ class TushareSource(DataSource):
         if raw.empty:
             return pd.DataFrame()
         frame = raw.copy()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"])
+        frame["trade_date"] = _parse_tushare_dates(
+            frame["trade_date"], field="trade_date"
+        )
         frame = frame.set_index("trade_date").sort_index()
         frame.index.name = "date"
         fields = [c for c in ("pe", "pe_ttm", "pb", "dv_ratio", "total_mv") if c in frame]
@@ -605,8 +657,17 @@ class TushareSource(DataSource):
         if raw.empty or "roe" not in raw:
             return pd.DataFrame(columns=["report_date", "roe", "update_flag"])
         frame = raw.copy()
-        frame["report_date"] = pd.to_datetime(frame["end_date"], errors="coerce")
-        frame["ann_date"] = pd.to_datetime(frame.get("ann_date"), errors="coerce")
+        if "end_date" not in frame or "ann_date" not in frame:
+            raise ProviderContractChanged(
+                "Tushare fina_indicator 响应缺少 ann_date 或 end_date "
+                "[missing_required_field]"
+            )
+        frame["report_date"] = _parse_tushare_dates(
+            frame["end_date"], field="end_date"
+        )
+        frame["ann_date"] = _parse_tushare_dates(
+            frame["ann_date"], field="ann_date", allow_missing=True
+        )
         frame["roe"] = pd.to_numeric(frame["roe"], errors="coerce")
         update_flag = frame.get("update_flag")
         frame["update_flag"] = (
@@ -691,7 +752,9 @@ class TushareSource(DataSource):
             return pd.DataFrame(columns=["index_code", "symbol", "trade_date", "weight"])
         raw = pd.concat(batches, ignore_index=True)
         frame = raw.rename(columns={"con_code": "symbol"}).copy()
-        frame["trade_date"] = pd.to_datetime(frame["trade_date"], errors="coerce")
+        frame["trade_date"] = _parse_tushare_dates(
+            frame["trade_date"], field="trade_date"
+        )
         frame["weight"] = pd.to_numeric(frame.get("weight"), errors="coerce")
         if "index_code" not in frame:
             frame["index_code"] = index_symbol.upper()
