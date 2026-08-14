@@ -380,7 +380,7 @@ def main() -> int:
             run_external(
                 "PyInstaller smoke",
                 [
-                    "uv", "run", "--no-project", "--no-sync", "--python", str(PYTHON),
+                    "uv", "run", "--no-project", "--python", str(PYTHON),
                     "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
                     "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
                     str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec",

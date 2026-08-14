@@ -315,8 +315,8 @@ def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
 
     label, command, kwargs = next(call for call in external_calls if call[0] == "PyInstaller smoke")
     assert label == "PyInstaller smoke"
-    assert command[:11] == [
-        "uv", "run", "--no-project", "--no-sync", "--python", str(run.PYTHON),
+    assert command[:10] == [
+        "uv", "run", "--no-project", "--python", str(run.PYTHON),
         "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
     ]
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
