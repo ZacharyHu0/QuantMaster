@@ -1759,7 +1759,7 @@ def _session_refresh_due(
         return False
     if cached is None or cached.empty or not checked_at:
         return False
-    current = now if now is not None else pd.Timestamp.now(tz="Asia/Shanghai")
+    current = now if now is not None else pd.Timestamp(market_now())
     if current.tzinfo is None:
         current = current.tz_localize("Asia/Shanghai")
     else:
