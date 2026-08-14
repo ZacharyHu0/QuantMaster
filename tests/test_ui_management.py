@@ -142,6 +142,31 @@ def _assert_no_ui_process_owners() -> None:
     )
 
 
+def test_after_close_prioritizes_sector_width_without_wide_screen_scroll(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#select/after-close")
+        workbench = page.locator(".after-close-workbench")
+        workbench.wait_for(state="visible")
+
+        sector = page.locator(".after-close-sector-pane")
+        candidate = page.locator(".after-close-candidate-pane")
+        assert sector.bounding_box()["width"] > candidate.bounding_box()["width"]
+        assert sector.locator(".after-close-table-wrap").evaluate(
+            "node => node.scrollWidth <= node.clientWidth"
+        )
+        _wait_for_document_fit(page)
+
+        page.set_viewport_size({"width": 1100, "height": 900})
+        assert workbench.evaluate(
+            "node => getComputedStyle(node).gridTemplateColumns.split(' ').length"
+        ) == 1
+        _wait_for_document_fit(page)
+        browser.close()
+
+
 @pytest.fixture(scope="module")
 def module_config(tmp_path_factory, _minimal_security_master):
     root = tmp_path_factory.mktemp("qm-ui")
