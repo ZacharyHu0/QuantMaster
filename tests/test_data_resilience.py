@@ -823,7 +823,10 @@ def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkey
 
 def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
     store = BarStore(root=tmp_path / "bars")
-    end = pd.Timestamp.now().normalize()
+    current = pd.Timestamp("2026-08-14 16:00", tz="Asia/Shanghai")
+    monkeypatch.setattr(registry, "market_now", lambda: current.to_pydatetime())
+    monkeypatch.setattr(registry, "market_date", lambda: current.date())
+    end = current.tz_localize(None).normalize()
     dates = pd.bdate_range(end=end - pd.Timedelta(days=10), periods=40)
     # bdate_range(end=..., periods=...) keeps the last cached day before the requested end.
     cached = pd.DataFrame({
@@ -841,10 +844,16 @@ def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
         def daily(self, symbol, start, requested_end):
             self.calls.append((start, requested_end))
             index = pd.bdate_range(start, requested_end)
-            return pd.DataFrame({
+            frame = pd.DataFrame({
                 "open": 10.0, "high": 10.0, "low": 10.0,
                 "close": 10.0, "volume": 2.0,
             }, index=index)
+            frame.attrs.update({
+                "provider_published_at": "2026-08-14T15:15:00+08:00",
+                "ingested_at": "2026-08-14T15:20:00+08:00",
+                "coverage_complete": True,
+            })
+            return frame
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [TailSource]})
     start = str(dates[0].date())
