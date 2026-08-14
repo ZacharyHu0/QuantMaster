@@ -9,6 +9,10 @@ if __name__ == "__main__":
     # modules, otherwise a renamed worker can start another desktop server.
     multiprocessing.freeze_support()
 
+    from quantmaster.config import configure_installed_instance
+
+    configure_installed_instance()
+
     from quantmaster.cli import main
     from quantmaster.runtime.windows_app import initialize_windows_app_process
 

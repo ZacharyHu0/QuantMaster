@@ -43,9 +43,11 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
         encoding="utf-8",
     )
 
-    assert entry.index("multiprocessing.freeze_support()") < entry.index(
-        "from quantmaster.cli import main"
-    )
+    freeze = entry.index("multiprocessing.freeze_support()")
+    configure = entry.index("configure_installed_instance()")
+    cli_import = entry.index("from quantmaster.cli import main")
+
+    assert freeze < configure < cli_import
 
 
 def test_project_icon_has_valid_group_and_images() -> None:

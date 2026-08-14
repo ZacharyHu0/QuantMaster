@@ -399,8 +399,12 @@ def main() -> int:
                 run_external("EXE help", [str(exe), "--help"])
                 with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
                     exe_env = os.environ.copy()
-                    exe_env["QM_CONFIG_PATH"] = os.devnull
-                    exe_env["QM_DATA_ROOT"] = str(Path(raw_temp) / "data")
+                    instance = Path(raw_temp)
+                    exe_env["QM_CONFIG_PATH"] = str(instance / "config.yaml")
+                    exe_env["QM_DATA_ROOT"] = str(instance / "data")
+                    exe_env["QM_FREE_STOCKDB_ROOT"] = str(
+                        instance / "runtime" / "free-stockdb"
+                    )
                     run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
             else:
                 print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")

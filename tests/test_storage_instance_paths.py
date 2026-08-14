@@ -1,12 +1,160 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
 import yaml
 
+import quantmaster.config as config_module
 from quantmaster.config import Config, load_config, set_config
 from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
 from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
+from quantmaster.settings import ConfigManager
+
+_INSTANCE_ENV = ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT")
+
+
+@pytest.fixture
+def packaged_windows(tmp_path, monkeypatch):
+    previous_paths = list(config_module.DEFAULT_CONFIG_PATHS)
+    previous_defaults = config_module._installed_data_defaults
+    monkeypatch.setattr(config_module, "_is_packaged_windows", lambda: True)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    for name in _INSTANCE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    yield
+    config_module.DEFAULT_CONFIG_PATHS[:] = previous_paths
+    config_module._installed_data_defaults = previous_defaults
+    set_config(None)
+
+
+def test_packaged_windows_defaults_are_external_without_creating_paths(
+    tmp_path, monkeypatch, packaged_windows,
+):
+    appdata = tmp_path / "roaming"
+    local_appdata = tmp_path / "local"
+    home = tmp_path / "home"
+    cwd = tmp_path / "cwd"
+    home.mkdir()
+    cwd.mkdir()
+    (home / "config.yaml").write_text("data:\n  root: ignored-home\n", encoding="utf-8")
+    (cwd / "config.yaml").write_text("data:\n  root: ignored-cwd\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(cwd)
+
+    config_module.configure_installed_instance()
+
+    expected_config = appdata / "QuantMaster" / "config.yaml"
+    expected_data = local_appdata / "QuantMaster" / "data"
+    expected_stockdb = local_appdata / "QuantMaster" / "runtime" / "free-stockdb"
+    assert not any(name in os.environ for name in _INSTANCE_ENV)
+    assert ConfigManager().path == expected_config
+    cfg = load_config()
+    assert cfg.data_root == expected_data
+    assert cfg.free_stockdb_root == expected_stockdb
+    assert not expected_config.parent.exists()
+    assert not expected_data.exists()
+    assert not expected_stockdb.exists()
+
+
+def test_packaged_windows_yaml_and_absolute_overrides_win(
+    tmp_path, monkeypatch, packaged_windows,
+):
+    default_config = tmp_path / "roaming" / "QuantMaster" / "config.yaml"
+    default_config.parent.mkdir(parents=True)
+    default_config.write_text(
+        yaml.safe_dump({
+            "data": {
+                "root": "yaml-data",
+                "free_stockdb_root": "yaml-runtime/free-stockdb",
+            },
+        }),
+        encoding="utf-8",
+    )
+    overrides = {
+        "QM_CONFIG_PATH": tmp_path / "custom" / "config.yaml",
+        "QM_DATA_ROOT": tmp_path / "custom-data",
+        "QM_FREE_STOCKDB_ROOT": tmp_path / "custom-runtime" / "free-stockdb",
+    }
+    config_module.configure_installed_instance()
+    yaml_cfg = load_config()
+    assert yaml_cfg.data_root == default_config.parent / "yaml-data"
+    assert yaml_cfg.free_stockdb_root == default_config.parent / "yaml-runtime/free-stockdb"
+
+    overrides["QM_CONFIG_PATH"].parent.mkdir(parents=True)
+    overrides["QM_CONFIG_PATH"].write_text("{}", encoding="utf-8")
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, str(value))
+
+    cfg = load_config()
+
+    assert {name: os.environ[name] for name in _INSTANCE_ENV} == {
+        name: str(value) for name, value in overrides.items()
+    }
+    assert cfg.config_path == overrides["QM_CONFIG_PATH"]
+    assert cfg.data_root == overrides["QM_DATA_ROOT"]
+    assert cfg.free_stockdb_root == overrides["QM_FREE_STOCKDB_ROOT"]
+
+
+@pytest.mark.parametrize("invalid_name", _INSTANCE_ENV)
+def test_packaged_windows_rejects_relative_override_without_partial_defaults(
+    tmp_path, monkeypatch, packaged_windows, invalid_name,
+):
+    monkeypatch.setenv(invalid_name, "relative/path")
+    previous_paths = list(config_module.DEFAULT_CONFIG_PATHS)
+
+    with pytest.raises(RuntimeError, match=invalid_name):
+        config_module.configure_installed_instance()
+
+    assert {
+        name: os.environ[name] for name in _INSTANCE_ENV if name in os.environ
+    } == {invalid_name: "relative/path"}
+    assert config_module.DEFAULT_CONFIG_PATHS == previous_paths
+    assert config_module._installed_data_defaults is None
+
+
+@pytest.mark.parametrize("invalid_root", ["APPDATA", "LOCALAPPDATA"])
+@pytest.mark.parametrize("value", [None, "relative/path"])
+def test_packaged_windows_requires_absolute_default_roots(
+    monkeypatch, packaged_windows, invalid_root, value,
+):
+    if value is None:
+        monkeypatch.delenv(invalid_root)
+    else:
+        monkeypatch.setenv(invalid_root, value)
+    previous_paths = list(config_module.DEFAULT_CONFIG_PATHS)
+
+    with pytest.raises(RuntimeError, match=invalid_root):
+        config_module.configure_installed_instance()
+
+    assert not any(name in os.environ for name in _INSTANCE_ENV)
+    assert config_module.DEFAULT_CONFIG_PATHS == previous_paths
+    assert config_module._installed_data_defaults is None
+
+
+def test_source_instance_path_bootstrap_is_noop(monkeypatch):
+    previous_paths = list(config_module.DEFAULT_CONFIG_PATHS)
+    monkeypatch.setattr(config_module, "_is_packaged_windows", lambda: False)
+
+    config_module.configure_installed_instance()
+
+    assert config_module.DEFAULT_CONFIG_PATHS == previous_paths
+    assert config_module._installed_data_defaults is None
+
+
+def test_packaged_help_does_not_create_installed_paths(tmp_path, packaged_windows):
+    from quantmaster.cli import main
+
+    config_module.configure_installed_instance()
+
+    with pytest.raises(SystemExit) as stopped:
+        main(["--help"])
+
+    assert stopped.value.code == 0
+    assert not (tmp_path / "roaming" / "QuantMaster").exists()
+    assert not (tmp_path / "local" / "QuantMaster").exists()
 
 
 def test_relative_instance_paths_are_stable_across_cwd(tmp_path, monkeypatch):
