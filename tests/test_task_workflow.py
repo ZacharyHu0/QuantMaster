@@ -586,6 +586,36 @@ def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
     assert artifacts.exists()
 
 
+def test_remove_task_artifacts_refuses_acl_recovery_outside_task_root(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    outside = primary / "keep"
+    artifacts.mkdir(parents=True)
+    outside.mkdir()
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(
+        tasks.shutil, "rmtree",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            PermissionError(13, "denied", outside),
+        ),
+    )
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("outside path must not reach PowerShell"),
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="任务工件之外"):
+        remove_task_artifacts(primary, "recovery")
+
+    assert outside.exists()
+
+
 def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
     monkeypatch, tmp_path,
 ):
@@ -614,6 +644,43 @@ def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
     remove_task_artifacts(primary, "recovery")
 
     assert calls == ["remove", "restore", "remove"]
+
+
+def test_remove_task_artifacts_targets_denied_child_without_enumerating(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "runs" / "denied"
+    blocked.mkdir(parents=True)
+    calls: list[str] = []
+    original_rmtree = tasks.shutil.rmtree
+
+    def remove(path, **kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", blocked)
+        return original_rmtree(path, **kwargs)
+
+    def restore(command, **kwargs):
+        environment = kwargs["env"]
+        if "Get-ChildItem" in command[-1]:
+            calls.append("enumerate")
+            return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
+        calls.append("restore-target")
+        assert Path(environment["QM_TASK_ARTIFACT_BLOCKED"]) == blocked.resolve()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    remove_task_artifacts(primary, "recovery")
+
+    assert calls == ["remove", "restore-target", "remove"]
+    assert not artifacts.exists()
 
 
 def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_path):
