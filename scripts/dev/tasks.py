@@ -279,6 +279,7 @@ def run(command: list[str], *, cwd: Path) -> None:
     env["UV_CACHE_DIR"] = str(artifacts / "uv-cache")
     env["QM_CONFIG_PATH"] = os.devnull
     env["QM_FREE_STOCKDB_ROOT"] = str(artifacts / "runtime" / "tests" / "free-stockdb")
+    env["QM_TASK_LEASE_HELD"] = str(artifacts.resolve())
     with task_artifact_lease(artifacts):
         subprocess.run(command, cwd=cwd, env=env, check=True)
 

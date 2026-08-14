@@ -32,6 +32,22 @@ from scripts.dev.tasks import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _hold_direct_pytest_task_lease(primary: str, ready, release) -> None:
+    from scripts.dev import pytest_windows_acl
+
+    root = Path(primary)
+    worktree = root / ".worktrees" / "task"
+    os.chdir(worktree)
+    cleanups = []
+    pytest_windows_acl._install_task_artifact_lease(
+        SimpleNamespace(add_cleanup=cleanups.append),
+    )
+    ready.set()
+    if not release.wait(10):
+        raise RuntimeError("test did not release direct pytest lease")
+    cleanups.pop()()
+
+
 def test_documentation_only_changes_skip_python_tests():
     assert select_impact(["README.md", "docs/guide.md"]) == Impact("docs")
 
@@ -43,6 +59,52 @@ def test_task_artifact_lease_is_external_and_reusable_after_use(tmp_path):
         assert marker.is_file()
         assert task_artifacts_active(artifacts) is True
     assert marker.is_file()
+    assert task_artifacts_active(artifacts) is False
+
+
+def test_task_runner_marks_outer_lease_for_child_process(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    worktree = primary / ".worktrees" / "task"
+    worktree.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+
+    def child(command, *, cwd, env, check):
+        artifacts = primary / ".artifacts" / "worktrees" / "task"
+        assert env["QM_TASK_LEASE_HELD"] == str(artifacts.resolve())
+        assert task_artifacts_active(artifacts) is True
+
+    monkeypatch.setattr(tasks.subprocess, "run", child)
+
+    tasks.run(["python", "check.py"], cwd=worktree)
+
+
+def test_direct_pytest_lease_blocks_cleanup_across_processes(tmp_path):
+    import multiprocessing
+
+    primary = tmp_path / "primary"
+    worktree = primary / ".worktrees" / "task"
+    artifacts = primary / ".artifacts" / "worktrees" / "task"
+    worktree.mkdir(parents=True)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_direct_pytest_task_lease,
+        args=(str(primary), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(10)
+        assert task_artifacts_active(artifacts) is True
+        with pytest.raises(RuntimeError, match="另一进程"):
+            with task_artifact_lease(artifacts):
+                pytest.fail("cleanup lease must not overlap direct pytest")
+    finally:
+        release.set()
+        process.join(10)
+    assert process.exitcode == 0
     assert task_artifacts_active(artifacts) is False
 
 
