@@ -30,6 +30,7 @@ def _formal_eligibility(
     universe_quality: str,
     data_quality: dict[str, Any],
     research_manifest: dict[str, Any],
+    benchmark_required: bool,
     warnings: list[dict[str, Any]],
 ) -> tuple[bool, list[str]]:
     reasons: list[str] = []
@@ -54,6 +55,12 @@ def _formal_eligibility(
     market_contract = data_quality.get("market_contract") or {}
     if market_contract.get("formal_eligible") is False:
         reasons.append("market_contract_not_formal")
+    benchmark_contract = data_quality.get("benchmark_contract") or {}
+    if benchmark_required and (
+        data_quality.get("benchmark_status") != "verified"
+        or benchmark_contract.get("formal_eligible") is not True
+    ):
+        reasons.append("benchmark_evidence_not_verified")
     return not reasons, list(dict.fromkeys(reasons))
 
 
@@ -210,6 +217,7 @@ def execute_backtest(
         intentional_flat=signal_bundle.intentional_flat,
     ))
 
+    benchmark_required = bool(spec.benchmark) or benchmark_close is not None
     if benchmark_close is None and spec.benchmark:
         try:
             benchmark_envelope = refresh_history(spec.benchmark, spec.start, end)
@@ -273,6 +281,7 @@ def execute_backtest(
         universe_quality=universe_quality,
         data_quality=data_quality,
         research_manifest=research_manifest,
+        benchmark_required=benchmark_required,
         warnings=warnings,
     )
     manifest = {

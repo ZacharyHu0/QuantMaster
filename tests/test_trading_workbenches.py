@@ -1196,6 +1196,20 @@ def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
         universe_quality="production",
         data_quality={"status": "complete"},
         research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=False,
+        warnings=[],
+    ) == (True, [])
+    assert _formal_eligibility(
+        production,
+        resolved_tier="production",
+        universe_quality="production",
+        data_quality={
+            "status": "complete",
+            "benchmark_status": "verified",
+            "benchmark_contract": {"formal_eligible": True},
+        },
+        research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=True,
         warnings=[],
     ) == (True, [])
     assert _formal_eligibility(
@@ -1204,6 +1218,7 @@ def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
         universe_quality="production",
         data_quality={"status": "complete"},
         research_manifest={},
+        benchmark_required=False,
         warnings=[],
     ) == (False, ["missing_research_manifest"])
     assert _formal_eligibility(
@@ -1212,6 +1227,7 @@ def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
         universe_quality="sandbox",
         data_quality={"status": "partial"},
         research_manifest={},
+        benchmark_required=False,
         warnings=[{"code": "partial_market_data"}],
     ) == (
         False,
@@ -1234,8 +1250,70 @@ def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
         universe_quality="production",
         data_quality={"status": "complete"},
         research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=False,
         warnings=[],
     ) == (False, ["lab_oof_result"])
+
+
+def test_degraded_benchmark_envelope_blocks_formal_eligibility(
+    panel, monkeypatch,
+) -> None:
+    from quantmaster.backtest.application import execute_backtest
+
+    spec = BacktestSpec.model_validate({
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-08-01",
+        "benchmark": "000300.SH",
+    })
+    quality = BarDataQuality(
+        status="degraded",
+        requested_start=spec.start,
+        requested_end=spec.end or "",
+        observed_start=spec.start,
+        observed_end=spec.end or "",
+        issues=("benchmark evidence degraded",),
+    )
+    benchmark = pd.DataFrame({"close": panel["close"].mean(axis=1)})
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_history",
+        lambda *_args, **_kwargs: BarDataEnvelope(benchmark, quality),
+    )
+
+    result = execute_backtest(spec, panel=panel)
+
+    assert result["manifest"]["data_quality"]["benchmark_status"] == "degraded"
+    assert result["manifest"]["data_quality"]["benchmark_contract"][
+        "formal_eligible"
+    ] is False
+    assert "benchmark_evidence_not_verified" in result["manifest"][
+        "eligibility_reasons"
+    ]
+
+
+def test_injected_benchmark_without_provenance_blocks_formal_eligibility(panel) -> None:
+    from quantmaster.backtest.application import execute_backtest
+
+    spec = BacktestSpec.model_validate({
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-08-01",
+        "benchmark": None,
+    })
+
+    result = execute_backtest(
+        spec,
+        panel=panel,
+        benchmark_close=panel["close"].mean(axis=1),
+    )
+
+    assert result["manifest"]["data_quality"]["benchmark_status"] == "not_requested"
+    assert "benchmark_contract" not in result["manifest"]["data_quality"]
+    assert "benchmark_evidence_not_verified" in result["manifest"][
+        "eligibility_reasons"
+    ]
 
 
 def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_path):
