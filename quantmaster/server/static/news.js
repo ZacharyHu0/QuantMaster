@@ -1,4 +1,4 @@
-(() => {
+const newsFeature = (() => {
   'use strict';
 
   const state = {
@@ -63,8 +63,9 @@
   }
 
   async function secure(path, options = {}) {
-    await window.QuantMasterManagement.ensureSettings();
-    return window.QuantMasterManagement.request(path, options);
+    const management = await import('./settings.js');
+    await management.ensureSettings();
+    return management.request(path, options);
   }
 
   async function submitAnnotationTask(mode, ids) {
@@ -995,5 +996,17 @@
     state.loaded = true;
   }
 
-  window.loadNews = loadNews;
+  function unmount() {
+    clearInterval(state.annotationTimer);
+    clearTimeout(state.annotationHideTimer);
+    clearInterval(state.annotationStatsTimer);
+    state.annotationTimer = null;
+    state.annotationHideTimer = null;
+    state.annotationStatsTimer = null;
+    disposeChart?.('news-factor-chart');
+  }
+
+  return {mount:loadNews, unmount, refresh:loadNews};
 })();
+
+export const {mount, unmount, refresh} = newsFeature;

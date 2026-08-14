@@ -1,4 +1,4 @@
-(function () {
+const labFeature = (function () {
   'use strict';
 
   const state = {
@@ -1923,12 +1923,20 @@
     openFactorDialog(expression);
   }
 
-  window.loadQuantLab = loadQuantLab;
-  window.quantLabOpenExpression = openExpression;
   document.addEventListener('quantmaster:settings-persisted', event => {
     if (!(event.detail?.changed_fields || []).some(field => field.startsWith('lab.'))) return;
     refreshOverview().catch(error => {
       if (isLabActive()) showError('研究设置同步失败', error);
     });
   });
+  function unmount() {
+    if (state.timer) window.clearTimeout(state.timer);
+    state.timer = null;
+    state.controllers.forEach(controller => controller.abort());
+    state.controllers.clear();
+  }
+
+  return {mount:loadQuantLab, unmount, refresh:refreshJobs, openExpression};
 })();
+
+export const {mount, unmount, refresh, openExpression} = labFeature;

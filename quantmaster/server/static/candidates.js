@@ -1,4 +1,4 @@
-(() => {
+const candidatesFeature = (() => {
   'use strict';
 
   const PAGE_SIZE = 100;
@@ -93,8 +93,9 @@
   async function request(path, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
     if (method === 'GET') return window.QuantMasterAPI(path, options);
-    await window.QuantMasterManagement.ensureSettings();
-    return window.QuantMasterManagement.request(path, options);
+    const management = await import('./settings.js');
+    await management.ensureSettings();
+    return management.request(path, options);
   }
 
   function catalogItem(name) {
@@ -752,7 +753,8 @@
         method:'POST', body:{new_name:next},
       });
       await refreshCatalog({mapping:{from:previous,to:next}, select:next, loadDetail:true});
-      await window.QuantMasterManagement.ensureSettings(true);
+      const management = await import('./settings.js');
+      await management.ensureSettings(true);
     } catch (error) {
       setNotice('error', error.message);
       button.disabled = false;
@@ -769,7 +771,8 @@
       const suffix = replacement ? `?replacement=${encodeURIComponent(replacement)}` : '';
       await request(`/api/v1/settings/universes/${encodeURIComponent(previous)}${suffix}`, {method:'DELETE'});
       await refreshCatalog({mapping:{from:previous,to:replacement || 'demo'}, select:replacement || 'demo', loadDetail:true});
-      await window.QuantMasterManagement.ensureSettings(true);
+      const management = await import('./settings.js');
+      await management.ensureSettings(true);
     } catch (error) {
       setNotice('error', error.message);
       button.disabled = false;
@@ -987,7 +990,9 @@
 
   workspace.addEventListener('click', event => {
     const settings = event.target.closest('[data-candidate-settings]');
-    if (settings) window.QuantMasterManagement.open(settings.dataset.candidateSettings);
+    if (settings) document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+      detail:{tab:'settings', section:settings.dataset.candidateSettings},
+    }));
   });
 
   workspace.addEventListener('keydown', event => {
@@ -1039,12 +1044,13 @@
     event.returnValue = '';
   });
 
-  window.loadCandidates = loadCandidates;
-  window.QuantMasterCandidates = {
-    open: openCandidate,
-    refresh: refreshCatalog,
-    get catalog() { return state.catalog.slice(); },
+  return {
+    mount:loadCandidates,
+    unmount:() => closeInstrumentSearch(),
+    refresh:refreshCatalog,
+    open:openCandidate,
+    catalog:() => state.catalog.slice(),
   };
-
-  refreshCatalog();
 })();
+
+export const {mount, unmount, refresh, open, catalog} = candidatesFeature;

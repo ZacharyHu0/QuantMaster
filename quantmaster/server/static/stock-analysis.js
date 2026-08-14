@@ -1,4 +1,4 @@
-(() => {
+const stockAnalysisFeature = (() => {
   const form = document.getElementById('stock-analysis-form');
   if (!form) return;
 
@@ -545,7 +545,7 @@
     } finally { busy(form, false); setMode(mode); }
   });
 
-  window.loadStockAnalysis = async () => {
+  async function loadStockAnalysis() {
     if (loaded) return;
     loaded = true;
     resetDimensions();
@@ -558,5 +558,16 @@
       try { await refreshAnalysis(saved); } catch (_) { /* poll supplies the diagnostic */ }
       pollRun(saved, activeToken);
     } else queueMicrotask(() => input.focus({preventScroll:true}));
-  };
+  }
+
+  function unmount() {
+    activeToken += 1;
+    clearInterval(tickTimer);
+    clearTimeout(suggestionTimer);
+    tickTimer = 0;
+  }
+
+  return {mount:loadStockAnalysis, unmount, refresh:loadStockAnalysis};
 })();
+
+export const {mount, unmount, refresh} = stockAnalysisFeature;

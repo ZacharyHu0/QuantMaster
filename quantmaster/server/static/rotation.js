@@ -1,4 +1,4 @@
-(() => {
+const rotationFeature = (() => {
   'use strict';
 
   const TODAY_ROUTE_PREFIX = '#today/';
@@ -1494,20 +1494,6 @@
       .catch(() => clearActiveJob());
   }
 
-  function applyHash() {
-    const match = location.hash.match(/^#today\/([a-z-]+)$/);
-    const route = match?.[1] || '';
-    const marketPages = new Set(['quotes','temperature','style']);
-    const rotationPages = {rotation:'overview',industry:'industry',themes:'themes',etfs:'etfs'};
-    const parent = marketPages.has(route) ? 'market' : rotationPages[route] ? 'rotation' : '';
-    if (!parent) return false;
-    const control = document.querySelector(`header [data-workspace-page="${route}"][data-tab="${parent}"]`);
-    if (control) activateTab(control,{persist:true,load:false,route:false});
-    if (parent === 'market') setMarketPage(route,false);
-    else setRotationPage(rotationPages[route],false);
-    return true;
-  }
-
   async function jumpToGroup(kind, code) {
     const page = kind === 'theme' ? 'themes' : 'industry';
     setRotationPage(page);
@@ -1813,25 +1799,25 @@
     }
   });
 
-  document.querySelector('header')?.addEventListener('click', event => {
-    const control = event.target.closest('[data-tab]');
-    if (control?.dataset.tab === 'market' && !control.dataset.marketPage) setMarketPage(activeMarketPage);
-    if (control?.dataset.tab === 'rotation' && !control.dataset.rotationPage) setRotationPage(activeRotationPage);
-  });
-  window.addEventListener('hashchange',applyHash);
-
-  window.loadRotationFeature = tab => {
-    if (tab === 'market') {
-      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
-        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeMarketPage;
-      setMarketPage(page,false);
-    } else if (tab === 'rotation') {
-      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
-        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeRotationPage;
-      setRotationPage(page,false);
+  async function mount(page) {
+    if (['temperature', 'style'].includes(page)) {
+      setMarketPage(page, false);
+      recoverActiveJob();
+      return;
     }
-  };
+    const rotationPages = {rotation:'overview', industry:'industry', themes:'themes', etfs:'etfs'};
+    setRotationPage(rotationPages[page] || 'overview', false);
+    recoverActiveJob();
+  }
 
-  if (!applyHash()) setMarketPage('quotes',false);
-  recoverActiveJob();
+  function unmount() {
+    clearTimeout(searchTimer);
+    searchTimer = 0;
+    activeJob = null;
+    window.QuantCharts?.activateTab('');
+  }
+
+  return {mount, unmount, refresh: () => loadCurrent(true)};
 })();
+
+export const {mount, unmount, refresh} = rotationFeature;

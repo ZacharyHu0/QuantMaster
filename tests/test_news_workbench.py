@@ -1607,10 +1607,8 @@ def test_news_api_csrf_and_ui_contract():
     assert 'name="news.annotation_model"' in page
     assert 'name="news.annotation_reasoning_effort"' in page
     assert 'data-settings-section="sources"' in page
-    assert "/static/news.js" in page
-    assert "/static/news.css" in page
-    assert "/static/news.js?rev=" in page
-    assert "/static/news.css?rev=" in page
+    assert "/static/news.js" not in page
+    assert "/static/news.css" not in page
     assert "%%QM_NEWS_" not in page
     chart_source = client.get("/static/news.js").text
     assert "limit: 100, batch_size: 5" not in chart_source

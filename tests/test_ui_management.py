@@ -330,6 +330,148 @@ def live_server(module_config):
         _assert_no_ui_process_owners()
 
 
+def test_default_today_uses_native_canvas_without_echarts(live_server):
+    url, _ = live_server
+    market = {
+        "groups": {"A股指数": [{
+            "symbol": "000300.SH", "name": "沪深300", "last": 4600.0,
+            "change_pct": -0.2, "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
+            "as_of": "2026-07-21", "cache_status": "ready", "rsi_14": 60.0,
+            "rsi_history": [["2026-05-01", 35.0], ["2026-07-21", 60.0]],
+        }]},
+    }
+    fear_greed = {
+        "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
+        "as_of": "2026-07-21T08:00:00+08:00",
+        "history": [{"date": "2026-07-20", "score": 22.0}, {"date": "2026-07-21", "score": 18.0}],
+        "thresholds": {"fear_greed_rare": 10, "rsi_add": 22},
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        requested = []
+        errors = []
+        page.on("request", lambda request: requested.append(request.url))
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route("**/api/v1/market/overview", lambda route: route.fulfill(json=market))
+        page.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+
+        page.goto(url)
+        page.wait_for_url(re.compile(r"#today/quotes$"))
+        gauge = page.locator("#fear-greed-gauge-market canvas")
+        history = page.locator("#fear-greed-history-market canvas")
+        spark = page.locator('[data-market-group="A股指数"] .spark canvas')
+        for canvas in (gauge, history, spark):
+            canvas.wait_for(state="visible")
+        assert "18.0，极度恐惧" in page.locator("#fear-greed-gauge-market").get_attribute("aria-label")
+        assert not any(path.endswith(("/echarts.min.js", "/charts.js", "/charts.css")) for path in requested)
+
+        bounds = spark.bounding_box()
+        page.mouse.move(bounds["x"] + bounds["width"] * 0.75, bounds["y"] + bounds["height"] / 2)
+        tooltip = page.locator('[data-market-group="A股指数"] .native-chart-tooltip')
+        tooltip.wait_for(state="visible")
+        assert "区间涨跌" in tooltip.inner_text()
+        assert "当日涨跌" in tooltip.inner_text()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
+        assert spark.bounding_box()["width"] <= 390
+        assert errors == []
+        browser.close()
+
+
+def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        requested = []
+        errors = []
+        page.on("request", lambda request: requested.append(request.url.split("?", 1)[0]))
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(url)
+        page.wait_for_url(re.compile(r"#today/quotes$"))
+        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        initial = set(requested)
+        assert f"{url}/static/workspaces/today.js" in initial
+        assert not any(name in path for path in initial for name in (
+            "/workspaces/research.js", "/workspaces/account.js", "/workspaces/runtime.js",
+            "/lab.js", "/rotation.js", "/help.js", "/echarts.min.js",
+        ))
+
+        journeys = [
+            ("研究", "#research/lab", "#tab-lab", "/static/workspaces/research.js"),
+            ("账户", "#account/paper", "#tab-paper", "/static/workspaces/account.js"),
+            ("运行", "#runtime/automation", "#tab-automation", "/static/workspaces/runtime.js"),
+            ("今日", "#today/quotes", "#tab-market", "/static/workspaces/today.js"),
+        ]
+        for label, route, selector, resource in journeys:
+            page.get_by_role("button", name=label, exact=True).click()
+            page.wait_for_url(re.compile(re.escape(route) + r"$"))
+            page.locator(selector).wait_for(state="visible")
+            playwright_sync.expect(page.locator(selector)).to_have_class(re.compile(r"(?:^|\s)active(?:\s|$)"))
+            assert requested.count(f"{url}{resource}") == 1
+            if route == "#research/lab":
+                page.wait_for_function("() => typeof window.echarts !== 'undefined'")
+                assert requested.count(f"{url}/static/echarts.min.js") == 1
+
+        page.get_by_role("button", name="研究", exact=True).click()
+        page.get_by_role("button", name="今日", exact=True).click()
+        assert requested.count(f"{url}/static/workspaces/research.js") == 1
+        assert requested.count(f"{url}/static/workspaces/today.js") == 1
+
+        page.get_by_role("tab", name="轮动总览", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/rotation$"))
+        page.locator("#tab-rotation").wait_for(state="visible")
+        page.wait_for_function("() => typeof window.echarts !== 'undefined'")
+        assert requested.count(f"{url}/static/echarts.min.js") == 1
+        assert requested.count(f"{url}/static/rotation.js") == 1
+
+        page.get_by_role("button", name="手册", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/help$"))
+        page.wait_for_timeout(1_000)
+        assert errors == []
+        page.locator("#help-root .help-handbook").wait_for(state="visible")
+        assert requested.count(f"{url}/static/help.js") == 1
+        assert requested.count(f"{url}/static/help-content.html") == 1
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert errors == []
+        browser.close()
+
+
+def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(f"{url}/#research/lab")
+        page.wait_for_url(re.compile(r"#research/lab$"))
+        page.locator("#tab-lab").wait_for(state="visible")
+        page.reload()
+        page.wait_for_url(re.compile(r"#research/lab$"))
+        page.locator("#tab-lab").wait_for(state="visible")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        assert errors == []
+
+        failed = browser.new_page()
+        failed.route("**/static/workspaces/account.js", lambda route: route.abort())
+        failed.goto(url)
+        failed.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        failed.get_by_role("button", name="账户", exact=True).click()
+        alert = failed.get_by_role("alert")
+        playwright_sync.expect(alert).to_contain_text("工作区加载失败")
+        playwright_sync.expect(failed.locator("#tab-market")).to_have_class(
+            re.compile(r"(?:^|\s)active(?:\s|$)")
+        )
+        assert failed.url.endswith("#today/quotes")
+        browser.close()
+
+
 def test_live_server_teardown_prefers_graceful_lifespan_signal() -> None:
     events = []
 
@@ -469,7 +611,9 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert desktop_lists[0]["left"] < desktop_lists[1]["left"]
         page.locator('#settings-nav [data-settings-section="llm"]').click()
 
-        browser_settings = page.evaluate("structuredClone(window.QuantMasterManagement.state.config)")
+        browser_settings = page.evaluate(
+            "async () => structuredClone((await import('/static/settings.js')).state.config)"
+        )
 
         def fulfill_settings_save(route):
             body = route.request.post_data_json
@@ -1484,48 +1628,18 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         assert index_section.locator(".spark").bounding_box()["height"] >= 70
         assert "区间 -0.20%" in index_section.locator(".mkt-spark-foot").inner_text()
         assert "07.20—07.21" in index_section.locator(".mkt-spark-period").inner_text()
-        spark_id = index_section.locator(".spark").get_attribute("id")
-        spark_option = page.evaluate(
-            """id => {
-              const option = charts[id].getOption();
-              return {
-                series: option.series.map(item => item.name),
-                tooltip: option.tooltip[0].show,
-                axisType: option.xAxis[0].type,
-                axisVisible: option.xAxis[0].show,
-                axisDates: option.xAxis[0].data,
-                axisLabelSize: option.xAxis[0].axisLabel.fontSize,
-                areaOpacity: option.series[0].areaStyle.opacity,
-                lineColor: option.series[0].lineStyle.color,
-                endpointPoints: option.series[1].data.length,
-                tooltipText: option.tooltip[0].formatter([{
-                  seriesId:'market-spark-trend', dataIndex:1,
-                  value:-0.2,
-                }]),
-              };
-            }""",
-            spark_id,
+        price_spark = index_section.locator(".spark canvas")
+        assert price_spark.get_attribute("data-native-chart") == "market-spark"
+        assert "最新区间涨跌 -0.20%" in index_section.locator(".spark").get_attribute("aria-label")
+        spark_bounds = price_spark.bounding_box()
+        page.mouse.move(
+            spark_bounds["x"] + spark_bounds["width"] * 0.75,
+            spark_bounds["y"] + spark_bounds["height"] / 2,
         )
-        assert spark_option == {
-            "series": ["区间走势", "最新位置"],
-            "tooltip": True,
-            "axisType": "category",
-            "axisVisible": True,
-            "axisDates": [1784505600000, 1784592000000],
-            "axisLabelSize": 9,
-            "areaOpacity": 0.1,
-            "lineColor": "#24a06b",
-            "endpointPoints": 1,
-            "tooltipText": (
-                '07.21<br><span style="color:#24a06b">●</span> '
-                "区间涨跌&nbsp;&nbsp;<b>-0.20%</b><br>"
-                '<span style="color:#24a06b">●</span> '
-                "当日涨跌&nbsp;&nbsp;<b>-0.20%</b>"
-            ),
-        }
-        assert page.evaluate("marketSparkMonth(1784505600000, true)") == "2026.07"
-        assert page.evaluate("marketSparkMonth('1784505600000', true)") == "2026.07"
-        assert page.evaluate("marketSparkMonth(1784505600000, false)") == "07月"
+        price_tooltip = index_section.locator(".native-chart-tooltip")
+        price_tooltip.wait_for(state="visible")
+        assert "区间涨跌" in price_tooltip.inner_text()
+        assert "当日涨跌" in price_tooltip.inner_text()
         assert page.evaluate(
             "history => rsiSparkPoints(history).map(point => point.date)",
             index["rsi_history"],

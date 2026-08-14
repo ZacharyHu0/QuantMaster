@@ -8,6 +8,7 @@ import re
 import sqlite3
 import sys
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -23,6 +24,8 @@ from quantmaster.server.app import app, liveness
 client = TestClient(app)
 _csrf = client.get("/api/v1/session").json()["csrf_token"]
 client.headers["X-CSRF-Token"] = _csrf
+
+STATIC_ROOT = Path(__file__).resolve().parents[1] / "quantmaster" / "server" / "static"
 
 
 def _verified_market_data(data, *, start="2023-01-01", end="2026-08-08", symbols=()):
@@ -66,6 +69,70 @@ def _unavailable_market_data(data, *, symbols=()):
 
 
 class TestBasics:
+    def test_workspace_shell_uses_native_lazy_modules_within_raw_budgets(self):
+        page = client.get("/").text
+        initial_urls = re.findall(
+            r'<(?:script[^>]+src|link[^>]+href)="([^"?]+)', page,
+        )
+        initial_names = {
+            Path(url).name for url in initial_urls
+            if url.startswith("/static/") and Path(url).suffix in {".css", ".js"}
+        }
+
+        assert initial_names == {
+            "brand-intro.css", "brand-intro.js", "app.css", "app.js", "workspace-loader.js",
+        }
+        assert '<script type="module" src="/static/workspace-loader.js"></script>' in page
+        assert all(
+            name not in initial_names
+            for name in ("echarts.min.js", "help.js", "lab.js", "rotation.js")
+        )
+
+        workspace_root = STATIC_ROOT / "workspaces"
+        adapters = sorted(workspace_root.glob("*.js"))
+        assert [path.stem for path in adapters] == ["account", "research", "runtime", "today"]
+        for adapter in adapters:
+            source = adapter.read_text(encoding="utf-8")
+            assert re.search(r"export\s+(?:async\s+)?function\s+mount\b", source)
+            assert re.search(r"export\s+(?:async\s+)?function\s+unmount\b", source)
+            assert re.search(r"export\s+(?:async\s+)?function\s+refresh\b", source)
+            assert adapter.stat().st_size <= 350 * 1024
+
+        loader = (STATIC_ROOT / "workspace-loader.js").read_text(encoding="utf-8")
+        assert loader.count("import(") == 4
+        assert all(
+            f"./workspaces/{name}.js" in loader
+            for name in ("today", "research", "account", "runtime")
+        )
+
+        initial_paths = [
+            STATIC_ROOT / Path(url).name for url in initial_urls
+            if url.startswith("/static/") and Path(url).suffix in {".css", ".js"}
+        ]
+        initial_paths.extend([workspace_root / "today.js", STATIC_ROOT / "today-charts.js"])
+        attribution = {
+            path.relative_to(STATIC_ROOT).as_posix(): path.stat().st_size
+            for path in initial_paths
+        }
+        attribution["index.html"] = len(page.encode("utf-8"))
+        assert sum(attribution.values()) <= 1024 * 1024, attribution
+
+        # ECharts is a shared, separately gated vendor asset. Each workspace's own
+        # adapter, feature code, styles, and shared chart glue stay under 350 KiB.
+        workspace_resources = {
+            "today": ["workspaces/today.js", "today-charts.js", "rotation.js", "rotation.css",
+                      "advanced-charts.js", "charts.js", "charts.css"],
+            "research": ["workspaces/research.js", "lab.js", "lab.css", "trading.js",
+                         "trading.css", "advanced-charts.js", "charts.js", "charts.css"],
+            "account": ["workspaces/account.js", "trading.js", "trading.css", "ledger-import.js",
+                        "advanced-charts.js", "charts.js", "charts.css"],
+            "runtime": ["workspaces/runtime.js", "automation.js", "automation.css", "help.js",
+                        "help.css", "settings.js", "settings.css"],
+        }
+        for workspace, resources in workspace_resources.items():
+            sizes = {name: (STATIC_ROOT / name).stat().st_size for name in resources}
+            assert sum(sizes.values()) <= 350 * 1024, {workspace: sizes}
+
     def test_health(self):
         resp = client.get("/api/v1/diagnostics")
         assert resp.status_code == 200
@@ -378,6 +445,7 @@ class TestBasics:
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
         charts_script = client.get("/static/charts.js").text
+        today_charts = client.get("/static/today-charts.js").text
         app_styles = client.get("/static/app.css").text
         settings_script = client.get("/static/settings.js").text
         settings_styles = client.get("/static/settings.css").text
@@ -392,33 +460,29 @@ class TestBasics:
         assert "主要指数区块已保留" in app_script
         assert "function marketChangeSeries" in app_script
         assert "function marketSparkParsedDate" in app_script
-        assert "function marketSparkMonth" in app_script
-        assert "function marketSparkOption" in app_script
-        assert "categories[dataIndex]" in app_script
-        assert "Number.isFinite(parsedValue)" in app_script
-        assert "type:'category',data:categories,show:true" in app_script
-        assert "id:'market-spark-latest'" in app_script
-        assert "区间涨跌" in app_script
-        assert "当日涨跌" in app_script
+        assert "function marketSparkOption" not in app_script
+        assert "function month" in today_charts
+        assert "区间涨跌" in today_charts
+        assert "当日涨跌" in today_charts
         assert "PERSONAL_MARKET_GROUP = '我的股票'" in app_script
         assert "market-section-title" in resp.text
         assert "mkt-memberships" in app_script
         assert "名称与代码 · 标注提及次数" in resp.text
-        assert "/static/settings.css?rev=" in resp.text
-        assert "/static/settings.js?rev=" in resp.text
+        assert "/static/settings.css" not in resp.text
+        assert "/static/settings.js" not in resp.text
         assert ".settings-diagnostic-grid" in settings_styles
         assert "align-items: start; margin-bottom: 24px" in settings_styles
         assert resp.text.count('class="automation-list-field"') == 2
         assert '.automation-list-field textarea { min-height: 168px; }' in settings_styles
         assert "%%QM_SETTINGS_CSS_REV%%" not in resp.text
         assert "%%QM_SETTINGS_JS_REV%%" not in resp.text
-        assert "/static/news.css?rev=" in resp.text
-        assert "/static/news.js?rev=" in resp.text
+        assert "/static/news.css" not in resp.text
+        assert "/static/news.js" not in resp.text
         for stylesheet in ("app", "lab", "after-close"):
-            assert f"/static/{stylesheet}.css?rev=" in resp.text
+            assert (f"/static/{stylesheet}.css" in resp.text) is (stylesheet == "app")
         assert "queueMarketReload" in app_script
-        assert "data:[{yAxis:0}]" in app_script
-        assert "type:'dashed'" in app_script
+        assert "context.setLineDash([3, 3])" in today_charts
+        assert "context.setLineDash([4, 3])" in today_charts
         assert "result.itemStyle.color = result.lineStyle.color" in charts_script
         assert "formatter:params =>" in app_script
         assert "point.seriesName === '牛熊分' ? fixed(numeric,1)" in app_script
@@ -443,47 +507,23 @@ class TestBasics:
         assert "function fearGreedAsOf" in app_script
         assert ".formatToParts(parsed)" in app_script
         assert "`${year}${Number(parts.month)}月${Number(parts.day)}日" in app_script
-        assert "function fearGreedGaugeLabels" in app_script
-        assert "[0,25,45,55,75,100].map" in app_script
-        assert "font:'600 13px" in app_script
+        assert "export function renderFearGreedGauge" in today_charts
+        assert "export function renderFearGreedHistory" in today_charts
+        assert "export function renderMarketSpark" in today_charts
         assert 'class="eyebrow market-sentiment-title"' in resp.text
         assert 'class="market-sentiment-value"' not in resp.text
         assert "CNN 当日恐贪指数 ${scoreText}，${label}" in app_script
         assert ".market-sentiment-panel { display:grid; gap:var(--space-sm)" in app_styles
-        assert ".fear-greed-gauge { width:100%; height:156px" in app_styles
-        assert ".fear-greed-history { width:100%; height:142px" in app_styles
-        assert "title:{show:true,offsetCenter:[0,'94%'],color:CHART_COLORS.ink2" in app_script
-        assert "fontSize:14,fontWeight:600,lineHeight:16" in app_script
-        assert "detail:{offsetCenter:[0,'42%']" in app_script
-        assert "fontSize:30,fontWeight:720,lineHeight:32" in app_script
-        assert "splitNumber:20" in app_script
-        assert "valueAnimation:!REDUCED_MOTION" in app_script
-        assert "animationDuration:REDUCED_MOTION ? 0 : 640" in app_script
-        assert "duration:640,easing:'cubicInOut'" in app_script
-        assert "formatter:'≤10 · 罕见恐惧'" in app_script
-        assert "position:'insideStartTop',distance:6" in app_script
+        assert ".fear-greed-gauge { position:relative" in app_styles
+        assert ".fear-greed-history { position:relative" in app_styles
+        assert ".mkt-spark-shell { position:relative" in app_styles
+        assert "getContext('2d')" in today_charts
+        assert "new ResizeObserver" in today_charts
+        assert "prefers-reduced-motion: reduce" in today_charts
         assert "黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
         assert "黄色虚线表示 10 分罕见恐惧参考阈值" in resp.text
-        assert "__qmMotion:true" in app_script
-        assert "id:'fear-greed-dial'" in app_script
-        assert "!chart.__qmFearGreedEntered" in app_script
-        assert "function replayFearGreedGaugeAnimation" in app_script
-        assert "control.dataset.marketPage === 'quotes'" in app_script
-        assert "control.getAttribute('aria-selected') !== 'true'" in app_script
-        assert "replayFearGreedGaugeAnimation(view)" in app_script
-        assert "chart.__qmFearGreedAnimationRevision !== animationRevision" in app_script
-        assert "marketFearGreed,width,height,0" in app_script
-        assert "target.animationDurationUpdate = 640" in app_script
-        assert "target.animationEasingUpdate = 'cubicInOut'" in app_script
-        assert "function fearGreedGaugeNeedle" in app_script
-        assert "function fearGreedGaugeRotation" in app_script
-        assert "210 - Math.max(0,Math.min(100,value)) * 2.4" in app_script
-        assert "rotation:fearGreedGaugeRotation(0)" in app_script
-        assert "id:'fear-greed-needle',type:'group'" in app_script
-        assert "pointer:{show:false}" in app_script
-        assert "keyframes:[" in app_script
-        assert "undefined,true" in app_script
-        assert "var explicitMotion = option.__qmMotion === true" in client.get("/static/charts.js").text
+        assert "requestAnimationFrame" in today_charts
+        assert "disposeTodayCharts" in today_charts
         assert "data-opportunity-rsi" in app_script
         assert 'class="mkt-rsi-label"><span>RSI(14)</span><small>日线</small>' in app_script
         assert "function rsiSparkPoints" in app_script
@@ -514,18 +554,19 @@ class TestBasics:
         assert 'data-decision-detail="${esc(decisionKlineState.symbol)}"><td colspan="10">' in app_script
         assert "data-decision-asset-toggle" in app_script
         assert "showKline(row.dataset.symbol" not in app_script
-        assert 'src="/static/charts.js"' in resp.text
-        assert 'href="/static/charts.css"' in resp.text
+        assert 'src="/static/charts.js"' not in resp.text
+        assert 'href="/static/charts.css"' not in resp.text
         assert 'href="/static/brand-intro.css"' in resp.text
         assert 'src="/static/brand-intro.js"' in resp.text
         assert 'href="/static/brand/quantmaster-favicon.svg"' in resp.text
         assert 'src="/static/brand/quantmaster-mark-inverse.svg"' in resp.text
         assert 'option value="swing"' not in resp.text
         assert 'id="brand-replay"' in resp.text
-        assert "window.QuantCharts.activateTab(tab)" in app_script
-        assert "ACTIVE_TAB_STORAGE_KEY" in app_script
-        assert "sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY)" in app_script
-        assert "activateTab(restoredControl, {persist:false, load:false})" in app_script
+        loader_script = client.get("/static/workspace-loader.js").text
+        assert "const WORKSPACES" in loader_script
+        assert "const PAGE_KEY = 'quantmaster.workspacePage.v2'" in loader_script
+        assert "await previous.adapter.unmount()" in loader_script
+        assert "await adapter.mount" in loader_script
         assert 'class="snapshot-table"' in app_script
         assert 'class="snapshot-period"' in app_script
         assert 'class="snapshot-pick"' in app_script
@@ -545,15 +586,15 @@ class TestBasics:
         assert 'id="asset-workbench"' in resp.text
         assert 'id="tab-candidates"' in resp.text
         assert 'id="candidate-workspace"' in resp.text
-        assert 'href="/static/candidates.css"' in resp.text
-        assert 'src="/static/candidates.js"' in resp.text
+        assert 'href="/static/candidates.css"' not in resp.text
+        assert 'src="/static/candidates.js"' not in resp.text
         assert 'id="tab-stock-analysis"' in resp.text
-        assert 'href="/static/stock-analysis.css"' in resp.text
-        assert 'src="/static/stock-analysis.js"' in resp.text
+        assert 'href="/static/stock-analysis.css"' not in resp.text
+        assert 'src="/static/stock-analysis.js"' not in resp.text
         assert 'id="tab-help"' in resp.text
         assert 'class="header-help" data-tab="help"' in resp.text
-        assert 'href="/static/help.css"' in resp.text
-        assert 'src="/static/help.js"' in resp.text
+        assert 'href="/static/help.css"' not in resp.text
+        assert 'src="/static/help.js"' not in resp.text
         assert f'data-trading-days="{TRADING_DAYS}"' in resp.text
         assert f'data-risk-free="{RISK_FREE}"' in resp.text
         assert 'data-regime-window="10y"' in app_script

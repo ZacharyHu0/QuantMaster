@@ -1658,185 +1658,6 @@ async function streamJson(path, opts, onProgress) {
   });
 })();
 
-/* ---------- 导航 ---------- */
-const ACTIVE_TAB_STORAGE_KEY = 'quantmaster.activeTab';
-const ACTIVE_WORKSPACE_PAGE_KEY = 'quantmaster.workspacePage.v2';
-const TAB_WORKSPACE = {
-  market:'today', rotation:'today', news:'today',
-  'after-close':'today', candidates:'today', 'stock-analysis':'today', decision:'today',
-  lab:'research', backtest:'research', paper:'account', ledger:'account', automation:'runtime',
-};
-const DEFAULT_WORKSPACE_PAGE = {
-  today:'quotes', research:'lab', account:'paper', runtime:'automation',
-};
-const ROUTE_PAGE = {
-  today:{quotes:'market', temperature:'market', style:'market', rotation:'rotation', industry:'rotation', themes:'rotation', etfs:'rotation', news:'news', 'after-close':'after-close', candidates:'candidates', 'stock-analysis':'stock-analysis', decision:'decision'},
-  research:{lab:'lab', backtest:'backtest'}, account:{paper:'paper', ledger:'ledger'}, runtime:{automation:'automation'},
-};
-
-function storedActiveTab() {
-  try { return sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY) || ''; }
-  catch (_) { return ''; }
-}
-
-function rememberActiveTab(tab) {
-  try { sessionStorage.setItem(ACTIVE_TAB_STORAGE_KEY, tab); }
-  catch (_) { /* 禁用会话存储时仍可正常导航 */ }
-}
-
-function forgetActiveTab() {
-  try { sessionStorage.removeItem(ACTIVE_TAB_STORAGE_KEY); }
-  catch (_) { /* 禁用会话存储时无需清理 */ }
-}
-
-function storedWorkspacePage(workspace) {
-  try {
-    const value = JSON.parse(sessionStorage.getItem(ACTIVE_WORKSPACE_PAGE_KEY) || '{}');
-    return typeof value?.[workspace] === 'string' ? value[workspace] : '';
-  } catch (_) { return ''; }
-}
-
-function rememberWorkspacePage(workspace, page) {
-  if (!workspace || !page) return;
-  try {
-    const value = JSON.parse(sessionStorage.getItem(ACTIVE_WORKSPACE_PAGE_KEY) || '{}');
-    value[workspace] = page;
-    sessionStorage.setItem(ACTIVE_WORKSPACE_PAGE_KEY, JSON.stringify(value));
-  } catch (_) { /* 会话存储不可用时使用默认页 */ }
-}
-
-function workspaceForTab(tab) { return TAB_WORKSPACE[tab] || ''; }
-
-function routeForControl(control) {
-  const workspace = workspaceForTab(control?.dataset.tab || '');
-  const page = control?.dataset.workspacePage || '';
-  if (!workspace || !page) return '';
-  return `#${workspace}/${page}`;
-}
-
-function updateRoute(control) {
-  const route = routeForControl(control);
-  if (route && location.hash !== route) history.replaceState(null, '', route);
-}
-
-function pageControl(workspace, page) {
-  const expectedTab = ROUTE_PAGE[workspace]?.[page];
-  return Array.from(document.querySelectorAll(`header [data-workspace-pages="${workspace}"] [data-tab]`)).find(control =>
-    control.dataset.workspacePage === page && (!expectedTab || control.dataset.tab === expectedTab),
-  ) || null;
-}
-
-function setWorkspace(workspace) {
-  document.querySelectorAll('[data-workspace]').forEach(button => {
-    button.classList.toggle('active', button.dataset.workspace === workspace);
-    button.setAttribute('aria-current', button.dataset.workspace === workspace ? 'page' : 'false');
-  });
-  document.querySelectorAll('[data-workspace-pages]').forEach(group => {
-    group.hidden = group.dataset.workspacePages !== workspace;
-  });
-  const context = document.querySelector('.workspace-context');
-  if (context) context.hidden = !document.querySelector(`[data-workspace-pages="${workspace}"]`);
-}
-
-function tabControl(tab) {
-  return Array.from(document.querySelectorAll('header [data-tab]')).find(control =>
-    control.dataset.tab === tab && !control.hidden && !control.disabled
-    && document.getElementById('tab-' + tab));
-}
-
-function loadActiveTab(tab) {
-  if ((tab === 'market' || tab === 'rotation')
-      && typeof window.loadRotationFeature === 'function') window.loadRotationFeature(tab);
-  if (tab === 'ledger') loadLedger();
-  if (tab === 'news' && typeof window.loadNews === 'function') window.loadNews();
-  if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
-    window.loadStockAnalysis();
-  }
-  if (tab === 'paper') loadPaper();
-  if (tab === 'help' && typeof window.loadHelp === 'function') window.loadHelp();
-  if (tab === 'candidates' && typeof window.loadCandidates === 'function') window.loadCandidates();
-  if (tab === 'after-close' && typeof window.loadAfterClose === 'function') window.loadAfterClose();
-  if (tab === 'automation' && typeof window.loadAutomation === 'function') window.loadAutomation();
-  if (tab === 'lab' && typeof window.loadQuantLab === 'function') window.loadQuantLab();
-  if (tab === 'decision' && !decisionLoaded && !decisionLoading) void loadDecisionHistory();
-}
-
-function activateTab(control, {persist = true, load = true, route = true} = {}) {
-  const tab = control?.dataset.tab;
-  if (!tab || !document.getElementById('tab-' + tab)) return false;
-  const replayFearGreed = tab === 'market' && control.dataset.marketPage === 'quotes'
-    && control.getAttribute('aria-selected') !== 'true';
-  document.querySelectorAll('header [data-tab]').forEach(b => b.classList.toggle('active', b === control));
-  document.querySelectorAll('header [role="tab"]').forEach(button => {
-    button.setAttribute('aria-selected', String(button === control));
-    button.tabIndex = button === control ? 0 : -1;
-  });
-  document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + tab));
-  if (persist) rememberActiveTab(tab);
-  const workspace = workspaceForTab(tab);
-  if (workspace) {
-    setWorkspace(workspace);
-    rememberWorkspacePage(workspace, control.dataset.workspacePage || DEFAULT_WORKSPACE_PAGE[workspace]);
-    if (route) updateRoute(control);
-  } else {
-    document.querySelectorAll('[data-workspace]').forEach(button => button.classList.remove('active'));
-    document.querySelectorAll('[data-workspace-pages]').forEach(group => { group.hidden = true; });
-    const context = document.querySelector('.workspace-context');
-    if (context) context.hidden = true;
-  }
-  if (tab !== 'help' && location.hash.startsWith('#help')) {
-    history.replaceState(null, '', location.pathname + location.search);
-  }
-  control.scrollIntoView({block:'nearest', inline:'nearest'});
-  Object.values(charts).forEach(c => c.resize());
-  if (load) loadActiveTab(tab);
-  if (window.QuantCharts) window.QuantCharts.activateTab(tab);
-  if (replayFearGreed) requestAnimationFrame(() => {
-    const view = document.getElementById('market-quotes-view');
-    if (view && !view.hidden && document.getElementById('tab-market')?.classList.contains('active')) {
-      replayFearGreedGaugeAnimation(view);
-    }
-  });
-  return true;
-}
-
-document.querySelector('header').addEventListener('click', e => {
-  const workspaceControl = e.target.closest('[data-workspace]');
-  if (workspaceControl) {
-    const workspace = workspaceControl.dataset.workspace;
-    const page = storedWorkspacePage(workspace) || DEFAULT_WORKSPACE_PAGE[workspace];
-    pageControl(workspace, page)?.click();
-    return;
-  }
-  const control = e.target.closest('[data-tab]');
-  if (!control) return;
-  activateTab(control);
-});
-
-function routeFromHash() {
-  const match = location.hash.match(/^#(today|research|account|runtime)\/([a-z-]+)$/);
-  if (match && ROUTE_PAGE[match[1]]?.[match[2]]) return {workspace:match[1], page:match[2]};
-  return null;
-}
-
-const initialRoute = routeFromHash();
-const restoredTab = location.hash.startsWith('#help') ? 'help' : (initialRoute ? ROUTE_PAGE[initialRoute.workspace][initialRoute.page] : storedActiveTab());
-const restoredControl = initialRoute ? pageControl(initialRoute.workspace, initialRoute.page) : tabControl(restoredTab);
-if (restoredControl) {
-  activateTab(restoredControl, {persist:false, load:false});
-  window.addEventListener('load', () => loadActiveTab(restoredTab), {once:true});
-} else if (restoredTab) {
-  forgetActiveTab();
-}
-
-window.addEventListener('hashchange', () => {
-  const route = routeFromHash();
-  // 市场与轮动的同级页还要切换本页视图，由 rotation.js 统一接管。
-  if (!route || route.workspace === 'today') return;
-  const control = pageControl(route.workspace, route.page);
-  if (control) activateTab(control, {persist:true, load:true, route:false});
-});
-
 /* ---------- 我的标的 ---------- */
 let assetListsData = { favorites:[], following:[], holdings:[] };
 let assetListsLoaded = false;
@@ -1943,8 +1764,6 @@ document.getElementById('asset-list').addEventListener('click', async event => {
   const symbol = event.target.closest('[data-show-asset]');
   if (symbol) showKline(symbol.dataset.showAsset, symbol.dataset.assetName || symbol.dataset.showAsset, '1d');
 });
-loadAssetLists();
-
 /* ---------- 市场 ---------- */
 let marketLoading = false;
 let marketReloadPending = false;
@@ -1952,6 +1771,12 @@ let marketColdRetryTimer = null;
 let marketColdRetryCount = 0;
 let marketStreamCycle = 0;
 let marketFearGreed = null;
+const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
+let todayChartsPromise = null;
+function todayCharts() {
+  if (!todayChartsPromise) todayChartsPromise = import('./today-charts.js');
+  return todayChartsPromise;
+}
 const PERSONAL_MARKET_GROUP = '我的股票';
 const marketGroupMeta = {
   [PERSONAL_MARKET_GROUP]: {order:0, description:'自选、关注与实盘持有'},
@@ -1987,94 +1812,6 @@ function rsiVisualClass(value) {
   return Number.isFinite(parsed) && parsed < threshold ? 'oversold' : '';
 }
 
-function fearGreedGaugeGeometry(width, height) {
-  return {
-    centerX:width * .5,
-    centerY:height * .54,
-    dialRadius:Math.min(width,height) * .36,
-  };
-}
-
-function fearGreedGaugeLabels(width, height) {
-  const {centerX,centerY,dialRadius} = fearGreedGaugeGeometry(width,height);
-  const radius = dialRadius + 17;
-  return [0,25,45,55,75,100].map(value => {
-    const angle = (210 - value / 100 * 240) * Math.PI / 180;
-    return {
-      type:'text',silent:true,x:centerX + Math.cos(angle) * radius,
-      y:centerY - Math.sin(angle) * radius,
-      style:{text:String(value),fill:MUTED,font:'600 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif',
-        align:'center',verticalAlign:'middle'},
-    };
-  });
-}
-
-function fearGreedGaugeRotation(value) {
-  return (210 - Math.max(0,Math.min(100,value)) * 2.4) * Math.PI / 180;
-}
-
-function fearGreedGaugeNeedle(value, width, height, tone, animatePointer = false) {
-  const {centerX,centerY,dialRadius} = fearGreedGaugeGeometry(width,height);
-  const rotation = fearGreedGaugeRotation(value);
-  const needle = {
-    id:'fear-greed-needle',type:'group',silent:true,x:centerX,y:centerY,rotation,
-    transition:['rotation'],
-    children:[
-      {type:'line',shape:{x1:-7,y1:0,x2:dialRadius * .56,y2:0},
-        style:{stroke:tone,lineWidth:3,lineCap:'round'}},
-      {type:'circle',shape:{cx:0,cy:0,r:5},
-        style:{fill:CHART_COLORS.surface,stroke:tone,lineWidth:2}},
-      {type:'circle',shape:{cx:0,cy:0,r:1.5},style:{fill:tone}},
-    ],
-  };
-  if (animatePointer && !REDUCED_MOTION) {
-    needle.keyframeAnimation = {
-      duration:640,easing:'cubicInOut',
-      keyframes:[
-        {percent:0,rotation:fearGreedGaugeRotation(0)},
-        {percent:1,rotation},
-      ],
-    };
-  }
-  return needle;
-}
-
-function fearGreedGaugeOption(data, width = 240, height = 190, displayScore, animatePointer = false) {
-  const targetScore = indicatorNumber(data?.score);
-  const available = Number.isFinite(targetScore);
-  const shownScore = displayScore === undefined ? targetScore : indicatorNumber(displayScore);
-  const value = available && Number.isFinite(shownScore)
-    ? Math.max(0,Math.min(100,shownScore)) : 0;
-  const tone = targetScore < 25 ? CHART_COLORS.danger : targetScore < 45 ? CHART_COLORS.warning
-    : targetScore < 55 ? CHART_COLORS.neutral : targetScore < 75 ? CHART_COLORS.primary : CHART_COLORS.down;
-  return {
-    __qmMotion:true, backgroundColor:'transparent', animation:!REDUCED_MOTION,
-    animationDuration:REDUCED_MOTION ? 0 : 640, animationEasing:'cubicInOut',
-    animationDurationUpdate:REDUCED_MOTION ? 0 : 320, animationEasingUpdate:'cubicInOut',
-    graphic:[...fearGreedGaugeLabels(width,height),
-      fearGreedGaugeNeedle(value,width,height,tone,animatePointer)],
-    series:[{
-      id:'fear-greed-dial',type:'gauge',min:0,max:100,startAngle:210,endAngle:-30,
-      center:['50%','54%'], radius:'72%', splitNumber:20,
-      axisLine:{roundCap:true,lineStyle:{width:7,color:[
-        [.25,CHART_COLORS.danger],[.45,CHART_COLORS.warning],
-        [.55,CHART_COLORS.neutral],[.75,CHART_COLORS.primary],[1,CHART_COLORS.down],
-      ]}},
-      pointer:{show:false},
-      anchor:{show:false},
-      axisTick:{show:false},
-      splitLine:{show:false},
-      axisLabel:{show:false},
-      title:{show:true,offsetCenter:[0,'94%'],color:CHART_COLORS.ink2,
-        fontSize:14,fontWeight:600,lineHeight:16},
-      detail:{offsetCenter:[0,'42%'],color:available ? CHART_COLORS.ink : MUTED,
-        fontSize:30,fontWeight:720,lineHeight:32,valueAnimation:!REDUCED_MOTION,
-        formatter:animatedValue => available ? Number(animatedValue).toFixed(1) : '—'},
-      data:[{value,name:data?.rating_label || '暂不可用'}],
-    }],
-  };
-}
-
 function fearGreedAsOf(value) {
   if (!value) return '';
   const parsed = new Date(value);
@@ -2087,74 +1824,14 @@ function fearGreedAsOf(value) {
   return `${year}${Number(parts.month)}月${Number(parts.day)}日 ${parts.hour}:${parts.minute}`;
 }
 
-function fearGreedHistoryOption(data) {
-  const history = Array.isArray(data?.history) ? data.history.filter(point =>
-    point?.date && Number.isFinite(Number(point?.score))) : [];
-  return baseOpt({
-    animation:!REDUCED_MOTION,
-    grid:{left:38,right:14,top:18,bottom:28},
-    tooltip:{trigger:'axis',confine:true,formatter:params => {
-      const point = params[0];
-      return `${marketSparkDate(point?.value?.[0])}<br>恐贪指数&nbsp;&nbsp;<b>${Number(point?.value?.[1]).toFixed(1)}</b>`;
-    }},
-    xAxis:timeAxis(),
-    yAxis:{...valAxis(),min:0,max:100,interval:25},
-    graphic:history.length ? [] : [{type:'text',left:'center',top:'middle',
-      style:{text:'历史数据暂缺',fill:MUTED,fontSize:11}}],
-    series:[{
-      name:'CNN 恐贪',type:'line',showSymbol:false,sampling:'lttb',smooth:.12,
-      data:history.map(point => [point.date,Number(point.score)]),
-      lineStyle:{width:2,color:CHART_COLORS.primary},
-      areaStyle:{color:CHART_COLORS.primary,opacity:.08},
-      markLine:{silent:true,symbol:'none',label:{show:true,formatter:'≤10 · 罕见恐惧',
-        position:'insideStartTop',distance:6,color:CHART_COLORS.warning,fontSize:10,
-        backgroundColor:CHART_COLORS.surface,borderRadius:3,padding:[2,5]},
-        lineStyle:{color:CHART_COLORS.warning,width:1,type:'dashed'},data:[{yAxis:10}]},
-    }],
-  });
-}
-
-function renderFearGreedGauge(element, replay = false) {
-  const chart = mkChart(element.id, false);
-  if (!chart) return;
-  if (replay) chart.__qmFearGreedEntered = false;
-  const animationRevision = (chart.__qmFearGreedAnimationRevision || 0) + 1;
-  chart.__qmFearGreedAnimationRevision = animationRevision;
-  const width = element.clientWidth, height = element.clientHeight;
-  const score = indicatorNumber(marketFearGreed?.score);
-  const shouldEnter = Number.isFinite(score) && !REDUCED_MOTION && !chart.__qmFearGreedEntered;
-  if (shouldEnter) {
-    chart.__qmFearGreedEntered = true;
-    chart.setOption(fearGreedGaugeOption(marketFearGreed,width,height,0),{notMerge:true});
-    requestAnimationFrame(() => {
-      if (chart.isDisposed() || chart.getDom() !== element
-          || chart.__qmFearGreedAnimationRevision !== animationRevision) return;
-      const target = fearGreedGaugeOption(marketFearGreed,width,height,undefined,true);
-      target.animationDurationUpdate = 640;
-      target.animationEasingUpdate = 'cubicInOut';
-      chart.setOption(target,{notMerge:false});
-    });
-    return;
-  }
-  if (Number.isFinite(score)) chart.__qmFearGreedEntered = true;
-  chart.setOption(fearGreedGaugeOption(marketFearGreed,width,height),{
-    notMerge:!chart.__qmFearGreedEntered,
-  });
-}
-
-function replayFearGreedGaugeAnimation(root = document) {
-  root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
-    renderFearGreedGauge(element,true);
-  });
-}
-
 function renderFearGreedVisuals(root = document) {
-  root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
-    renderFearGreedGauge(element);
-  });
-  root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
-    const chart = mkChart(element.id, false);
-    if (chart) chart.setOption(fearGreedHistoryOption(marketFearGreed),{notMerge:true});
+  void todayCharts().then(module => {
+    root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
+      module.renderFearGreedGauge(element, marketFearGreed);
+    });
+    root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
+      module.renderFearGreedHistory(element, marketFearGreed);
+    });
   });
 }
 
@@ -2359,12 +2036,7 @@ function disposeMarketSparks() {
   marketSparkObserver?.disconnect();
   marketSparkObserver = null;
   for (const element of marketSparkTasks.keys()) cancelMarketSparkTask(element);
-  for (const [id, chart] of Object.entries(charts)) {
-    if (id.startsWith('spark-stream-')) {
-      chart.dispose();
-      delete charts[id];
-    }
-  }
+  if (todayChartsPromise) void todayChartsPromise.then(module => module.disposeTodayCharts(document.getElementById('tab-market')));
 }
 
 function marketChangeSeries(nav) {
@@ -2397,86 +2069,6 @@ function marketSparkDate(value) {
   return parsed.toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replaceAll('/','.');
 }
 
-function marketSparkMonth(value, includeYear = true) {
-  const parsed = marketSparkParsedDate(value);
-  if (Number.isNaN(parsed.getTime())) return '—';
-  const month = String(parsed.getMonth() + 1).padStart(2,'0');
-  return includeYear ? `${parsed.getFullYear()}.${month}` : `${month}月`;
-}
-
-function marketSparkOption(item, changeSeries) {
-  const summary = marketSparkSummary(changeSeries);
-  const categories = changeSeries.map(point => point[0]);
-  const values = changeSeries.map(point => Number(point[1]));
-  const lastIndex = categories.length - 1;
-  const tickIndexes = new Set(categories.length < 3
-    ? categories.map((_,index) => index)
-    : [0,Math.round(lastIndex / 2),lastIndex]);
-  const firstYear = categories.length ? marketSparkParsedDate(categories[0]).getFullYear() : null;
-  const tone = summary.last > 0 ? CHART_COLORS.up
-    : summary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
-  const signed = value => `${value > 0 ? '+' : ''}${Number(value).toFixed(2)}%`;
-  const dailyChanges = changeSeries.map((point, index) => {
-    if (!index) return null;
-    const previous = 1 + Number(changeSeries[index - 1]?.[1] || 0) / 100;
-    const current = 1 + Number(point?.[1] || 0) / 100;
-    return previous ? (current / previous - 1) * 100 : null;
-  });
-  return {
-    backgroundColor:'transparent',
-    animation:!REDUCED_MOTION,
-    grid:{left:22,right:22,top:8,bottom:19},
-    xAxis:{
-      type:'category',data:categories,show:true,boundaryGap:false,
-      axisLine:{show:false},axisTick:{show:false},splitLine:{show:false},
-      axisLabel:{
-        show:true,color:MUTED,fontSize:9,margin:5,hideOverlap:true,
-        showMinLabel:true,showMaxLabel:true,
-        interval:index => tickIndexes.has(index),
-        formatter:(value,index) => {
-          if (index === 0 || index === lastIndex) return marketSparkMonth(value,true);
-          const year = marketSparkParsedDate(value).getFullYear();
-          return marketSparkMonth(value,year !== firstYear);
-        },
-      },
-    },
-    yAxis:{type:'value',show:false,scale:true,min:summary.min,max:summary.max},
-    tooltip:{
-      show:true,trigger:'axis',confine:true,transitionDuration:REDUCED_MOTION ? 0 : .18,
-      axisPointer:{type:'line',snap:true,lineStyle:{color:AXIS,width:1,type:'dashed'}},
-      formatter:params => {
-        const point = params.find(value => value.seriesId === 'market-spark-trend') || params[0];
-        const dataIndex = Number(point?.dataIndex);
-        const rawValue = Array.isArray(point?.value) ? point.value[1] : point?.value;
-        const parsedValue = Number(rawValue);
-        const value = Number.isFinite(parsedValue) ? parsedValue : Number(values[dataIndex] || 0);
-        const date = Array.isArray(point?.value) ? point.value[0] : categories[dataIndex];
-        const daily = dailyChanges[dataIndex];
-        const dailyText = Number.isFinite(daily) ? signed(daily) : '—';
-        return `${marketSparkDate(date)}<br><span style="color:${tone}">●</span> 区间涨跌&nbsp;&nbsp;<b>${signed(value)}</b><br><span style="color:${tone}">●</span> 当日涨跌&nbsp;&nbsp;<b>${dailyText}</b>`;
-      },
-    },
-    aria:{enabled:true,label:{description:`${item.name}区间走势图，最新区间涨跌${signed(summary.last)}`}},
-    series:[
-      {
-        id:'market-spark-trend',name:'区间走势',type:'line',data:values,
-        showSymbol:false,symbol:'none',sampling:'lttb',silent:false,
-        lineStyle:{width:2,color:tone,cap:'round',join:'round'},
-        areaStyle:{color:tone,opacity:.10,origin:'auto'},
-        emphasis:{disabled:true},
-        markLine:{silent:true,symbol:'none',label:{show:false},
-          lineStyle:{color:'rgba(195,194,183,.32)',width:1,type:'dashed'},data:[{yAxis:0}]},
-      },
-      {
-        id:'market-spark-latest',name:'最新位置',type:'scatter',silent:true,z:4,
-        data:changeSeries.length ? [[categories.at(-1),values.at(-1)]] : [],symbolSize:7,
-        itemStyle:{color:tone,borderColor:CHART_COLORS.surface,borderWidth:2},
-        tooltip:{show:false},
-      },
-    ],
-  };
-}
-
 function createMarketStreamRenderer(root, pinnedGroups = {}) {
   const cycle = ++marketStreamCycle, groups = new Map(), entries = new Map();
   let index = 0, count = 0;
@@ -2507,8 +2099,8 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.item = item;
     const changeSeries = marketChangeSeries(item.nav);
     const sparkSummary = marketSparkSummary(changeSeries);
-    const sparkTone = sparkSummary.last > 0 ? CHART_COLORS.up
-      : sparkSummary.last < 0 ? CHART_COLORS.down : CHART_COLORS.neutral;
+    const sparkTone = sparkSummary.last > 0 ? MARKET_TONES.up
+      : sparkSummary.last < 0 ? MARKET_TONES.down : MARKET_TONES.neutral;
     const periodTone = sparkSummary.last > 0 ? 'up' : sparkSummary.last < 0 ? 'down' : '';
     const periodReturn = `${sparkSummary.last > 0 ? '+' : ''}${sparkSummary.last.toFixed(2)}%`;
     entry.element.style.setProperty('--market-tone',sparkTone);
@@ -2546,9 +2138,9 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
     queueMarketSpark(entry.element,() => {
-      if (!document.getElementById(entry.sparkId)) return;
-      const chart = mkChart(entry.sparkId);
-      chart.setOption(marketSparkOption(item,changeSeries),{notMerge:true});
+      const root = document.getElementById(entry.sparkId);
+      if (!root) return;
+      void todayCharts().then(module => module.renderMarketSpark(root,item,changeSeries));
     });
   }
   return {
@@ -2889,6 +2481,8 @@ function renderKlineSeries(chart, data) {
 
 let activeKline = {symbol:'', name:'', frequency:'1d', request:0, controller:null};
 async function showKline(symbol, name, frequency = '1d') {
+  const {loadAdvancedCharts} = await import('./advanced-charts.js');
+  await loadAdvancedCharts();
   const previousController = activeKline.controller;
   const request = activeKline.request + 1;
   const controller = new AbortController();
@@ -2923,8 +2517,6 @@ document.getElementById('kline-frequency').addEventListener('click', e => {
   if (!frequency || !activeKline.symbol || frequency === activeKline.frequency) return;
   showKline(activeKline.symbol, activeKline.name, frequency);
 });
-loadMarket();
-
 /* ---------- 决策 ---------- */
 let decisionLoaded = false, decisionLoading = false, decisionHistoryLoading = false;
 let decisionHistoryKey = '', decisionViewRequest = 0;
@@ -3746,7 +3338,6 @@ async function loadFactorList() {
     document.dispatchEvent(new CustomEvent('quantmaster:factor-catalog', {detail:data.factors}));
   } catch (e) { /* 非致命 */ }
 }
-loadFactorList();
 document.addEventListener('quantmaster:factors-changed', loadFactorList);
 
 /* ---------- 真实账户账本 ---------- */

@@ -1,4 +1,4 @@
-(() => {
+const settingsFeature = (() => {
   'use strict';
 
   const state = {
@@ -1637,7 +1637,22 @@
     switchSection(section);
   }
 
-  window.QuantMasterManagement = {
+  const management = {
     request, ensureSettings: loadSettings, state, open: openSettings,
   };
+  function unmount() {
+    [
+      'migrationTimer', 'dataRefreshTimer', 'researchTimer', 'modelCheckTimer',
+      'autoSaveTimer', 'retryTimer', 'weixinLoginTimer', 'contractMigrationTimer',
+    ].forEach(key => {
+      clearTimeout(state[key]);
+      state[key] = null;
+    });
+    clearTimeout(freeStockDbPollTimer);
+    freeStockDbPollTimer = null;
+  }
+
+  return {mount:loadSettings, unmount, refresh:() => loadSettings(true), ...management};
 })();
+
+export const {mount, unmount, refresh, request, ensureSettings, state, open} = settingsFeature;
