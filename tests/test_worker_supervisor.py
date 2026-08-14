@@ -15,7 +15,7 @@ def test_worker_supervisor_is_single_instance_and_runs_outside_web_process(tmp_p
         tmp_path,
         target=supervisor_probe,
     )
-    secondary = WorkerSupervisor(tmp_path)
+    secondary = WorkerSupervisor(tmp_path, target=supervisor_probe)
     try:
         assert primary.start(bootstrap_rotation=True) == "started"
         deadline = time.monotonic() + 10

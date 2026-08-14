@@ -183,12 +183,12 @@ def isolated_config(tmp_path, request):
     if request.node.get_closest_marker("module_isolated_config") is not None:
         yield None
         return
+    from quantmaster.bootstrap import reset_worker_supervisor_for_tests
     from quantmaster.data.repair import reset_data_repair_manager_for_tests
     from quantmaster.rotation.etf_jobs import shutdown_etf_research_jobs
     from quantmaster.rotation.etf_research import reset_etf_research_service
     from quantmaster.rotation.service import reset_rotation_runtime_for_tests
     from quantmaster.runtime.sqlite import reset_sqlite_runtime_for_tests
-    from quantmaster.runtime.supervisor import reset_worker_supervisor_for_tests
 
     previous_supervisor = os.environ.get("QM_DISABLE_WORKER_SUPERVISOR")
     os.environ["QM_DISABLE_WORKER_SUPERVISOR"] = "1"

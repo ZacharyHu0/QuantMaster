@@ -107,10 +107,9 @@ def create_lifespan(*, bootstrap_rotation: bool):
         reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
         _stream_runtime()
         _configure_reload_worker_logging()
+        from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
         from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.logging_config import current_log_path
-        from quantmaster.runtime.supervisor import get_worker_supervisor
-        from quantmaster.runtime.worker import get_runtime_worker
         from quantmaster.server.management import capture_runtime_baseline
 
         capture_runtime_baseline()
