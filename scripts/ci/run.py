@@ -377,9 +377,16 @@ def main() -> int:
                 env=build_env,
             )
             smoke_fresh_wheel()
-            run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm",
-                "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
-                str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
+            run_external(
+                "PyInstaller smoke",
+                [
+                    "uv", "run", "--no-project", "--no-sync", "--python", str(PYTHON),
+                    "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
+                    "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
+                    str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec",
+                ],
+                env=build_env,
+            )
             exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
             if exe.exists():
                 run(

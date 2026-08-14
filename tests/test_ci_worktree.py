@@ -284,6 +284,45 @@ def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
 
 
+def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    external_calls = []
+    project_calls = []
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(run, "PACKAGE_ROOT", artifacts / "packages")
+    monkeypatch.setattr(run, "RUN_ROOT", artifacts / "pytest" / "run")
+    monkeypatch.setattr(run, "PYTEST_CACHE", artifacts / "pytest" / "cache")
+    monkeypatch.setattr(
+        run, "parse_args",
+        lambda: run.argparse.Namespace(
+            fast=False, full=False, ui=False, package=True, rust=False, all=False,
+            serial=False, refresh_durations=False,
+        ),
+    )
+    monkeypatch.setattr(run, "prepare_pytest_directory", lambda path: path)
+    monkeypatch.setattr(run, "cleanup_run_root", lambda path: None)
+    monkeypatch.setattr(run, "smoke_fresh_wheel", lambda: None)
+    monkeypatch.setattr(
+        run, "run",
+        lambda label, command, **kwargs: project_calls.append((label, command, kwargs)),
+    )
+    monkeypatch.setattr(
+        run, "run_external",
+        lambda label, command, **kwargs: external_calls.append((label, command, kwargs)),
+    )
+
+    assert run.main() == 0
+
+    label, command, kwargs = next(call for call in external_calls if call[0] == "PyInstaller smoke")
+    assert label == "PyInstaller smoke"
+    assert command[:11] == [
+        "uv", "run", "--no-project", "--no-sync", "--python", str(run.PYTHON),
+        "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
+    ]
+    assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
+    assert all(label != "PyInstaller smoke" for label, _command, _kwargs in project_calls)
+
+
 def test_full_shards_use_three_way_parallelism(monkeypatch):
     observed = {}
 
