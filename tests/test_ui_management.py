@@ -120,30 +120,39 @@ def _wait_for_ui_runtime(url) -> None:
 def _assert_no_ui_process_owners() -> None:
     deadline = time.monotonic() + 1
     while True:
-        frames = sys._current_frames()
-        threads = []
-        for active in threading.enumerate():
-            if active is threading.main_thread() or not active.is_alive():
-                continue
-            frame = frames.get(active.ident) if active.ident is not None else None
-            threads.append({
-                "name": active.name, "ident": active.ident, "daemon": active.daemon,
-                "stack": "".join(traceback.format_stack(frame)) if frame else "unavailable",
-            })
-        children = [
-            {"pid": child.pid, "name": child.name, "exitcode": child.exitcode}
-            for child in multiprocessing.active_children()
-        ]
         blocking_threads = [
-            item for item in threads
-            if not item["daemon"] and not str(item["name"]).startswith("pytest_timeout ")
+            active for active in threading.enumerate()
+            if active is not threading.main_thread()
+            and active.is_alive()
+            and not active.daemon
+            and not active.name.startswith("pytest_timeout ")
         ]
+        children = multiprocessing.active_children()
         if not blocking_threads and not children:
             return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(0.01, remaining))
+
+    frames = sys._current_frames()
+    threads = []
+    for active in threading.enumerate():
+        if active is threading.main_thread() or not active.is_alive():
+            continue
+        frame = frames.get(active.ident) if active.ident is not None else None
+        threads.append({
+            "name": active.name, "ident": active.ident, "daemon": active.daemon,
+            "stack": "".join(traceback.format_stack(frame)) if frame else "unavailable",
+        })
+    children = [
+        {"pid": child.pid, "name": child.name, "exitcode": child.exitcode}
+        for child in multiprocessing.active_children()
+    ]
+    blocking_threads = [
+        item for item in threads
+        if not item["daemon"] and not str(item["name"]).startswith("pytest_timeout ")
+    ]
     assert not blocking_threads and not children, (
         f"UI 测试生命周期仍有阻塞所有者: threads={blocking_threads!r} "
         f"children={children!r} daemon_threads={threads!r}"
