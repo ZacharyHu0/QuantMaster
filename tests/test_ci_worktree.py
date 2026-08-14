@@ -186,6 +186,26 @@ def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
     assert delays == [run._CLEANUP_INITIAL_DELAY_SECONDS]
 
 
+def test_cleanup_run_root_retries_directory_not_empty(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    attempts = []
+    delays = []
+
+    def remove(path):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise _windows_cleanup_error(145, path)
+
+    monkeypatch.setattr(run.shutil, "rmtree", remove)
+    monkeypatch.setattr(run, "_cleanup_sleep", delays.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root, run_root]
+    assert delays == [run._CLEANUP_INITIAL_DELAY_SECONDS]
+
+
 def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, tmp_path):
     run_root = tmp_path / "run" / "ui" / "qm-ui0"
     attempts = []
