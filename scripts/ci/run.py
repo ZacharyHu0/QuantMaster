@@ -400,6 +400,16 @@ def main() -> int:
                     )
                     run_external("EXE help", [str(exe), "--help"], env=exe_env)
                     run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
+                    if os.name == "nt":
+                        run_external(
+                            "EXE runtime identity smoke",
+                            [
+                                str(PYTHON),
+                                "scripts/release/smoke_frozen_runtime.py",
+                                str(exe),
+                            ],
+                            env=exe_env,
+                        )
             else:
                 print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")
 

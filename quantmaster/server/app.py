@@ -37,6 +37,7 @@ from quantmaster.data.base import DataEvidenceNotReady, MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
 from quantmaster.runtime.contracts import ContractModel
+from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
@@ -732,6 +733,7 @@ async def liveness() -> dict:
 
     Optional provider/worker state is reported separately by ``/diagnostics``.
     """
+    identity = get_application_identity()
     threads = threading.active_count()
     return {
         "status": "ok",
@@ -739,6 +741,9 @@ async def liveness() -> dict:
         "release_date": RELEASE_DATE,
         "process_pid": os.getpid(),
         "generation": os.environ.get("QM_WEB_GENERATION", "0"),
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
         "web_threads": threads,
         "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
     }

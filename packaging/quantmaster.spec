@@ -2,15 +2,26 @@
 # 产物：.artifacts/packages/desktop/QuantMaster(.exe) 单文件；双击运行 = qm app，
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
-from pathlib import Path
+import runpy
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
 project_root = Path(SPECPATH).parent
+packaged_build_sha = runpy.run_path(
+    str(project_root / "scripts/release/check_desktop_artifact.py")
+)["packaged_build_sha"]
 release_scope = {}
 exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
+build_sha = packaged_build_sha(project_root)
+runtime_identity_hook = Path(workpath) / "quantmaster_runtime_identity.py"
+runtime_identity_hook.write_text(
+    "from quantmaster.runtime.identity import bind_packaged_build\n"
+    f"bind_packaged_build({build_sha!r})\n",
+    encoding="utf-8",
+)
 version_info = None
 if sys.platform == "win32":
     from PyInstaller.utils.win32.versioninfo import (
@@ -58,6 +69,7 @@ a = Analysis(
     [str(project_root / "packaging/entry.py")],
     pathex=[str(project_root)],
     datas=datas,
+    runtime_hooks=[str(runtime_identity_hook)],
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",

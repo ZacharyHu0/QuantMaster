@@ -44,10 +44,11 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
     )
 
     freeze = entry.index("multiprocessing.freeze_support()")
+    stdout = entry.index('sys.stdout.reconfigure(encoding="utf-8")')
     configure = entry.index("configure_installed_instance()")
     cli_import = entry.index("from quantmaster.cli import main")
 
-    assert freeze < configure < cli_import
+    assert freeze < stdout < configure < cli_import
 
 
 def test_project_icon_has_valid_group_and_images() -> None:
@@ -122,6 +123,74 @@ def test_pyinstaller_collects_only_required_scipy_array_api_modules() -> None:
     assert 'release_scope["VERSION"]' in spec
     assert "version=version_info" in spec
     assert 'if sys.platform == "win32":' in spec
+
+
+def test_pyinstaller_runtime_hook_binds_clean_full_git_sha() -> None:
+    from pathlib import Path
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+    assert "build_sha = packaged_build_sha(project_root)" in spec
+    assert '"diff-index"' not in spec
+    assert '"status", "--porcelain"' not in spec
+    assert "bind_packaged_build" in spec
+    assert "runtime_hooks=[str(runtime_identity_hook)]" in spec
+
+
+def test_pyinstaller_spec_loads_identity_policy_outside_project_sys_path(
+    tmp_path, monkeypatch,
+) -> None:
+    from pathlib import Path
+    from types import ModuleType, SimpleNamespace
+
+    project_root = Path(__file__).parents[1].resolve()
+    spec_path = project_root / "packaging" / "quantmaster.spec"
+    source = spec_path.read_text(encoding="utf-8")
+    bootstrap = source.split("version_info = None", 1)[0] + "version_info = None\n"
+    outside = tmp_path / "outside"
+    workpath = tmp_path / "work"
+    outside.mkdir()
+    workpath.mkdir()
+    monkeypatch.chdir(outside)
+    monkeypatch.setattr(
+        sys,
+        "path",
+        [
+            entry for entry in sys.path
+            if entry and Path(entry).resolve() != project_root
+        ],
+    )
+    for name in tuple(sys.modules):
+        if name == "scripts" or name.startswith("scripts."):
+            monkeypatch.delitem(sys.modules, name)
+
+    hooks = ModuleType("PyInstaller.utils.hooks")
+    hooks.collect_submodules = lambda *_args, **_kwargs: []
+    monkeypatch.setitem(sys.modules, "PyInstaller", ModuleType("PyInstaller"))
+    monkeypatch.setitem(sys.modules, "PyInstaller.utils", ModuleType("PyInstaller.utils"))
+    monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", hooks)
+    head = "a" * 40
+
+    def clean_git(command, **_kwargs):
+        if command[1] == "diff-index":
+            return SimpleNamespace(returncode=0, stdout="")
+        if command[1] == "ls-files":
+            return SimpleNamespace(returncode=0, stdout="")
+        return SimpleNamespace(returncode=0, stdout=f"{head}\n")
+
+    monkeypatch.setattr(subprocess, "run", clean_git)
+    scope = {
+        "SPECPATH": str(project_root / "packaging"),
+        "workpath": str(workpath),
+    }
+
+    exec(compile(bootstrap, str(spec_path), "exec"), scope)
+
+    assert scope["build_sha"] == head
+    assert head in (workpath / "quantmaster_runtime_identity.py").read_text(
+        encoding="utf-8",
+    )
 
 
 @pytest.mark.parametrize("version", ["1.2", "1.2.3.4", "1.x.3", "-1.2.3"])

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 from quantmaster.cli import main
 from quantmaster.doctor import _api_issues, _route_paths, run_doctor
+from quantmaster.runtime.identity import get_application_identity
 
 
 def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config):
@@ -38,6 +40,21 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
     assert operations["database_schemas"]["paper"] == {
         "status": "ok", "current": 5, "expected": 5,
     }
+
+
+def test_deep_doctor_probes_spawned_compute_identity(isolated_config):
+    expected = get_application_identity()
+
+    report = run_doctor(deep=True)
+
+    probe = report["metrics"]["application_identity_probe"]
+    assert probe == {
+        "build_sha": expected.build_sha,
+        "slot_id": expected.slot_id,
+        "runtime_generation": expected.runtime_generation,
+        "pid": probe["pid"],
+    }
+    assert probe["pid"] != os.getpid()
 
 
 def test_deep_doctor_reports_corrupt_sqlite_as_high_risk(isolated_config):

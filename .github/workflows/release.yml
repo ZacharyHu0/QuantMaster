@@ -83,6 +83,9 @@ jobs:
           uv run python scripts/release/check_desktop_artifact.py
           ".artifacts/packages/desktop/${{ matrix.platform.artifact }}"
           --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
+      - name: Smoke frozen Windows process tree
+        if: runner.os == 'Windows'
+        run: uv run python scripts/release/smoke_frozen_runtime.py .artifacts/packages/desktop/QuantMaster.exe
       - name: Rename artifact
         shell: bash
         run: mv ".artifacts/packages/desktop/${{ matrix.platform.artifact }}" "${{ matrix.platform.asset }}"

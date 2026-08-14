@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from quantmaster.config import get_config
+from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.lifecycle_state import RuntimeLifecycle
 from quantmaster.runtime.maintenance import MaintenanceParticipant, maintenance_barrier
 from quantmaster.runtime.worker_ipc import RuntimeCommandServer, WorkerCommandError
@@ -73,14 +74,24 @@ def runtime_worker_status() -> dict[str, Any]:
             "supervisor": supervisor,
         }
     age_seconds = max(0.0, time.time() - updated_at)
-    available = age_seconds <= WORKER_HEARTBEAT_MAX_AGE_SECONDS
+    identity = get_application_identity()
+    identity_matches = all(
+        str(value.get(key) or "") == getattr(identity, key)
+        for key in ("build_sha", "slot_id", "runtime_generation")
+    )
+    available = age_seconds <= WORKER_HEARTBEAT_MAX_AGE_SECONDS and identity_matches
+    reason = (
+        "runtime_identity_mismatch"
+        if not identity_matches
+        else "" if available else "runtime-worker 心跳已过期"
+    )
     return {
         **value,
         "status": "running" if available else "unavailable",
         "available": available,
         "age_seconds": round(age_seconds, 3),
         "heartbeat_path": str(path),
-        "reason": "" if available else "runtime-worker 心跳已过期",
+        "reason": reason,
     }
 
 
@@ -127,6 +138,7 @@ class RuntimeWorker:
     def _write_heartbeat(self) -> None:
         path = _heartbeat_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        identity = get_application_identity()
         value = {
             "worker_id": self._worker_id,
             "generation": self._generation,
@@ -137,6 +149,9 @@ class RuntimeWorker:
             "lifecycle": self._lifecycle.snapshot(),
             "effective_revision": self._config_revision,
             "config_generation": self._config_generation,
+            "build_sha": identity.build_sha,
+            "slot_id": identity.slot_id,
+            "runtime_generation": identity.runtime_generation,
         }
         command_server = self._command_server
         value["commands_available"] = bool(

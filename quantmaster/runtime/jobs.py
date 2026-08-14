@@ -27,6 +27,12 @@ from typing import Any, Protocol
 
 from quantmaster.config import get_config
 from quantmaster.runtime.contracts import reject_nonfinite
+from quantmaster.runtime.identity import (
+    ApplicationIdentity,
+    RuntimeIdentityMismatch,
+    get_application_identity,
+    require_application_identity,
+)
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -1561,6 +1567,7 @@ def _run_process_handler(
     owner: str,
     lease_token: str,
     spec: dict[str, Any],
+    expected_identity: ApplicationIdentity,
     result_queue: Any,
 ) -> None:
     """Spawn target: run pure computation while the parent owns the lease."""
@@ -1570,6 +1577,7 @@ def _run_process_handler(
 
         initialize_windows_app_process()
         os.environ["QM_COMPUTE_CHILD"] = "1"
+        require_application_identity(expected_identity)
         handler = _resolve_process_entrypoint(entrypoint)
         context = ProcessJobContext(store_path, job_id, owner, lease_token)
         if context.llm_scope:
@@ -1594,7 +1602,11 @@ def _run_process_handler(
         result_queue.put({
             "kind": "error",
             "type": exc.__class__.__name__,
-            "detail": "计算子进程未完成；详情见诊断记录",
+            "detail": (
+                "runtime_identity_mismatch"
+                if isinstance(exc, RuntimeIdentityMismatch)
+                else "计算子进程未完成；详情见诊断记录"
+            ),
             "frames": [
                 {"file": frame.filename, "line": frame.lineno, "function": frame.name}
                 for frame in traceback.extract_tb(exc.__traceback__, limit=20)
@@ -1906,6 +1918,7 @@ class UnifiedJobRuntime:
 
         context = multiprocessing.get_context("spawn")
         results = context.Queue(maxsize=1)
+        application_identity = get_application_identity()
         process = context.Process(
             target=_run_process_handler,
             args=(
@@ -1915,6 +1928,7 @@ class UnifiedJobRuntime:
                 self.identity.value,
                 lease_token,
                 dict(job["spec"]),
+                application_identity,
                 results,
             ),
             name=f"qm-compute-{str(job['type']).replace('.', '-')}-{str(job['id'])[-8:]}",

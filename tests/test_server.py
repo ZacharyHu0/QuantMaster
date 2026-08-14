@@ -79,6 +79,26 @@ class TestBasics:
         assert client.get("/api/v1/health/live").status_code == 404
         assert client.get("/api/v1/health/ready").status_code == 404
 
+    def test_health_reports_exact_application_identity(self, monkeypatch):
+        from quantmaster.runtime.identity import (
+            BUILD_SHA_ENV,
+            RUNTIME_GENERATION_ENV,
+            SLOT_ID_ENV,
+        )
+
+        build_sha = "0123456789abcdef0123456789abcdef01234567"
+        monkeypatch.setenv(BUILD_SHA_ENV, build_sha)
+        monkeypatch.setenv(SLOT_ID_ENV, build_sha)
+        monkeypatch.setenv(RUNTIME_GENERATION_ENV, "a" * 32)
+        monkeypatch.setenv("QM_WEB_GENERATION", "7")
+
+        health = client.get("/api/v1/health").json()
+
+        assert health["build_sha"] == build_sha
+        assert health["slot_id"] == build_sha
+        assert health["runtime_generation"] == "a" * 32
+        assert health["generation"] == "7"
+
     def test_cache_observability_ui_contract_is_accessible_and_responsive(self):
         page = client.get("/").text
         script = client.get("/static/app.js").text

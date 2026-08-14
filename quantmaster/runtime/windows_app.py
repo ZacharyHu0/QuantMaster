@@ -187,6 +187,11 @@ def _role_executable(role: str) -> str | None:
 
     if os.name != "nt":
         return None
+    if getattr(sys, "frozen", False):
+        # Copying a one-file archive writes another ~170 MiB and makes its
+        # first multiprocessing import race antivirus/archive extraction.
+        # The original frozen executable already has the exact spawn contract.
+        return os.path.abspath(sys.executable)
     # ``sys.executable`` is normally the venv redirector (a tiny executable
     # with no adjacent CPython DLLs). Its renamed copies cannot start outside
     # the original ``python.exe`` name. A base-interpreter copy alongside

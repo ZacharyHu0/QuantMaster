@@ -186,6 +186,28 @@ jobs:
           name: browser-junit
           path: .artifacts/reports/*.xml
 
+  windows-package:
+    timeout-minutes: 35
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12.13"
+          enable-cache: true
+      - name: Install locked desktop environment
+        run: uv sync --locked --extra data --extra tushare --extra release
+      - name: Build Windows desktop executable
+        run: uv run pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
+      - name: Enforce desktop artifact policy
+        run: >-
+          uv run python scripts/release/check_desktop_artifact.py
+          .artifacts/packages/desktop/QuantMaster.exe
+          --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
+      - name: Smoke frozen Windows process tree
+        run: uv run python scripts/release/smoke_frozen_runtime.py .artifacts/packages/desktop/QuantMaster.exe
+
   quality-package-audit:
     timeout-minutes: 35
     runs-on: ubuntu-latest

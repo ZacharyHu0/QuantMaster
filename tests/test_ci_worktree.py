@@ -336,6 +336,15 @@ def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
     for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
         assert Path(help_env[name]).is_absolute()
         assert help_env[name] == doctor_env[name]
+    if run.os.name == "nt":
+        _label, command, _kwargs = next(
+            call for call in external_calls if call[0] == "EXE runtime identity smoke"
+        )
+        assert command == [
+            str(run.PYTHON),
+            "scripts/release/smoke_frozen_runtime.py",
+            str(exe),
+        ]
 
 
 def test_full_shards_use_three_way_parallelism(monkeypatch):

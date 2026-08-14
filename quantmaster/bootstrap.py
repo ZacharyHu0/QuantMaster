@@ -13,6 +13,7 @@ from typing import Any, Protocol
 
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
+from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.supervisor import (
     WorkerSupervisor,
     publish_worker_supervisor_status,
@@ -476,6 +477,7 @@ _SUPERVISOR_LOCK = threading.Lock()
 
 def get_worker_supervisor() -> WorkerSupervisor:
     global _SUPERVISOR
+    get_application_identity()
     with _SUPERVISOR_LOCK:
         root = get_config().data_root
         if _SUPERVISOR is None or _SUPERVISOR.root != Path(root):
