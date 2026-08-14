@@ -226,7 +226,7 @@ def test_read_panel_uses_one_bounded_batch_read_and_preserves_input_order(tmp_pa
 
 
 def _hold_cross_process_bar_lock(
-    root: str, events, schema_visible, follower_started, initializer: bool,
+    root: str, events, schema_visible, schema_lock_attempted, initializer: bool,
 ) -> None:
     try:
         if initializer:
@@ -236,16 +236,24 @@ def _hold_cross_process_bar_lock(
                 with sqlite3.connect(store.meta_db):
                     pass
                 schema_visible.set()
-                if not follower_started.wait(10):
-                    raise TimeoutError("follower did not start")
-                time.sleep(0.25)
+                if not schema_lock_attempted.wait(10):
+                    raise TimeoutError("follower did not attempt schema initialization")
                 migrate(store)
 
             BarStore._migrate_legacy_schema = pause_after_database_open
         else:
             if not schema_visible.wait(10):
                 raise TimeoutError("initializer did not open meta.sqlite")
-            follower_started.set()
+            from quantmaster.data.storage import _BarLock
+
+            enter = _BarLock.__enter__
+
+            def signal_schema_lock_attempt(lock):
+                if lock.symbol == "__schema__":
+                    schema_lock_attempted.set()
+                return enter(lock)
+
+            _BarLock.__enter__ = signal_schema_lock_attempt
         store = BarStore(Path(root))
         with store.lock("600000.SH"):
             entered = time.monotonic()
@@ -1014,18 +1022,17 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
     pd.testing.assert_frame_equal(results[0].data, results[1].data)
 
 
-@pytest.mark.parametrize("_attempt", range(3))
-def test_same_symbol_lock_serializes_spawned_processes(tmp_path, _attempt):
+def test_same_symbol_lock_serializes_spawned_processes(tmp_path):
     context = multiprocessing.get_context("spawn")
     events = context.Queue()
     schema_visible = context.Event()
-    follower_started = context.Event()
+    schema_lock_attempted = context.Event()
     processes = [
         context.Process(
             target=_hold_cross_process_bar_lock,
             args=(
-                str(tmp_path / "bars"), events, schema_visible, follower_started,
-                initializer,
+                str(tmp_path / "bars"), events, schema_visible,
+                schema_lock_attempted, initializer,
             ),
         )
         for initializer in (True, False)
