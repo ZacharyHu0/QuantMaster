@@ -527,6 +527,10 @@ class TestBasics:
         assert 'data-regime-window="10y"' in app_script
         assert "名称 / 代码 / 板块" in app_script
         assert 'id="runtime-info"' in resp.text
+        assert 'id="runtime-markets"' in resp.text
+        assert 'id="runtime-market-list"' in resp.text
+        assert "window.QuantMasterTemporalStatus" in app_script
+        assert "current_session_provider_published_waiting_ingest" in app_script
         assert 'id="data-refresh-preview"' in resp.text
         assert 'id="data-refresh-start-button"' in resp.text
         assert 'id="data-refresh-resume"' in resp.text

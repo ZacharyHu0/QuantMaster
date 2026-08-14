@@ -1034,6 +1034,100 @@ const operationProblemDialog = (() => {
 })();
 window.QuantMasterProblemDialog = operationProblemDialog;
 
+const marketTimeLabels = {
+  current_session_complete:'当日完整', previous_session_complete:'最近交易日完整',
+  current_session_partial:'盘中 / 覆盖不完整', current_session_preopen:'开盘前',
+  current_session_closed_waiting_provider:'收盘后等待 Provider',
+  current_session_provider_published_waiting_ingest:'等待本地完整摄取',
+  calendar_unavailable:'日历证据不可用',
+};
+const providerStateLabels = {
+  waiting:'等待发布', published:'已发布', published_time_unavailable:'已有数据，发布时间不可用',
+  unavailable:'不可用',
+};
+const ingestStateLabels = {
+  waiting:'等待摄取', partial:'覆盖不完整', complete:'已完整摄取', unavailable:'不可用',
+};
+function marketTimeValue(value, fallback = '不可用') {
+  const text = String(value ?? '').trim();
+  return text || fallback;
+}
+function marketTimestamp(value, timezone) {
+  const text = String(value ?? '').trim();
+  if (!text) return '不可用';
+  if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(text)) return '不可用 · TIME_UNINTERPRETABLE';
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(text)) return '不可用 · TIME_UNZONED';
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return '不可用 · TIME_UNINTERPRETABLE';
+  try {
+    return parsed.toLocaleString('zh-CN', {hour12:false, timeZone:timezone, timeZoneName:'short'});
+  } catch (_) {
+    return '不可用 · TIMEZONE_UNINTERPRETABLE';
+  }
+}
+function marketSessionMarkup(market, raw) {
+  const item = raw && typeof raw === 'object' ? raw : {};
+  const codes = Array.from(new Set([
+    ...(Array.isArray(item.diagnostic_codes) ? item.diagnostic_codes : []),
+    item.diagnostic_code,
+  ].map(value => String(value || '').trim()).filter(Boolean)));
+  const completion = marketTimeLabels[item.completion_state] || marketTimeValue(item.completion_state);
+  const timezone = marketTimeValue(item.market_timezone);
+  const issue = codes.length > 0;
+  const nextSession = item.next_session
+    ? marketTimeValue(item.next_session)
+    : `不可用 · ${marketTimeValue(item.next_session_reason, '缺少经验证的未来交易日历')}`;
+  const latency = item.ingest_latency_seconds == null
+    ? '不可用' : `${Number(item.ingest_latency_seconds).toLocaleString('zh-CN')} 秒`;
+  const clockSkew = item.provider_clock_skew_seconds == null
+    ? '未检测到可量化偏差' : `${Number(item.provider_clock_skew_seconds).toLocaleString('zh-CN')} 秒`;
+  const late = item.late_record_count == null
+    ? (codes.includes('DATA_LATE') ? '已检测到迟到数据' : '不可用')
+    : `${Number(item.late_record_count).toLocaleString('zh-CN')} 条`;
+  return `<details class="runtime-market" data-market="${esc(market)}" data-level="${issue ? 'warning' : 'success'}">
+    <summary>
+      <span class="runtime-market-identity"><strong>${esc(market)}</strong><small>${esc(timezone)}</small></span>
+      <span class="runtime-market-completion">${esc(completion)}</span>
+      <span class="runtime-market-code">${codes.length ? `${codes.length} 项诊断` : '边界正常'}</span>
+    </summary>
+    <dl class="runtime-market-grid">
+      <dt>目标 session</dt><dd>${esc(marketTimeValue(item.session_date))}</dd>
+      <dt>session 阶段</dt><dd>${esc(marketTimeValue(item.session_phase))}</dd>
+      <dt>最近完整日线</dt><dd>${esc(marketTimeValue(item.latest_complete_session))}</dd>
+      <dt>下一 session</dt><dd>${esc(nextSession)}</dd>
+      <dt>Provider</dt><dd>${esc(providerStateLabels[item.provider_state] || marketTimeValue(item.provider_state))}</dd>
+      <dt>发布时间</dt><dd>${esc(marketTimestamp(item.provider_published_at, timezone))}</dd>
+      <dt>本地摄取</dt><dd>${esc(ingestStateLabels[item.ingest_state] || marketTimeValue(item.ingest_state))}</dd>
+      <dt>摄取时间</dt><dd>${esc(marketTimestamp(item.ingested_at, timezone))}</dd>
+      <dt>发布→摄取延迟</dt><dd>${esc(latency)}</dd>
+      <dt>Provider 时钟偏差</dt><dd>${esc(clockSkew)}</dd>
+      <dt>迟到记录</dt><dd>${esc(late)}</dd>
+      <dt>诊断码</dt><dd class="runtime-market-codes">${codes.length ? codes.map(code => `<code>${esc(code)}</code>`).join('') : '无'}</dd>
+    </dl>
+  </details>`;
+}
+function renderMarketSessions(raw) {
+  const list = document.getElementById('runtime-market-list');
+  const summary = document.getElementById('runtime-markets-summary');
+  if (!list || !summary) return;
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const markets = ['CN', 'HK', 'US'];
+  const normalized = Object.fromEntries(markets.map(market => [market, data[market] || {
+    market_timezone:({CN:'Asia/Shanghai', HK:'Asia/Hong_Kong', US:'America/New_York'})[market],
+    completion_state:'calendar_unavailable', diagnostic_codes:['TEMPORAL_DIAGNOSTICS_UNAVAILABLE'],
+    next_session_reason:'后台未提供该市场的时间诊断证据',
+  }]));
+  list.innerHTML = markets.map(market => marketSessionMarkup(market, normalized[market])).join('');
+  list.setAttribute('aria-busy', 'false');
+  const issueCount = markets.reduce((count, market) => {
+    const item = normalized[market];
+    return count + (Array.isArray(item.diagnostic_codes) ? item.diagnostic_codes.length : item.diagnostic_code ? 1 : 0);
+  }, 0);
+  summary.textContent = issueCount ? `${issueCount} 项需核查` : '全部边界正常';
+  document.getElementById('runtime-markets').dataset.level = issueCount ? 'warning' : 'success';
+}
+window.QuantMasterTemporalStatus = {render:renderMarketSessions};
+
 async function refreshBackendHealth() {
   if (document.visibilityState === 'hidden') return;
   try {
@@ -1041,6 +1135,7 @@ async function refreshBackendHealth() {
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
     runtimeInfo.sync('recovered', Array.isArray(data.recent_recovered) ? data.recent_recovered : []);
     runtimeInfo.syncRuntime(data.runtime);
+    renderMarketSessions(data.market_sessions);
     renderCacheObservability(data.cache);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
@@ -1050,6 +1145,7 @@ async function refreshBackendHealth() {
     });
     runtimeInfo.resolve('request:GET:/api/v1/diagnostics');
     runtimeInfo.sync('health', [problem]);
+    renderMarketSessions(null);
   }
 }
 

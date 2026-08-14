@@ -715,6 +715,69 @@ def test_runtime_lifecycle_snapshot_is_compact_sanitized_and_backward_compatible
         browser.close()
 
 
+def test_market_temporal_status_is_explicit_accessible_and_narrow(live_server):
+    url, _ = live_server
+    diagnostics = {
+        "issues": [], "recent_recovered": [],
+        "runtime": {"readiness": {}, "web": {}, "supervisor": {}, "storage": {}, "scheduler": {}},
+        "market_sessions": {
+            "CN": {
+                "market_timezone": "Asia/Shanghai", "session_date": "2026-08-13",
+                "session_phase": "post_close", "latest_complete_session": "2026-08-12",
+                "next_session": "", "next_session_reason": "未提供经验证的未来交易日历",
+                "completion_state": "current_session_provider_published_waiting_ingest",
+                "provider_state": "published", "provider_published_at": "2026-08-13T15:08:00+08:00",
+                "ingest_state": "waiting", "ingested_at": "",
+                "ingest_latency_seconds": None, "late_record_count": 49,
+                "diagnostic_codes": ["SESSION_WAITING_INGEST", "DATA_LATE"],
+            },
+            "HK": {
+                "market_timezone": "Asia/Hong_Kong", "completion_state": "calendar_unavailable",
+                "next_session_reason": "未提供经验证的未来交易日历",
+                "provider_state": "unavailable", "ingest_state": "unavailable",
+                "diagnostic_codes": ["CALENDAR_UNVERIFIED", "TIME_UNZONED"],
+            },
+            "US": {
+                "market_timezone": "America/New_York", "completion_state": "calendar_unavailable",
+                "next_session_reason": "未提供经验证的未来交易日历",
+                "provider_state": "unavailable", "ingest_state": "unavailable",
+                "diagnostic_codes": ["TIME_UNINTERPRETABLE"],
+            },
+        },
+    }
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 320, "height": 700})
+        page.route("**/api/v1/diagnostics", lambda route: route.fulfill(status=200, json=diagnostics))
+        page.goto(url)
+        page.locator("#runtime-summary").click()
+        markets = page.locator("#runtime-markets")
+        playwright_sync.expect(markets).to_have_attribute("aria-live", "polite")
+        playwright_sync.expect(page.locator("#runtime-market-list")).to_have_attribute("aria-busy", "false")
+        assert page.locator(".runtime-market").count() == 3
+        cn = page.locator('[data-market="CN"]')
+        assert "等待本地完整摄取" in cn.locator("summary").inner_text()
+        cn.locator("summary").focus()
+        page.keyboard.press("Enter")
+        cn_text = cn.inner_text()
+        assert "Asia/Shanghai" in cn_text
+        assert "最近完整日线\n2026-08-12" in cn_text
+        assert "下一 session\n不可用 · 未提供经验证的未来交易日历" in cn_text
+        assert "等待摄取" in cn_text
+        assert "49 条" in cn_text
+        assert "SESSION_WAITING_INGEST" in cn_text
+        hk = page.locator('[data-market="HK"]')
+        hk.locator("summary").click()
+        assert "TIME_UNZONED" in hk.inner_text()
+        us = page.locator('[data-market="US"]')
+        us.locator("summary").click()
+        assert "America/New_York" in us.inner_text()
+        assert "TIME_UNINTERPRETABLE" in us.inner_text()
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        browser.close()
+
+
 def test_cache_namespace_observability_is_progressive_accessible_and_narrow(live_server):
     url, _ = live_server
     cache = {

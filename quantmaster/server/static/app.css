@@ -535,6 +535,28 @@
   .runtime-lifecycle-issue p,.runtime-lifecycle-more { margin:0; color:var(--muted); overflow-wrap:anywhere; line-height:1.5; }
   .runtime-lifecycle-issue code { width:max-content; max-width:100%; overflow:hidden; color:var(--ink-2); font-size:9px; text-overflow:ellipsis; user-select:all; white-space:nowrap; }
   .runtime-lifecycle-more { padding-top:7px; }
+  .runtime-markets { display:grid; gap:8px; padding:11px; border-bottom:1px solid var(--border); background:color-mix(in oklch,var(--page) 42%,var(--surface)); }
+  .runtime-markets-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-width:0; }
+  .runtime-markets-head > div { display:flex; align-items:baseline; gap:8px; min-width:0; }
+  .runtime-markets-head strong { color:var(--ink); font-size:12px; }
+  .runtime-markets-head span { color:var(--muted); font-size:10px; }
+  .runtime-markets[data-level="warning"] #runtime-markets-summary { color:var(--s4); }
+  .runtime-market-list { display:grid; gap:1px; overflow:hidden; border:1px solid var(--axis); border-radius:7px; background:var(--axis); }
+  .runtime-market { min-width:0; background:var(--page); }
+  .runtime-market > summary { display:grid; grid-template-columns:minmax(112px,.8fr) minmax(0,1.35fr) auto; align-items:center; gap:10px; min-height:44px; padding:7px 9px; cursor:pointer; list-style:none; }
+  .runtime-market > summary::-webkit-details-marker { display:none; }
+  .runtime-market > summary:focus-visible { outline:2px solid var(--s1); outline-offset:-2px; }
+  .runtime-market-identity { display:flex; align-items:baseline; gap:6px; min-width:0; }
+  .runtime-market-identity strong { color:var(--ink); font-size:12px; }
+  .runtime-market-identity small { min-width:0; overflow:hidden; color:var(--muted); font-size:9px; text-overflow:ellipsis; white-space:nowrap; }
+  .runtime-market-completion { min-width:0; overflow:hidden; color:var(--ink-2); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+  .runtime-market-code { color:var(--s3); font-size:9px; white-space:nowrap; }
+  .runtime-market[data-level="warning"] .runtime-market-code { color:var(--s4); }
+  .runtime-market-grid { display:grid; grid-template-columns:max-content minmax(0,1fr); gap:4px 10px; margin:0; padding:9px; border-top:1px solid var(--grid); font-size:10px; }
+  .runtime-market-grid dt { color:var(--muted); }
+  .runtime-market-grid dd { min-width:0; margin:0; color:var(--ink-2); overflow-wrap:anywhere; }
+  .runtime-market-codes { display:flex; flex-wrap:wrap; gap:4px; }
+  .runtime-market-codes code { max-width:100%; overflow-wrap:anywhere; white-space:normal; }
   .runtime-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-bottom:1px solid var(--border); }
   .runtime-filters { display:flex; align-items:center; gap:2px; min-width:0; overflow-x:auto; overflow-y:hidden; }
   .runtime-filter,.runtime-tool,.runtime-copy { border:0; background:transparent; color:var(--muted); cursor:pointer; font:inherit; }
@@ -655,6 +677,12 @@
     .runtime-lifecycle-head { align-items:flex-start; flex-direction:column; gap:4px; }
     .runtime-lifecycle-counts { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .runtime-lifecycle-progress { grid-template-columns:1fr; }
+    .runtime-markets-head { align-items:flex-start; flex-direction:column; gap:2px; }
+    .runtime-market > summary { grid-template-columns:minmax(0,1fr) auto; gap:3px 8px; min-height:48px; }
+    .runtime-market-completion { grid-column:1; grid-row:2; white-space:normal; }
+    .runtime-market-code { grid-column:2; grid-row:1 / 3; align-self:center; }
+    .runtime-market-grid { grid-template-columns:1fr; gap:2px; }
+    .runtime-market-grid dd { margin-bottom:5px; }
     .decision-detail-shell { padding:var(--space-md); }
     .decision-model-evidence > summary { align-items:flex-start; flex-direction:column; gap:3px; }
     .decision-model-evidence > summary span { text-align:left; }
