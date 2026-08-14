@@ -357,6 +357,7 @@ class TestBasics:
     def test_index_serves_html(self):
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
+        charts_script = client.get("/static/charts.js").text
         app_styles = client.get("/static/app.css").text
         settings_script = client.get("/static/settings.js").text
         settings_styles = client.get("/static/settings.css").text
@@ -398,6 +399,10 @@ class TestBasics:
         assert "queueMarketReload" in app_script
         assert "data:[{yAxis:0}]" in app_script
         assert "type:'dashed'" in app_script
+        assert "result.itemStyle.color = result.lineStyle.color" in charts_script
+        assert "formatter:params =>" in app_script
+        assert "point.seriesName === '牛熊分' ? fixed(numeric,1)" in app_script
+        assert "color:CHART_COLORS.warning,type:'dashed'" in app_script
         assert "prefers-reduced-motion" in app_styles
         assert "prefers-reduced-transparency:reduce" in app_styles
         assert "prefers-contrast:more" in app_styles

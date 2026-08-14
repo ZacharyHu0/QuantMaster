@@ -31,7 +31,9 @@ AUTOMINER_SYSTEM_PROMPT = """你是 A 股横截面量化因子研究助手。你
 不能访问文件、网络、环境变量或原始样本。候选必须定义 compute(features, params)，仅使用
 pandas/numpy 向量运算并返回与 features['close'] 完全对齐的 DataFrame。禁止负向 shift、
 全样本统计、未来信息、循环、导入和任何 I/O。优化只能使用 TRAIN，筛选只能使用 VALID，
-TEST 永远不可见。优先选择经济含义清楚、参数处于稳定平台、成本后仍有边际的候选。"""
+TEST 永远不可见。feature_registry 中 runtime_compatible=false 的特征只能用于研究回放，
+不可作为可部署 Champion 的依赖。优先选择经济含义清楚、参数处于稳定平台、成本后仍有
+边际的候选。"""
 
 
 @dataclass
@@ -102,8 +104,28 @@ def _slice(frame: pd.DataFrame, split: dict[str, Any], name: str) -> pd.DataFram
 
 def _feature_slice(
     features: dict[str, pd.DataFrame], split: dict[str, Any], name: str,
+    *, warmup: int = 0,
 ) -> dict[str, pd.DataFrame]:
-    return {key: _slice(value, split, name) for key, value in features.items()}
+    item = split[name]
+    start = pd.Timestamp(item["start"])
+    end = pd.Timestamp(item["end"])
+
+    def window(frame: pd.DataFrame) -> pd.DataFrame:
+        # A validation/test window needs the preceding observations required by
+        # rolling, diff and pct_change expressions.  The caller trims outputs
+        # back to the sealed interval before calculating metrics, so these rows
+        # are feature history only and never become holdout labels.
+        index = frame.index
+        start_pos = int(index.searchsorted(start, side="left"))
+        context_start = max(0, start_pos - max(0, int(warmup)))
+        return frame.iloc[context_start:].loc[:end]
+
+    return {key: window(value) for key, value in features.items()}
+
+
+def _trim_to_split(frame: pd.DataFrame, split: dict[str, Any], name: str) -> pd.DataFrame:
+    """Remove warm-up history before scoring a sealed interval."""
+    return _slice(frame, split, name)
 
 
 def _normalize_parameters(raw: Any) -> list[dict[str, Any]]:
@@ -120,6 +142,15 @@ def _normalize_parameters(raw: Any) -> list[dict[str, Any]]:
             continue
         result.append({"name": name, "default": default, "min": low, "max": high})
     return result[:8]
+
+
+def _normalize_warmup(raw: Any) -> int:
+    if isinstance(raw, bool):
+        raise ValueError("warmup 必须为整数")
+    value = int(raw or 60)
+    if value < 1:
+        return 1
+    return min(504, value)
 
 
 def _parameter_variants(parameters: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -191,7 +222,7 @@ class PythonFactorMiner:
         feedback: list[dict[str, Any]], horizon: int,
     ) -> list[dict[str, Any]]:
         visible = [{key: item[key] for key in (
-            "name", "group", "description", "pit_grade", "coverage",
+            "name", "group", "description", "pit_grade", "coverage", "runtime_compatible",
         ) if key in item} for item in features if item.get("available")]
         prompt = {
             "task": f"提出最多 {count} 个互不重复的 {horizon} 日横截面因子",
@@ -264,15 +295,38 @@ class PythonFactorMiner:
                 if candidate_id in seen:
                     continue
                 seen.add(candidate_id)
-                candidate = PythonMiningCandidate(
-                    id=candidate_id, name=str(raw.get("name") or f"候选 {len(candidates)+1}")[:120],
-                    hypothesis=str(raw.get("hypothesis") or "")[:2000],
-                    objective=str(raw.get("objective") or "")[:1000],
-                    required_features=[str(item) for item in raw.get("required_features", [])][:24],
-                    warmup=min(504, max(1, int(raw.get("warmup") or 60))),
-                    parameters=_normalize_parameters(raw.get("parameters")), code=code,
-                )
+                try:
+                    raw_features = raw.get("required_features", [])
+                    if raw_features is None:
+                        raw_features = []
+                    if not isinstance(raw_features, (list, tuple)):
+                        raise ValueError("required_features 必须为数组")
+                    candidate = PythonMiningCandidate(
+                        id=candidate_id,
+                        name=str(raw.get("name") or f"候选 {len(candidates)+1}")[:120],
+                        hypothesis=str(raw.get("hypothesis") or "")[:2000],
+                        objective=str(raw.get("objective") or "")[:1000],
+                        required_features=[str(item) for item in raw_features][:24],
+                        warmup=_normalize_warmup(raw.get("warmup")),
+                        parameters=_normalize_parameters(raw.get("parameters")), code=code,
+                    )
+                except (TypeError, ValueError, OverflowError) as exc:
+                    candidate = PythonMiningCandidate(
+                        id=candidate_id,
+                        name=str(raw.get("name") or f"候选 {len(candidates)+1}")[:120],
+                        hypothesis=str(raw.get("hypothesis") or "")[:2000],
+                        objective=str(raw.get("objective") or "")[:1000],
+                        required_features=[], warmup=60,
+                        parameters=[], code=code, status="rejected",
+                        error=f"候选字段无效: {exc}"[:1000],
+                    )
                 candidates.append(candidate)
+                if candidate.status == "rejected":
+                    feedback.append({"name": candidate.name, "status": "rejected",
+                                     "reason": candidate.error})
+                    if on_candidate:
+                        on_candidate(candidate)
+                    continue
                 try:
                     policy = validate_python_factor(code)
                     referenced = set(policy.get("features") or [])
@@ -285,15 +339,22 @@ class PythonFactorMiner:
                     if missing:
                         raise PythonFactorPolicyError(f"未注册或不可用特征: {', '.join(missing)}")
                     train_features = _feature_slice(features, split, "train")
-                    valid_features = _feature_slice(features, split, "valid")
+                    valid_features = _feature_slice(
+                        features, split, "valid", warmup=candidate.warmup,
+                    )
                     plateau = []
                     for params in _parameter_variants(candidate.parameters):
                         if cancelled and cancelled():
                             raise InterruptedError("研究任务已请求取消")
                         train_values = self.runner.execute(code, train_features, params)
                         train_metrics = _candidate_metrics(train_values, train_features["close"], horizon)
-                        valid_values = self.runner.execute(code, valid_features, params)
-                        valid_metrics = _candidate_metrics(valid_values, valid_features["close"], horizon)
+                        valid_values = _trim_to_split(
+                            self.runner.execute(code, valid_features, params), split, "valid",
+                        )
+                        valid_metrics = _candidate_metrics(
+                            valid_values, _trim_to_split(valid_features["close"], split, "valid"),
+                            horizon,
+                        )
                         same_sign = train_metrics["rank_ic"] * valid_metrics["rank_ic"] > 0
                         value = _quality(valid_metrics) + (0.15 if same_sign else -0.25)
                         plateau.append({"params": params, "train": train_metrics,
@@ -381,20 +442,34 @@ class PythonFactorMiner:
         # 排序在这里冻结；下面才首次打开 TEST，且测试结果不参与重排。
         if progress:
             progress(90, f"Pareto 顺序已冻结 · 开启 {len(selected)} 个密封 TEST")
-        test_features = _feature_slice(features, split, "test")
+        tested_finalists: list[PythonMiningCandidate] = []
         for candidate in selected:
             if cancelled and cancelled():
                 raise InterruptedError("研究任务已请求取消")
             try:
-                values = self.runner.execute(candidate.code, test_features, candidate.selected_params)
-                candidate.test_metrics = _candidate_metrics(values, test_features["close"], horizon)
+                test_features = _feature_slice(
+                    features, split, "test", warmup=candidate.warmup,
+                )
+                values = _trim_to_split(
+                    self.runner.execute(candidate.code, test_features, candidate.selected_params),
+                    split, "test",
+                )
+                candidate.test_metrics = _candidate_metrics(
+                    values, _trim_to_split(test_features["close"], split, "test"), horizon,
+                )
                 candidate.status = "finalist"
+                tested_finalists.append(candidate)
             except Exception as exc:
                 candidate.status, candidate.error = "test_failed", str(exc)[:1000]
             if on_candidate:
                 on_candidate(candidate)
+        if selected and not tested_finalists:
+            warnings.append({
+                "code": "sealed_test_failed",
+                "message": "Pareto 候选均未能完成密封 TEST，未生成可晋级 finalist",
+            })
         return PythonMiningReport(
-            split=split, candidates=candidates, finalists=selected,
+            split=split, candidates=candidates, finalists=tested_finalists,
             rounds_requested=rounds, rounds_completed=completed, llm_calls=llm_calls,
             warnings=warnings,
         )

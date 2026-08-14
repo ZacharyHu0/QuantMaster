@@ -9,6 +9,8 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
+import numbers
 import os
 import pickle
 import sys
@@ -58,11 +60,13 @@ _SAFE_METHODS = {
     "rank", "reindex", "replace", "rolling", "shift", "std", "sub", "sum",
     "where", "winsorize",
 }
+_CAUSAL_PERIOD_METHODS = {"diff", "pct_change", "shift"}
 
 
 class _PolicyVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.functions: list[str] = []
+        self.period_params: dict[str, set[str]] = {}
 
     def generic_visit(self, node: ast.AST) -> None:
         if isinstance(node, _BANNED_NODES):
@@ -101,11 +105,58 @@ class _PolicyVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         if isinstance(node.func, ast.Name) and node.func.id not in _SAFE_CALLS:
             raise PythonFactorPolicyError(f"函数不在白名单: {node.func.id}")
-        if isinstance(node.func, ast.Attribute) and node.func.attr == "shift" and node.args:
-            first = node.args[0]
-            if (isinstance(first, ast.UnaryOp) and isinstance(first.op, ast.USub)):
-                raise PythonFactorPolicyError("shift 禁止使用负周期")
+        if isinstance(node.func, ast.Attribute) and node.func.attr in _CAUSAL_PERIOD_METHODS:
+            method = node.func.attr
+            periods = node.args[0] if node.args else next(
+                (item.value for item in node.keywords if item.arg == "periods"), None,
+            )
+            if periods is not None:
+                if _non_negative_integer_literal(periods):
+                    pass
+                else:
+                    parameter = _params_string_key(periods)
+                    if parameter is None:
+                        raise PythonFactorPolicyError(
+                            f"{method} 周期必须是非负整数常量或 params 参数"
+                        )
+                    self.period_params.setdefault(method, set()).add(parameter)
         self.generic_visit(node)
+
+
+def _non_negative_integer_literal(node: ast.AST) -> bool:
+    """Return whether an AST node is a literal, non-negative integer period."""
+    if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
+        return False
+    return isinstance(node.value, int) and node.value >= 0
+
+
+def _params_string_key(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Subscript):
+        return None
+    if not isinstance(node.value, ast.Name) or node.value.id != "params":
+        return None
+    value = node.slice.value if isinstance(node.slice, ast.Index) else node.slice
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return value.value
+    return None
+
+
+def _validate_period_parameters(policy: dict[str, Any], params: dict | None) -> None:
+    """Keep parameterized temporal operators causal at execution time."""
+    values = params or {}
+    for method, names in (policy.get("period_params") or {}).items():
+        for name in names:
+            value = values.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, numbers.Real)
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                or int(value) != float(value)
+            ):
+                raise PythonFactorPolicyError(
+                    f"{method} 周期参数 {name} 必须是非负整数"
+                )
 
 
 def validate_python_factor(source: str) -> dict[str, Any]:
@@ -137,6 +188,10 @@ def validate_python_factor(source: str) -> dict[str, Any]:
     return {
         "sha256": digest, "ast_nodes": sum(1 for _ in ast.walk(tree)),
         "features": sorted(features),
+        "shift_params": sorted(visitor.period_params.get("shift", set())),
+        "period_params": {
+            method: sorted(names) for method, names in sorted(visitor.period_params.items())
+        },
     }
 
 
@@ -152,7 +207,8 @@ def _normalize_output(value: Any, reference: pd.DataFrame) -> pd.DataFrame:
 
 
 def execute_in_process(source: str, features: dict[str, pd.DataFrame], params: dict) -> pd.DataFrame:
-    validate_python_factor(source)
+    policy = validate_python_factor(source)
+    _validate_period_parameters(policy, params)
     if "close" not in features:
         raise PythonFactorPolicyError("特征包缺少 close")
     namespace: dict[str, Any] = {
@@ -198,7 +254,8 @@ class RestrictedPythonRunner:
     def execute(
         self, source: str, features: dict[str, pd.DataFrame], params: dict | None = None,
     ) -> pd.DataFrame:
-        validate_python_factor(source)
+        policy = validate_python_factor(source)
+        _validate_period_parameters(policy, params)
         with tempfile.TemporaryDirectory(prefix="qm-factor-") as directory:
             root = Path(directory)
             input_path, output_path = root / "input.pkl", root / "output.pkl"
@@ -288,8 +345,10 @@ def execute_python_factor_artifact(
         raise PythonFactorPolicyError("工件路径越界") from exc
     source = source_path.read_text(encoding="utf-8")
     expected = str(artifact.get("source_sha256") or "")
+    if not expected:
+        raise PythonFactorPolicyError("Python 因子工件缺少 source_sha256，拒绝执行")
     actual = hashlib.sha256(source.encode("utf-8")).hexdigest()
-    if expected and actual != expected:
+    if actual != expected:
         raise PythonFactorPolicyError("Python 因子工件完整性校验失败")
     return RestrictedPythonRunner().execute(source, features, artifact.get("parameters") or {})
 

@@ -142,7 +142,11 @@ function prepareSeries(series, index, profile) {
     if (result.itemStyle.color0) result.itemStyle.color0 = mappedLegacyColor(result.itemStyle.color0);
     if (result.itemStyle.borderColor) result.itemStyle.borderColor = mappedLegacyColor(result.itemStyle.borderColor);
     if (result.itemStyle.borderColor0) result.itemStyle.borderColor0 = mappedLegacyColor(result.itemStyle.borderColor0);
-  } else if (result.type === 'bar' || result.type === 'scatter') {
+  }
+  if (result.type === 'line') {
+    result.itemStyle = Object.assign({}, result.itemStyle || {});
+    if (result.itemStyle.color === undefined) result.itemStyle.color = result.lineStyle.color;
+  } else if (!result.itemStyle && (result.type === 'bar' || result.type === 'scatter')) {
     result.itemStyle = {color: roleColor};
   }
   if (profile.stagger && (result.type === 'bar' || result.type === 'scatter')) {
