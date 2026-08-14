@@ -31,7 +31,7 @@ class MigrationPreflight:
     file_count: int
     total_bytes: int
     required_bytes: int
-    free_bytes: int
+    free_bytes: int | None
 
 
 @dataclass
@@ -107,18 +107,21 @@ def preflight_data_root_migration(
         raise MigrationError("仅切换要求目标是已存在的数据目录")
     files = _migration_files(source)
     total = sum(path.stat().st_size for path in files)
-    capacity_root = target.parent
-    while not capacity_root.exists():
-        parent = capacity_root.parent
-        if parent == capacity_root:
+    required = 0
+    free: int | None = None
+    if mode == "copy":
+        required = total + max(16 * 1024 * 1024, total // 20)
+        capacity_root = target.parent
+        while not capacity_root.exists():
+            parent = capacity_root.parent
+            if parent == capacity_root:
+                raise MigrationError("目标目录父路径不可用")
+            capacity_root = parent
+        if not capacity_root.is_dir():
             raise MigrationError("目标目录父路径不可用")
-        capacity_root = parent
-    if not capacity_root.is_dir():
-        raise MigrationError("目标目录父路径不可用")
-    free = shutil.disk_usage(capacity_root).free
-    required = total + max(16 * 1024 * 1024, total // 20) if mode == "copy" else 0
-    if free < required:
-        raise MigrationError("目标磁盘剩余空间不足")
+        free = shutil.disk_usage(capacity_root).free
+        if free < required:
+            raise MigrationError("目标磁盘剩余空间不足")
     return MigrationPreflight(
         source=source,
         target=target,

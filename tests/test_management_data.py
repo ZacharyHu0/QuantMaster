@@ -65,7 +65,11 @@ def test_data_migration_preflight_is_side_effect_free_and_reports_capacity(
     def reject_sqlite_open(*args, **kwargs):
         raise AssertionError("preflight opened SQLite")
 
+    def reject_mkdir(*args, **kwargs):
+        raise AssertionError("preflight created a directory")
+
     monkeypatch.setattr(Path, "open", reject_payload_open)
+    monkeypatch.setattr(Path, "mkdir", reject_mkdir)
     monkeypatch.setattr(data_migration.sqlite3, "connect", reject_sqlite_open)
 
     result = data_migration.preflight_data_root_migration(source, target, "copy")
@@ -88,6 +92,22 @@ def test_data_migration_preflight_is_side_effect_free_and_reports_capacity(
     )
     with pytest.raises(MigrationError, match="剩余空间不足"):
         data_migration.preflight_data_root_migration(source, target, "copy")
+
+
+def test_switch_preflight_does_not_probe_disk_capacity(tmp_path, monkeypatch):
+    source, target = tmp_path / "source", tmp_path / "existing"
+    source.mkdir()
+    target.mkdir()
+
+    def reject_disk_usage(path):
+        raise AssertionError(f"switch preflight probed disk capacity: {path}")
+
+    monkeypatch.setattr(data_migration.shutil, "disk_usage", reject_disk_usage)
+
+    result = data_migration.preflight_data_root_migration(source, target, "switch")
+
+    assert result.required_bytes == 0
+    assert result.free_bytes is None
 
 
 def test_data_migration_preflight_preserves_fail_closed_boundaries(tmp_path, monkeypatch):
