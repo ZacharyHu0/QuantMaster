@@ -538,13 +538,56 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         os.chmod(path, stat.S_IWRITE)
         function(path)
 
+    def restore_inheritance() -> None:
+        if os.name != "nt":
+            return
+        script = (
+            "$root=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_ROOT -Force;"
+            "$items=@($root)+@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse);"
+            "foreach($item in $items){"
+            "$acl=if($item.PSIsContainer){"
+            "[System.IO.Directory]::GetAccessControl($item.FullName)"
+            "}else{[System.IO.File]::GetAccessControl($item.FullName)};"
+            "if($acl.AreAccessRulesProtected){"
+            "$acl.SetAccessRuleProtection($false,$true);"
+            "if($item.PSIsContainer){"
+            "[System.IO.Directory]::SetAccessControl($item.FullName,$acl)"
+            "}else{[System.IO.File]::SetAccessControl($item.FullName,$acl)}"
+            "}}"
+        )
+        environment = os.environ.copy()
+        environment["QM_TASK_ARTIFACT_ROOT"] = str(artifact_root)
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown ACL error"
+            raise RuntimeError(f"无法恢复任务工件 ACL 继承：{detail}")
+
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
-    except PermissionError as exc:
+    except PermissionError:
+        restore_inheritance()
+        try:
+            shutil.rmtree(artifact_root, onexc=make_writable)
+            return
+        except PermissionError as exc:
+            blocked = Path(exc.filename or artifact_root)
+            raise SystemExit(
+                "Windows ACL 阻止删除任务工件："
+                f"{blocked}；已恢复继承但删除仍失败"
+            ) from None
+    except OSError as exc:
         blocked = Path(exc.filename or artifact_root)
         raise SystemExit(
             "Windows ACL 阻止删除任务工件："
-            f"{blocked}；修复该路径权限后重新运行 remove"
+            f"{blocked}；{exc}"
         ) from None
 
 

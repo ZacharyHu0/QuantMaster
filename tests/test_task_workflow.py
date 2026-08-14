@@ -515,6 +515,36 @@ def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
     assert artifacts.exists()
 
 
+def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+    calls: list[str] = []
+
+    def remove(path, **_kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", path)
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(
+        tasks.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append("restore") or SimpleNamespace(
+            returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    remove_task_artifacts(primary, "recovery")
+
+    assert calls == ["remove", "restore", "remove"]
+
+
 def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
     import pytest
 
