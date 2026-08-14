@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +39,22 @@ _FULL_ONLY_FILES = frozenset({
     "test_trading_workbenches.py",
     "test_ui_management.py",
 })
+
+
+def _drain_provider_scheduler(timeout: float = 5.0) -> None:
+    """Keep a late Tushare daily result in the test that submitted it."""
+    from quantmaster.data.resilience import PROVIDER_SCHEDULER
+
+    deadline = time.monotonic() + timeout
+    while True:
+        status = PROVIDER_SCHEDULER.status()
+        pending = status["lanes"].get("tushare:daily", {})
+        pending = any(pending.get(key, 0) for key in ("active", "waiting", "expired"))
+        if not pending:
+            return
+        if time.monotonic() >= deadline:
+            pytest.fail("provider call still active during isolated_config teardown")
+        time.sleep(0.01)
 
 
 def pytest_addoption(parser) -> None:
@@ -195,6 +212,7 @@ def isolated_config(tmp_path, request):
     reset_data_repair_manager_for_tests()
     reset_rotation_runtime_for_tests()
     reset_worker_supervisor_for_tests()
+    _drain_provider_scheduler()
     if previous_supervisor is None:
         os.environ.pop("QM_DISABLE_WORKER_SUPERVISOR", None)
     else:

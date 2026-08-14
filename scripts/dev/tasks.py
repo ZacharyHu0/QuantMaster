@@ -538,14 +538,12 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         os.chmod(path, stat.S_IWRITE)
         function(path)
 
-    def restore_inheritance() -> None:
+    def restore_inheritance(blocked: Path) -> None:
         if os.name != "nt":
             return
         script = (
             "$ErrorActionPreference='Stop';"
-            "$root=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_ROOT -Force;"
-            "$items=@($root)+@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse);"
-            "foreach($item in $items){"
+            "$item=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_BLOCKED -Force;"
             "$acl=if($item.PSIsContainer){"
             "[System.IO.Directory]::GetAccessControl($item.FullName)"
             "}else{[System.IO.File]::GetAccessControl($item.FullName)};"
@@ -554,10 +552,10 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
             "if($item.PSIsContainer){"
             "[System.IO.Directory]::SetAccessControl($item.FullName,$acl)"
             "}else{[System.IO.File]::SetAccessControl($item.FullName,$acl)}"
-            "}}"
+            "}"
         )
         environment = os.environ.copy()
-        environment["QM_TASK_ARTIFACT_ROOT"] = str(artifact_root)
+        environment["QM_TASK_ARTIFACT_BLOCKED"] = str(blocked)
         result = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
             env=environment,
@@ -573,19 +571,22 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
 
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
-    except PermissionError:
-        restore_inheritance()
+    except PermissionError as exc:
+        blocked = type(artifact_root)(exc.filename or artifact_root).resolve()
+        if blocked != artifact_root and artifact_root not in blocked.parents:
+            raise SystemExit(f"拒绝恢复任务工件之外的 ACL：{blocked}") from None
+        restore_inheritance(blocked)
         try:
             shutil.rmtree(artifact_root, onexc=make_writable)
             return
         except PermissionError as exc:
-            blocked = Path(exc.filename or artifact_root)
+            blocked = type(artifact_root)(exc.filename or artifact_root)
             raise SystemExit(
                 "Windows ACL 阻止删除任务工件："
                 f"{blocked}；已恢复继承但删除仍失败"
             ) from None
     except OSError as exc:
-        blocked = Path(exc.filename or artifact_root)
+        blocked = type(artifact_root)(exc.filename or artifact_root)
         raise SystemExit(
             "Windows ACL 阻止删除任务工件："
             f"{blocked}；{exc}"
