@@ -691,6 +691,9 @@ const runtimeInfo = (() => {
       return;
     }
     lifecyclePanel.dataset.state = snapshot.state;
+    lifecyclePanel.dataset.level = (
+      snapshot.issueCount || snapshot.state !== 'running' ? 'warning' : 'success'
+    );
     lifecycleState.textContent = lifecycleLabel(snapshot.state);
     lifecycleTitle.textContent = snapshot.state === 'running' ? '服务运行生命周期' : '服务正在安全交接';
     lifecycleGeneration.textContent = `generation ${snapshot.generation}`;

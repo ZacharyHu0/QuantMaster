@@ -689,7 +689,7 @@ def test_runtime_lifecycle_snapshot_is_compact_sanitized_and_backward_compatible
         assert "should-not-render" not in issue_text
         assert "also-secret" not in issue_text
         assert "***" in issue_text
-        assert page.locator("#runtime-info").get_attribute("data-level") == "warning"
+        assert panel.get_attribute("data-level") == "warning"
 
         entry_count = page.locator("#runtime-list .runtime-entry").count()
         page.evaluate(
