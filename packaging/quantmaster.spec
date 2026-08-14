@@ -12,15 +12,12 @@ project_root = Path(SPECPATH).parent
 release_scope = {}
 exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
-git_status = subprocess.run(
-    ["git", "status", "--porcelain", "--untracked-files=normal"],
+tracked_tree_changed = subprocess.run(
+    ["git", "diff-index", "--quiet", "HEAD", "--"],
     cwd=project_root,
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout
-if git_status:
-    raise SystemExit("QuantMaster packages require a clean Git worktree")
+).returncode
+if tracked_tree_changed:
+    raise SystemExit("QuantMaster packages require the tracked Git tree to match HEAD")
 build_sha = subprocess.run(
     ["git", "rev-parse", "--verify", "HEAD"],
     cwd=project_root,

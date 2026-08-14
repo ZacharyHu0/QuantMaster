@@ -130,7 +130,8 @@ def test_pyinstaller_runtime_hook_binds_clean_full_git_sha() -> None:
     spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
         encoding="utf-8",
     )
-    assert '"status", "--porcelain"' in spec
+    assert '"diff-index", "--quiet", "HEAD", "--"' in spec
+    assert '"status", "--porcelain"' not in spec
     assert '"rev-parse", "--verify", "HEAD"' in spec
     assert "bind_packaged_build" in spec
     assert "runtime_hooks=[str(runtime_identity_hook)]" in spec
