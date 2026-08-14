@@ -146,6 +146,10 @@ class AkshareSource(DataSource):
         else:
             raise NotImplementedError(f"akshare 不支持该市场分钟线: {symbol}")
         bars = normalize_bars(raw)
+        bars.attrs["timezone"] = {
+            Market.CN: "Asia/Shanghai",
+            Market.HK: "Asia/Hong_Kong",
+        }[market]
         if period == "1" and "open" in bars:
             # 东财近期 1m 历史有时将非最新交易日开盘价置 0；用同日上一根
             # 收盘修复，日内首根则回退到本根收盘，避免伪造 -100% 跳空。

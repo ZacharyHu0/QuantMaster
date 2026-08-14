@@ -16,9 +16,11 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
+from datetime import UTC, date, datetime, time
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 import pandas as pd
@@ -65,6 +67,102 @@ _MINUTE_FREQUENCY_MINUTES = {
     "30m": 30,
     "60m": 60,
 }
+
+_MARKET_TIMEZONES: dict[Market, str] = {
+    Market.CN: "Asia/Shanghai",
+    Market.HK: "Asia/Hong_Kong",
+    Market.US: "America/New_York",
+}
+
+
+def _market_timezone(symbol: str) -> ZoneInfo | None:
+    """Return only an IANA timezone proved by the symbol's market identity."""
+    try:
+        name = _MARKET_TIMEZONES.get(guess_market(symbol))
+    except ValueError:
+        return None
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:  # pragma: no cover - deployment data defect
+        return None
+
+
+def _market_wall_time(value: object, zone: ZoneInfo) -> pd.Timestamp:
+    """Interpret request boundaries in an explicit exchange timezone."""
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        return stamp
+    return stamp.tz_convert(zone).tz_localize(None)
+
+
+def _market_sessions(
+    market: Market,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    observed_dates: pd.DatetimeIndex | None = None,
+) -> tuple[pd.DatetimeIndex, str, bool]:
+    """Resolve session dates without inventing holidays from weekdays.
+
+    CN can use the locally published calendar.  HK/US currently have no local
+    holiday feed, so their own dated bars are usable as observed-session evidence
+    for clock/bucket validation, but never certify that the requested range is
+    complete.
+    """
+    if market == Market.CN:
+        sessions, source = _local_sessions(start, end)
+        return sessions, source, bool(len(sessions))
+    if market in {Market.HK, Market.US} and observed_dates is not None:
+        selected = observed_dates[(observed_dates >= start) & (observed_dates <= end)]
+        return (
+            selected.unique().sort_values(),
+            f"{market.value}:observed-session-dates",
+            False,
+        )
+    return pd.DatetimeIndex([]), f"{market.value}:unsupported-calendar", False
+
+
+def _trading_windows(market: Market, day: pd.Timestamp) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """Exchange-local regular/CAS trading windows used for bar coverage."""
+    base = day.normalize()
+    if market == Market.CN:
+        return (
+            (base + pd.Timedelta(hours=9, minutes=30), base + pd.Timedelta(hours=11, minutes=30)),
+            (base + pd.Timedelta(hours=13), base + pd.Timedelta(hours=15)),
+        )
+    if market == Market.HK:
+        return (
+            (base + pd.Timedelta(hours=9, minutes=30), base + pd.Timedelta(hours=12)),
+            (base + pd.Timedelta(hours=13), base + pd.Timedelta(hours=16)),
+        )
+    if market == Market.US:
+        return ((base + pd.Timedelta(hours=9, minutes=30), base + pd.Timedelta(hours=16)),)
+    return ()
+
+
+def _daily_close(market: Market, day: date, zone: ZoneInfo) -> datetime | None:
+    close = {
+        Market.CN: time(15),
+        Market.HK: time(16, 10),
+        Market.US: time(16),
+    }.get(market)
+    return datetime.combine(day, close, zone) if close is not None else None
+
+
+def _exact_attr_instant(frame: pd.DataFrame, name: str) -> datetime | None:
+    """Read an exact provider instant; naive evidence is deliberately unusable."""
+    raw = frame.attrs.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
 
 # 各市场按优先级排列的数据源工厂
 _SOURCE_FACTORIES: dict[str, list] = {}
@@ -303,8 +401,15 @@ def _assess_daily_frame(
     stale: bool = False,
     extra_issues: tuple[str, ...] = (),
 ) -> BarDataQuality:
+    try:
+        market = guess_market(symbol) if symbol else Market.CN
+    except ValueError:
+        market = Market.CN
+    zone = _market_timezone(symbol) if symbol else ZoneInfo("Asia/Shanghai")
+    current = market_now()
+    market_today = current.astimezone(zone).date() if zone is not None else market_date()
     requested_start = pd.Timestamp(start).normalize()
-    requested_end = min(pd.Timestamp(end).normalize(), pd.Timestamp(market_date()))
+    requested_end = min(pd.Timestamp(end).normalize(), pd.Timestamp(market_today))
     effective_start, effective_end = _instrument_range(
         symbol, requested_start, requested_end,
     )
@@ -317,7 +422,7 @@ def _assess_daily_frame(
         return BarDataQuality(
             "unavailable", start, end, sources=(source,) if source else (),
             issues=tuple(issues), stale=stale, partial=True,
-            timezone="exchange-date", adjustment="qfq",
+            timezone=str(zone) if zone is not None else "unknown", adjustment="qfq",
             units=units,
             requested_symbols=(symbol,) if symbol else (),
             missing_symbols=(symbol,) if symbol else (),
@@ -396,11 +501,9 @@ def _assess_daily_frame(
             issues.append(
                 f"响应终点 {observed_end.date()} 早于有证据的请求终点 {effective_end.date()}"
             )
-    if symbol and guess_market(symbol) != Market.CN:
-        sessions = pd.DatetimeIndex([])
-        calendar_source = f"{guess_market(symbol).value}:calendar-unavailable"
-    else:
-        sessions, calendar_source = _local_sessions(effective_start, effective_end)
+    sessions, calendar_source, calendar_complete = _market_sessions(
+        market, effective_start, effective_end, observed_dates=valid_index.normalize(),
+    )
     coverage_ratio: float | None = None
     partial = False
     if len(sessions):
@@ -410,9 +513,35 @@ def _assess_daily_frame(
             partial = coverage_ratio < 1.0
             if coverage_ratio < 0.95:
                 issues.append(f"有证据交易日覆盖率仅 {coverage_ratio:.1%}")
-    else:
+    elif market in {Market.CN, Market.HK, Market.US}:
         partial = True
         issues.append("缺少权威交易日历，仅完成边界与结构校验")
+    else:
+        partial = True
+        issues.append("MARKET_SESSION_UNSUPPORTED: 缺少该交易所/产品的已验证时区与交易时段模板")
+    if not calendar_complete and market in {Market.HK, Market.US}:
+        partial = True
+        issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
+    if zone is not None and not pd.isna(observed_end) and observed_end.date() == market_today:
+        close = _daily_close(market, market_today, zone)
+        now_utc = current.astimezone(UTC)
+        published = _exact_attr_instant(df, "provider_published_at")
+        ingested = _exact_attr_instant(df, "ingested_at")
+        coverage_complete = bool(df.attrs.get("coverage_complete"))
+        if close is not None and now_utc < close.astimezone(UTC):
+            partial = True
+            issues.append("CURRENT_SESSION_PARTIAL: 当日 bar 尚处于交易时段，不能用于正式研究")
+        elif close is not None and (published is None or published > now_utc):
+            partial = True
+            issues.append("CURRENT_SESSION_CLOSED_WAITING_PROVIDER: 收盘后仍缺少 provider 发布时间")
+        elif close is not None and (
+            ingested is None or ingested > now_utc or not coverage_complete
+        ):
+            partial = True
+            issues.append(
+                "CURRENT_SESSION_PROVIDER_PUBLISHED_WAITING_INGEST: "
+                "等待 cutoff 前的本地摄取与完整覆盖证据"
+            )
     blocking = bool(
         duplicate_rows or future_rows or sparse_cadence or missing_columns
         or invalid_numeric or invalid_semantics
@@ -437,7 +566,7 @@ def _assess_daily_frame(
         issues=tuple(dict.fromkeys(issues)),
         stale=stale,
         partial=partial,
-        timezone="exchange-date",
+        timezone=str(zone) if zone is not None else "unknown",
         adjustment=adjustment,
         units=units,
         duplicate_rows=duplicate_rows,
@@ -556,6 +685,16 @@ def _assess_intraday_frame(
     stale: bool = False,
 ) -> BarDataQuality:
     issues: list[str] = []
+    try:
+        market = guess_market(symbol)
+    except ValueError:
+        market = Market.FUTURES
+    zone = _market_timezone(symbol)
+    unsupported_market = zone is None
+    if unsupported_market:
+        issues.append(
+            "MARKET_SESSION_UNSUPPORTED: 缺少该交易所/产品的已验证时区与交易时段模板"
+        )
     frequency_minutes = _MINUTE_FREQUENCY_MINUTES.get(frequency, 0)
     if frequency_minutes <= 0:
         issues.append("无法确认分钟行情的时间间隔")
@@ -570,12 +709,25 @@ def _assess_intraday_frame(
             requested_symbols=(symbol,), missing_symbols=(symbol,),
         )
     raw_index = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce"))
-    timezone = str(raw_index.tz or "Asia/Shanghai")
+    timezone = str(zone) if zone is not None else "unknown"
+    time_unzoned = False
     if raw_index.tz is None:
-        issues.append("分钟行情没有注明时区，当前按北京时间解释")
-        wall_index = raw_index
+        provider_timezone = str(frame.attrs.get("timezone") or "").strip()
+        try:
+            provider_zone = ZoneInfo(provider_timezone) if provider_timezone else None
+        except ZoneInfoNotFoundError:
+            provider_zone = None
+        if provider_zone is None or zone is None:
+            issues.append("TIME_UNZONED: 分钟行情没有可解释的 IANA provider 时区")
+            time_unzoned = True
+            wall_index = raw_index
+        else:
+            wall_index = raw_index.tz_localize(provider_zone).tz_convert(zone).tz_localize(None)
     else:
-        wall_index = raw_index.tz_convert("Asia/Shanghai").tz_localize(None)
+        wall_index = (
+            raw_index.tz_convert(zone).tz_localize(None)
+            if zone is not None else raw_index.tz_convert("UTC").tz_localize(None)
+        )
     valid_index = wall_index[~wall_index.isna()]
     duplicate_rows = int(valid_index.duplicated(keep=False).sum())
     if duplicate_rows:
@@ -604,16 +756,18 @@ def _assess_intraday_frame(
         invalid_semantics = int((finite & ~semantic).sum())
         if invalid_semantics:
             issues.append(f"存在 {invalid_semantics} 行价格高低关系或成交量不合理")
-    requested_start = _shanghai_wall_time(start)
-    requested_end = _shanghai_wall_time(end)
+    request_zone = zone or ZoneInfo("UTC")
+    requested_start = _market_wall_time(start, request_zone)
+    requested_end = _market_wall_time(end, request_zone)
     if frequency == "1d":
-        requested_end = min(requested_end.normalize(), pd.Timestamp(market_date()))
+        current_date = market_now().astimezone(request_zone).date()
+        requested_end = min(requested_end.normalize(), pd.Timestamp(current_date))
         requested_start, requested_end = _instrument_range(
             symbol, requested_start.normalize(), requested_end,
         )
     if len(str(end).strip()) <= 10:
         requested_end += pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
-    requested_end = min(requested_end, _shanghai_wall_time(market_now()))
+    requested_end = min(requested_end, _market_wall_time(market_now(), request_zone))
     observed_start = valid_index.min() if len(valid_index) else pd.NaT
     observed_end = valid_index.max() if len(valid_index) else pd.NaT
     boundary_failure = False
@@ -636,13 +790,13 @@ def _assess_intraday_frame(
     coverage_ratio: float | None = None
     bucket_coverage: float | None = None
     partial = boundary_failure or stale
-    if guess_market(symbol) == Market.CN:
-        sessions, calendar_source = _local_sessions(
-            requested_start.normalize(), requested_end.normalize(),
-        )
-    else:
-        sessions = pd.DatetimeIndex([])
-        calendar_source = f"{guess_market(symbol).value}:calendar-unavailable"
+    observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
+    sessions, calendar_source, calendar_complete = _market_sessions(
+        market,
+        requested_start.normalize(),
+        requested_end.normalize(),
+        observed_dates=observed_dates,
+    )
     if len(sessions) and len(valid_index):
         observed_dates = pd.DatetimeIndex(valid_index.normalize().unique())
         session_coverage = len(sessions.intersection(observed_dates)) / len(sessions)
@@ -657,16 +811,11 @@ def _assess_intraday_frame(
             off_grid_rows = 0
             for session in sessions:
                 day = pd.Timestamp(session).normalize()
-                for start_offset, end_offset in (
-                    (pd.Timedelta(hours=9, minutes=30), pd.Timedelta(hours=11, minutes=30)),
-                    (pd.Timedelta(hours=13), pd.Timedelta(hours=15)),
-                ):
-                    window_start = max(day + start_offset, requested_start)
-                    window_end = min(day + end_offset, requested_end)
+                for session_start, session_end in _trading_windows(market, day):
+                    window_start = max(session_start, requested_start)
+                    window_end = min(session_end, requested_end)
                     if window_end <= window_start:
                         continue
-                    session_start = day + start_offset
-                    session_end = day + end_offset
                     expected_grid = pd.date_range(
                         session_start + pd.Timedelta(minutes=frequency_minutes),
                         session_end,
@@ -713,6 +862,9 @@ def _assess_intraday_frame(
                     )
             if off_grid_rows:
                 issues.append(f"存在 {off_grid_rows} 行未对齐 {frequency} 桶边界的时间戳")
+        if not calendar_complete and market in {Market.HK, Market.US}:
+            partial = True
+            issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
     else:
         partial = True
         issues.append("缺少独立交易日历，无法验证分钟历史覆盖")
@@ -723,6 +875,7 @@ def _assess_intraday_frame(
         or (coverage_ratio is not None and coverage_ratio < 0.80)
         or frequency_minutes <= 0
         or any("未对齐" in item for item in issues)
+        or time_unzoned or unsupported_market
     )
     status: QualityStatus = (
         "unavailable" if blocking else "degraded" if issues or partial else "verified"

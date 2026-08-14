@@ -108,10 +108,12 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
         def intraday(self, symbol, start, end, frequency="5m"):
             self.calls.append(frequency)
             index = pd.date_range("2024-01-02 09:30", periods=4, freq="5min")
-            return pd.DataFrame({
+            frame = pd.DataFrame({
                 "open": [10.0] * 4, "high": [10.2] * 4, "low": [9.9] * 4,
                 "close": [10.1] * 4, "volume": [1000.0] * 4,
             }, index=index)
+            frame.attrs["timezone"] = "Asia/Shanghai"
+            return frame
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     store = IntradayBarStore("5m", root=tmp_path / "intraday")
@@ -144,10 +146,12 @@ def test_multisymbol_intraday_panel(monkeypatch):
         def intraday(self, symbol, start, end, frequency="5m"):
             index = pd.date_range("2024-01-02 09:30", periods=3, freq="5min")
             offset = 1.0 if symbol.startswith("600") else 2.0
-            return pd.DataFrame({
+            frame = pd.DataFrame({
                 "open": offset, "high": offset + 0.2, "low": offset - 0.1,
                 "close": offset + 0.1, "volume": 1000.0,
             }, index=index)
+            frame.attrs["timezone"] = "Asia/Shanghai"
+            return frame
 
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     updates = []
