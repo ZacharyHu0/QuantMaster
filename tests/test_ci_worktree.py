@@ -260,6 +260,30 @@ def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
     assert captured["env"]["MYPY_CACHE_DIR"] == str(artifacts / "cache" / "mypy")
 
 
+def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
+    packages = tmp_path / "packages"
+    wheel = packages / "python" / "quantmaster-1.0.0-py3-none-any.whl"
+    wheel.parent.mkdir(parents=True)
+    wheel.touch()
+    artifacts = tmp_path / "artifacts"
+    python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    calls = []
+    monkeypatch.setattr(run, "PACKAGE_ROOT", packages)
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(run, "PYTHON", python)
+    monkeypatch.setattr(
+        run, "run_external",
+        lambda label, command, **kwargs: calls.append((label, command, kwargs)),
+    )
+
+    run.smoke_fresh_wheel()
+
+    label, command, kwargs = calls[0]
+    assert label == "fresh wheel install"
+    assert command[:5] == ["uv", "pip", "install", "--python", str(python)]
+    assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
+
+
 def test_full_shards_use_three_way_parallelism(monkeypatch):
     observed = {}
 

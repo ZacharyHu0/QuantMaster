@@ -244,10 +244,16 @@ def smoke_fresh_wheel() -> None:
         wheel = temp / wheels[-1].name
         shutil.copy2(wheels[-1], wheel)
         target = temp / "site"
+        install_env = os.environ.copy()
+        install_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
         run_external(
             "fresh wheel install",
-            [str(PYTHON), "-m", "pip", "install", "--no-deps", "--target", str(target), str(wheel)],
+            [
+                "uv", "pip", "install", "--python", str(PYTHON), "--no-deps",
+                "--target", str(target), str(wheel),
+            ],
             cwd=temp,
+            env=install_env,
         )
         smoke_env = os.environ.copy()
         smoke_env["QM_CONFIG_PATH"] = os.devnull
