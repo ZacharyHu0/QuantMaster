@@ -420,14 +420,16 @@ def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_pa
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
-    monkeypatch.setattr(tasks, "record_task_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tasks, "record_task_completion", lambda *args, **kwargs: calls.append("completion"),
+    )
     monkeypatch.setattr(tasks, "remove_task_artifacts", blocked_artifacts)
     monkeypatch.setattr(tasks, "git", fake_git)
 
     with pytest.raises(SystemExit, match="ACL blocked"):
         remove("recovery")
 
-    assert calls == ["artifacts"]
+    assert calls == ["completion", "artifacts"]
     assert artifacts.exists()
 
 
@@ -607,6 +609,9 @@ def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_
     )
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
     monkeypatch.setattr(tasks.shutil, "rmtree", remove_once_blocked)
+    monkeypatch.setattr(
+        tasks, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
     monkeypatch.setattr(
         tasks.subprocess, "run",
         lambda *args, **kwargs: calls.append("restore") or SimpleNamespace(
