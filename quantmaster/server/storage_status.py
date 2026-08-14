@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,10 @@ def _iso_timestamp(value: object) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat()
 
 
-def _owner_writer_count(root: Path) -> int:
+_CONTROL_WRITER_LEASE_SECONDS = 10.0
+
+
+def _vendor_process_active(root: Path) -> bool:
     marker = root / ".quantmaster-stockdb-owner.json"
     try:
         value = json.loads(marker.read_text(encoding="utf-8"))
@@ -62,17 +66,17 @@ def _owner_writer_count(root: Path) -> int:
         expected = Path(str(process.get("image") or "")).resolve()
         configured = (root / "stockdb.exe").resolve()
         if pid <= 0 or expected != configured:
-            return 0
+            return False
         from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
 
         identity = FreeStockDBRuntime._process_identity(pid)
-        return int(bool(
+        return bool(
             identity
             and int(identity.get("created") or 0) == int(process.get("created") or 0)
             and Path(str(identity.get("image") or "")).resolve() == configured
-        ))
+        )
     except (ImportError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return 0
+        return False
 
 
 def _decode_mapping(value: object) -> dict[str, Any]:
@@ -81,6 +85,59 @@ def _decode_mapping(value: object) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return decoded if isinstance(decoded, dict) else {}
+
+
+def _same_path(value: object, expected: Path) -> bool:
+    try:
+        candidate = Path(str(value or ""))
+        return candidate.is_absolute() and candidate.resolve() == expected.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _control_writer_count(
+    connection: sqlite3.Connection, root: Path, control: Path,
+) -> int | None:
+    try:
+        row = connection.execute(
+            "SELECT payload_json,updated_at FROM runtime_state WHERE singleton=1"
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    if not row:
+        return 0
+    payload = _decode_mapping(row[0])
+    lease = payload.get("control_writer")
+    try:
+        age = max(0.0, time.time() - float(row[1] or 0))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(lease, dict):
+        return None if age <= _CONTROL_WRITER_LEASE_SECONDS else 0
+    try:
+        pid = int(lease.get("pid") or 0)
+        created = int(lease.get("created") or 0)
+        image = str(lease.get("image") or "")
+    except (TypeError, ValueError):
+        return None
+    if (
+        pid <= 0 or created <= 0 or not Path(image).is_absolute()
+        or not _same_path(lease.get("instance_root"), root)
+        or not _same_path(lease.get("control_path"), control)
+    ):
+        return None
+    from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
+
+    identity = FreeStockDBRuntime._process_identity(pid)
+    if age > _CONTROL_WRITER_LEASE_SECONDS:
+        return 0 if identity is None else None
+    if not identity:
+        return None
+    matches = (
+        int(identity.get("created") or 0) == created
+        and _same_path(identity.get("image"), Path(image))
+    )
+    return 1 if matches else None
 
 
 def _state_summary(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -166,7 +223,8 @@ def storage_status() -> dict[str, Any]:
         "wal_present": wal_present,
         "shm_present": shm.is_file(),
         "journal_present": journal.is_file(),
-        "active_writers": _owner_writer_count(stockdb_root),
+        "active_writers": None,
+        "vendor_process_active": _vendor_process_active(stockdb_root),
         "last_success_at": "",
         "last_error": "",
         "affected_tasks": [],
@@ -180,11 +238,6 @@ def storage_status() -> dict[str, Any]:
     if not control.is_file():
         status["diagnostic_code"] = "CONTROL_DB_MISSING"
         return status
-    if status["active_writers"] and (wal_present or status["shm_present"]):
-        status["status"] = "degraded"
-        status["diagnostic_code"] = "WAL_REQUIRES_QUIESCENT_CHECK"
-        status["last_error"] = "存在活跃写入者与 SQLite sidecar；需协调写入者后复验完整状态"
-        return status
     try:
         status["estimated_bytes"] = (
             control.stat().st_size
@@ -192,6 +245,9 @@ def storage_status() -> dict[str, Any]:
             + (shm.stat().st_size if shm.is_file() else 0)
         )
         with connect_sqlite_diagnostic(control) as connection:
+            status["active_writers"] = _control_writer_count(
+                connection, stockdb_root, control,
+            )
             status["journal_mode"] = str(
                 connection.execute("PRAGMA journal_mode").fetchone()[0]
             ).lower()
@@ -204,6 +260,10 @@ def storage_status() -> dict[str, Any]:
             status["status"] = "degraded"
             status["diagnostic_code"] = "SQLITE_CORRUPT"
             status["last_error"] = "StockDB 控制库主文件完整性检查未通过"
+        elif status["active_writers"] is None:
+            status["status"] = "degraded"
+            status["diagnostic_code"] = "WRITER_IDENTITY_UNCERTAIN"
+            status["last_error"] = "控制库写入者身份无法可靠确认；需协调运行实例后复验"
         elif wal_present:
             status["status"] = "degraded"
             status["diagnostic_code"] = "WAL_REQUIRES_QUIESCENT_CHECK"

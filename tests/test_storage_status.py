@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -34,9 +35,6 @@ def test_storage_status_is_read_only_redacted_and_reports_schema(
     _control_database(control)
     isolated_config.data.free_stockdb_root = str(root)
     monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
-    monkeypatch.setattr(
-        "quantmaster.server.storage_status._owner_writer_count", lambda _root: 0,
-    )
     before = control.stat()
 
     result = storage_status()
@@ -81,11 +79,8 @@ def test_storage_status_reports_wal_without_consuming_sidecars(
     isolated_config.data.free_stockdb_root = str(root)
     monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
     monkeypatch.setattr(
-        "quantmaster.server.storage_status._owner_writer_count", lambda _root: 1,
-    )
-    monkeypatch.setattr(
-        "quantmaster.server.storage_status.connect_sqlite_diagnostic",
-        lambda _path: (_ for _ in ()).throw(AssertionError("database was opened")),
+        "quantmaster.server.storage_status._control_writer_count",
+        lambda _connection, _root, _control: 1,
     )
     before = {path: path.read_bytes() for path in (control, wal, shm)}
 
@@ -113,9 +108,6 @@ def test_storage_status_resolves_relative_stockdb_root_from_config_not_cwd(
     isolated_config.data.free_stockdb_root = "runtime/free-stockdb"
     monkeypatch.chdir(unrelated_cwd)
     monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
-    monkeypatch.setattr(
-        "quantmaster.server.storage_status._owner_writer_count", lambda _root: 0,
-    )
 
     result = storage_status()
 
@@ -123,6 +115,137 @@ def test_storage_status_resolves_relative_stockdb_root_from_config_not_cwd(
     assert result["database"] == ".quantmaster-control.sqlite"
     assert result["display_path"] == "<configured-instance>/.quantmaster-control.sqlite"
     assert not (unrelated_cwd / "runtime" / "free-stockdb").exists()
+
+
+def test_control_writer_lease_requires_fresh_identity_and_exact_paths(
+    monkeypatch, tmp_path,
+):
+    from quantmaster.server.storage_status import _control_writer_count
+
+    root = tmp_path / "runtime" / "free-stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    root.mkdir(parents=True)
+    lease = {
+        "pid": 4321, "image": str(tmp_path / "python.exe"), "created": 9876,
+        "instance_root": str(root), "control_path": str(control),
+    }
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE runtime_state (singleton INTEGER PRIMARY KEY, "
+            "payload_json TEXT, updated_at REAL)"
+        )
+        connection.execute(
+            "INSERT INTO runtime_state VALUES (1, ?, ?)",
+            (json.dumps({"control_writer": lease}), time.time()),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.free_stockdb_runtime.FreeStockDBRuntime._process_identity",
+            lambda _pid: {
+                "pid": 4321, "image": lease["image"], "created": 9876,
+            },
+        )
+        assert _control_writer_count(connection, root, control) == 1
+
+        lease["control_path"] = str(tmp_path / "other.sqlite")
+        connection.execute(
+            "UPDATE runtime_state SET payload_json=? WHERE singleton=1",
+            (json.dumps({"control_writer": lease}),),
+        )
+        assert _control_writer_count(connection, root, control) is None
+
+
+def test_control_writer_lease_is_uncertain_for_pid_reuse_and_zero_when_stale_dead(
+    monkeypatch, tmp_path,
+):
+    from quantmaster.server.storage_status import (
+        _CONTROL_WRITER_LEASE_SECONDS,
+        _control_writer_count,
+    )
+
+    root = tmp_path / "stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    lease = {
+        "pid": 123, "image": str(tmp_path / "python.exe"), "created": 456,
+        "instance_root": str(root), "control_path": str(control),
+    }
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE runtime_state (singleton INTEGER PRIMARY KEY, "
+            "payload_json TEXT, updated_at REAL)"
+        )
+        connection.execute(
+            "INSERT INTO runtime_state VALUES (1, ?, ?)",
+            (json.dumps({"control_writer": lease}), time.time()),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.free_stockdb_runtime.FreeStockDBRuntime._process_identity",
+            lambda _pid: {**lease, "created": 999},
+        )
+        assert _control_writer_count(connection, root, control) is None
+
+        connection.execute(
+            "UPDATE runtime_state SET updated_at=? WHERE singleton=1",
+            (time.time() - _CONTROL_WRITER_LEASE_SECONDS - 1,),
+        )
+        monkeypatch.setattr(
+            "quantmaster.data.free_stockdb_runtime.FreeStockDBRuntime._process_identity",
+            lambda _pid: None,
+        )
+        assert _control_writer_count(connection, root, control) == 0
+
+
+def test_storage_status_reports_recent_legacy_heartbeat_as_uncertain(
+    isolated_config, monkeypatch, tmp_path,
+):
+    root = tmp_path / "stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    _control_database(control)
+    with sqlite3.connect(control) as connection:
+        connection.execute(
+            "UPDATE runtime_state SET updated_at=? WHERE singleton=1", (time.time(),),
+        )
+    isolated_config.data.free_stockdb_root = str(root)
+    monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
+
+    result = storage_status()
+
+    assert result["active_writers"] is None
+    assert result["vendor_process_active"] is False
+    assert result["status"] == "degraded"
+    assert result["diagnostic_code"] == "WRITER_IDENTITY_UNCERTAIN"
+
+
+def test_storage_status_does_not_expose_control_writer_identity(
+    isolated_config, monkeypatch, tmp_path,
+):
+    root = tmp_path / "private-user" / "stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    _control_database(control)
+    private_image = str(tmp_path / "private-runtime" / "python.exe")
+    lease = {
+        "pid": 7654, "image": private_image, "created": 321,
+        "instance_root": str(root), "control_path": str(control),
+    }
+    with sqlite3.connect(control) as connection:
+        connection.execute(
+            "UPDATE runtime_state SET payload_json=?,updated_at=? WHERE singleton=1",
+            (json.dumps({"control_writer": lease}), time.time()),
+        )
+    isolated_config.data.free_stockdb_root = str(root)
+    monkeypatch.delenv("QM_FREE_STOCKDB_CONTROL_PATH", raising=False)
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.FreeStockDBRuntime._process_identity",
+        lambda _pid: {"pid": 7654, "image": private_image, "created": 321},
+    )
+
+    result = storage_status()
+    serialized = json.dumps(result, ensure_ascii=False)
+
+    assert result["active_writers"] == 1
+    assert result["diagnostic_code"] == "ACTIVE_WRITER"
+    assert private_image not in serialized
+    assert str(root) not in serialized
+    assert "control_writer" not in serialized
 
 
 def test_runtime_status_exposes_storage_contract_without_absolute_path(

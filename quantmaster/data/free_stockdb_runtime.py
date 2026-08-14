@@ -489,9 +489,28 @@ class FreeStockDBRuntime:
             payload = dict(self._status)
         if self._owner:
             try:
-                self._ensure_control().write_state(payload)
+                self._write_owner_state(payload)
             except (OSError, sqlite3.Error):
                 logger.warning("free-stockdb 控制状态写入失败", exc_info=True)
+
+    def _control_writer_lease(self) -> dict[str, Any]:
+        identity = self._process_identity(os.getpid())
+        if not identity:
+            return {}
+        return {
+            "pid": int(identity["pid"]),
+            "image": str(identity["image"]),
+            "created": int(identity["created"]),
+            "instance_root": str(self._root().resolve()),
+            "control_path": str(self._control_path().resolve()),
+        }
+
+    def _write_owner_state(self, payload: dict[str, Any]) -> None:
+        heartbeat = dict(payload)
+        lease = self._control_writer_lease()
+        if lease:
+            heartbeat["control_writer"] = lease
+        self._ensure_control().write_state(heartbeat)
 
     def _is_managed(self) -> bool:
         return self._daemon_started or self._process is not None
@@ -1395,7 +1414,7 @@ class FreeStockDBRuntime:
                 with self._lock:
                     heartbeat = dict(self._status)
                 heartbeat.update({"owner_pid": os.getpid(), "supervised": False})
-                self._ensure_control().write_state(heartbeat)
+                self._write_owner_state(heartbeat)
             except (OSError, sqlite3.Error):
                 logger.warning("free-stockdb owner 心跳写入失败", exc_info=True)
             except Exception:

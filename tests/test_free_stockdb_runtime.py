@@ -13,6 +13,38 @@ from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
 from quantmaster.settings import DataSettings
 
 
+def test_owner_state_publishes_control_writer_lease(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "free-stockdb"
+    control = root / ".quantmaster-control.sqlite"
+    root.mkdir()
+    captured: list[dict[str, object]] = []
+
+    class Control:
+        @staticmethod
+        def write_state(payload):
+            captured.append(dict(payload))
+
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    monkeypatch.setattr(runtime, "_root", lambda: root)
+    monkeypatch.setattr(runtime, "_control_path", lambda: control)
+    monkeypatch.setattr(runtime, "_ensure_control", lambda: Control())
+    monkeypatch.setattr(
+        runtime, "_process_identity",
+        lambda _pid: {"pid": 123, "image": str(tmp_path / "python.exe"), "created": 456},
+    )
+
+    runtime._set_status("running", "ready")
+
+    assert captured[-1]["control_writer"] == {
+        "pid": 123,
+        "image": str(tmp_path / "python.exe"),
+        "created": 456,
+        "instance_root": str(root.resolve()),
+        "control_path": str(control.resolve()),
+    }
+
+
 def test_apply_config_control_error_is_redacted(monkeypatch):
     internal = r"C:\private\control.sqlite Bearer secret-value"
 
