@@ -6,12 +6,16 @@ import json
 import sqlite3
 import threading
 import time
+from dataclasses import FrozenInstanceError
+from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pandas as pd
 import pytest
 
 from quantmaster.config import Config, set_config
+from quantmaster.data import migration as data_migration
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.data.migration import DataMigrationManager, MigrationError
 from quantmaster.data.universe import (
@@ -30,6 +34,111 @@ class RootSwitcher:
 
     def update_data_root(self, target):
         self.target = str(target)
+
+
+def test_data_migration_preflight_is_side_effect_free_and_reports_capacity(
+    tmp_path, monkeypatch,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    database = source / "ledger.sqlite"
+    parquet = source / "bars.parquet"
+    sidecar = source / "ledger.sqlite-wal"
+    database.write_bytes(b"sqlite")
+    parquet.write_bytes(b"parquet")
+    sidecar.write_bytes(b"excluded-sidecar")
+    target = tmp_path / "missing-parent" / "target"
+    free_bytes = 64 * 1024 * 1024
+    usage_paths = []
+    monkeypatch.setattr(
+        data_migration.shutil,
+        "disk_usage",
+        lambda path: usage_paths.append(Path(path)) or SimpleNamespace(free=free_bytes),
+    )
+    original_open = Path.open
+
+    def reject_payload_open(path, *args, **kwargs):
+        if path in {database, parquet, sidecar}:
+            raise AssertionError(f"preflight opened payload: {path}")
+        return original_open(path, *args, **kwargs)
+
+    def reject_sqlite_open(*args, **kwargs):
+        raise AssertionError("preflight opened SQLite")
+
+    monkeypatch.setattr(Path, "open", reject_payload_open)
+    monkeypatch.setattr(data_migration.sqlite3, "connect", reject_sqlite_open)
+
+    result = data_migration.preflight_data_root_migration(source, target, "copy")
+
+    assert result.source == source.resolve()
+    assert result.target == target.resolve()
+    assert result.mode == "copy"
+    assert result.file_count == 2
+    assert result.total_bytes == len(b"sqliteparquet")
+    assert result.required_bytes == result.total_bytes + 16 * 1024 * 1024
+    assert result.free_bytes == free_bytes
+    assert usage_paths == [tmp_path.resolve()]
+    assert not target.parent.exists()
+    with pytest.raises(FrozenInstanceError):
+        result.total_bytes = 0
+    monkeypatch.setattr(
+        data_migration.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=result.required_bytes - 1),
+    )
+    with pytest.raises(MigrationError, match="剩余空间不足"):
+        data_migration.preflight_data_root_migration(source, target, "copy")
+
+
+def test_data_migration_preflight_preserves_fail_closed_boundaries(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    payload = source / "payload.parquet"
+    payload.write_bytes(b"payload")
+    target = tmp_path / "target"
+
+    with pytest.raises(MigrationError, match="绝对路径"):
+        data_migration.preflight_data_root_migration("relative", target, "copy")
+    with pytest.raises(MigrationError, match="嵌套"):
+        data_migration.preflight_data_root_migration(source, source / "nested", "copy")
+    with pytest.raises(MigrationError, match="mode"):
+        data_migration.preflight_data_root_migration(source, target, "move")
+
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == payload or original_is_symlink(path),
+    )
+    with pytest.raises(MigrationError, match="符号链接"):
+        data_migration.preflight_data_root_migration(source, target, "copy")
+
+
+def test_data_migration_manager_reuses_public_preflight(tmp_path, monkeypatch):
+    source, target = tmp_path / "source", tmp_path / "existing"
+    source.mkdir()
+    target.mkdir()
+    cfg = Config()
+    cfg.data.root = str(source)
+    set_config(cfg)
+    calls = []
+    original = data_migration.preflight_data_root_migration
+
+    def tracked_preflight(source_path, target_path, mode):
+        calls.append((source_path, target_path, mode))
+        return original(source_path, target_path, mode)
+
+    monkeypatch.setattr(data_migration, "preflight_data_root_migration", tracked_preflight)
+    manager = DataMigrationManager(RootSwitcher())
+    task = manager.create(target, "switch")
+    for _ in range(100):
+        result = manager.get(task["id"])
+        if result["status"] not in {"pending", "running", "cancelling"}:
+            break
+        time.sleep(0.01)
+
+    assert result["status"] == "completed"
+    assert calls == [(str(source), target, "switch")]
 
 
 def test_symbol_and_universe_validation(tmp_path):
