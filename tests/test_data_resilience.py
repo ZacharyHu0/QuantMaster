@@ -579,7 +579,8 @@ def test_incremental_tail_tries_fallback_when_primary_has_no_new_date(
         calls = 0
 
         def daily(self, symbol, start, end):
-            type(self).calls += 1
+            if (start, end) == ("2024-01-02", "2024-01-03"):
+                type(self).calls += 1
             return old
 
     class Current(DataSource):
@@ -588,7 +589,8 @@ def test_incremental_tail_tries_fallback_when_primary_has_no_new_date(
         calls = 0
 
         def daily(self, symbol, start, end):
-            type(self).calls += 1
+            if (start, end) == ("2024-01-02", "2024-01-03"):
+                type(self).calls += 1
             frame = pd.concat([old, old.rename(index={old.index[0]: pd.Timestamp("2024-01-03")})])
             return frame
 
@@ -729,7 +731,8 @@ def test_fresh_cache_does_not_hide_missing_end(tmp_path, isolated_config, monkey
         calls = 0
 
         def daily(self, symbol, start, end):
-            FakeSource.calls += 1
+            if (start, end) == ("2024-01-02", "2024-06-28"):
+                FakeSource.calls += 1
             full_dates = pd.bdate_range(start, end)
             return pd.DataFrame({
                 "open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0,
@@ -888,7 +891,8 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
         calls = 0
 
         def daily(self, symbol, start, end):
-            type(self).calls += 1
+            if (start, end) == ("2024-01-02", "2024-03-29"):
+                type(self).calls += 1
             time.sleep(0.05)
             index = pd.bdate_range(start, end)
             return pd.DataFrame({
