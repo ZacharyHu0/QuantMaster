@@ -5,14 +5,55 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.15.3"
-RELEASE_DATE = "2026-08-13"
+VERSION = "1.15.4"
+RELEASE_DATE = "2026-08-14"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "时间、身份与行情真实性",
+                "items": (
+                    (
+                        "业务日期、精确信息截止和多市场时钟使用明确契约；标的身份、"
+                        "provider alias 与连续期货语义不再依赖裸代码猜测。"
+                    ),
+                    (
+                        "历史缓存必须覆盖截止日前可信交易尾部；无语义旧缓存由单一来源"
+                        "完整替换，不再与增量响应拼接。"
+                    ),
+                ),
+            },
+            {
+                "title": "Provider、存储与研究安全",
+                "items": (
+                    (
+                        "Provider 响应在写缓存前校验字段、标的、日期、媒体类型和拦截页，"
+                        "失败不会冒充有效空结果。"
+                    ),
+                    (
+                        "控制数据库写者租约按 PID、启动时间和路径核验；Quant Lab 在批次写入"
+                        "前估算峰值空间并在磁盘压力下 fail closed。"
+                    ),
+                ),
+            },
+            {
+                "title": "界面与开发基线",
+                "items": (
+                    (
+                        "收盘后工作台扩大板块优先区并在 1120px 以下切换单列；任务开发固定"
+                        "基线、一次性对齐后集成，减少反复追逐 main。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.15.3",
+        "date": "2026-08-13",
         "sections": (
             {
                 "title": "缓存治理与可观测性",
