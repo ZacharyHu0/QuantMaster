@@ -9,10 +9,10 @@ export async function mount(next) {
     ]);
     feature = ledger;
     await Promise.all([loadAdvancedCharts(), feature.mount()]);
-    await loadLedger();
+    await context.shell.loadLedger();
     return;
   }
-  await context.loadStyle('/static/trading.css');
+  await context.shell.loadStyle('/static/trading.css');
   const [{loadAdvancedCharts}, trading] = await Promise.all([
     import('../advanced-charts.js'), import('../trading.js'),
   ]);
@@ -23,11 +23,11 @@ export async function mount(next) {
 
 export async function unmount() {
   await feature?.unmount?.();
-  window.QuantCharts?.activateTab('');
+  context?.shell.deactivateCharts();
 }
 
 export async function refresh() {
   if (!context) return;
-  if (context.page === 'ledger') await loadLedger();
+  if (context.page === 'ledger') await context.shell.loadLedger();
   else await feature?.refresh?.(context.page);
 }

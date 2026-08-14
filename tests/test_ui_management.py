@@ -381,6 +381,151 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         browser.close()
 
 
+def test_fear_greed_gauge_animates_normally_and_respects_reduced_motion(live_server):
+    url, _ = live_server
+    fear_greed = {
+        "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
+        "history": [{"date": "2026-07-20", "score": 22.0}],
+    }
+    capture = r"""
+      window.__gaugeValues = [];
+      const fillText = CanvasRenderingContext2D.prototype.fillText;
+      CanvasRenderingContext2D.prototype.fillText = function(text, ...args) {
+        if (this.canvas.closest?.('#fear-greed-gauge-market') && /^\d+\.\d$/.test(String(text))) {
+          window.__gaugeValues.push(String(text));
+        }
+        return fillText.call(this, text, ...args);
+      };
+    """
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        normal = browser.new_page(viewport={"width": 1280, "height": 900})
+        normal.add_init_script(capture)
+        normal.route("**/api/v1/market/overview", lambda route: route.fulfill(json={"groups": {}}))
+        normal.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+        normal.goto(url)
+        normal.wait_for_function("() => window.__gaugeValues.includes('18.0')")
+        normal_values = normal.evaluate("window.__gaugeValues")
+        assert any(value != "18.0" for value in normal_values), normal_values
+
+        reduced = browser.new_page(
+            viewport={"width": 1280, "height": 900}, reduced_motion="reduce",
+        )
+        reduced.add_init_script(capture)
+        reduced.route("**/api/v1/market/overview", lambda route: route.fulfill(json={"groups": {}}))
+        reduced.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+        reduced.goto(url)
+        reduced.wait_for_function("() => window.__gaugeValues.includes('18.0')")
+        reduced.wait_for_timeout(700)
+        assert set(reduced.evaluate("window.__gaugeValues")) == {"18.0"}
+        browser.close()
+
+
+def test_today_unmount_cancels_native_chart_work_and_delayed_renders(live_server):
+    url, _ = live_server
+    market = {
+        "groups": {"A股指数": [{
+            "symbol": "000300.SH", "name": "沪深300", "last": 4600.0,
+            "change_pct": -0.2, "nav": [[1784505600000, 1.0], [1784592000000, 0.998]],
+            "as_of": "2026-07-21", "cache_status": "ready", "rsi_14": 60.0,
+            "rsi_history": [["2026-05-01", 35.0], ["2026-07-21", 60.0]],
+        }]},
+    }
+    fear_greed = {
+        "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
+        "history": [{"date": "2026-07-20", "score": 22.0}],
+    }
+    lifecycle_script = """
+      window.__qmChartLifecycle = {idle:new Map(), canceled:new Map(), next:1, disconnects:0};
+      window.requestIdleCallback = callback => {
+        const id = window.__qmChartLifecycle.next++;
+        window.__qmChartLifecycle.idle.set(id, callback);
+        return id;
+      };
+      window.cancelIdleCallback = id => {
+        const callback = window.__qmChartLifecycle.idle.get(id);
+        if (callback) window.__qmChartLifecycle.canceled.set(id, callback);
+        window.__qmChartLifecycle.idle.delete(id);
+      };
+      window.__runIdle = () => {
+        const pending = [...window.__qmChartLifecycle.idle.entries()];
+        window.__qmChartLifecycle.idle.clear();
+        pending.forEach(([, callback]) => callback({didTimeout:false, timeRemaining:() => 10}));
+      };
+      window.__runCanceledIdle = () => {
+        const pending = [...window.__qmChartLifecycle.canceled.values()];
+        window.__qmChartLifecycle.canceled.clear();
+        pending.forEach(callback => callback({didTimeout:false, timeRemaining:() => 10}));
+      };
+      window.IntersectionObserver = class {
+        constructor(callback) { this.callback = callback; this.targets = new Set(); }
+        observe(target) {
+          this.targets.add(target);
+          queueMicrotask(() => this.targets.has(target) && this.callback([{target, isIntersecting:true}]));
+        }
+        unobserve(target) { this.targets.delete(target); }
+        disconnect() { this.targets.clear(); window.__qmChartLifecycle.disconnects += 1; }
+      };
+    """
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script(lifecycle_script)
+        page.route("**/api/v1/market/overview", lambda route: route.fulfill(json=market))
+        page.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+        page.goto(url)
+        page.wait_for_function("() => window.__qmChartLifecycle.idle.size > 0")
+        page.evaluate("window.__runIdle()")
+        page.locator('[data-market-group="A股指数"] .spark canvas').wait_for(state="visible")
+
+        page.evaluate("window.QuantMasterShell.loadMarket()")
+        page.wait_for_function("() => window.__qmChartLifecycle.idle.size > 0")
+        pending = page.evaluate("window.__qmChartLifecycle.idle.size")
+        page.get_by_role("button", name="运行", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/automation$"))
+        assert page.evaluate("window.__qmChartLifecycle.disconnects") >= 1
+        assert page.evaluate("window.__qmChartLifecycle.canceled.size") >= pending
+        assert page.locator("#tab-market canvas, #tab-decision canvas").count() == 0
+        page.evaluate("window.__runCanceledIdle()")
+        page.wait_for_timeout(50)
+        assert page.locator("#tab-market canvas, #tab-decision canvas").count() == 0
+
+        delayed = browser.new_page(viewport={"width": 1280, "height": 900})
+        held = []
+        delayed.route("**/api/v1/market/overview", lambda route: route.fulfill(json=market))
+        delayed.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+        delayed.route("**/static/today-charts.js", lambda route: held.append(route))
+        delayed.goto(url)
+        delayed.wait_for_url(re.compile(r"#today/quotes$"))
+        for _ in range(40):
+            if held:
+                break
+            delayed.wait_for_timeout(25)
+        assert len(held) == 1
+        delayed.get_by_role("button", name="运行", exact=True).click()
+        delayed.wait_for_url(re.compile(r"#runtime/automation$"))
+        delayed.evaluate(
+            """() => {
+              window.__canvasAddsAfterLeave = 0;
+              window.__canvasObserver = new MutationObserver(records => records.forEach(record => {
+                record.addedNodes.forEach(node => {
+                  if (node.nodeType === 1 && (node.matches?.('canvas') || node.querySelector?.('canvas'))) {
+                    window.__canvasAddsAfterLeave += 1;
+                  }
+                });
+              }));
+              window.__canvasObserver.observe(document.body, {childList:true, subtree:true});
+            }"""
+        )
+        held.pop().continue_()
+        delayed.wait_for_timeout(250)
+        assert delayed.evaluate("window.__canvasAddsAfterLeave") == 0
+        assert delayed.locator("#tab-market canvas, #tab-decision canvas").count() == 0
+        browser.close()
+
+
 def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -442,6 +587,43 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         browser.close()
 
 
+def test_workspace_activation_is_latest_wins_after_mount_wait(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        held = []
+        page.add_init_script(
+            """document.addEventListener('quantmaster:workspace-mounted', event => {
+              (window.__workspaceMounts ||= []).push(`${event.detail.workspace}/${event.detail.page}`);
+            });"""
+        )
+        page.route("**/static/lab.js", lambda route: held.append(route))
+        page.goto(url)
+        page.wait_for_url(re.compile(r"#today/quotes$"))
+
+        page.get_by_role("button", name="研究", exact=True).click()
+        for _ in range(40):
+            if held:
+                break
+            page.wait_for_timeout(25)
+        assert len(held) == 1
+        page.get_by_role("button", name="运行", exact=True).click()
+        held.pop().continue_()
+
+        page.wait_for_url(re.compile(r"#runtime/automation$"))
+        page.locator("#tab-automation").wait_for(state="visible")
+        page.wait_for_timeout(1_000)
+        assert page.evaluate("window.__workspaceMounts") == [
+            "today/quotes", "runtime/automation",
+        ]
+        playwright_sync.expect(page.get_by_role("button", name="运行", exact=True)).to_have_attribute(
+            "aria-current", "page"
+        )
+        playwright_sync.expect(page.locator("#tab-lab")).to_be_hidden()
+        browser.close()
+
+
 def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -459,7 +641,17 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
         assert errors == []
 
         failed = browser.new_page()
-        failed.route("**/static/workspaces/account.js", lambda route: route.abort())
+        account_requests = 0
+
+        def fail_account_once(route):
+            nonlocal account_requests
+            account_requests += 1
+            if account_requests == 1:
+                route.abort()
+            else:
+                route.continue_()
+
+        failed.route("**/static/workspaces/account.js*", fail_account_once)
         failed.goto(url)
         failed.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
         failed.get_by_role("button", name="账户", exact=True).click()
@@ -469,6 +661,102 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
             re.compile(r"(?:^|\s)active(?:\s|$)")
         )
         assert failed.url.endswith("#today/quotes")
+        failed.get_by_role("button", name="账户", exact=True).click()
+        failed.wait_for_url(re.compile(r"#account/paper$"))
+        failed.locator("#tab-paper").wait_for(state="visible")
+        assert account_requests == 2
+        browser.close()
+
+
+def test_workspace_mount_failure_restores_previous_route_and_retries_style(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        style_requests = 0
+
+        def fail_style_once(route):
+            nonlocal style_requests
+            style_requests += 1
+            if style_requests == 1:
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route("**/static/lab.css*", fail_style_once)
+        page.goto(url)
+        page.wait_for_url(re.compile(r"#today/quotes$"))
+        assert page.evaluate("Object.isFrozen(window.QuantMasterShell)")
+        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+
+        page.get_by_role("button", name="研究", exact=True).click()
+        playwright_sync.expect(page.get_by_role("alert")).to_contain_text("工作区加载失败")
+        assert page.url.endswith("#today/quotes")
+        playwright_sync.expect(page.get_by_role("button", name="今日", exact=True)).to_have_attribute(
+            "aria-current", "page"
+        )
+        playwright_sync.expect(page.locator("#tab-market")).to_be_visible()
+
+        page.get_by_role("button", name="研究", exact=True).click()
+        page.wait_for_url(re.compile(r"#research/lab$"))
+        page.locator("#tab-lab").wait_for(state="visible")
+        assert style_requests == 2
+        assert page.locator('link[href="/static/lab.css"]').count() == 1
+        playwright_sync.expect(page.get_by_role("alert")).to_be_hidden()
+        browser.close()
+
+
+def test_workspace_mount_resource_failures_retry_script_and_today_feature(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+
+        script_page = browser.new_page(viewport={"width": 1280, "height": 900})
+        script_requests = 0
+
+        def fail_script_once(route):
+            nonlocal script_requests
+            script_requests += 1
+            if script_requests == 1:
+                route.abort()
+            else:
+                route.continue_()
+
+        script_page.route("**/static/echarts.min.js*", fail_script_once)
+        script_page.goto(url)
+        script_page.wait_for_url(re.compile(r"#today/quotes$"))
+        script_page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        script_page.get_by_role("button", name="研究", exact=True).click()
+        playwright_sync.expect(script_page.get_by_role("alert")).to_contain_text("工作区加载失败")
+        assert script_page.url.endswith("#today/quotes")
+        script_page.get_by_role("button", name="研究", exact=True).click()
+        script_page.wait_for_url(re.compile(r"#research/lab$"))
+        script_page.locator("#tab-lab").wait_for(state="visible")
+        assert script_requests == 2
+        assert script_page.locator('script[src="/static/echarts.min.js"]').count() == 1
+
+        feature_page = browser.new_page(viewport={"width": 1280, "height": 900})
+        feature_requests = 0
+
+        def fail_feature_once(route):
+            nonlocal feature_requests
+            feature_requests += 1
+            if feature_requests == 1:
+                route.abort()
+            else:
+                route.continue_()
+
+        feature_page.route("**/static/rotation.js*", fail_feature_once)
+        feature_page.goto(url)
+        feature_page.wait_for_url(re.compile(r"#today/quotes$"))
+        feature_page.get_by_role("tab", name="轮动总览", exact=True).click()
+        playwright_sync.expect(feature_page.get_by_role("alert")).to_contain_text("工作区加载失败")
+        assert feature_page.url.endswith("#today/quotes")
+        playwright_sync.expect(feature_page.locator("#tab-market")).to_be_visible()
+        feature_page.get_by_role("tab", name="轮动总览", exact=True).click()
+        feature_page.wait_for_url(re.compile(r"#today/rotation$"))
+        feature_page.locator("#tab-rotation").wait_for(state="visible")
+        assert feature_requests == 2
         browser.close()
 
 
@@ -3018,6 +3306,7 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
             }"""
         )
         page.reload()
+        page.wait_for_url(re.compile(r"#today/quotes$"))
         page.locator("#market-quotes-view").wait_for(state="visible")
         assert page.url.endswith("#today/quotes")
         assert page.locator("#tab-news").is_hidden()

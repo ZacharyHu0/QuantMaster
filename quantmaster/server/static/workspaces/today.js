@@ -1,5 +1,7 @@
 let context;
 const features = new Map();
+const featureRetries = new Map();
+let mountedFeature = null;
 
 const FEATURE_RESOURCES = {
   temperature: ['/static/rotation.css', '../rotation.js'],
@@ -19,10 +21,16 @@ async function feature(page) {
   if (!resources) return null;
   const [, modulePath] = resources;
   if (!features.has(modulePath)) {
-    features.set(modulePath, Promise.all([
-      context.loadStyle(resources[0]),
-      import(modulePath),
-    ]).then(([, module]) => module));
+    const retry = featureRetries.get(modulePath) || 0;
+    const pending = Promise.all([
+      context.shell.loadStyle(resources[0]),
+      import(`${modulePath}${retry ? `?retry=${retry}` : ''}`),
+    ]).then(([, module]) => module).catch(error => {
+      if (features.get(modulePath) === pending) features.delete(modulePath);
+      featureRetries.set(modulePath, retry + 1);
+      throw error;
+    });
+    features.set(modulePath, pending);
   }
   return features.get(modulePath);
 }
@@ -32,13 +40,14 @@ async function loadPage(page) {
     document.querySelectorAll('[data-market-view]').forEach(view => {
       view.hidden = view.dataset.marketView !== page;
     });
-    await Promise.all([loadAssetLists(false), loadMarket()]);
+    await Promise.all([context.shell.loadAssetLists(false), context.shell.loadMarket()]);
     return;
   }
   if (['temperature', 'style', 'rotation', 'industry', 'themes', 'etfs', 'news'].includes(page)) {
     const {loadAdvancedCharts} = await import('../advanced-charts.js');
     const [, module] = await Promise.all([loadAdvancedCharts(), feature(page)]);
     await module?.mount?.(page);
+    mountedFeature = module;
     return;
   }
   if (page === 'decision') {
@@ -47,20 +56,21 @@ async function loadPage(page) {
   }
   const module = await feature(page);
   await module?.mount?.(page);
-  if (page === 'decision' && !decisionLoaded && !decisionLoading) await loadDecisionHistory();
+  mountedFeature = module;
+  if (page === 'decision') await context.shell.loadDecisionHistory();
 }
 
 export async function mount(next) {
   context = next;
+  mountedFeature = null;
   await loadPage(context.page);
 }
 
 export async function unmount() {
-  const module = await feature(context?.page);
-  await module?.unmount?.();
-  const charts = await import('../today-charts.js');
-  charts.disposeTodayCharts(document.getElementById('tab-market'));
-  window.QuantCharts?.activateTab('');
+  await mountedFeature?.unmount?.();
+  mountedFeature = null;
+  await context?.shell.disposeToday();
+  context?.shell.deactivateCharts();
 }
 
 export async function refresh() {

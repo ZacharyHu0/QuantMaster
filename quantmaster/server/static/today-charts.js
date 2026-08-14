@@ -209,10 +209,11 @@ export function renderFearGreedHistory(root, data) {
   });
 }
 
-export function renderFearGreedGauge(root, data, {replay = false} = {}) {
+export function renderFearGreedGauge(root, data) {
   if (!root) return;
   const target = Number.isFinite(Number(data?.score)) ? Math.max(0, Math.min(100, Number(data.score))) : null;
-  let value = target ?? 0;
+  const animated = target != null && !reducedMotion.matches;
+  let value = animated ? 0 : target ?? 0;
   const drawGauge = (context, width, height) => {
     const cx = width * .5, cy = height * .54, radius = Math.min(width, height) * .36;
     context.lineWidth = 7; context.lineCap = 'round';
@@ -235,9 +236,8 @@ export function renderFearGreedGauge(root, data, {replay = false} = {}) {
     context.fillStyle = COLORS.ink2; context.font = '600 14px sans-serif'; context.fillText(data?.rating_label || '暂不可用', cx, cy + radius * .94);
   };
   const instance = surface(root, drawGauge);
-  if (target != null && !reducedMotion.matches && replay) {
+  if (animated) {
     const started = performance.now();
-    value = 0;
     const animate = now => {
       const progress = Math.min(1, (now - started) / 640);
       value = target * (progress < .5 ? 4 * progress ** 3 : 1 - (-2 * progress + 2) ** 3 / 2);

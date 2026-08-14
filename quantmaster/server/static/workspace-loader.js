@@ -1,8 +1,8 @@
 const WORKSPACES = {
-  today: () => import('./workspaces/today.js'),
-  research: () => import('./workspaces/research.js'),
-  account: () => import('./workspaces/account.js'),
-  runtime: () => import('./workspaces/runtime.js'),
+  today: retry => import(`./workspaces/today.js${retry ? `?retry=${retry}` : ''}`),
+  research: retry => import(`./workspaces/research.js${retry ? `?retry=${retry}` : ''}`),
+  account: retry => import(`./workspaces/account.js${retry ? `?retry=${retry}` : ''}`),
+  runtime: retry => import(`./workspaces/runtime.js${retry ? `?retry=${retry}` : ''}`),
 };
 
 const PAGES = {
@@ -20,42 +20,69 @@ const PAGES = {
 const DEFAULT_PAGE = {today: 'quotes', research: 'lab', account: 'paper', runtime: 'automation'};
 const PAGE_KEY = 'quantmaster.workspacePage.v2';
 const modulePromises = new Map();
+const moduleRetries = new Map();
 const stylePromises = new Map();
 const scriptPromises = new Map();
 let active = null;
 let activation = 0;
+let transitions = Promise.resolve();
 
 function loadWorkspace(name) {
-  if (!modulePromises.has(name)) modulePromises.set(name, WORKSPACES[name]());
+  if (!modulePromises.has(name)) {
+    const retry = moduleRetries.get(name) || 0;
+    const pending = WORKSPACES[name](retry).catch(error => {
+      if (modulePromises.get(name) === pending) modulePromises.delete(name);
+      moduleRetries.set(name, retry + 1);
+      throw error;
+    });
+    modulePromises.set(name, pending);
+  }
   return modulePromises.get(name);
 }
 
 export function loadStyle(path) {
   if (!stylePromises.has(path)) {
-    stylePromises.set(path, new Promise((resolve, reject) => {
+    const pending = new Promise((resolve, reject) => {
       const link = document.createElement('link');
       link.rel = 'stylesheet';
       link.href = path;
       link.onload = () => resolve(link);
-      link.onerror = () => reject(new Error(`样式加载失败：${path}`));
+      link.onerror = () => {
+        link.remove();
+        if (stylePromises.get(path) === pending) stylePromises.delete(path);
+        reject(new Error(`样式加载失败：${path}`));
+      };
       document.head.appendChild(link);
-    }));
+    });
+    stylePromises.set(path, pending);
   }
   return stylePromises.get(path);
 }
 
 export function loadScript(path) {
   if (!scriptPromises.has(path)) {
-    scriptPromises.set(path, new Promise((resolve, reject) => {
+    const pending = new Promise((resolve, reject) => {
       const script = document.createElement('script');
       script.src = path;
       script.onload = () => resolve(script);
-      script.onerror = () => reject(new Error(`脚本加载失败：${path}`));
+      script.onerror = () => {
+        script.remove();
+        if (scriptPromises.get(path) === pending) scriptPromises.delete(path);
+        reject(new Error(`脚本加载失败：${path}`));
+      };
       document.head.appendChild(script);
-    }));
+    });
+    scriptPromises.set(path, pending);
   }
   return scriptPromises.get(path);
 }
+
+const shell = Object.freeze({
+  ...window.QuantMasterShell,
+  loadStyle,
+  loadScript,
+  deactivateCharts: () => window.QuantCharts?.activateTab(''),
+});
 
 function readPages() {
   try { return JSON.parse(sessionStorage.getItem(PAGE_KEY) || '{}'); }
@@ -117,30 +144,58 @@ function showError(error) {
   output.hidden = false;
 }
 
-async function activate(workspace, page, {replace = false} = {}) {
-  if (!PAGES[workspace]?.[page]) return false;
-  const token = ++activation;
+async function transitionTo(workspace, page, replace, token) {
+  if (token !== activation) return false;
   const previous = active;
+  let adapter = null;
   try {
-    const adapter = await loadWorkspace(workspace);
+    adapter = await loadWorkspace(workspace);
     if (token !== activation) return false;
     if (previous?.adapter) await previous.adapter.unmount();
+    if (token !== activation) return false;
+    const context = {workspace, page, shell};
+    await adapter.mount(context);
+    if (token !== activation) {
+      await adapter.unmount();
+      if (token !== activation) return false;
+      return false;
+    }
     showRoute(workspace, page);
     rememberPage(workspace, page);
     const target = `#${workspace}/${page}`;
     if (location.hash !== target) history[replace ? 'replaceState' : 'pushState'](null, '', target);
-    active = {workspace, page, adapter};
-    await adapter.mount({workspace, page, loadStyle, loadScript});
+    active = {workspace, page, adapter, context};
     document.dispatchEvent(new CustomEvent('quantmaster:workspace-mounted', {
       detail:{workspace, page},
     }));
     document.getElementById('workspace-load-error')?.setAttribute('hidden', '');
     return true;
   } catch (error) {
+    if (adapter) {
+      try { await adapter.unmount(); }
+      catch (_) { /* failed mounts may have nothing to dispose */ }
+      if (token !== activation) return false;
+    }
+    if (previous?.adapter) {
+      await previous.adapter.mount(previous.context);
+      if (token !== activation) return false;
+      showRoute(previous.workspace, previous.page);
+      const target = `#${previous.workspace}/${previous.page}`;
+      if (location.hash !== target) history.replaceState(null, '', target);
+      active = previous;
+    }
     showError(error);
     console.error(error);
     return false;
   }
+}
+
+function activate(workspace, page, {replace = false} = {}) {
+  if (!PAGES[workspace]?.[page]) return Promise.resolve(false);
+  const token = ++activation;
+  const pending = transitions.then(() => transitionTo(workspace, page, replace, token));
+  transitions = pending.catch(() => false);
+  return pending;
 }
 
 document.querySelector('header')?.addEventListener('click', event => {

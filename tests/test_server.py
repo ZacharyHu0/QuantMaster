@@ -96,6 +96,11 @@ class TestBasics:
             assert re.search(r"export\s+(?:async\s+)?function\s+mount\b", source)
             assert re.search(r"export\s+(?:async\s+)?function\s+unmount\b", source)
             assert re.search(r"export\s+(?:async\s+)?function\s+refresh\b", source)
+            assert "window." not in source
+            assert not re.search(
+                r"(?<![.\w])(loadMarket|loadAssetLists|loadDecisionHistory|loadLedger)\s*\(",
+                source,
+            )
             assert adapter.stat().st_size <= 350 * 1024
 
         loader = (STATIC_ROOT / "workspace-loader.js").read_text(encoding="utf-8")
@@ -104,6 +109,10 @@ class TestBasics:
             f"./workspaces/{name}.js" in loader
             for name in ("today", "research", "account", "runtime")
         )
+        assert "Object.freeze" in loader
+
+        app_source = (STATIC_ROOT / "app.js").read_text(encoding="utf-8")
+        assert "window.QuantMasterShell = Object.freeze" in app_source
 
         initial_paths = [
             STATIC_ROOT / Path(url).name for url in initial_urls
@@ -119,6 +128,7 @@ class TestBasics:
 
         # ECharts is a shared, separately gated vendor asset. Each workspace's own
         # adapter, feature code, styles, and shared chart glue stay under 350 KiB.
+        assert (STATIC_ROOT / "echarts.min.js").stat().st_size <= 1024 * 1024
         workspace_resources = {
             "today": ["workspaces/today.js", "today-charts.js", "rotation.js", "rotation.css",
                       "advanced-charts.js", "charts.js", "charts.css"],

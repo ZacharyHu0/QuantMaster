@@ -9,10 +9,10 @@ const RESOURCES = {
 
 async function loadFeature(page) {
   const [style, module] = RESOURCES[page];
-  await context.loadStyle(style);
+  await context.shell.loadStyle(style);
   if (page === 'settings') {
     await Promise.all([
-      context.loadStyle('/static/news.css'),
+      context.shell.loadStyle('/static/news.css'),
       import('../news.js'),
     ]);
   }
@@ -27,7 +27,7 @@ export async function mount(next) {
 
 export async function unmount() {
   await feature?.unmount?.();
-  window.QuantCharts?.activateTab('');
+  context?.shell.deactivateCharts();
 }
 
 export async function refresh() {

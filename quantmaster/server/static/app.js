@@ -1773,8 +1773,15 @@ let marketStreamCycle = 0;
 let marketFearGreed = null;
 const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
+let todayRenderGeneration = 0;
 function todayCharts() {
-  if (!todayChartsPromise) todayChartsPromise = import('./today-charts.js');
+  if (!todayChartsPromise) {
+    const pending = import('./today-charts.js').catch(error => {
+      if (todayChartsPromise === pending) todayChartsPromise = null;
+      throw error;
+    });
+    todayChartsPromise = pending;
+  }
   return todayChartsPromise;
 }
 const PERSONAL_MARKET_GROUP = '我的股票';
@@ -1825,7 +1832,9 @@ function fearGreedAsOf(value) {
 }
 
 function renderFearGreedVisuals(root = document) {
+  const generation = todayRenderGeneration;
   void todayCharts().then(module => {
+    if (generation !== todayRenderGeneration) return;
     root.querySelectorAll('[data-fear-greed-gauge]').forEach(element => {
       module.renderFearGreedGauge(element, marketFearGreed);
     });
@@ -1977,10 +1986,12 @@ function acceptMarketFearGreed(data) {
   refreshSentimentBindings();
 }
 
-async function loadMarketFearGreed() {
+async function loadMarketFearGreed(generation = todayRenderGeneration) {
   try {
-    acceptMarketFearGreed(await api('/api/v1/market/fear-greed'));
+    const data = await api('/api/v1/market/fear-greed');
+    if (generation === todayRenderGeneration) acceptMarketFearGreed(data);
   } catch (error) {
+    if (generation !== todayRenderGeneration) return;
     acceptMarketFearGreed({status:'unavailable', score:null, rating_label:'暂不可用',
       warning:`CNN 指数读取失败：${error.message}；RSI 仍可独立使用。`});
   }
@@ -2032,11 +2043,26 @@ function queueMarketSpark(element, render) {
   else marketSparkObserver.observe(element);
 }
 
-function disposeMarketSparks() {
+function clearMarketSparks() {
   marketSparkObserver?.disconnect();
   marketSparkObserver = null;
   for (const element of marketSparkTasks.keys()) cancelMarketSparkTask(element);
-  if (todayChartsPromise) void todayChartsPromise.then(module => module.disposeTodayCharts(document.getElementById('tab-market')));
+  if (todayChartsPromise) void todayChartsPromise
+    .then(module => module.disposeTodayCharts(document.getElementById('tab-market')))
+    .catch(() => {});
+}
+
+function disposeMarketSparks() {
+  todayRenderGeneration += 1;
+  marketReloadPending = false;
+  if (marketColdRetryTimer !== null) {
+    window.clearTimeout(marketColdRetryTimer);
+    marketColdRetryTimer = null;
+  }
+  clearMarketSparks();
+  if (todayChartsPromise) void todayChartsPromise
+    .then(module => module.disposeTodayCharts(document.getElementById('tab-decision')))
+    .catch(() => {});
 }
 
 function marketChangeSeries(nav) {
@@ -2137,10 +2163,16 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.element.setAttribute('aria-label',
       `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
+    const generation = todayRenderGeneration;
     queueMarketSpark(entry.element,() => {
+      if (generation !== todayRenderGeneration) return;
       const root = document.getElementById(entry.sparkId);
       if (!root) return;
-      void todayCharts().then(module => module.renderMarketSpark(root,item,changeSeries));
+      void todayCharts().then(module => {
+        if (generation === todayRenderGeneration && root.isConnected) {
+          module.renderMarketSpark(root,item,changeSeries);
+        }
+      });
     });
   }
   return {
@@ -2236,15 +2268,19 @@ function retryColdMarketSnapshot() {
 }
 
 async function loadMarket() {
-  if (marketLoading) return;
+  if (marketLoading) {
+    marketReloadPending = true;
+    return;
+  }
   marketLoading = true;
+  const generation = todayRenderGeneration;
   const majorIndexes = document.getElementById('major-indexes');
   const container = document.getElementById('mkt-groups');
   const hasExisting = Boolean(container.querySelector('.mkt-item, .market-section'))
     || Boolean(majorIndexes.querySelector('.mkt-item'));
   let tracker = null, renderer = null;
   const beginRender = () => {
-    disposeMarketSparks();
+    clearMarketSparks();
     majorIndexes.querySelector('.mkt-grid').replaceChildren();
     majorIndexes.querySelector('.market-section-count').textContent = '正在读取';
     majorIndexes.querySelector('.market-section-empty').textContent = '正在读取本地指数行情…';
@@ -2254,9 +2290,10 @@ async function loadMarket() {
   };
   if (!hasExisting) beginRender();
   else document.getElementById('mkt-stamp').textContent = '正在刷新本地快照；当前内容仍可使用';
-  void loadMarketFearGreed();
+  void loadMarketFearGreed(generation);
   try {
     const response = await api('/api/v1/market/overview');
+    if (generation !== todayRenderGeneration) return;
     const data = response?.data || response;
     const snapshot = response?.snapshot || null;
     if (!renderer) beginRender();
@@ -3409,3 +3446,11 @@ document.getElementById('cash-form').onsubmit = async e => {
   } catch (err) { reportLocalError('真实账户账本', '资金流水未能保存', err); }
   busy(form, false);
 };
+
+window.QuantMasterShell = Object.freeze({
+  loadMarket,
+  loadAssetLists,
+  loadDecisionHistory,
+  loadLedger,
+  disposeToday: disposeMarketSparks,
+});

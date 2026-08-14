@@ -1309,15 +1309,17 @@ const rotationFeature = (() => {
     } catch (error) { target.innerHTML = errorMarkup(error); }
   }
 
-  async function loadCurrent(force = false) {
+  async function loadCurrent(force = false, hiddenOwner = '') {
     const thisRequest = ++requestVersion;
     const marketPage = activeMarketPage;
     const rotationPage = activeRotationPage;
-    const marketActive = document.getElementById('tab-market')?.classList.contains('active');
-    const rotationActive = document.getElementById('tab-rotation')?.classList.contains('active');
+    const marketActive = hiddenOwner
+      ? hiddenOwner === 'market' : document.getElementById('tab-market')?.classList.contains('active');
+    const rotationActive = hiddenOwner
+      ? hiddenOwner === 'rotation' : document.getElementById('tab-rotation')?.classList.contains('active');
     const stillCurrent = () => (
-      thisRequest === requestVersion && ((marketActive && activeMarketPage === marketPage && document.getElementById('tab-market')?.classList.contains('active'))
-      || (rotationActive && activeRotationPage === rotationPage && document.getElementById('tab-rotation')?.classList.contains('active')))
+      thisRequest === requestVersion && ((marketActive && activeMarketPage === marketPage && (hiddenOwner === 'market' || document.getElementById('tab-market')?.classList.contains('active')))
+      || (rotationActive && activeRotationPage === rotationPage && (hiddenOwner === 'rotation' || document.getElementById('tab-rotation')?.classList.contains('active'))))
     );
     try {
       let payload;
@@ -1371,7 +1373,7 @@ const rotationFeature = (() => {
     }
   }
 
-  function setMarketPage(page, updateHash = true) {
+  function setMarketPage(page, updateHash = true, hiddenOwner = '') {
     if (!['quotes','temperature','style'].includes(page)) page = 'quotes';
     activeMarketPage = page;
     document.querySelectorAll('[data-market-page]').forEach(button => {
@@ -1382,11 +1384,12 @@ const rotationFeature = (() => {
     document.querySelectorAll('[data-market-view]').forEach(view => { view.hidden = view.dataset.marketView !== page; });
     const route = `${TODAY_ROUTE_PREFIX}${page}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
-    if (page !== 'quotes') loadCurrent();
+    const loading = page === 'quotes' ? null : loadCurrent(false, hiddenOwner);
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
+    return loading;
   }
 
-  function setRotationPage(page, updateHash = true) {
+  function setRotationPage(page, updateHash = true, hiddenOwner = '') {
     if (page === 'radar') page = 'overview';
     if (!['overview','industry','themes','etfs'].includes(page)) page = 'overview';
     activeRotationPage = page;
@@ -1399,8 +1402,9 @@ const rotationFeature = (() => {
     const routePage = {overview:'rotation',industry:'industry',themes:'themes',etfs:'etfs'}[page] || 'rotation';
     const route = `${TODAY_ROUTE_PREFIX}${routePage}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
-    loadCurrent();
+    const loading = loadCurrent(false, hiddenOwner);
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
+    return loading;
   }
 
   function saveActiveJob(job, scope) {
@@ -1799,14 +1803,20 @@ const rotationFeature = (() => {
     }
   });
 
+  document.addEventListener('quantmaster:workspace-mounted', event => {
+    if (event.detail?.workspace === 'today') {
+      requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
+    }
+  });
+
   async function mount(page) {
     if (['temperature', 'style'].includes(page)) {
-      setMarketPage(page, false);
+      await setMarketPage(page, false, 'market');
       recoverActiveJob();
       return;
     }
     const rotationPages = {rotation:'overview', industry:'industry', themes:'themes', etfs:'etfs'};
-    setRotationPage(rotationPages[page] || 'overview', false);
+    await setRotationPage(rotationPages[page] || 'overview', false, 'rotation');
     recoverActiveJob();
   }
 
