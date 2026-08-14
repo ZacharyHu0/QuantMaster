@@ -244,10 +244,16 @@ def smoke_fresh_wheel() -> None:
         wheel = temp / wheels[-1].name
         shutil.copy2(wheels[-1], wheel)
         target = temp / "site"
+        install_env = os.environ.copy()
+        install_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
         run_external(
             "fresh wheel install",
-            [str(PYTHON), "-m", "pip", "install", "--no-deps", "--target", str(target), str(wheel)],
+            [
+                "uv", "pip", "install", "--python", str(PYTHON), "--no-deps",
+                "--target", str(target), str(wheel),
+            ],
             cwd=temp,
+            env=install_env,
         )
         smoke_env = os.environ.copy()
         smoke_env["QM_CONFIG_PATH"] = os.devnull
@@ -371,9 +377,16 @@ def main() -> int:
                 env=build_env,
             )
             smoke_fresh_wheel()
-            run("PyInstaller smoke", ["-m", "PyInstaller", "--noconfirm",
-                "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
-                str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec"])
+            run_external(
+                "PyInstaller smoke",
+                [
+                    "uv", "run", "--no-project", "--python", str(PYTHON),
+                    "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
+                    "--distpath", str(PACKAGE_ROOT / "desktop"), "--workpath",
+                    str(ARTIFACTS / "build" / "pyinstaller"), "packaging/quantmaster.spec",
+                ],
+                env=build_env,
+            )
             exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
             if exe.exists():
                 run(
