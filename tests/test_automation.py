@@ -25,6 +25,7 @@ from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 from quantmaster.server.app import app
+from quantmaster.trading_sessions import SessionExpectation
 
 
 class MemoryCredentials:
@@ -1632,8 +1633,13 @@ def test_daily_close_keeps_degraded_analysis_preview_without_formal_save(
         ),
     )
     monkeypatch.setattr(
-        "quantmaster.automation.service.market_date",
-        lambda: datetime(2026, 8, 7).date(),
+        "quantmaster.automation.service.resolve_session_target",
+        lambda as_of="", now=None: SessionExpectation(
+            session="2026-08-07",
+            source="test-calendar",
+            ready=True,
+            completion="previous_session_complete",
+        ),
     )
     monkeypatch.setattr(
         "quantmaster.data.universe.load_universe_analysis_snapshot",
@@ -1773,6 +1779,36 @@ def test_daily_scheduler_uses_the_same_resolved_trade_date_as_manual(tmp_path, m
 
     assert scheduled["business_key"] == "daily_close_pipeline:date:2026-08-14"
     assert manual["job_id"] == scheduled["job_id"]
+    service.jobs.stop()
+    service.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_daily_close_calendar_unavailable_never_invents_natural_date(
+    tmp_path, monkeypatch,
+):
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
+    unavailable = SessionExpectation(
+        ready=False,
+        reason="缺少已验证交易日历",
+        completion="calendar_unavailable",
+    )
+    monkeypatch.setattr(
+        "quantmaster.automation.service.resolve_session_target",
+        lambda as_of="", now=None: unavailable,
+    )
+
+    business_key, as_of = service.business_request(
+        "daily_close_pipeline",
+        now=datetime(2026, 8, 17, 15, 20),
+    )
+    result = service._task_daily_close_pipeline()
+
+    assert business_key == "daily_close_pipeline:calendar-unavailable"
+    assert as_of == ""
+    assert result["status"] == "skipped"
+    assert result["calendar"]["completion"] == "calendar_unavailable"
+    assert "2026-08-16" not in str(result)
     service.jobs.stop()
     service.executor.shutdown(wait=False, cancel_futures=True)
 

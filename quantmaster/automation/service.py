@@ -29,7 +29,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
-from quantmaster.trading_sessions import market_date, resolve_session_target
+from quantmaster.trading_sessions import resolve_session_target
 
 logger = logging.getLogger(__name__)
 
@@ -1035,7 +1035,9 @@ class AutomationService:
             return f"{name}:window:{start.isoformat()}:{end.isoformat()}", ""
         if name in {"daily_close_pipeline", "paper_rebalance_proposal"}:
             expectation = resolve_session_target(as_of, now=current)
-            business_date = expectation.session or current.date().isoformat()
+            if not expectation.session:
+                return f"{name}:calendar-unavailable", ""
+            business_date = expectation.session
         else:
             business_date = str(as_of or current.date().isoformat())
         slot = ""
@@ -1377,19 +1379,11 @@ class AutomationService:
         cfg = get_config().automation
         expectation = resolve_session_target(as_of)
         if not expectation.ready or not expectation.session:
-            if as_of:
-                return {
-                    "status": "skipped",
-                    "reason": expectation.reason or "无法确认最近完成交易日",
-                    "calendar": expectation.as_dict(),
-                }
-            fallback = (pd.Timestamp(market_date()) - pd.Timedelta(days=1)).date().isoformat()
-            expectation = expectation.__class__(
-                session=fallback,
-                source="bounded-probe",
-                ready=True,
-                reason="交易日历不可用，使用非当天探测日期并继续通过行情门禁校验",
-            )
+            return {
+                "status": "skipped",
+                "reason": expectation.reason or "无法确认最近完成交易日",
+                "calendar": expectation.as_dict(),
+            }
         end = pd.Timestamp(expectation.session)
         start = end - pd.Timedelta(days=500)
         if as_of:
