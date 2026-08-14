@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -55,3 +56,47 @@ def test_supported_research_command_remains_available() -> None:
         build_parser().parse_args(["lab", "--help"])
 
     assert result.value.code == 0
+
+
+def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, capsys) -> None:
+    observed = []
+
+    def run_factor_test(**kwargs):
+        observed.append(kwargs)
+        return {
+            "summary": {"name": "mom_20d", "ic_mean": 0.0312},
+            "universe_evidence": {"formal_eligible": False},
+            "data_quality": {"status": "degraded"},
+            "neutralized": False,
+            "industry_evidence": {"status": "degraded"},
+        }
+
+    monkeypatch.setattr("quantmaster.factors.run_factor_test", run_factor_test)
+    args = build_parser().parse_args([
+        "factor-test",
+        "mom_20d",
+        "--universe", "csi800",
+        "--start", "2023-01-02",
+        "--end", "2023-07-28",
+        "--quantiles", "4",
+        "--neutralize",
+    ])
+
+    assert args.func(args) is None
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"name": "mom_20d", "ic_mean": 0.0312}
+    assert captured.err.splitlines() == [
+        "⚠️ Sandbox：结果不可进入正式研究",
+        "⚠️ 行情数据已降级",
+        "⚠️ 行业中性化未执行",
+        "⚠️ 行业证据已降级",
+    ]
+    assert observed == [{
+        "expression": "mom_20d",
+        "universe": "csi800",
+        "start": "2023-01-02",
+        "end": "2023-07-28",
+        "quantiles": 4,
+        "neutralize": True,
+        "refresh": True,
+    }]

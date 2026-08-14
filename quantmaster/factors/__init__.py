@@ -10,6 +10,7 @@ from quantmaster.factors.composite import (
 from quantmaster.factors.engine import combine_factors, compute_factor, compute_factors
 from quantmaster.factors.fundamental import make_fundamental_factors
 from quantmaster.factors.library import BUILTIN_FACTORS
+from quantmaster.factors.service import run_factor_test
 
 __all__ = [
     "BUILTIN_FACTORS",
@@ -28,4 +29,5 @@ __all__ = [
     "make_fundamental_factors",
     "orthogonalize",
     "parse_artifact_reference",
+    "run_factor_test",
 ]
