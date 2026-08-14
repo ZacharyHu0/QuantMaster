@@ -86,5 +86,7 @@ Ready lanes（勾选实际运行项；不适用项保持未勾选并在下方解
 
 ## 发布授权
 
-- [x] 本 PR **不**创建或替换 Git tag / GitHub Release。
+<!-- 二选一；提交前必须明确勾选一项。 -->
+
+- [ ] 本 PR **不**创建或替换 Git tag / GitHub Release。
 - [ ] Owner 已另行明确授权发布，并已记录候选 SHA、版本和发布日期。
