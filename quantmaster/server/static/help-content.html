@@ -1096,7 +1096,7 @@ for train_idx, valid_idx in purged_walk_forward(900, 504, 63, 7, 63):
           <section id="help-backtest-accounting" data-search-unit data-search-title="持仓会计、公司行动、现金流与基准对齐">
             <h3>净值曲线必须由可追溯的持仓和现金重建</h3>
             <p>回测账本至少包含现金、可用/冻结持仓、平均成本、成交金额、费用、公司行动和每日估值。分红增加现金，送转改变股数与单位价格，配股包含权利与额外现金需求；使用稳定总收益序列生成信号时，仍要用未复权价格和真实股数模拟成交与持仓。</p>
-            <p>外部现金流不能当作投资收益。时间加权收益（TWR）把入金前后区间链接，适合评价策略；资金加权收益（XIRR）考虑现金流时点，更接近投资者实际体验。回测通常没有外部入金，但模拟盘与实盘账本必须区分入金、出金、分红、费用和交易盈亏。</p>
+            <p>外部现金流不能当作投资收益。时间加权收益（TWR）把入金前后区间链接，适合评价策略；资金加权收益（XIRR）考虑现金流时点，更接近投资者实际体验。回测通常没有外部入金，但模拟盘与真实账户账本必须区分入金、出金、分红、费用和交易盈亏。</p>
             <p>基准应与策略使用同一日期、币种和收益类型。策略包含分红而基准使用价格指数，会虚增长期超额；策略持有现金时，是否给现金计息也要说明。若候选仅覆盖中小盘，却用大盘权重指数作唯一基准，至少再报告风格匹配基准与市场中性后的结果。</p>
           </section>
           <section id="help-backtest-event-driven" data-search-unit data-search-title="事件驱动回测、订单状态机与撮合重放">
@@ -1370,14 +1370,14 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
           <h2>从研究到执行</h2>
           <p class="help-lead">把每一次策略变化当成一个可审计实验：明确问题、冻结版本、留出样本、模拟执行、小规模观察，再决定是否扩大使用。</p>
 
-          <section id="help-workflow-path" data-search-unit data-search-title="候选到 Quant Lab 到回测到模拟盘到实盘账本">
+          <section id="help-workflow-path" data-search-unit data-search-title="候选到 Quant Lab 到回测到模拟盘到真实账户账本">
             <h3>一条不跳步的路径</h3>
             <div class="help-workflow" aria-label="项目研究工作流">
               <button type="button" data-help-tab="candidates"><span>01</span><strong>候选</strong><small>定义可投资范围与历史成分</small></button>
               <button type="button" data-help-tab="lab"><span>02</span><strong>Quant Lab</strong><small>冻结数据、因子、标签和验证报告</small></button>
               <button type="button" data-help-tab="backtest"><span>03</span><strong>回测</strong><small>加入基准、成本和执行限制</small></button>
               <button type="button" data-help-tab="paper"><span>04</span><strong>模拟盘</strong><small>观察实时信号与可成交偏差</small></button>
-              <button type="button" data-help-tab="ledger"><span>05</span><strong>实盘账本</strong><small>记录成交、现金流、TWR 与 XIRR</small></button>
+              <button type="button" data-help-tab="ledger"><span>05</span><strong>真实账户账本</strong><small>记录成交、现金流、TWR 与 XIRR</small></button>
             </div>
             <p>候选范围改变会改变横截面排名；标签或周期改变会改变研究目标；费用改变会改变可行换手。任何一个环节变化，都应生成新版本而不是覆盖旧结果。</p>
           </section>
@@ -1399,10 +1399,10 @@ print(round(float(brier), 4), round(float(ece), 4))</code></pre>
             <h3>一次实验至少留下这些证据</h3>
             <p>记录研究问题、负责人、创建时间、代码提交、数据快照、候选版本、特征与标签定义、训练/验证/测试区间、随机种子、参数搜索空间、成本假设、通过门槛和最终决定。失败实验也要保留摘要，因为删除失败记录会让之后的人低估尝试次数和过拟合风险。</p>
             <p>从模拟盘进入实盘时冻结策略规格，不要一边交易一边根据当天盈亏改模型。实盘归因至少拆成市场/基准、选股、仓位、交易成本、未成交与人工覆盖；若真实表现偏离回测，先判断是信号衰减、数据差异还是执行偏差，再决定暂停、回滚或重新研究。</p>
-            <div class="concept-flow"><p><b>合成例子</b>实盘少赚 2%，其中 1.2% 来自涨停未成交，0.5% 来自滑点高估不足，0.3% 才是持仓收益差异。若不拆分，可能错误地重训一个本来没有明显失效的模型。</p><p><b>版本原则</b>改变候选、标签、特征、成本、组合或执行中的任何一项，都创建新实验或新策略版本；旧快照保持不可变。</p><p><b>项目位置</b>Quant Lab 保存版本账本和验证报告，模拟盘记录订单过程，实盘账本用 TWR/XIRR 与基准对照实际结果。</p></div>
+            <div class="concept-flow"><p><b>合成例子</b>实盘少赚 2%，其中 1.2% 来自涨停未成交，0.5% 来自滑点高估不足，0.3% 才是持仓收益差异。若不拆分，可能错误地重训一个本来没有明显失效的模型。</p><p><b>版本原则</b>改变候选、标签、特征、成本、组合或执行中的任何一项，都创建新实验或新策略版本；旧快照保持不可变。</p><p><b>项目位置</b>Quant Lab 保存版本账本和验证报告，模拟盘记录订单过程，真实账户账本用 TWR/XIRR 与基准对照实际结果。</p></div>
           </section>
 
-          <section class="help-case-study" id="help-case-production-loop" data-search-unit data-search-title="完整案例三：信号到实盘账本的闭环">
+          <section class="help-case-study" id="help-case-production-loop" data-search-unit data-search-title="完整案例三：信号到真实账户账本的闭环">
             <div class="help-case-kicker">SYNTHETIC CASE 03</div>
             <h3>同一信号，回测、模拟盘和账本为什么得到三个数字</h3>
             <p>已批准策略在 T 日收盘生成 12 个目标，计划 T+1 开盘成交。回测按未复权开盘、整手、价格限制和基准成本成交 9 个；模拟盘因两只涨停、一只数据延迟同样完成 9 个，但真实盘口滑点更高；小额实盘又有一笔最低佣金占比显著。</p>

@@ -628,25 +628,30 @@ class TestBasics:
         assert "%%QM_RISK_FREE%%" not in resp.text
         nav_markup = resp.text.split('<nav id="nav"', 1)[1].split("</nav>", 1)[0]
         assert 'data-tab="settings"' not in nav_markup
-        assert [nav_markup.index(f'data-workspace="{workspace}"') for workspace in (
-            "observe", "select", "research", "trade", "automation",
-        )] == sorted([
-            nav_markup.index(f'data-workspace="{workspace}"') for workspace in (
-                "observe", "select", "research", "trade", "automation",
-            )
-        ])
-        assert (
-            'data-workspace="automation" data-workspace-page="automation" data-tab="automation"'
-            in nav_markup
-        )
-        assert 'data-workspace-pages="automation"' not in resp.text
+        assert re.findall(
+            r'<button data-workspace="([^"]+)"[^>]*>([^<]+)</button>', nav_markup,
+        ) == [
+            ("today", "今日"),
+            ("research", "研究"),
+            ("account", "账户"),
+            ("runtime", "运行"),
+        ]
+        assert re.findall(r'data-workspace-pages="([^"]+)"', resp.text) == [
+            "today", "research", "account", "runtime",
+        ]
         workspace_pages = (
             "quotes", "temperature", "style", "rotation", "industry", "themes", "etfs", "news",
             "after-close", "candidates", "stock-analysis", "decision", "lab", "backtest", "paper",
-            "ledger",
+            "ledger", "automation",
         )
         assert [resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages] == sorted(
             resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages
+        )
+        assert 'id="tab-factor"' not in resp.text
+        assert 'id="tab-mine"' not in resp.text
+        assert all(
+            f'data-workspace="{legacy}"' not in resp.text
+            for legacy in ("observe", "select", "trade", "automation")
         )
         assert 'class="header-settings" data-tab="settings"' in resp.text
         assert resp.text.index('class="header-help"') < resp.text.index('class="header-settings"')

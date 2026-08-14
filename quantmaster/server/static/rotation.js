@@ -1,6 +1,7 @@
 (() => {
   'use strict';
 
+  const TODAY_ROUTE_PREFIX = '#today/';
   const STATE_LABELS = {
     strong_up:'强势加速', up:'趋势延续', range:'中位整理', weak:'低位偏弱',
   };
@@ -1379,7 +1380,7 @@
       button.tabIndex = selected ? 0 : -1;
     });
     document.querySelectorAll('[data-market-view]').forEach(view => { view.hidden = view.dataset.marketView !== page; });
-    const route = `#observe/${page}`;
+    const route = `${TODAY_ROUTE_PREFIX}${page}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
     if (page !== 'quotes') loadCurrent();
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
@@ -1396,7 +1397,7 @@
     });
     document.querySelectorAll('[data-rotation-view]').forEach(view => { view.hidden = view.dataset.rotationView !== page; });
     const routePage = {overview:'rotation',industry:'industry',themes:'themes',etfs:'etfs'}[page] || 'rotation';
-    const route = `#observe/${routePage}`;
+    const route = `${TODAY_ROUTE_PREFIX}${routePage}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
     loadCurrent();
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
@@ -1494,7 +1495,7 @@
   }
 
   function applyHash() {
-    const match = location.hash.match(/^#observe\/([a-z-]+)$/);
+    const match = location.hash.match(/^#today\/([a-z-]+)$/);
     const route = match?.[1] || '';
     const marketPages = new Set(['quotes','temperature','style']);
     const rotationPages = {rotation:'overview',industry:'industry',themes:'themes',etfs:'etfs'};
@@ -1821,10 +1822,12 @@
 
   window.loadRotationFeature = tab => {
     if (tab === 'market') {
-      const page = location.hash.startsWith('#observe/') ? location.hash.slice(9) : activeMarketPage;
+      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
+        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeMarketPage;
       setMarketPage(page,false);
     } else if (tab === 'rotation') {
-      const page = location.hash.startsWith('#observe/') ? location.hash.slice(9) : activeRotationPage;
+      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
+        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeRotationPage;
       setRotationPage(page,false);
     }
   };

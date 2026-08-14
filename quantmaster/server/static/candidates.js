@@ -87,7 +87,7 @@
 
   function tabLabel(tab) {
     return ({market:'市场', news:'资讯', decision:'决策', lab:'Quant Lab', backtest:'回测',
-      paper:'模拟盘', ledger:'实盘', automation:'自动化', settings:'设置'})[tab] || '原页面';
+      paper:'模拟盘', ledger:'真实账户账本', automation:'任务与消息', settings:'设置'})[tab] || '原页面';
   }
 
   async function request(path, options = {}) {
