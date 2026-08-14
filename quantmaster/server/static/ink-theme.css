@@ -3317,6 +3317,18 @@ html[data-qm-theme="ink"] #tab-settings .theme-control>.theme-control__track>.th
 html[data-qm-theme="ink"] #tab-settings .theme-control>.theme-control__track>label{transition:none}
 }
 
+html[data-qm-theme="ink"] #tab-settings .settings-heading__copy{min-width:0}
+html[data-qm-theme="ink"] #tab-settings .settings-heading__meta{min-width:0;max-width:100%;box-sizing:border-box}
+html[data-qm-theme="ink"] #tab-settings .settings-path{max-width:100%;overflow-wrap:anywhere;word-break:break-word}
+html[data-qm-theme="ink"] #tab-settings .theme-control{min-width:0;box-sizing:border-box}
+html[data-qm-theme="ink"] #tab-settings .theme-control>.theme-control__track{min-width:0}
+@media (max-width:640px){
+  html[data-qm-theme="ink"] #tab-settings .settings-heading{flex-wrap:wrap}
+  html[data-qm-theme="ink"] #tab-settings .settings-heading__meta{width:100%}
+  html[data-qm-theme="ink"] #tab-settings .theme-control{width:100%}
+  html[data-qm-theme="ink"] #tab-settings .theme-control>.theme-control__track{width:100%}
+}
+
 
 /* ============================================================
    QuantMaster · ink · Help — 墨韵书房 editorial handbook
