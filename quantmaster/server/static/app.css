@@ -699,6 +699,100 @@
   @media (pointer:coarse) {
     .decision-symbol-trigger,.decision-list-toggle,.decision-detail-close,.decision-inline-retry { min-height:44px; }
   }
+  /* ==== QuantMaster refinement pass (visual only; Kimi K3) ==== */
+
+  /* -- Surfaces: one quiet elevation step, no stacked glass -- */
+  .panel,.card,.mkt-item{border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,.28)}
+  .release-popover,.runtime-info,.problem-dialog{border-radius:12px;box-shadow:0 10px 28px rgba(0,0,0,.42),0 1px 3px rgba(0,0,0,.3)}
+
+  /* -- Sticky header: restrained dark translucency, legible fallback -- */
+  .app-header{
+    background:color-mix(in oklch,var(--page) 86%,transparent);
+    backdrop-filter:blur(14px) saturate(1.35);
+    -webkit-backdrop-filter:blur(14px) saturate(1.35);
+  }
+
+  /* -- Nav (primary/secondary tabs): quiet hover, precise active ring -- */
+  .workspace-nav button,:where([role="tab"]){
+    border-radius:8px;color:var(--ink-2);
+    transition:background-color .18s var(--ease-out-quart),color .18s var(--ease-out-quart),transform .12s var(--ease-out-quart);
+  }
+  .workspace-nav button:hover,:where([role="tab"]:hover){background:color-mix(in oklch,var(--surface) 65%,transparent);color:var(--ink)}
+  .workspace-nav button.active,:where([role="tab"][aria-selected="true"]){background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--border)}
+
+  /* -- Controls: uniform motion, immediate :active feedback, clear focus -- */
+  :where(button,input,select,textarea,[role="button"],[role="tab"]){
+    transition:background-color .18s var(--ease-out-quart),border-color .18s var(--ease-out-quart),box-shadow .18s var(--ease-out-quart),transform .12s var(--ease-out-quart),opacity .18s var(--ease-out-quart);
+  }
+  :where(button,[role="button"],[role="tab"],.mkt-item):active{transform:scale(.98)}
+  :where(button){cursor:pointer;border-radius:8px}
+  :where(input,select,textarea){
+    border:1px solid var(--border);border-radius:8px;padding:4px 8px;
+    background:color-mix(in oklch,var(--surface) 72%,var(--page));color:var(--ink);
+  }
+  :where(input,select,textarea):hover{border-color:color-mix(in oklch,var(--border) 55%,var(--muted))}
+  :where(input,select,textarea):focus-visible{border-color:var(--s1)}
+  :where(input)::placeholder,:where(textarea)::placeholder{color:var(--muted)}
+  :where(button,input,select,textarea):disabled{opacity:.45;cursor:not-allowed;transform:none}
+  :where(button,a,input,select,textarea,[tabindex],[role="tab"]):focus-visible{outline:2px solid var(--s1);outline-offset:2px}
+  a{color:var(--s1);text-underline-offset:2px}
+
+  /* -- Tables: dense, aligned numerals, hairline rows, single hover tint -- */
+  :where(table){border-collapse:collapse}
+  :where(th){padding:6px 10px;font-size:12px;font-weight:600;letter-spacing:.03em;color:var(--muted);text-align:left;white-space:nowrap;border-bottom:1px solid var(--border)}
+  :where(td){padding:5px 10px;border-bottom:1px solid color-mix(in oklch,var(--grid) 55%,transparent);font-variant-numeric:tabular-nums}
+  :where(tbody tr:last-child td){border-bottom:0}
+  :where(tbody tr){transition:background-color .15s var(--ease-out-quart)}
+  :where(tbody tr:hover){background:color-mix(in oklch,var(--surface) 55%,transparent)}
+
+  /* -- Anchored popover / dialog / runtime drawer entrance (opacity+transform only) -- */
+  @keyframes qm-pop{from{opacity:0;transform:translateY(3px) scale(.995)}to{opacity:1;transform:none}}
+  .release-popover,.runtime-info,.problem-dialog{animation:qm-pop .2s var(--ease-out-expo) both}
+  :where(dialog)::backdrop{background:rgba(0,0,0,.55)}
+
+  /* -- Active tab content reveal -- */
+  @keyframes qm-tab{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .tab.active{animation:qm-tab .22s var(--ease-out-quart) both}
+
+  /* -- Fit & finish -- */
+  ::selection{background:color-mix(in oklch,var(--s1) 38%,transparent);color:var(--ink)}
+  :where(*){scrollbar-width:thin;scrollbar-color:var(--axis) transparent}
+  :where([id]){scroll-margin-top:72px}
+
+  /* -- Coarse pointers: 44px targets, no density change elsewhere -- */
+  @media (pointer:coarse){
+    :where(button,select,input:not([type="checkbox"]):not([type="radio"]),[role="button"],[role="tab"]){min-height:44px}
+    :where(input,select,textarea){font-size:16px}
+  }
+
+  /* -- Reduced motion -- */
+  @media (prefers-reduced-motion:reduce){
+    .release-popover,.runtime-info,.problem-dialog,.tab.active{animation:none}
+    :where(*){transition-duration:.01ms!important;scroll-behavior:auto!important}
+  }
+
+  /* -- Reduced transparency -- */
+  @media (prefers-reduced-transparency:reduce){
+    .app-header{background:var(--page);backdrop-filter:none;-webkit-backdrop-filter:none}
+  }
+
+  /* -- Higher contrast -- */
+  @media (prefers-contrast:more){
+    :root{--border:rgba(255,255,255,.26)}
+    .workspace-nav button.active,:where([role="tab"][aria-selected="true"]){box-shadow:inset 0 0 0 1px var(--ink-2)}
+    :where(button,a,input,select,textarea,[tabindex],[role="tab"]):focus-visible{outline-width:3px}
+  }
+
+  /* -- Forced colors -- */
+  @media (forced-colors:active){
+    .app-header{background:Canvas;backdrop-filter:none;-webkit-backdrop-filter:none;border-bottom-color:CanvasText}
+    .panel,.card,.mkt-item,.release-popover,.runtime-info,.problem-dialog{border-color:CanvasText;box-shadow:none}
+    .workspace-nav button,:where([role="tab"]){border:1px solid transparent}
+    .workspace-nav button.active,:where([role="tab"][aria-selected="true"]){background:Highlight;color:HighlightText;box-shadow:none}
+    :where(button,input,select,textarea){border:1px solid ButtonBorder}
+    :where(button,a,input,select,textarea,[tabindex],[role="tab"]):focus-visible{outline:2px solid Highlight}
+    ::selection{background:Highlight;color:HighlightText}
+  }
   @media (prefers-reduced-motion:reduce) {
     *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; scroll-behavior:auto !important; }
   }
