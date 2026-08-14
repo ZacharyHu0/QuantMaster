@@ -68,19 +68,19 @@ class AkshareSource(DataSource):
             raw = akshare_call(
                 f"fund_etf_hist_em({symbol})", ak.fund_etf_hist_em,
                 symbol=code, period="daily", start_date=start_c, end_date=end_c,
-                adjust="qfq",
+                adjust="",
             )
         elif market == Market.CN:
             raw = akshare_call(
                 f"stock_zh_a_hist({symbol})", ak.stock_zh_a_hist,
                 symbol=code, period="daily", start_date=start_c, end_date=end_c,
-                adjust="qfq",
+                adjust="",
             )
         elif market == Market.HK:
             raw = akshare_call(
                 f"stock_hk_hist({symbol})", ak.stock_hk_hist,
                 symbol=code, period="daily", start_date=start_c, end_date=end_c,
-                adjust="qfq",
+                adjust="",
             )
         elif market == Market.FUTURES:
             # 期货主力连续合约，如 AU0 -> 沪金主力

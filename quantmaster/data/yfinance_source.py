@@ -41,7 +41,7 @@ class YFinanceSource(DataSource):
 
         def fetch():
             return yf.Ticker(ticker).history(
-                start=start, end=inclusive_end, auto_adjust=True, actions=False,
+                start=start, end=inclusive_end, auto_adjust=False, actions=False,
                 raise_errors=True,
             )
 
@@ -67,7 +67,7 @@ class YFinanceSource(DataSource):
         def fetch():
             return yf.download(
                 list(mapping.values()), start=start, end=inclusive_end,
-                progress=False, auto_adjust=True, actions=False, threads=False,
+                progress=False, auto_adjust=False, actions=False, threads=False,
                 group_by="ticker",
             )
 
