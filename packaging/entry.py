@@ -8,6 +8,7 @@ if __name__ == "__main__":
     # ``--multiprocessing-fork``. Dispatch them before importing application
     # modules, otherwise a renamed worker can start another desktop server.
     multiprocessing.freeze_support()
+    sys.stdout.reconfigure(encoding="utf-8")
 
     from quantmaster.config import configure_installed_instance
 
