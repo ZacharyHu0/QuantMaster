@@ -136,22 +136,31 @@ def inspect_acl(path: str | Path) -> ACLStatus:
         "Write-Output ('OWNER=' + [string]$a.Owner);"
         "Write-Output ('INHERITED=' + [string](-not $a.AreAccessRulesProtected))"
     )
-    try:
-        environment = os.environ.copy()
-        environment["QM_ACL_TARGET"] = str(target)
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], env=environment,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, check=True,
-        )
-        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        values = dict(line.split("=", 1) for line in lines if "=" in line)
-        return ACLStatus(
-            str(target), values.get("OWNER", ""),
-            values.get("INHERITED", "").lower() == "true" if "INHERITED" in values else None,
-            readable, writable,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return ACLStatus(str(target), "", None, readable, writable, f"{type(exc).__name__}: {exc}")
+    environment = os.environ.copy()
+    environment["QM_ACL_TARGET"] = str(target)
+    timeouts: list[str] = []
+    for attempt in range(1, 3):
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                env=environment, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10, check=True,
+            )
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            values = dict(line.split("=", 1) for line in lines if "=" in line)
+            return ACLStatus(
+                str(target), values.get("OWNER", ""),
+                values.get("INHERITED", "").lower() == "true" if "INHERITED" in values else None,
+                readable, writable,
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeouts.append(f"attempt {attempt}/2 TimeoutExpired: {exc}")
+            if attempt == 1:
+                continue
+            return ACLStatus(str(target), "", None, readable, writable, "; ".join(timeouts))
+        except (OSError, subprocess.SubprocessError) as exc:
+            return ACLStatus(str(target), "", None, readable, writable, f"{type(exc).__name__}: {exc}")
+    raise AssertionError("unreachable ACL inspection retry state")
 
 
 def prepare_writable_directory(path: str | Path, *, require_inheritance: bool = True) -> ACLStatus:
@@ -162,9 +171,13 @@ def prepare_writable_directory(path: str | Path, *, require_inheritance: bool = 
     status = inspect_acl(target)
     if not status.writable:
         raise PermissionError(f"目录不可写: {target}; owner={status.owner or '未知'}")
-    if os.name == "nt" and require_inheritance and status.inherited is not True:
+    if os.name == "nt" and require_inheritance and status.inherited is False:
         raise PermissionError(
             f"目录未保留 Windows ACL 继承: {target}; owner={status.owner or '未知'}; {status.error}"
+        )
+    if os.name == "nt" and require_inheritance and status.inherited is None:
+        raise RuntimeError(
+            f"无法验证 Windows ACL 继承: {target}; owner={status.owner or '未知'}; {status.error}"
         )
     return status
 

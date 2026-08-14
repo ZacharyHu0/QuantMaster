@@ -89,8 +89,11 @@ def test_pytest_args_override_checkout_cache_dir(monkeypatch, tmp_path):
 
 
 def test_prepare_pytest_cache_precreates_directory(tmp_path):
+    from scripts.dev.pytest_windows_acl import prepare_pytest_directory
+
     cache = tmp_path / "task-artifacts" / "pytest" / "cache"
 
+    assert run.prepare_pytest_directory is prepare_pytest_directory
     assert run.prepare_pytest_directory(cache) == cache
     assert cache.is_dir()
 

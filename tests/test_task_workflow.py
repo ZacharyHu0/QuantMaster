@@ -217,8 +217,15 @@ def test_full_validation_evidence_requires_exact_identity(monkeypatch, tmp_path)
     assert not has_full_validation(tmp_path, {**identity, "ui": True})
 
 
-def test_prepare_pytest_cache_precreates_directory(tmp_path):
+def test_prepare_pytest_cache_precreates_directory_without_acl_probe(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
     cache = tmp_path / "task-artifacts" / "pytest" / "cache"
+    monkeypatch.setattr(
+        storage_governance,
+        "inspect_acl",
+        lambda _path: pytest.fail("routine pytest preparation must not inspect ACLs"),
+    )
 
     assert prepare_pytest_directory(cache) == cache
     assert cache.is_dir()
@@ -227,7 +234,11 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
 def test_windows_pytest_plugin_preserves_precreated_basetemp(monkeypatch, tmp_path):
     from scripts.dev import pytest_windows_acl
 
-    monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        pytest_windows_acl,
+        "os",
+        SimpleNamespace(name="nt", access=os.access, W_OK=os.W_OK),
+    )
     basetemp = tmp_path / "pytest" / "run"
     factory = SimpleNamespace(_given_basetemp=basetemp, _basetemp=None)
     cache = tmp_path / "pytest" / "cache"
@@ -253,7 +264,11 @@ def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
 
     from scripts.dev import pytest_windows_acl
 
-    monkeypatch.setattr(pytest_windows_acl, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        pytest_windows_acl,
+        "os",
+        SimpleNamespace(name="nt", access=os.access, W_OK=os.W_OK),
+    )
     basetemp = tmp_path / "pytest" / "full-1"
     factory = TempPathFactory(
         given_basetemp=basetemp,

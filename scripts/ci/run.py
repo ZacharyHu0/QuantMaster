@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# This file is also executed directly, so repository imports follow the path bootstrap.
+from scripts.dev.pytest_windows_acl import prepare_pytest_directory  # noqa: E402
+
 
 def primary_root() -> Path:
     """Return the primary checkout even when CI runs inside a linked worktree."""
@@ -69,15 +72,6 @@ _CLEANUP_INITIAL_DELAY_SECONDS = 0.1
 _CLEANUP_MAX_DELAY_SECONDS = 1.0
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 _cleanup_sleep = time.sleep
-
-
-def prepare_pytest_directory(path: Path) -> Path:
-    """Create a pytest directory without replacing inherited Windows ACLs."""
-    from quantmaster.runtime.storage_governance import prepare_writable_directory
-
-    target = path.resolve()
-    prepare_writable_directory(target)
-    return target
 
 
 def cleanup_run_root(path: Path) -> None:
