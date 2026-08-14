@@ -55,6 +55,7 @@ def test_historical_freshness_ignores_wall_ttl_but_rejects_future_rows() -> None
         checked_at=1,
         purpose="formal_research",
         now=datetime(2026, 8, 10, tzinfo=ZoneInfo("Asia/Shanghai")),
+        expectation=SessionExpectation("2024-01-10", "fixture-calendar", True, "verified"),
         display_ttl_seconds=1,
     )
     future = assess_daily_freshness(
@@ -71,6 +72,88 @@ def test_historical_freshness_ignores_wall_ttl_but_rejects_future_rows() -> None
     assert future.state == "invalid_future"
     assert future.future_rows == 2
     assert future.formal_eligible is False
+
+
+def test_historical_missing_requested_tail_is_incomplete() -> None:
+    result = assess_daily_freshness(
+        symbol="600000.SH",
+        frame=_bars("2024-01-02", "2024-01-09"),
+        requested_end="2024-01-10",
+        checked_at=1,
+        purpose="historical",
+        expectation=SessionExpectation("2024-01-10", "fixture-calendar", True, "verified"),
+    )
+
+    assert result.state == "incomplete"
+    assert result.formal_eligible is False
+    assert result.expected_session == "2024-01-10"
+
+
+def test_historical_weekend_as_of_uses_latest_trusted_session() -> None:
+    result = assess_daily_freshness(
+        symbol="600000.SH",
+        frame=_bars("2024-01-02", "2024-01-12"),
+        requested_end="2024-01-14",
+        checked_at=1,
+        purpose="historical",
+        expectation=SessionExpectation("2024-01-12", "fixture-calendar", True, "verified"),
+    )
+
+    assert result.state == "fresh"
+    assert result.expected_session == "2024-01-12"
+
+
+def test_formal_research_fails_closed_without_trusted_calendar_evidence() -> None:
+    result = assess_daily_freshness(
+        symbol="600000.SH",
+        frame=_bars("2024-01-02", "2024-01-10"),
+        requested_end="2024-01-10",
+        checked_at=1,
+        purpose="formal_research",
+        expectation=SessionExpectation(
+            source="unavailable", ready=False, reason="本地交易日证据不可用",
+        ),
+    )
+
+    assert result.state == "incomplete"
+    assert result.formal_eligible is False
+
+
+def test_bar_envelope_resolves_historical_session_at_requested_end(monkeypatch, tmp_path) -> None:
+    store = BarStore(tmp_path / "bars")
+    calls: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+
+    def sessions(start: pd.Timestamp, end: pd.Timestamp):
+        calls.append((start, end))
+        return pd.DatetimeIndex(["2024-01-12"]), "fixture-calendar"
+
+    monkeypatch.setattr(registry, "_local_sessions", sessions)
+    envelope = registry._bar_envelope(
+        _bars("2024-01-02", "2024-01-12"),
+        symbol="600000.SH", start="2024-01-02", end="2024-01-14",
+        store=store, frequency="1d", metadata={"checked_at": 1},
+        purpose="historical",
+    )
+
+    assert calls[-1][1] == pd.Timestamp("2024-01-14")
+    assert envelope.quality.freshness_state == "fresh"
+
+
+def test_historical_foreign_market_is_not_certified_by_cn_calendar(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda *_args: (pd.DatetimeIndex(["2024-01-12"]), "cn-calendar"),
+    )
+    envelope = registry._bar_envelope(
+        _bars("2024-01-02", "2024-01-12"),
+        symbol="AAPL.US", start="2024-01-02", end="2024-01-14",
+        store=BarStore(tmp_path / "bars"), frequency="1d",
+        metadata={"checked_at": 1}, purpose="formal_research",
+    )
+
+    assert envelope.quality.freshness_state == "incomplete"
+    assert envelope.quality.formal_eligible is False
 
 
 def test_daily_quality_rejects_future_rows(monkeypatch) -> None:

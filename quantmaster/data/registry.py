@@ -1083,12 +1083,40 @@ def _with_daily_freshness(
     purpose: CachePurpose | str,
 ) -> BarDataQuality:
     expected = SessionExpectation()
+    historical = str(purpose) in {
+        CachePurpose.HISTORICAL.value,
+        CachePurpose.FORMAL_RESEARCH.value,
+        "historical_replay",
+    }
     current = pd.Timestamp(market_now())
-    sessions, calendar_source = _local_sessions(
-        (current - pd.Timedelta(days=45)).tz_localize(None).normalize(),
-        current.tz_localize(None).normalize(),
+    requested = (
+        min(pd.Timestamp(end).normalize(), pd.Timestamp(market_date()).normalize())
+        if historical else current.tz_localize(None).normalize()
     )
-    if len(sessions):
+    calendar_ready = False
+    if historical:
+        market = guess_market(symbol)
+        observed = pd.DatetimeIndex(pd.to_datetime(frame.index, errors="coerce")).dropna()
+        if observed.tz is not None:
+            observed = observed.tz_localize(None)
+        if market in {Market.CN, Market.INDEX}:
+            sessions, calendar_source = _local_sessions(
+                requested - pd.Timedelta(days=45), requested,
+            )
+            calendar_ready = bool(len(sessions))
+        else:
+            sessions, calendar_source, calendar_ready = _market_sessions(
+                market,
+                requested - pd.Timedelta(days=45),
+                requested,
+                observed_dates=observed.normalize(),
+            )
+    else:
+        sessions, calendar_source = _local_sessions(
+            requested - pd.Timedelta(days=45), requested,
+        )
+        calendar_ready = bool(len(sessions))
+    if calendar_ready and len(sessions):
         expected = SessionExpectation(
             sessions.max().date().isoformat(), calendar_source, True,
             "已发布本地交易日证据",
@@ -1102,7 +1130,7 @@ def _with_daily_freshness(
         expectation=expected,
         display_ttl_seconds=get_config().data.cache_days * 86400,
     )
-    freshness_stale = freshness.state in {"stale", "unchecked"}
+    freshness_stale = freshness.state in {"stale", "unchecked", "incomplete"}
     return replace(
         quality,
         status=(

@@ -69,6 +69,45 @@ def _purpose(value: CachePurpose | str) -> CachePurpose:
     return aliases.get(raw, CachePurpose(raw))
 
 
+def _historical_freshness(
+    *,
+    usage: CachePurpose,
+    observed_end: pd.Timestamp | None,
+    requested: pd.Timestamp,
+    expectation: SessionExpectation | None,
+    age: float | None,
+) -> FreshnessAssessment:
+    if observed_end is None:
+        return FreshnessAssessment(
+            "missing", age, False, f"as_of {requested.date()} 没有本地数据",
+        )
+    expected = expectation or SessionExpectation()
+    requested_date = requested.date().isoformat()
+    trusted_target = bool(
+        expected.ready and expected.session and expected.session <= requested_date
+    )
+    if not trusted_target:
+        qualifier = "正式研究" if usage == CachePurpose.FORMAL_RESEARCH else "历史读取"
+        return FreshnessAssessment(
+            "incomplete", age, False,
+            f"{qualifier}无法确认 as_of {requested_date} 的完整尾部："
+            f"{expected.reason or '缺少 requested_end 之前的可信交易日证据'}",
+            calendar_source=expected.source,
+        )
+    observed_session = observed_end.date().isoformat()
+    if observed_session < expected.session:
+        return FreshnessAssessment(
+            "incomplete", age, False,
+            f"本地行情截至 {observed_session}，as_of {requested_date} "
+            f"之前应发布的最近交易日为 {expected.session}",
+            expected.session, expected.source,
+        )
+    return FreshnessAssessment(
+        "fresh", age, False, expected_session=expected.session,
+        calendar_source=expected.source,
+    )
+
+
 def assess_daily_freshness(
     *,
     symbol: str,
@@ -111,13 +150,13 @@ def assess_daily_freshness(
         # are admissible only when their requested as_of boundary is complete;
         # provider recency must not cause an unrelated re-download.
         observed_end = normalized_index.max() if len(normalized_index) else None
-        if observed_end is None:
-            return FreshnessAssessment(
-                "missing", age, False, f"as_of {requested.date()} 没有本地数据",
-            )
-        if observed_end > requested:
-            return FreshnessAssessment("invalid_future", age, False, "历史结果越过 as_of", future_rows=1)
-        return FreshnessAssessment("fresh", age, False)
+        return _historical_freshness(
+            usage=usage,
+            observed_end=observed_end,
+            requested=requested,
+            expectation=expectation,
+            age=age,
+        )
 
     expected = expectation or SessionExpectation()
     if (
