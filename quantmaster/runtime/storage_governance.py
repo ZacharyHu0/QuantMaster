@@ -131,7 +131,10 @@ def inspect_acl(path: str | Path) -> ACLStatus:
         owner = str(target.stat().st_uid) if target.exists() else ""
         return ACLStatus(str(target), owner, None, readable, writable)
     script = (
-        "$a=Get-Acl -LiteralPath $env:QM_ACL_TARGET -ErrorAction Stop;"
+        "$ErrorActionPreference='Stop';"
+        "$a=if([System.IO.Directory]::Exists($env:QM_ACL_TARGET)){"
+        "[System.IO.Directory]::GetAccessControl($env:QM_ACL_TARGET)"
+        "}else{[System.IO.File]::GetAccessControl($env:QM_ACL_TARGET)};"
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
         "Write-Output ('OWNER=' + [string]$a.Owner);"
         "Write-Output ('INHERITED=' + [string](-not $a.AreAccessRulesProtected))"
