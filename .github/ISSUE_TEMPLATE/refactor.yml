@@ -1,0 +1,100 @@
+name: 重构任务
+description: 为产品、架构或开发工作流重构定义可验证、可独立集成的范围
+title: "[Refactor] "
+labels:
+  - refactor
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先关联 [重构 Epic #1](https://github.com/ZacharyHu0/QuantMaster/issues/1)。存在不可调和的产品/架构取舍时，先在 [RFC Discussion #3](https://github.com/ZacharyHu0/QuantMaster/discussions/3) 留下决策记录。
+
+  - type: input
+    id: parent
+    attributes:
+      label: 父任务 / RFC
+      description: 填写 Epic、阶段任务或 Discussion 链接。
+      placeholder: "#1；阶段 1 为 #2；RFC 为 Discussion #3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题与目标
+      description: 描述当前可观察问题、目标用户和完成后的行为，不写实现口号。
+      placeholder: 当前……导致……；完成后……
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标
+      description: 分别列出本任务会做和明确不会做的事项；独立目标应拆为另一任务。
+      placeholder: |
+        范围：
+        -
+        非目标：
+        -
+    validations:
+      required: true
+
+  - type: textarea
+    id: seam
+    attributes:
+      label: 模块边界 / Seam
+      description: 说明改动落在哪个模块边界、依赖方向和公开契约；优先深化现有模块，不引入无必要的新服务或框架。
+      placeholder: 调用方 → 契约 → 所有者；被删除或替代的旧路径……
+    validations:
+      required: true
+
+  - type: textarea
+    id: data_migration
+    attributes:
+      label: 数据、配置与迁移
+      description: 写明数据根目录、schema/config 变化、原子写入、恢复或明确无影响。证据不足时必须显式失败。
+      placeholder: |
+        数据/配置影响：
+        迁移与回滚：
+        无法恢复时的阻断条件：
+    validations:
+      required: true
+
+  - type: textarea
+    id: budgets
+    attributes:
+      label: 体积与性能预算
+      description: 给出适用的重构前基线、目标、硬上限和测量方法；不适用项写 N/A 并说明原因。
+      placeholder: |
+        Windows 发布载荷：before / target / hard limit
+        首屏 raw 或网络传输：before / target / hard limit
+        启动或任务耗时：before / target / hard limit
+        测量命令与环境：
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 使用可执行、可观察的 Given/When/Then 或检查清单，包含失败和回滚场景。
+      placeholder: |
+        - [ ] 正常路径：
+        - [ ] 边界/失败路径：
+        - [ ] 回滚/恢复：
+        - [ ] 精确测试：
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: task_contract
+    attributes:
+      label: 任务约束
+      options:
+        - label: 本任务可在一个 `codex/<task-slug>` worktree 中独立开发、验证和回滚。
+          required: true
+        - label: 已检查 stockdb 与本地缓存优先级；远端数据只补本地缺失或陈旧字段。
+          required: true
+        - label: 未默认引入兼容适配层、重复路由、内容哈希或新基础设施。
+          required: true

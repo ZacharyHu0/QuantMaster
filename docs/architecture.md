@@ -2,21 +2,147 @@
 
 ## 总览
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                 Web 仪表盘 (ECharts)  /  CLI (qm)        │
-├─────────────────────────────────────────────────────────┤
-│                  FastAPI 本地服务 (server/)              │
-├───────────┬───────────┬───────────┬───────────┬─────────┤
-│  factors/ │ backtest/ │    ai/    │ portfolio/│  data/  │
-│  因子引擎  │  回测引擎  │ LLM+爬虫  │  实盘账本  │ 数据层   │
-├───────────┴───────────┴───────────┴───────────┴─────────┤
-│      本地存储：Parquet 行情缓存 + SQLite（新闻/账本）        │
-└─────────────────────────────────────────────────────────┘
+QuantMaster 是一个模块化单体：一个仓库保存 Python 应用、原生 Web 界面和可选 Rust
+计算内核，按需要运行 Web、后台 worker 和受监督的本地 sidecar 进程。进程数量不是服务
+边界；所有进程仍发布为一个版本、遵守同一领域合同，并由同一个应用激活操作切换。
+
+```text
+浏览器 / qm CLI
+        │
+        ▼
+入站适配器：server/、cli.py
+        │
+        ▼
+领域能力：after_close/、ai/、analysis/、automation/、backtest/、decision/、
+          factors/、lab/、market/、portfolio/、research/、rotation/
+        │                         │
+        ▼                         ▼
+data/ 数据适配器             runtime/ 运行时原语
+        │                         │
+        └──────────┬──────────────┘
+                   ▼
+        SQLite / Parquet / 外部数据源 / 可选 Rust 内核
+
+唯一 composition root（bootstrap）负责把适配器、领域服务、任务处理器和运行时实例连接起来。
 ```
 
-所有模块都可以脱离 Web 界面在 Python / CLI 中独立使用；Web 层只是薄薄的
-一层 JSON API。
+保留当前仓库布局。不会为了形式统一迁移到 `apps/`、`packages/` 或为每个功能复制
+`domain/application/infrastructure` 三层目录。只有当一个独立发布物真正出现时，才增加新的
+顶层包。模块边界由公开接口和依赖检查保证，而不是由更多目录、DI 容器或事件总线保证。
+
+## 模块边界与允许依赖
+
+### 模块角色
+
+- **基础模块**：`config.py`、`errors.py`、`release.py` 等无业务所有权的稳定值对象和配置。
+- **运行时原语**：`runtime/` 中的 SQLite、租约、任务生命周期、进程和时间等通用机制。
+  原语不知道任何领域任务、FastAPI router 或页面。
+- **数据适配器**：`data/` 负责本地数据、缓存和远程数据源合同，不依赖研究、Lab、市场等
+  上层功能来取得通用实现。
+- **领域能力**：各业务顶层包拥有自己的计算、用例、状态与结果合同。跨领域调用必须通过
+  被调用方的公开入口；不得直接导入对方的 store、router 或私有 helper。
+- **入站适配器**：`server/` 和 `cli.py` 负责鉴权、输入转换、调用用例、错误映射和输出转换，
+  不拥有领域计算或任务生命周期。
+- **composition root**：`bootstrap` 是唯一允许了解全部具体实现的角色。它以普通 Python
+  构造函数和显式注册函数连接对象；项目不引入 DI 容器、服务定位器或进程内事件总线。
+
+“可以依赖”不表示每个模块都应该依赖该列；只表示确有用例时方向合法。表中的“公开接口”
+是被调用模块有意维护的入口，优先为 `__init__.py`、`contracts.py` 或职责明确的 `service.py`。
+
+| 发起依赖的模块 | 基础模块 | `runtime/` 原语 | `data/` | 其他领域能力 | `server/` / CLI | composition root |
+| --- | --- | --- | --- | --- | --- | --- |
+| 基础模块 | 允许 | 禁止 | 禁止 | 禁止 | 禁止 | 禁止 |
+| `runtime/` 原语 | 允许 | 允许 | 禁止 | 禁止 | 禁止 | 禁止 |
+| `data/` | 允许 | 允许 | 允许 | 禁止 | 禁止 | 禁止 |
+| 领域能力 | 允许 | 允许 | 允许公开接口 | 仅允许已声明的公开接口 | 禁止 | 禁止 |
+| `server/` / CLI | 允许 | 允许公开接口 | 允许公开接口 | 允许公开接口 | 仅同类内部 | 禁止 |
+| composition root | 允许 | 允许 | 允许 | 允许 | 允许 | 允许 |
+
+依赖检查必须扫描模块顶层和函数体内的 import。局部 import 只用于延迟加载或解决可选依赖，
+不能用来绕过矩阵。新增跨领域边必须在本节或相邻架构决策中说明业务理由；不能以建立
+`common` 杂物包来消除表面环。
+
+### 唯一 composition root
+
+目标状态只有一个逻辑 composition root，负责：
+
+1. 读取配置并创建共享基础设施实例；
+2. 注册领域任务 handler、调度任务和关闭回调；
+3. 为 Web、CLI 和 worker 提供同一组领域用例；
+4. 按相反顺序关闭它创建的资源。
+
+`server.app` 只保留 FastAPI lifespan、中间件、错误映射、router 和静态入口装配；领域代码
+不得从 `server.app` 取得服务或计算函数。`runtime.worker` 只运行 composition root 交给它的
+worker 计划，不导入 `server.management`、`server.diagnostics` 或具体领域 handler。
+composition root 可以先是一组小的显式函数；在调用关系确实需要之前，不创建接口层级或
+抽象工厂。
+
+## Server、Runtime 与领域 seam
+
+一次 Web 或 CLI 调用按以下边界流动：
+
+```text
+HTTP/CLI 输入
+  -> 入站适配器：验证传输参数、鉴权、CSRF、错误/响应映射
+  -> 领域用例：决定业务动作、读取证据、提交或查询任务
+  -> runtime/data：执行通用任务生命周期或数据访问
+  -> 领域结果
+  -> 入站适配器：序列化
+```
+
+- Router 不直接实现因子计算、市场聚合、迁移策略或任务租约，也不向领域返回 FastAPI 的
+  `Request`、`Response`、`HTTPException`。
+- Web、CLI、Bot 和 worker 对同一动作调用同一个领域用例，不互相调用适配器实现。
+- `runtime/jobs.py` 只拥有不可变任务规格、幂等键、租约、事件、取消、重试和产物等通用
+  生命周期。领域拥有 handler、业务进度和结果解释；handler 在 composition root 注册。
+- `data/` 可以实现领域声明的数据合同，但不能从领域包反向借用 helper。需要共享的持久化
+  标识必须先证明语义和升级规则相同，不能只因实现相似而合并。
+- 领域内部可以保留深模块和较长的数值流水线。按职责、变化原因和公开接口拆分，不按行数
+  或统一模板拆分。
+
+## 不可变使用槽与完整应用激活
+
+日常使用进程不能直接从正在开发或刚集成的 checkout 读取 Python、HTML、CSS、JavaScript
+或原生扩展。稳定 supervisor 运行一个不可变的 **使用槽**；开发仅在独立 worktree、端口、
+测试目录和可写数据根中进行。
+
+一个槽至少固定以下内容：
+
+- 完整 Python 应用代码与依赖身份；
+- Web 静态资源；
+- 可选 Rust 扩展和其他随版本发布的二进制；
+- 应用版本、Git commit 与验证结果。
+
+Windows 默认以 onedir 目录运行、以 ZIP 分发：
+
+- 槽：`%LOCALAPPDATA%\QuantMaster\app\slots\<main-sha>`；
+- 激活状态：`%LOCALAPPDATA%\QuantMaster\app\active.json`；
+- 用户配置：`%APPDATA%\QuantMaster\config.yaml`；
+- 大型数据与 StockDB：用户确认的绝对路径，不在更新时静默搬迁。
+
+用户通过手动快捷方式启动稳定 helper；本阶段不创建 Task Scheduler 任务或 Windows
+Service。`active.json` 只记录 schema、active/previous/pending SHA、状态和最近错误，不增加
+文件内容哈希。
+
+用户配置、行情缓存、研究湖和 SQLite 业务数据位于槽外，由版本化合同访问。候选槽不得在
+激活时临时构建，也不得来自 dirty checkout；它必须先通过相应 `tasks.py ready` 验证和启动
+探针。静态文件必须来自槽本身，不能继续指向开发源码目录。
+
+“应用更新”表示激活一个已经验证的完整候选槽，而不是只重载 FastAPI worker。用户已接受
+5–15 秒协调重启，因此不跨版本维护蓝绿 socket 或两套并发 worker：
+
+1. helper 验证 staged 槽、完整 main SHA 与 package gate，并原子记录 pending；
+2. 当前槽停止领取新任务，Web、调度器和任务 worker 有界排空，再停止当前 owned Job Object；
+3. helper 从候选槽在固定端口启动完整应用；
+4. 15 秒内检查 Web `core_ready`、worker 可用性及 Web/runtime/compute 的精确 `build_sha`；
+5. 健康后原子提交 active/previous 指针；失败则从 previous 槽恢复，并保留错误诊断。
+
+FreeStockDB 等由 supervisor 托管、数据目录位于槽外的 sidecar 可以跨激活继续存在，但控制它的
+应用 generation 必须同时切换。不能出现“新页面 + 旧 Web handler”或“新 Web + 旧任务
+handler”的混合版本。
+
+数据库迁移是激活边界的一部分。可回滚激活只允许兼容旧槽读取的数据变更；不可逆迁移必须在
+激活前备份并显式阻止自动回滚，证据不足时直接失败，不能把旧数据静默解释为新合同。
 
 ## 自动化与 Bot（automation/）
 

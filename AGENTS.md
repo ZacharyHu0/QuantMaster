@@ -150,6 +150,24 @@
   committing it to `main`. A genuine dependency or conflicting intervening change requires an
   explicit new integration attempt, not a continuous loop following unrelated `main` progress.
 
+## GitHub management workflow
+
+- Every feature, bug, or independent refactor must have a GitHub Issue before implementation. The
+  Issue records scope, non-goals, the public seam, data or migration risk, performance budgets, and
+  acceptance checks; the task branch and worktree slug must be linked from it.
+- Push the first coherent task commit and open a Draft PR with `Closes #<issue>`. Keep exact tests,
+  `tasks.py check`, final `tasks.py ready` lanes, package or UI evidence, and rollback notes in the
+  PR description. Mark it ready only after the committed task has completed its one-time integration
+  alignment and final gate.
+- The agent owns PR maintenance, review fixes, GitHub Actions follow-up, squash merge, and the normal
+  task-worktree cleanup. Do not bypass the PR with a direct `main` integration unless the owner
+  explicitly authorizes an emergency exception.
+- Use GitHub Discussions for architecture proposals and evidence-backed decisions spanning multiple
+  tasks. Irreversible migrations, hard package-budget conflicts, and inconclusive Rust or SciPy
+  benchmarks pause the affected task and receive a decision post before implementation continues.
+- The agent owns tag mechanics. Because the current tag workflow publishes a GitHub Release, do not
+  push a release tag until the owner explicitly confirms that Release.
+
 ## Stale task classification
 
 - Do not equate `tasks.py` refusing removal with an active or valuable task. Classify every stale
