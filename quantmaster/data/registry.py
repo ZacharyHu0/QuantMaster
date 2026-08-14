@@ -901,154 +901,183 @@ def _assess_intraday_frame(
     )
 
 
-def _bar_envelope(
+def _assess_bar_quality(
     frame: pd.DataFrame,
     *,
     symbol: str,
     start: str,
     end: str,
-    store: BarStore,
     frequency: str,
-    metadata: dict[str, Any] | None = None,
-    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
-) -> BarDataEnvelope[pd.DataFrame]:
-    metadata = metadata if metadata is not None else store.metadata(symbol) or {}
-    source = str(metadata.get("last_source") or "")
-    stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
+    source: str,
+    stale: bool,
+) -> BarDataQuality:
     if frequency == "1d":
-        quality = _assess_daily_frame(
+        return _assess_daily_frame(
             frame, start, end, symbol=symbol, source=source, stale=stale,
         )
-    else:
-        quality = _assess_intraday_frame(
-            frame, start, end, symbol=symbol, frequency=frequency,
-            source=source, stale=stale,
+    return _assess_intraday_frame(
+        frame, start, end, symbol=symbol, frequency=frequency,
+        source=source, stale=stale,
+    )
+
+
+def _with_daily_freshness(
+    quality: BarDataQuality,
+    frame: pd.DataFrame,
+    *,
+    symbol: str,
+    end: str,
+    metadata: dict[str, Any],
+    purpose: CachePurpose | str,
+) -> BarDataQuality:
+    expected = SessionExpectation()
+    current = pd.Timestamp(market_now())
+    sessions, calendar_source = _local_sessions(
+        (current - pd.Timedelta(days=45)).tz_localize(None).normalize(),
+        current.tz_localize(None).normalize(),
+    )
+    if len(sessions):
+        expected = SessionExpectation(
+            sessions.max().date().isoformat(), calendar_source, True,
+            "已发布本地交易日证据",
         )
-    if frequency == "1d":
-        # Use only already-published local session evidence here.  Page reads
-        # must never contact a provider merely to decide whether stale bytes
-        # can be displayed.
-        expected = SessionExpectation()
-        current = pd.Timestamp(market_now())
-        sessions, calendar_source = _local_sessions(
-            (current - pd.Timedelta(days=45)).tz_localize(None).normalize(),
-            current.tz_localize(None).normalize(),
-        )
-        if len(sessions):
-            expected = SessionExpectation(
-                sessions.max().date().isoformat(), calendar_source, True,
-                "已发布本地交易日证据",
-            )
-        freshness = assess_daily_freshness(
-            symbol=symbol,
-            frame=frame,
-            requested_end=end,
-            checked_at=float(metadata.get("checked_at") or 0),
-            purpose=purpose,
-            expectation=expected,
-            display_ttl_seconds=get_config().data.cache_days * 86400,
-        )
-        freshness_stale = freshness.state in {"stale", "unchecked"}
-        quality = replace(
-            quality,
-            status=(
-                "degraded"
-                if freshness_stale and quality.status == "verified"
-                else "unavailable" if freshness.future_rows else quality.status
-            ),
-            stale=quality.stale or freshness_stale,
-            issues=tuple(dict.fromkeys((
-                *quality.issues,
-                *((freshness.refresh_reason,) if freshness.refresh_reason else ()),
-            ))),
-            freshness_state=freshness.state,
-            age_seconds=freshness.age_seconds,
-            stale_while_revalidate=freshness.stale_while_revalidate,
-            refresh_reason=freshness.refresh_reason,
-            expected_session=freshness.expected_session,
-            future_rows=max(quality.future_rows, freshness.future_rows),
-        )
+    freshness = assess_daily_freshness(
+        symbol=symbol,
+        frame=frame,
+        requested_end=end,
+        checked_at=float(metadata.get("checked_at") or 0),
+        purpose=purpose,
+        expectation=expected,
+        display_ttl_seconds=get_config().data.cache_days * 86400,
+    )
+    freshness_stale = freshness.state in {"stale", "unchecked"}
+    return replace(
+        quality,
+        status=(
+            "degraded"
+            if freshness_stale and quality.status == "verified"
+            else "unavailable" if freshness.future_rows else quality.status
+        ),
+        stale=quality.stale or freshness_stale,
+        issues=tuple(dict.fromkeys((
+            *quality.issues,
+            *((freshness.refresh_reason,) if freshness.refresh_reason else ()),
+        ))),
+        freshness_state=freshness.state,
+        age_seconds=freshness.age_seconds,
+        stale_while_revalidate=freshness.stale_while_revalidate,
+        refresh_reason=freshness.refresh_reason,
+        expected_session=freshness.expected_session,
+        future_rows=max(quality.future_rows, freshness.future_rows),
+    )
+
+
+def _decoded_source_provenance(metadata: dict[str, Any]) -> list[object]:
     try:
         raw_provenance = json.loads(str(metadata.get("source_chain_json") or "[]"))
-        if not isinstance(raw_provenance, list):
-            raw_provenance = []
     except (TypeError, ValueError, json.JSONDecodeError):
-        raw_provenance = []
+        return []
+    return raw_provenance if isinstance(raw_provenance, list) else []
 
-    requested_start = _shanghai_wall_time(start)
-    requested_end = _shanghai_wall_time(end)
 
-    def overlaps(event: dict[str, object]) -> bool:
-        for prefix in ("requested", "affected"):
-            event_start = str(event.get(f"{prefix}_start") or "")
-            event_end = str(event.get(f"{prefix}_end") or "")
-            if not event_start or not event_end:
-                continue
-            try:
-                normalized_start = _shanghai_wall_time(event_start)
-                normalized_end = _shanghai_wall_time(event_end)
-            except (TypeError, ValueError):
-                return True
-            return normalized_start <= requested_end and normalized_end >= requested_start
-        return True
+def _provenance_event_overlaps(
+    event: dict[str, object],
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+) -> bool:
+    for prefix in ("requested", "affected"):
+        event_start = str(event.get(f"{prefix}_start") or "")
+        event_end = str(event.get(f"{prefix}_end") or "")
+        if not event_start or not event_end:
+            continue
+        try:
+            normalized_start = _shanghai_wall_time(event_start)
+            normalized_end = _shanghai_wall_time(event_end)
+        except (TypeError, ValueError):
+            return True
+        return normalized_start <= requested_end and normalized_end >= requested_start
+    return True
 
-    provenance = [
+
+def _provenance_for_range(
+    metadata: dict[str, Any],
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+) -> list[dict[str, object]]:
+    return [
         dict(item)
-        for item in raw_provenance
-        if isinstance(item, dict) and overlaps(item)
+        for item in _decoded_source_provenance(metadata)
+        if isinstance(item, dict)
+        and _provenance_event_overlaps(item, requested_start, requested_end)
     ]
-    rank = _QUALITY_RANK
 
-    def event_interval(event: dict[str, object]) -> tuple[pd.Timestamp, pd.Timestamp] | None:
-        for prefix in ("requested", "affected"):
-            event_start = str(event.get(f"{prefix}_start") or "")
-            event_end = str(event.get(f"{prefix}_end") or "")
-            if not event_start or not event_end:
-                continue
-            try:
-                return _shanghai_wall_time(event_start), _shanghai_wall_time(event_end)
-            except (TypeError, ValueError):
-                return None
-        return None
 
-    def event_status(event: dict[str, object]) -> str:
-        contract = event.get("quality")
-        if isinstance(contract, dict):
-            status = str(contract.get("status") or "")
-            if status:
-                return status
-        return str(event.get("status") or "")
+def _provenance_event_interval(
+    event: dict[str, object],
+) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    for prefix in ("requested", "affected"):
+        event_start = str(event.get(f"{prefix}_start") or "")
+        event_end = str(event.get(f"{prefix}_end") or "")
+        if not event_start or not event_end:
+            continue
+        try:
+            return _shanghai_wall_time(event_start), _shanghai_wall_time(event_end)
+        except (TypeError, ValueError):
+            return None
+    return None
 
-    def lineage_covers(events: list[dict[str, object]]) -> bool:
-        intervals = sorted(
-            interval
-            for event in events
-            if event_status(event) in rank
-            for interval in (event_interval(event),)
-            if interval is not None
+
+def _provenance_event_status(event: dict[str, object]) -> str:
+    contract = event.get("quality")
+    if isinstance(contract, dict):
+        status = str(contract.get("status") or "")
+        if status:
+            return status
+    return str(event.get("status") or "")
+
+
+def _lineage_interval_contiguous(
+    interval_start: pd.Timestamp,
+    merged_end: pd.Timestamp,
+    frequency: str,
+) -> bool:
+    if frequency == "1d":
+        return interval_start <= merged_end + pd.offsets.BDay(1)
+    if interval_start.normalize() == merged_end.normalize():
+        tolerance = pd.Timedelta(
+            minutes=_MINUTE_FREQUENCY_MINUTES.get(frequency, 0),
         )
-        if not intervals or intervals[0][0] > requested_start:
-            return False
-        merged_end = intervals[0][1]
-        for interval_start, interval_end in intervals[1:]:
-            if frequency == "1d":
-                contiguous = interval_start <= merged_end + pd.offsets.BDay(1)
-            elif interval_start.normalize() == merged_end.normalize():
-                tolerance = pd.Timedelta(
-                    minutes=_MINUTE_FREQUENCY_MINUTES.get(frequency, 0),
-                )
-                contiguous = interval_start <= merged_end + tolerance
-            else:
-                contiguous = (
-                    interval_start.normalize()
-                    <= merged_end.normalize() + pd.offsets.BDay(1)
-                )
-            if not contiguous:
-                return False
-            merged_end = max(merged_end, interval_end)
-        return merged_end >= requested_end
+        return interval_start <= merged_end + tolerance
+    return interval_start.normalize() <= merged_end.normalize() + pd.offsets.BDay(1)
 
-    lineage_complete = lineage_covers(provenance)
+
+def _lineage_covers(
+    events: list[dict[str, object]],
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+    frequency: str,
+) -> bool:
+    intervals = sorted(
+        interval
+        for event in events
+        if _provenance_event_status(event) in _QUALITY_RANK
+        for interval in (_provenance_event_interval(event),)
+        if interval is not None
+    )
+    if not intervals or intervals[0][0] > requested_start:
+        return False
+    merged_end = intervals[0][1]
+    for interval_start, interval_end in intervals[1:]:
+        if not _lineage_interval_contiguous(interval_start, merged_end, frequency):
+            return False
+        merged_end = max(merged_end, interval_end)
+    return merged_end >= requested_end
+
+
+def _persisted_quality_contracts(
+    provenance: list[dict[str, object]],
+    metadata: dict[str, Any],
+) -> list[dict[str, Any]]:
     # Persisted quality is decoded JSON and therefore intentionally schema-dynamic.
     persisted_contracts: list[dict[str, Any]] = []
     for event in provenance:
@@ -1068,24 +1097,39 @@ def _bar_envelope(
                 persisted_contracts.append(persisted)
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
+    return persisted_contracts
 
+
+def _with_legacy_lineage_warning(
+    quality: BarDataQuality,
+    provenance: list[dict[str, object]],
+    frequency: str,
+) -> BarDataQuality:
     # A former release persisted per-symbol Tushare witnesses beside StockDB
     # bytes.  They have no immutable batch-manifest identity, so they remain
     # viewable but cannot silently satisfy the new formal evidence contract.
-    if frequency == "1d" and any(
+    legacy = frequency == "1d" and any(
         "stockdb-price+tushare-contract-v2" in str(event.get("source") or "")
         for event in provenance
-    ):
-        quality = replace(
-            quality,
-            status="degraded" if quality.status == "verified" else quality.status,
-            partial=True,
-            issues=tuple(dict.fromkeys((
-                *quality.issues,
-                "旧版逐标的交叉证据缺少整批内容清单，仅可作为预览快照",
-            ))),
-        )
+    )
+    if not legacy:
+        return quality
+    return replace(
+        quality,
+        status="degraded" if quality.status == "verified" else quality.status,
+        partial=True,
+        issues=tuple(dict.fromkeys((
+            *quality.issues,
+            "旧版逐标的交叉证据缺少整批内容清单，仅可作为预览快照",
+        ))),
+    )
 
+
+def _merge_persisted_quality(
+    quality: BarDataQuality,
+    persisted_contracts: list[dict[str, Any]],
+) -> BarDataQuality:
+    rank = _QUALITY_RANK
     for persisted in persisted_contracts:
         persisted_status_raw = str(persisted.get("status") or "")
         if persisted_status_raw not in rank:
@@ -1115,6 +1159,18 @@ def _bar_envelope(
                 else quality.adjustment
             ),
         )
+    return quality
+
+
+def _with_lineage_completion(
+    quality: BarDataQuality,
+    provenance: list[dict[str, object]],
+    *,
+    source: str,
+    lineage_complete: bool,
+    requested_start: pd.Timestamp,
+    requested_end: pd.Timestamp,
+) -> tuple[BarDataQuality, list[dict[str, object]]]:
     if not provenance:
         missing_provenance: dict[str, object] = {
             "status": "provenance_missing",
@@ -1134,22 +1190,71 @@ def _bar_envelope(
                 "provenance_missing: 缓存记录没有请求区间的来源证据",
             ))),
         )
-    elif not lineage_complete:
-        provenance.append({
+        return quality, provenance
+    if lineage_complete:
+        return quality, provenance
+    provenance.append({
             "status": "lineage_gap",
             "diagnostic_code": "provenance_incomplete",
             "requested_start": requested_start.isoformat(),
             "requested_end": requested_end.isoformat(),
-        })
-        quality = replace(
-            quality,
-            status="degraded" if quality.status == "verified" else quality.status,
-            partial=True,
-            issues=tuple(dict.fromkeys((
-                *quality.issues,
-                "provenance_incomplete: 来源证据没有覆盖完整请求区间",
-            ))),
+    })
+    quality = replace(
+        quality,
+        status="degraded" if quality.status == "verified" else quality.status,
+        partial=True,
+        issues=tuple(dict.fromkeys((
+            *quality.issues,
+            "provenance_incomplete: 来源证据没有覆盖完整请求区间",
+        ))),
+    )
+    return quality, provenance
+
+
+def _bar_envelope(
+    frame: pd.DataFrame,
+    *,
+    symbol: str,
+    start: str,
+    end: str,
+    store: BarStore,
+    frequency: str,
+    metadata: dict[str, Any] | None = None,
+    purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
+) -> BarDataEnvelope[pd.DataFrame]:
+    metadata = metadata if metadata is not None else store.metadata(symbol) or {}
+    source = str(metadata.get("last_source") or "")
+    stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
+    quality = _assess_bar_quality(
+        frame,
+        symbol=symbol,
+        start=start,
+        end=end,
+        frequency=frequency,
+        source=source,
+        stale=stale,
+    )
+    if frequency == "1d":
+        quality = _with_daily_freshness(
+            quality, frame, symbol=symbol, end=end, metadata=metadata, purpose=purpose,
         )
+    requested_start = _shanghai_wall_time(start)
+    requested_end = _shanghai_wall_time(end)
+    provenance = _provenance_for_range(metadata, requested_start, requested_end)
+    lineage_complete = _lineage_covers(
+        provenance, requested_start, requested_end, frequency,
+    )
+    persisted_contracts = _persisted_quality_contracts(provenance, metadata)
+    quality = _with_legacy_lineage_warning(quality, provenance, frequency)
+    quality = _merge_persisted_quality(quality, persisted_contracts)
+    quality, provenance = _with_lineage_completion(
+        quality,
+        provenance,
+        source=source,
+        lineage_complete=lineage_complete,
+        requested_start=requested_start,
+        requested_end=requested_end,
+    )
     return BarDataEnvelope(frame, quality, tuple(provenance))
 
 

@@ -662,6 +662,37 @@ def test_public_envelope_verified_tail_cannot_upgrade_unverified_history(
     assert "source" not in result.provenance[-1]
 
 
+def test_daily_lineage_accepts_business_day_adjacency_but_rejects_a_gap():
+    first = {
+        "requested_start": "2026-08-03",
+        "requested_end": "2026-08-07",
+        "quality": {"status": "verified"},
+    }
+    adjacent = {
+        "requested_start": "2026-08-10",
+        "requested_end": "2026-08-14",
+        "quality": {"status": "verified"},
+    }
+    gap = {
+        "requested_start": "2026-08-11",
+        "requested_end": "2026-08-14",
+        "quality": {"status": "verified"},
+    }
+
+    assert registry._lineage_covers(
+        [first, adjacent],
+        pd.Timestamp("2026-08-03"),
+        pd.Timestamp("2026-08-14"),
+        "1d",
+    )
+    assert not registry._lineage_covers(
+        [first, gap],
+        pd.Timestamp("2026-08-03"),
+        pd.Timestamp("2026-08-14"),
+        "1d",
+    )
+
+
 def test_spot_uses_oldest_row_timestamp_and_rejects_mixed_freshness(monkeypatch):
     now = pd.Timestamp("2026-08-09 10:00:00", tz="Asia/Shanghai")
     frame = pd.DataFrame({
