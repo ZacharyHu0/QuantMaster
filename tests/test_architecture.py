@@ -50,6 +50,17 @@ def test_domain_and_runtime_modules_do_not_depend_on_server_transport():
     assert not violations, "transport dependency leaked into domain:\n" + "\n".join(violations)
 
 
+def test_lab_modules_do_not_hide_server_dependencies_inside_functions():
+    violations = []
+    for path in (PACKAGE_ROOT / "lab").rglob("*.py"):
+        for imported in _all_imports(path):
+            if imported == "quantmaster.server" or imported.startswith("quantmaster.server."):
+                violations.append(
+                    f"{path.relative_to(PACKAGE_ROOT).as_posix()} -> {imported}"
+                )
+    assert not violations, "Lab domain depends on server transport:\n" + "\n".join(violations)
+
+
 def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
     existing_runtime_adapters = {
         ("llm.py", "quantmaster.ai.llm"),

@@ -37,7 +37,7 @@ class LabLLMJobs:
 
     @staticmethod
     def _handle(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
-        from quantmaster.server.lab import get_lab_service
+        from quantmaster.lab.service import get_lab_service
 
         context.progress(5, "生成云端建议", "已取得 LLM 执行租约")
         result = get_lab_service().suggest_revision(

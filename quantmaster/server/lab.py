@@ -10,38 +10,19 @@ from pydantic import Field
 from quantmaster.config import get_config
 from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError, classify_lab_error
-from quantmaster.lab.service import LabService
+from quantmaster.lab.service import LabService as _LabService
+from quantmaster.lab.service import get_lab_service as _get_lab_service
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
 from quantmaster.runtime.problems import OperationProblem, make_problem
 
 router = APIRouter(prefix="/api/v1/lab", tags=["quant-lab"])
-_service: LabService | None = None
-_service_path = ""
-_read_service: LabService | None = None
-_read_service_path = ""
 
 
-def get_lab_service(*, read_only: bool = False) -> LabService:
-    """Return a writer service for commands or a bounded reader for GETs."""
-
-    global _service, _service_path, _read_service, _read_service_path
-    expected = str((get_config().data_root / "lab.sqlite").resolve())
-    if read_only:
-        if _read_service is None or expected != _read_service_path:
-            _read_service = LabService(read_only=True)
-            _read_service_path = expected
-        return _read_service
-    if _service is None or expected != _service_path:
-        _service = LabService()
-        _service_path = expected
-    return _service
-
-
-def _published_lab_service() -> LabService:
+def _published_lab_service() -> _LabService:
     """Return the immutable Lab ledger view or an explicit cold-start error."""
 
-    service = get_lab_service(read_only=True)
+    service = _get_lab_service(read_only=True)
     if service.store.path.is_file():
         return service
     raise OperationProblem(
@@ -218,7 +199,7 @@ def strategy_return_curve(strategy_id: str) -> dict:
 @router.post("/strategies/{strategy_id}/promotions")
 def promote_strategy(strategy_id: str, body: StrategyPromotion) -> dict:
     try:
-        return get_lab_service().store.promote_strategy(
+        return _get_lab_service().store.promote_strategy(
             strategy_id, target=body.target, actor=body.actor, reason=body.reason,
         )
     except (LabError, KeyError, TypeError, ValueError) as exc:
@@ -227,7 +208,7 @@ def promote_strategy(strategy_id: str, body: StrategyPromotion) -> dict:
 
 @router.post("/preflight")
 def preflight(body: PreflightCreate) -> dict:
-    return get_lab_service().preflight(body.operation, body.params)
+    return _get_lab_service().preflight(body.operation, body.params)
 
 
 @router.get("/capabilities")
@@ -258,7 +239,7 @@ def factor_version(version_id: str) -> dict:
 @router.post("/factors")
 def create_factor(body: FactorCreate) -> dict:
     try:
-        return get_lab_service().create_expression(**body.model_dump())
+        return _get_lab_service().create_expression(**body.model_dump())
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -266,11 +247,11 @@ def create_factor(body: FactorCreate) -> dict:
 @router.post("/factors/{version_id}/approve")
 def approve(version_id: str, body: Decision) -> dict:
     try:
-        report = get_lab_service().preflight("approve", {"version_id": version_id})
+        report = _get_lab_service().preflight("approve", {"version_id": version_id})
         from quantmaster.lab.preflight import require_runnable
 
         require_runnable(report)
-        return get_lab_service().store.approve(
+        return _get_lab_service().store.approve(
             version_id, actor=body.actor, reason=body.reason)
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
@@ -279,7 +260,7 @@ def approve(version_id: str, body: Decision) -> dict:
 @router.post("/factors/{version_id}/reject")
 def reject(version_id: str, body: Decision) -> dict:
     try:
-        return get_lab_service().store.reject(
+        return _get_lab_service().store.reject(
             version_id, actor=body.actor, reason=body.reason)
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
@@ -288,13 +269,13 @@ def reject(version_id: str, body: Decision) -> dict:
 @router.post("/factors/{version_id}/deploy")
 def deploy(version_id: str, body: Deployment) -> dict:
     try:
-        report = get_lab_service().preflight("deploy", {
+        report = _get_lab_service().preflight("deploy", {
             "version_id": version_id, "universe": body.universe,
         })
         from quantmaster.lab.preflight import require_runnable
 
         require_runnable(report)
-        return get_lab_service().store.deploy(
+        return _get_lab_service().store.deploy(
             version_id, universe=body.universe, horizon=body.horizon, actor=body.actor,
             profile=body.profile, scope=body.scope)
     except Exception as exc:
@@ -319,7 +300,7 @@ def suggest(version_id: str, body: SuggestionRequest, response: Response) -> dic
             )
             response.status_code = 202
             return UnifiedJobRuntime.public(job)
-        return get_lab_service().suggest_revision(
+        return _get_lab_service().suggest_revision(
             version_id, use_cloud=body.use_cloud,
             sample_consent=body.sample_consent, sample=body.anonymous_sample,
         )
@@ -330,7 +311,7 @@ def suggest(version_id: str, body: SuggestionRequest, response: Response) -> dic
 @router.post("/suggestions/{suggestion_id}/apply")
 def apply_suggestion(suggestion_id: str, body: Decision) -> dict:
     try:
-        return get_lab_service().apply_suggestion(suggestion_id, actor=body.actor)
+        return _get_lab_service().apply_suggestion(suggestion_id, actor=body.actor)
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -338,7 +319,7 @@ def apply_suggestion(suggestion_id: str, body: Decision) -> dict:
 @router.post("/suggestions/{suggestion_id}/dismiss")
 def dismiss_suggestion(suggestion_id: str) -> dict:
     try:
-        return get_lab_service().store.resolve_suggestion(suggestion_id, "dismissed")
+        return _get_lab_service().store.resolve_suggestion(suggestion_id, "dismissed")
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -346,7 +327,7 @@ def dismiss_suggestion(suggestion_id: str) -> dict:
 @router.post("/jobs", status_code=202)
 def enqueue_job(body: JobCreate) -> dict:
     try:
-        return get_lab_service().enqueue(body.kind, body.params)
+        return _get_lab_service().enqueue(body.kind, body.params)
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -354,7 +335,7 @@ def enqueue_job(body: JobCreate) -> dict:
 @router.post("/mining/preview")
 def mining_preview(body: MiningPreview) -> dict:
     try:
-        return get_lab_service().preview_python_mining(**body.model_dump())
+        return _get_lab_service().preview_python_mining(**body.model_dump())
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -383,7 +364,7 @@ def mining_candidate(candidate_id: str) -> dict:
 @router.post("/studies", status_code=202)
 def create_study(body: StudyCreate) -> dict:
     try:
-        return get_lab_service().create_study(body.model_dump())
+        return _get_lab_service().create_study(body.model_dump())
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -407,7 +388,7 @@ def study(study_id: str) -> dict:
 @router.post("/studies/{study_id}/resume", status_code=202)
 def resume_study(study_id: str) -> dict:
     try:
-        return get_lab_service().resume_study(study_id)
+        return _get_lab_service().resume_study(study_id)
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
@@ -415,7 +396,7 @@ def resume_study(study_id: str) -> dict:
 @router.post("/audits", status_code=202)
 def create_audit(body: AuditCreate) -> dict:
     try:
-        return get_lab_service().enqueue("bias_audit", body.model_dump())
+        return _get_lab_service().enqueue("bias_audit", body.model_dump())
     except Exception as exc:
         return _fail(exc)  # type: ignore[return-value]
 
