@@ -27,12 +27,32 @@ def _top_level_imports(path: Path) -> set[str]:
     return imports
 
 
+def _resolved_import_from(path: Path, node: ast.ImportFrom) -> set[str]:
+    parts: list[str] = []
+    if node.level:
+        package = list(path.relative_to(PACKAGE_ROOT.parent).with_suffix("").parts[:-1])
+        parents = node.level - 1
+        if parents > len(package):
+            return set()
+        parts.extend(package[:len(package) - parents])
+    if node.module:
+        parts.extend(node.module.split("."))
+    base = ".".join(parts)
+    imports = {base} if base else set()
+    imports.update(
+        f"{base}.{alias.name}" if base else alias.name
+        for alias in node.names
+        if alias.name != "*"
+    )
+    return imports
+
+
 def _all_imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imports: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
+        if isinstance(node, ast.ImportFrom):
+            imports.update(_resolved_import_from(path, node))
         elif isinstance(node, ast.Import):
             imports.update(alias.name for alias in node.names)
     return imports
@@ -72,6 +92,21 @@ def test_market_capability_has_no_deep_transport_dependency():
     assert not violations, "market capability depends on transport:\n" + "\n".join(violations)
 
 
+def test_import_resolver_canonicalizes_market_transport_import_forms():
+    fixture = PACKAGE_ROOT / "market" / "fixture.py"
+    specimens = {
+        "from quantmaster import server": "quantmaster.server",
+        "from quantmaster import cli": "quantmaster.cli",
+        "from .. import server": "quantmaster.server",
+        "from ..server import app": "quantmaster.server.app",
+    }
+    for source, expected in specimens.items():
+        node = next(
+            item for item in ast.walk(ast.parse(source)) if isinstance(item, ast.ImportFrom)
+        )
+        assert expected in _resolved_import_from(fixture, node)
+
+
 def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
     existing_runtime_adapters = {
         ("llm.py", "quantmaster.ai.llm"),
@@ -88,9 +123,15 @@ def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
         for imported in _all_imports(path):
             if not imported.startswith("quantmaster."):
                 continue
-            if imported.startswith("quantmaster.runtime.") or imported in foundation:
+            if imported.startswith("quantmaster.runtime.") or any(
+                imported == item or imported.startswith(f"{item}.") for item in foundation
+            ):
                 continue
-            if (path.name, imported) in existing_runtime_adapters:
+            if any(
+                path.name == filename
+                and (imported == adapter or imported.startswith(f"{adapter}."))
+                for filename, adapter in existing_runtime_adapters
+            ):
                 continue
             violations.append(f"runtime/{path.name} -> {imported}")
     assert not violations, "runtime wiring must live in bootstrap:\n" + "\n".join(violations)
