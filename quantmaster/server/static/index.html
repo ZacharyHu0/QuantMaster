@@ -172,6 +172,35 @@
       </div>
     </div>
   </section>
+  <section class="panel market-sentiment-panel" id="market-ashare-fear-greed" aria-live="polite">
+    <div class="market-sentiment-head">
+      <span class="eyebrow market-sentiment-title">A-SHARE FEAR &amp; GREED</span>
+      <div class="market-sentiment-copy">
+        <div class="market-sentiment-status">
+          <strong id="market-ashare-fear-greed-status">A股情绪</strong>
+          <time id="market-ashare-fear-greed-time">等待更新</time>
+        </div>
+        <div class="market-sentiment-meta">
+          <label for="market-ashare-fear-greed-symbol">指数口径
+            <select id="market-ashare-fear-greed-symbol" aria-label="A股恐贪指数口径">
+              <option value="上证指数">上证指数</option>
+              <option value="沪深300">沪深300</option>
+            </select>
+          </label>
+          <span id="market-ashare-fear-greed-benchmark">指数点位 —</span>
+        </div>
+        <p id="market-ashare-fear-greed-note">FundDB A股恐贪指数；当前选择的指数点位作为历史曲线基准。</p>
+      </div>
+      <a href="https://www.funddb.cn/tool/fear" target="_blank" rel="noreferrer">查看 FundDB 来源</a>
+    </div>
+    <div class="market-sentiment-visuals">
+      <div class="fear-greed-gauge" id="fear-greed-gauge-ashare" data-ashare-fear-greed-gauge role="img" aria-label="A股当日恐贪指数仪表盘"></div>
+      <div class="fear-greed-history-wrap">
+        <div class="indicator-chart-head"><strong>恐贪历史曲线</strong><span>黄色虚线：A股恐贪 ≤10，属于罕见恐惧区间；分数越低越恐惧</span></div>
+        <div class="fear-greed-history" id="fear-greed-history-ashare" data-ashare-fear-greed-history role="img" aria-label="A股恐贪指数历史曲线；黄色虚线表示 10 分罕见恐惧参考阈值"></div>
+      </div>
+    </div>
+  </section>
   <section class="market-section market-index-section" id="major-indexes" data-market-group="A股指数" data-market-order="0" aria-labelledby="major-indexes-title">
     <div class="market-section-head"><div class="market-section-heading">
       <h2 class="market-section-title" id="major-indexes-title">主要指数</h2><span class="market-section-count">正在读取</span></div>

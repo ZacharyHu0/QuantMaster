@@ -181,7 +181,10 @@ class _DefaultWorkerPlan:
         from quantmaster.lab.capabilities import publish_capabilities
         from quantmaster.lab.llm_jobs import get_lab_llm_jobs, shutdown_lab_llm_jobs
         from quantmaster.lab.worker import get_worker
-        from quantmaster.market import get_cnn_fear_greed_refresher
+        from quantmaster.market import (
+            get_ashare_fear_greed_refresher,
+            get_cnn_fear_greed_refresher,
+        )
         from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
         from quantmaster.research.jobs import get_research_job_manager
         from quantmaster.rotation.etf_jobs import (
@@ -216,6 +219,7 @@ class _DefaultWorkerPlan:
         self.settings_worker = get_settings_jobs()
         self.lab_llm_worker = get_lab_llm_jobs()
         self.cnn_fear_greed_refresher = get_cnn_fear_greed_refresher()
+        self.ashare_fear_greed_refresher = get_ashare_fear_greed_refresher()
         self.paper_automation_worker = get_paper_automation_worker()
         self.data_refresh_manager = data_refresh_manager
         self.free_stockdb_runtime = free_stockdb_runtime
@@ -278,6 +282,7 @@ class _DefaultWorkerPlan:
         self.paper_automation_worker.start()
         self.rotation_worker.start(bootstrap_local=bootstrap_rotation)
         self.cnn_fear_greed_refresher.start()
+        self.ashare_fear_greed_refresher.start()
         self._publish_async(
             self._publish_market_overview, "quant-market-overview-publish",
         )
@@ -289,6 +294,7 @@ class _DefaultWorkerPlan:
 
     def drain(self) -> None:
         self.cnn_fear_greed_refresher.stop()
+        self.ashare_fear_greed_refresher.stop()
         self.paper_automation_worker.stop()
         self.rotation_worker.stop()
         self.repair_worker.shutdown()
@@ -306,6 +312,7 @@ class _DefaultWorkerPlan:
 
     def resume(self) -> None:
         self.cnn_fear_greed_refresher.start()
+        self.ashare_fear_greed_refresher.start()
         self.stock_analysis_worker.resume()
         self.after_close_worker.resume()
         self.etf_research_worker.resume()
@@ -399,6 +406,7 @@ class _DefaultWorkerPlan:
         self._stop_diagnostics_sampler()
         self.stockdb_event_delivery.stop()
         self.cnn_fear_greed_refresher.stop()
+        self.ashare_fear_greed_refresher.stop()
         # Scheduler/channel owners stop before durable workers so no producer
         # can submit during the durable drain.
         self.runtime.close()
