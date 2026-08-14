@@ -542,6 +542,7 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         if os.name != "nt":
             return
         script = (
+            "$ErrorActionPreference='Stop';"
             "$root=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_ROOT -Force;"
             "$items=@($root)+@(Get-ChildItem -LiteralPath $root.FullName -Force -Recurse);"
             "foreach($item in $items){"
@@ -787,9 +788,12 @@ def _remove_locked(
     record_task_completion(
         primary, slug, branch=branch, superseded_by=replacement,
     )
+    # Artifacts may be owned by the current sandbox identity while Git metadata
+    # requires a different one.  Clean them before the final Git write so the
+    # documented retry can finish branch removal without stranding ACLs.
+    remove_task_artifacts(primary, slug)
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
-    remove_task_artifacts(primary, slug)
     task_remove_intent_path(primary, slug).unlink(missing_ok=True)
     evidence = f"; superseded by main commit {replacement}" if replacement else ""
     print(f"[task] removed {branch} and {target}{evidence}")
