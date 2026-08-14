@@ -127,6 +127,14 @@ def test_cloud_sample_ui_describes_and_enforces_two_state_contract():
     assert "outbound_confirmed:outboundConfirmed" in lab_script
 
 
+def test_discovery_form_uses_the_queue_preflight_once():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    assert "const job = await enqueue(operation, params);" in lab_script
+    assert "confirmPreflight(operation, params, kindLabel[operation]" not in lab_script
+
+
 class _SequenceLLMClient:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)

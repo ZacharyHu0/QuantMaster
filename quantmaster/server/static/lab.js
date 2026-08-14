@@ -1809,7 +1809,6 @@
           operation = 'discover_genetic';
           params = {...base, top_n:+form.get('top'), population:+form.get('population'), generations:+form.get('generations')};
         }
-        if (!await confirmPreflight(operation, params, kindLabel[operation] || '创建发现任务')) return;
         const job = await enqueue(operation, params);
         if (!job) return;
         state.formsDirty = false;
