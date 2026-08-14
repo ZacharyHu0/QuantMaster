@@ -63,7 +63,13 @@ def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, 
 
     def run_factor_test(**kwargs):
         observed.append(kwargs)
-        return {"summary": {"name": "mom_20d", "ic_mean": 0.0312}}
+        return {
+            "summary": {"name": "mom_20d", "ic_mean": 0.0312},
+            "universe_evidence": {"formal_eligible": False},
+            "data_quality": {"status": "degraded"},
+            "neutralized": False,
+            "industry_evidence": {"status": "degraded"},
+        }
 
     monkeypatch.setattr("quantmaster.factors.run_factor_test", run_factor_test)
     args = build_parser().parse_args([
@@ -77,7 +83,14 @@ def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, 
     ])
 
     assert args.func(args) is None
-    assert json.loads(capsys.readouterr().out) == {"name": "mom_20d", "ic_mean": 0.0312}
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"name": "mom_20d", "ic_mean": 0.0312}
+    assert captured.err.splitlines() == [
+        "⚠️ Sandbox：结果不可进入正式研究",
+        "⚠️ 行情数据已降级",
+        "⚠️ 行业中性化未执行",
+        "⚠️ 行业证据已降级",
+    ]
     assert observed == [{
         "expression": "mom_20d",
         "universe": "csi800",

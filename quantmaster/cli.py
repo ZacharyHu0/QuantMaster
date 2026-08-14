@@ -711,6 +711,15 @@ def cmd_factor_test(args) -> None:
         neutralize=args.neutralize,
         refresh=True,
     )
+    if (result.get("universe_evidence") or {}).get("formal_eligible") is False:
+        print("⚠️ Sandbox：结果不可进入正式研究", file=sys.stderr)
+    if (result.get("data_quality") or {}).get("status") == "degraded":
+        print("⚠️ 行情数据已降级", file=sys.stderr)
+    if args.neutralize:
+        if not result.get("neutralized"):
+            print("⚠️ 行业中性化未执行", file=sys.stderr)
+        if (result.get("industry_evidence") or {}).get("status") == "degraded":
+            print("⚠️ 行业证据已降级", file=sys.stderr)
     _print_json(result["summary"])
 
 
