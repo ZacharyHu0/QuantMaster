@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 pytest_plugins = ("pytester",)
@@ -45,6 +47,10 @@ def test_default_config_is_per_test_but_marker_keeps_one_module_config(pytester)
             assert str(get_config().data_root) == roots[0]
         """,
     )
-    result = pytester.runpytest()
+    result = pytester.runpytest("-p", "scripts.dev.pytest_windows_acl")
     assert result.ret == pytest.ExitCode.OK
     result.assert_outcomes(passed=4)
+    if os.name == "nt":
+        from quantmaster.runtime.storage_governance import inspect_acl
+
+        assert inspect_acl(pytester.path.parent / "basetemp").inherited is True
