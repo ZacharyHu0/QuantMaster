@@ -193,3 +193,31 @@ def test_refresh_reference_panel_isolates_provider_failure(tmp_path, monkeypatch
     assert failures[failed]["error_code"] == "all_sources_unavailable"
     assert store.metadata(failed)["last_status"] == "stale"
     assert store.metadata(ready)["last_source"] == "sina:us-index"
+
+
+def test_refresh_reference_panel_isolates_sdk_capability_failure(tmp_path, monkeypatch):
+    ready, failed = "SPX.INDEX", "DXY.INDEX"
+    frame = _frame().assign(volume=0.0).set_index("date")
+    store = BarStore(root=tmp_path / "bars")
+    store.put(
+        failed,
+        frame,
+        request_start="2026-07-20",
+        request_end="2026-07-24",
+        source="yfinance",
+    )
+
+    def fetch(symbol: str, _start: str, _end: str) -> ReferenceFetch:
+        if symbol == failed:
+            raise AttributeError("SDK method missing")
+        return ReferenceFetch(frame=frame, source="sina:us-index", attempts=())
+
+    monkeypatch.setattr("quantmaster.data.reference_market.fetch_reference", fetch)
+    frames, failures = refresh_reference_panel(
+        [ready, failed], "2026-07-20", "2026-07-24", "incremental", store,
+    )
+
+    assert ready not in failures, failures
+    assert set(frames) == {ready, failed}
+    assert failures[failed]["error_code"] == "AttributeError"
+    assert store.metadata(failed)["last_status"] == "stale"
