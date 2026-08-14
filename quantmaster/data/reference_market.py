@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -249,7 +250,7 @@ def refresh_reference_panel(
             }
             previous_source = str((store.metadata(symbol) or {}).get("last_source") or "")
             store.mark_status(symbol, "stale", source=previous_source)
-        except Exception as exc:
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             failures[symbol] = {
                 "error_code": type(exc).__name__,
                 "message": (str(exc).strip() or "同步失败")[:500],
