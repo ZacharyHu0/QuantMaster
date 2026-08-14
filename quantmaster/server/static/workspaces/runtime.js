@@ -10,6 +10,12 @@ const RESOURCES = {
 async function loadFeature(page) {
   const [style, module] = RESOURCES[page];
   await context.loadStyle(style);
+  if (page === 'settings') {
+    await Promise.all([
+      context.loadStyle('/static/news.css'),
+      import('../news.js'),
+    ]);
+  }
   return import(module);
 }
 

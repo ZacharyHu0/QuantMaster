@@ -127,7 +127,7 @@ class TestBasics:
             "account": ["workspaces/account.js", "trading.js", "trading.css", "ledger-import.js",
                         "advanced-charts.js", "charts.js", "charts.css"],
             "runtime": ["workspaces/runtime.js", "automation.js", "automation.css", "help.js",
-                        "help.css", "settings.js", "settings.css"],
+                        "help.css", "settings.js", "settings.css", "news.js", "news.css"],
         }
         for workspace, resources in workspace_resources.items():
             sizes = {name: (STATIC_ROOT / name).stat().st_size for name in resources}

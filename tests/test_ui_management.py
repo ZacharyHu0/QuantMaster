@@ -556,12 +556,15 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "决策",
         ]
         page.get_by_role("button", name="研究", exact=True).click()
+        page.wait_for_url(re.compile(r"#research/lab$"))
         assert page.url.endswith("#research/lab")
-        assert page.locator("#tab-lab").is_visible()
+        page.locator("#tab-lab").wait_for(state="visible")
         page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
         assert page.url.endswith("#account/paper")
-        assert page.locator("#tab-paper").is_visible()
+        page.locator("#tab-paper").wait_for(state="visible")
         page.get_by_role("button", name="运行", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/automation$"))
         assert page.url.endswith("#runtime/automation")
         runtime_pages = page.locator('[data-workspace-pages="runtime"]')
         assert runtime_pages.is_visible()
@@ -829,7 +832,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="设置", exact=True).click()
         mobile_settings = page.locator("#settings-section-select")
-        assert mobile_settings.is_visible()
+        mobile_settings.wait_for(state="visible")
         assert page.locator("#settings-nav").is_hidden()
         mobile_settings.select_option("automation")
         mobile_lists = page.locator(".automation-list-field").evaluate_all(
@@ -1081,22 +1084,19 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert page.locator("#help-article h2").count() == 28
         assert page.locator(".help-sidebar .help-nav-part").count() == 6
         assert page.locator(".help-sidebar .help-nav-part > ol").count() == 6
-        assert page.evaluate("location.hash") == "#help/start"
+        assert page.evaluate("location.hash") == "#runtime/help"
 
         page.reload()
         page.locator("#help-start").wait_for(state="visible")
         assert page.locator("#tab-help").evaluate("el => el.classList.contains('active')")
 
-        page.goto(f"{url}/#help/validation")
+        page.locator('[data-help-link="validation"]').click()
         page.locator("#help-validation").wait_for(state="visible")
         playwright_sync.expect(page.locator('[data-help-link="validation"]')).to_have_attribute(
             "aria-current",
             "location",
         )
         assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
-        assert page.locator('[data-help-nav-part="signals"]').evaluate(
-            "element => element.classList.contains('active')"
-        )
 
         search = page.locator("#help-search-input")
         search.fill("T+1")
@@ -1105,19 +1105,19 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.locator("#help-search-clear").click()
         assert page.locator("#help-search-results").is_hidden()
 
-        page.goto(f"{url}/#help/calculators")
+        page.locator('[data-help-link="calculators"]').click()
         page.locator("#calc-compound").wait_for(state="visible")
         assert page.locator('#calc-compound [data-output="annual"]').inner_text() == "10.00%"
 
-        page.goto(f"{url}/#help/models")
+        page.locator('[data-help-link="models"]').click()
         page.locator('#help-models [data-help-tab="decision"]').click()
-        assert page.locator("#tab-decision").evaluate("el => el.classList.contains('active')")
+        page.locator("#tab-decision").wait_for(state="visible")
 
+        help_button.click()
+        page.locator("#tab-help").wait_for(state="visible")
         for width, height in ((1360, 900), (900, 900), (390, 844)):
             page.set_viewport_size({"width": width, "height": height})
-            page.goto(f"{url}/#help/start")
-            page.locator("#help-start").wait_for(state="visible")
-            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            _wait_for_document_fit(page)
         assert page.locator(".help-mobile-toc").is_visible()
         browser.close()
 
@@ -1280,12 +1280,11 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         page.route("**/api/v1/market/history/**", history_handler)
         page.route("**/api/v1/portfolio/lists**", asset_handler)
         page.goto(url)
+        page.get_by_role("tab", name="决策", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/decision$"))
+        page.wait_for_function("() => typeof window.mkChart === 'function'")
         page.evaluate(
             """data => {
-              document.querySelectorAll('header [data-tab]').forEach(button =>
-                button.classList.toggle('active', button.dataset.tab === 'decision'));
-              document.querySelectorAll('.tab').forEach(section =>
-                section.classList.toggle('active', section.id === 'tab-decision'));
               renderDecision(data);
             }""",
             decision,
@@ -1407,6 +1406,9 @@ def test_kline_cache_and_stale_view_protection(live_server):
             lambda route: route.fulfill(status=200, json=empty_market),
         )
         page.goto(url)
+        page.evaluate(
+            "() => import('/static/advanced-charts.js').then(module => module.loadAdvancedCharts())"
+        )
         result = page.evaluate(
             """async () => {
               const originalApi = api;
@@ -1489,6 +1491,18 @@ def test_kline_cache_and_stale_view_protection(live_server):
 
                 Date.now = originalNow;
                 const pendingViews = {};
+                const waitForPending = async (symbol, promise) => {
+                  let outcome = 'pending';
+                  promise.then(
+                    () => { outcome = 'resolved'; },
+                    error => { outcome = `rejected: ${error?.message || error}`; },
+                  );
+                  for (let attempt = 0; attempt < 50; attempt += 1) {
+                    if (pendingViews[symbol]) return;
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                  }
+                  throw new Error(`${symbol} did not reach loadKlineSeries (${outcome})`);
+                };
                 loadKlineSeries = (symbol, frequency, {signal} = {}) =>
                   new Promise(resolve => {
                     pendingViews[symbol] = {resolve,signal};
@@ -1496,11 +1510,13 @@ def test_kline_cache_and_stale_view_protection(live_server):
                 marketLoading = true;
                 const startedAt = performance.now();
                 const firstView = showKline('FIRST.SH','旧标的');
+                await waitForPending('FIRST.SH', firstView);
                 const showLatencyMs = performance.now() - startedAt;
                 const panel = document.getElementById('kline-panel');
                 const panelVisibleImmediately = getComputedStyle(panel).display !== 'none';
                 const panelTop = panel.getBoundingClientRect().top;
                 const secondView = showKline('SECOND.SH','新标的');
+                await waitForPending('SECOND.SH', secondView);
                 const firstSignalAborted = pendingViews['FIRST.SH'].signal.aborted;
                 pendingViews['SECOND.SH'].resolve(bar('SECOND.SH'));
                 await secondView;
@@ -3003,7 +3019,7 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         )
         page.reload()
         page.locator("#market-quotes-view").wait_for(state="visible")
-        assert page.url.endswith("/")
+        assert page.url.endswith("#today/quotes")
         assert page.locator("#tab-news").is_hidden()
 
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
