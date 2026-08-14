@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -45,6 +47,23 @@ def test_free_stockdb_settings_validate_schedule_and_root() -> None:
 
     with pytest.raises(ValueError):
         DataSettings(free_stockdb_update_time="25:00")
+
+
+def test_stockdb_schedule_uses_shanghai_clock_across_us_dst(isolated_config) -> None:
+    isolated_config.data.free_stockdb_update_time = "18:30"
+    new_york = ZoneInfo("America/New_York")
+
+    before_us_dst = FreeStockDBRuntime._scheduled_at(
+        datetime(2026, 3, 7, 5, tzinfo=new_york),
+    )
+    after_us_dst = FreeStockDBRuntime._scheduled_at(
+        datetime(2026, 3, 9, 5, tzinfo=new_york),
+    )
+
+    assert before_us_dst.isoformat() == "2026-03-07T18:30:00+08:00"
+    assert after_us_dst.isoformat() == "2026-03-09T18:30:00+08:00"
+    with pytest.raises(ValueError, match="必须包含时区"):
+        FreeStockDBRuntime._scheduled_at(datetime(2026, 3, 9, 17))
 
 
 def test_managed_endpoint_uses_configured_loopback_port(monkeypatch) -> None:
@@ -438,6 +457,7 @@ def test_runtime_status_exposes_sidecar_contract() -> None:
     assert status["service_url"].startswith("http")
     assert "last_update_at" in status
     assert "next_update_at" in status
+    assert status["market_timezone"] == "Asia/Shanghai"
     assert "managed" in status
     assert "target_session" in status
     assert "actual_session" in status

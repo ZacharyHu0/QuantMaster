@@ -27,6 +27,7 @@ from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
+FREE_STOCKDB_MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _monotonic() -> float:
@@ -1304,9 +1305,16 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _scheduled_at(now: datetime) -> datetime:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("free-stockdb 调度时钟必须包含时区")
+        now = now.astimezone(FREE_STOCKDB_MARKET_TIMEZONE)
         hour, minute = map(int, get_config().data.free_stockdb_update_time.split(":"))
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return target if target > now else target + timedelta(days=1)
+
+    @staticmethod
+    def _scheduler_now() -> datetime:
+        return datetime.now(FREE_STOCKDB_MARKET_TIMEZONE)
 
     def _apply_config_command(self, changed_fields: list[str]) -> dict[str, Any]:
         from quantmaster.config import load_config, set_config
@@ -1363,8 +1371,7 @@ class FreeStockDBRuntime:
             try:
                 if self._process_command():
                     continue
-                timezone = ZoneInfo(get_config().automation.timezone)
-                now = datetime.now(timezone)
+                now = self._scheduler_now()
                 if self._next_retry_at and time.time() >= self._next_retry_at:
                     target, attempt = self._retry_target, self._retry_attempt
                     self._next_retry_at = 0.0
@@ -1621,8 +1628,7 @@ class FreeStockDBRuntime:
         root, _, updater = self._paths()
         marker = self._read_marker()
         try:
-            timezone = ZoneInfo(get_config().automation.timezone)
-            next_update = self._scheduled_at(datetime.now(timezone)).isoformat()
+            next_update = self._scheduled_at(self._scheduler_now()).isoformat()
         except (ValueError, TypeError):
             next_update = ""
         from quantmaster.data.free_stockdb_source import resolve_free_stockdb_sdk_path
@@ -1637,6 +1643,7 @@ class FreeStockDBRuntime:
             "updater_path": str(updater),
             "root": str(root),
             "last_update_at": str(marker.get("updated_at") or marker.get("date") or ""),
+            "market_timezone": str(FREE_STOCKDB_MARKET_TIMEZONE),
             "validated_session": str(
                 status.get("validated_session") or marker.get("validated_session") or ""
             ),
