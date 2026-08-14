@@ -281,6 +281,10 @@ def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
     label, command, kwargs = calls[0]
     assert label == "fresh wheel install"
     assert command[:5] == ["uv", "pip", "install", "--python", str(python)]
+    assert command[5:7] == ["--no-deps", "--target"]
+    assert Path(command[7]).name == "site"
+    assert Path(command[8]).name == wheel.name
+    assert Path(command[7]).parent == Path(command[8]).parent == kwargs["cwd"]
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
 
 
