@@ -1999,49 +1999,54 @@ class EtfResearchService:
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             return pd.DataFrame()
 
-    def _adjustment_factors(
-        self,
+    @staticmethod
+    def _normalized_adjustment_cache(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        cached = frame.copy()
+        cached["date"] = pd.to_datetime(cached.get("date"), errors="coerce")
+        cached["symbol"] = cached.get(
+            "symbol", pd.Series(dtype=str)
+        ).astype(str).str.upper()
+        cached["adj_factor"] = pd.to_numeric(
+            cached.get("adj_factor"), errors="coerce"
+        )
+        cached["source"] = cached["source"].fillna("").astype(str)
+        cached["acquired_at"] = pd.to_datetime(
+            cached["acquired_at"], errors="coerce", utc=True
+        )
+        return cached[
+            cached["date"].notna()
+            & cached["symbol"].ne("")
+            & np.isfinite(cached["adj_factor"])
+            & cached["adj_factor"].gt(0)
+        ]
+
+    @staticmethod
+    def _embedded_adjustment_factors(
         daily: pd.DataFrame,
         *,
-        progress: Progress,
-        cancelled: Cancelled,
-        as_of: str = "",
-    ) -> tuple[pd.DataFrame, dict[str, Any]]:
-        target = self.store.root / "evidence" / "adjustment_factors.parquet"
-        acquired_now = market_now().isoformat()
-        historical_cutoff = (
-            pd.Timestamp(daily_signal_cutoff(date.fromisoformat(as_of))).tz_convert("UTC")
-            if as_of
-            else None
+        acquired_at: str,
+    ) -> pd.DataFrame:
+        if "adj_factor" not in daily:
+            return pd.DataFrame(columns=_ADJUSTMENT_COLUMNS)
+        embedded = daily[["symbol", "date", "adj_factor"]].copy()
+        embedded["date"] = pd.to_datetime(embedded["date"], errors="coerce")
+        embedded["adj_factor"] = pd.to_numeric(
+            embedded["adj_factor"], errors="coerce"
         )
-        cached = _read_current_adjustment_factors(target)
-        if not cached.empty:
-            cached["date"] = pd.to_datetime(cached.get("date"), errors="coerce")
-            cached["symbol"] = cached.get("symbol", pd.Series(dtype=str)).astype(str).str.upper()
-            cached["adj_factor"] = pd.to_numeric(cached.get("adj_factor"), errors="coerce")
-            cached["source"] = cached["source"].fillna("").astype(str)
-            cached["acquired_at"] = pd.to_datetime(
-                cached["acquired_at"], errors="coerce", utc=True,
-            )
-            cached = cached[
-                cached["date"].notna()
-                & cached["symbol"].ne("")
-                & np.isfinite(cached["adj_factor"])
-                & cached["adj_factor"].gt(0)
-            ]
+        embedded["source"] = (
+            "free-stockdb:embedded-factor"
+            if daily.attrs.get("adjustment_status") == "verified"
+            else "unverified:free-stockdb-embedded-factor"
+        )
+        embedded["acquired_at"] = acquired_at
+        return embedded
 
-        if "adj_factor" in daily:
-            embedded = daily[["symbol", "date", "adj_factor"]].copy()
-            embedded["date"] = pd.to_datetime(embedded["date"], errors="coerce")
-            embedded["adj_factor"] = pd.to_numeric(embedded["adj_factor"], errors="coerce")
-            embedded["source"] = (
-                "free-stockdb:embedded-factor"
-                if daily.attrs.get("adjustment_status") == "verified"
-                else "unverified:free-stockdb-embedded-factor"
-            )
-            embedded["acquired_at"] = acquired_now
-            cached = pd.concat([cached, embedded], ignore_index=True)
-
+    @staticmethod
+    def _adjustment_research_grid(
+        daily: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, list[str], str, str, pd.Series]:
         grid = daily[["symbol", "date"]].copy()
         grid["symbol"] = grid["symbol"].astype(str).str.upper()
         grid["date"] = pd.to_datetime(grid["date"], errors="coerce").dt.normalize()
@@ -2051,180 +2056,280 @@ class EtfResearchService:
         start = pd.Timestamp(dates[0]).date().isoformat() if dates else ""
         end = pd.Timestamp(dates[-1]).date().isoformat() if dates else ""
         expected = grid.groupby("symbol")["date"].nunique()
+        return grid, symbols, start, end, expected
 
-        def eligible_factors(frame: pd.DataFrame) -> pd.DataFrame:
-            if frame is None or frame.empty:
-                return pd.DataFrame(
-                    columns=["symbol", "date", "adj_factor", "source", "acquired_at"]
-                )
-            usable = frame.copy()
-            usable["adj_factor"] = pd.to_numeric(usable.get("adj_factor"), errors="coerce")
-            usable["acquired_at"] = pd.to_datetime(
-                usable.get("acquired_at"), errors="coerce", utc=True,
+    @staticmethod
+    def _eligible_adjustment_factors(
+        frame: pd.DataFrame,
+        *,
+        historical_cutoff: pd.Timestamp | None,
+    ) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            return pd.DataFrame(columns=_ADJUSTMENT_COLUMNS)
+        usable = frame.copy()
+        usable["adj_factor"] = pd.to_numeric(
+            usable.get("adj_factor"), errors="coerce"
+        )
+        usable["acquired_at"] = pd.to_datetime(
+            usable.get("acquired_at"), errors="coerce", utc=True
+        )
+        usable = usable[
+            np.isfinite(usable["adj_factor"])
+            & usable["adj_factor"].gt(0)
+            & usable["acquired_at"].notna()
+            & ~usable.get("source", pd.Series("", index=usable.index))
+            .astype(str)
+            .str.startswith("unverified:")
+        ]
+        if historical_cutoff is not None:
+            usable = usable[usable["acquired_at"].le(historical_cutoff)]
+        return usable
+
+    @classmethod
+    def _missing_adjustment_symbols(
+        cls,
+        frame: pd.DataFrame,
+        *,
+        symbols: list[str],
+        expected: pd.Series,
+        historical_cutoff: pd.Timestamp | None,
+    ) -> list[str]:
+        usable = cls._eligible_adjustment_factors(
+            frame, historical_cutoff=historical_cutoff
+        )
+        counts = (
+            usable.groupby("symbol")["date"].nunique()
+            if not usable.empty
+            else pd.Series(dtype=int)
+        )
+        return [
+            symbol
+            for symbol in symbols
+            if int(counts.get(symbol, 0))
+            < max(1, round(int(expected.get(symbol, 0)) * 0.95))
+        ]
+
+    def _stockdb_adjustment_frames(
+        self,
+        missing: list[str],
+        grid: pd.DataFrame,
+        *,
+        start: str,
+        end: str,
+        acquired_at: str,
+    ) -> list[pd.DataFrame]:
+        local_events = self.source.adjustment_factors(missing, start, end)
+        if local_events.empty:
+            raise RuntimeError(
+                "stockdb 累计复权事件为空，不能据此证明各产品均无复权事件"
             )
-            usable = usable[
-                np.isfinite(usable["adj_factor"])
-                & usable["adj_factor"].gt(0)
-                & usable["acquired_at"].notna()
-                & ~usable.get("source", pd.Series("", index=usable.index)).astype(str).str.startswith(
-                    "unverified:"
-                )
-            ]
-            if historical_cutoff is not None:
-                usable = usable[usable["acquired_at"].le(historical_cutoff)]
-            return usable
-
-        def missing_symbols(frame: pd.DataFrame) -> list[str]:
-            frame = eligible_factors(frame)
-            counts = (
-                frame.groupby("symbol")["date"].nunique()
-                if frame is not None and not frame.empty
-                else pd.Series(dtype=int)
+        events = local_events.copy()
+        events["symbol"] = events.get(
+            "symbol", pd.Series(dtype=str)
+        ).astype(str).str.upper()
+        events["date"] = pd.to_datetime(
+            events.get("date"), errors="coerce"
+        ).dt.normalize()
+        events["adj_factor"] = pd.to_numeric(
+            events.get("adj_factor"), errors="coerce"
+        )
+        events = events.dropna(subset=["symbol", "date", "adj_factor"])
+        events = events[
+            np.isfinite(events["adj_factor"]) & events["adj_factor"].gt(0)
+        ]
+        if events.empty:
+            raise RuntimeError("stockdb 累计复权事件没有有限正数证据")
+        grid_groups = {
+            str(symbol): group[["symbol", "date"]]
+            for symbol, group in grid.groupby("symbol", sort=False)
+        }
+        event_groups = {
+            str(symbol): group[["date", "adj_factor"]].sort_values("date")
+            for symbol, group in events.groupby("symbol", sort=False)
+        }
+        frames: list[pd.DataFrame] = []
+        for symbol in set(missing).intersection(event_groups):
+            dense = pd.merge_asof(
+                grid_groups[symbol].sort_values("date"),
+                event_groups[symbol],
+                on="date",
+                direction="backward",
             )
-            return [
-                symbol
-                for symbol in symbols
-                if int(counts.get(symbol, 0)) < max(1, round(int(expected.get(symbol, 0)) * 0.95))
-            ]
+            dense["symbol"] = symbol
+            dense["adj_factor"] = dense["adj_factor"].fillna(1.0)
+            dense["source"] = "free-stockdb:cum-factor-events"
+            dense["acquired_at"] = acquired_at
+            frames.append(dense[list(_ADJUSTMENT_COLUMNS)])
+        if not frames:
+            raise RuntimeError("stockdb 未对任何请求产品返回可验证累计复权事件")
+        return frames
 
-        missing = missing_symbols(cached)
+    def _add_stockdb_adjustments(
+        self,
+        cached: pd.DataFrame,
+        capability: dict[str, Any],
+        missing: list[str],
+        grid: pd.DataFrame,
+        *,
+        start: str,
+        end: str,
+        acquired_at: str,
+        progress: Progress,
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        try:
+            frames = self._stockdb_adjustment_frames(
+                missing,
+                grid,
+                start=start,
+                end=end,
+                acquired_at=acquired_at,
+            )
+        except InterruptedError:
+            raise
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            capability.update({
+                "status": "partial" if not cached.empty else "unavailable",
+                "reason": f"本地 stockdb 复权证据不可用：{str(exc)[:180]}",
+            })
+            return cached, capability
+        cached = pd.concat([cached, *frames], ignore_index=True)
+        capability.update({
+            "source": "free-stockdb:cum-factor-events",
+            "reason": (
+                "仅将 stockdb 明确返回事件的产品展开；"
+                "未返回产品继续保持缺失并尝试官方补证"
+            ),
+        })
+        progress(63, "读取本地 ETF 复权证据", f"{len(missing)} 只产品")
+        return cached, capability
+
+    @staticmethod
+    def _persist_adjustment_cache(target: Path, cached: pd.DataFrame) -> pd.DataFrame:
+        if cached.empty:
+            return cached
+        persisted = cached.copy()
+        persisted["date"] = pd.to_datetime(persisted["date"], errors="coerce")
+        persisted["symbol"] = persisted["symbol"].astype(str).str.upper()
+        persisted["adj_factor"] = pd.to_numeric(
+            persisted["adj_factor"], errors="coerce"
+        )
+        persisted["acquired_at"] = pd.to_datetime(
+            persisted["acquired_at"], errors="coerce", utc=True
+        )
+        persisted = (
+            persisted[
+                persisted["date"].notna()
+                & persisted["symbol"].ne("")
+                & np.isfinite(persisted["adj_factor"])
+                & persisted["adj_factor"].gt(0)
+            ]
+            .drop_duplicates(["symbol", "date", "acquired_at"], keep="last")
+            .sort_values(
+                ["symbol", "date", "acquired_at"], na_position="first"
+            )
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".adjustment_factors.", suffix=".parquet.tmp", dir=target.parent
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        try:
+            persisted.to_parquet(temp, index=False)
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+        return persisted
+
+    def _adjustment_factors(
+        self,
+        daily: pd.DataFrame,
+        *,
+        progress: Progress,
+        cancelled: Cancelled,
+        as_of: str = "",
+    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+        target = self.store.root / "evidence" / "adjustment_factors.parquet"
+        acquired_at = market_now().isoformat()
+        historical_cutoff = (
+            pd.Timestamp(daily_signal_cutoff(date.fromisoformat(as_of))).tz_convert("UTC")
+            if as_of
+            else None
+        )
+        cached = self._normalized_adjustment_cache(
+            _read_current_adjustment_factors(target)
+        )
+        embedded = self._embedded_adjustment_factors(
+            daily, acquired_at=acquired_at
+        )
+        if not embedded.empty:
+            cached = pd.concat([cached, embedded], ignore_index=True)
+        grid, symbols, start, end, expected = self._adjustment_research_grid(daily)
+        missing = self._missing_adjustment_symbols(
+            cached,
+            symbols=symbols,
+            expected=expected,
+            historical_cutoff=historical_cutoff,
+        )
         capability: dict[str, Any] = {
             "status": "ready" if not missing else "partial",
             "source": "adjustment-factor-cache",
             "covered_symbols": len(symbols) - len(missing),
             "expected_symbols": len(symbols),
-            "reason": "可核查复权因子已覆盖研究窗口" if not missing else "复权因子缓存覆盖不足",
+            "reason": (
+                "可核查复权因子已覆盖研究窗口"
+                if not missing
+                else "复权因子缓存覆盖不足"
+            ),
         }
-
         if missing and start and end:
-            try:
-                local_events = self.source.adjustment_factors(missing, start, end)
-                if local_events.empty:
-                    raise RuntimeError(
-                        "stockdb 累计复权事件为空，不能据此证明各产品均无复权事件"
-                    )
-                local_events = local_events.copy()
-                local_events["symbol"] = local_events.get(
-                    "symbol", pd.Series(dtype=str)
-                ).astype(str).str.upper()
-                local_events["date"] = pd.to_datetime(
-                    local_events.get("date"), errors="coerce"
-                ).dt.normalize()
-                local_events["adj_factor"] = pd.to_numeric(
-                    local_events.get("adj_factor"), errors="coerce"
-                )
-                local_events = local_events.dropna(subset=["symbol", "date", "adj_factor"])
-                local_events = local_events[
-                    np.isfinite(local_events["adj_factor"])
-                    & local_events["adj_factor"].gt(0)
-                ]
-                if local_events.empty:
-                    raise RuntimeError("stockdb 累计复权事件没有有限正数证据")
-                dense_frames: list[pd.DataFrame] = []
-                grid_groups = {
-                    str(symbol): group[["symbol", "date"]]
-                    for symbol, group in grid.groupby("symbol", sort=False)
-                }
-                event_groups = {
-                    str(symbol): group[["date", "adj_factor"]].sort_values("date")
-                    for symbol, group in local_events.groupby("symbol", sort=False)
-                }
-                for symbol in set(missing).intersection(event_groups):
-                    symbol_dates = grid_groups[symbol]
-                    events = event_groups[symbol]
-                    dense = pd.merge_asof(
-                        symbol_dates.sort_values("date"),
-                        events,
-                        on="date",
-                        direction="backward",
-                    )
-                    dense["symbol"] = symbol
-                    dense["adj_factor"] = dense["adj_factor"].fillna(1.0)
-                    dense["source"] = "free-stockdb:cum-factor-events"
-                    dense["acquired_at"] = acquired_now
-                    dense_frames.append(
-                        dense[["symbol", "date", "adj_factor", "source", "acquired_at"]]
-                    )
-                if dense_frames:
-                    cached = pd.concat([cached, *dense_frames], ignore_index=True)
-                else:
-                    raise RuntimeError(
-                        "stockdb 未对任何请求产品返回可验证累计复权事件"
-                    )
-                capability.update(
-                    {
-                        "source": "free-stockdb:cum-factor-events",
-                        "reason": (
-                            "仅将 stockdb 明确返回事件的产品展开；"
-                            "未返回产品继续保持缺失并尝试官方补证"
-                        ),
-                    }
-                )
-                progress(63, "读取本地 ETF 复权证据", f"{len(missing)} 只产品")
-            except InterruptedError:
-                raise
-            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                capability.update(
-                    {
-                        "status": "partial" if not cached.empty else "unavailable",
-                        "reason": f"本地 stockdb 复权证据不可用：{str(exc)[:180]}",
-                    }
-                )
-
-        missing = missing_symbols(cached)
+            cached, capability = self._add_stockdb_adjustments(
+                cached,
+                capability,
+                missing,
+                grid,
+                start=start,
+                end=end,
+                acquired_at=acquired_at,
+                progress=progress,
+            )
+        missing = self._missing_adjustment_symbols(
+            cached,
+            symbols=symbols,
+            expected=expected,
+            historical_cutoff=historical_cutoff,
+        )
         if missing:
-            capability.update(
-                {
-                    "status": "partial" if not cached.empty else "unavailable",
-                    "reason": (
-                        f"{capability.get('reason', '本地复权证据不完整')}；"
-                        f"{len(missing)} 只产品使用收益率链或短周期原价降级，"
-                        "研究刷新不串行等待远程 fund_adj"
-                    ),
-                }
-            )
-
-        if not cached.empty:
-            cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
-            cached["symbol"] = cached["symbol"].astype(str).str.upper()
-            cached["adj_factor"] = pd.to_numeric(cached["adj_factor"], errors="coerce")
-            cached["acquired_at"] = pd.to_datetime(
-                cached["acquired_at"], errors="coerce", utc=True,
-            )
-            cached = (
-                cached[
-                    cached["date"].notna()
-                    & cached["symbol"].ne("")
-                    & np.isfinite(cached["adj_factor"])
-                    & cached["adj_factor"].gt(0)
-                ]
-                .drop_duplicates(["symbol", "date", "acquired_at"], keep="last")
-                .sort_values(["symbol", "date", "acquired_at"], na_position="first")
-            )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".adjustment_factors.", suffix=".parquet.tmp", dir=target.parent
-            )
-            os.close(fd)
-            temp = Path(temp_name)
-            try:
-                cached.to_parquet(temp, index=False)
-                os.replace(temp, target)
-            finally:
-                temp.unlink(missing_ok=True)
-        usable = eligible_factors(cached)
+            capability.update({
+                "status": "partial" if not cached.empty else "unavailable",
+                "reason": (
+                    f"{capability.get('reason', '本地复权证据不完整')}；"
+                    f"{len(missing)} 只产品使用收益率链或短周期原价降级，"
+                    "研究刷新不串行等待远程 fund_adj"
+                ),
+            })
+        cached = self._persist_adjustment_cache(target, cached)
+        usable = self._eligible_adjustment_factors(
+            cached, historical_cutoff=historical_cutoff
+        )
         usable = (
             usable.sort_values(["symbol", "date", "acquired_at"])
             .drop_duplicates(["symbol", "date"], keep="last")
         )
-        missing = missing_symbols(usable)
+        missing = self._missing_adjustment_symbols(
+            usable,
+            symbols=symbols,
+            expected=expected,
+            historical_cutoff=historical_cutoff,
+        )
         covered = len(symbols) - len(missing)
         capability["covered_symbols"] = covered
         capability["coverage"] = covered / len(symbols) if symbols else 0.0
         if covered == len(symbols) and symbols:
-            capability.update(
-                {"status": "ready", "reason": "可核查复权因子已覆盖全部产品研究窗口"}
-            )
+            capability.update({
+                "status": "ready",
+                "reason": "可核查复权因子已覆盖全部产品研究窗口",
+            })
         return usable, capability
 
     @staticmethod

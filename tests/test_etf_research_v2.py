@@ -434,6 +434,48 @@ def test_stockdb_sparse_adjustment_events_expand_to_verified_daily_factors(tmp_p
     assert 0 < metrics["return_20d"] < 0.05
 
 
+def test_adjustment_eligibility_requires_timely_verified_positive_evidence():
+    factors = pd.DataFrame([
+        {
+            "symbol": "510300.SH",
+            "date": "2026-08-07",
+            "adj_factor": 1.0,
+            "source": "free-stockdb:cum-factor-events",
+            "acquired_at": "2026-08-07T07:00:00+00:00",
+        },
+        {
+            "symbol": "510300.SH",
+            "date": "2026-08-07",
+            "adj_factor": 2.0,
+            "source": "free-stockdb:cum-factor-events",
+            "acquired_at": "2026-08-07T08:00:01+00:00",
+        },
+        {
+            "symbol": "159920.SZ",
+            "date": "2026-08-07",
+            "adj_factor": 1.0,
+            "source": "unverified:free-stockdb-embedded-factor",
+            "acquired_at": "2026-08-07T07:00:00+00:00",
+        },
+        {
+            "symbol": "511010.SH",
+            "date": "2026-08-07",
+            "adj_factor": -1.0,
+            "source": "free-stockdb:cum-factor-events",
+            "acquired_at": "2026-08-07T07:00:00+00:00",
+        },
+    ])
+
+    eligible = EtfResearchService._eligible_adjustment_factors(
+        factors,
+        historical_cutoff=pd.Timestamp("2026-08-07T08:00:00+00:00"),
+    )
+
+    assert eligible[["symbol", "adj_factor"]].to_dict("records") == [
+        {"symbol": "510300.SH", "adj_factor": 1.0}
+    ]
+
+
 def test_stockdb_partial_adjustment_events_do_not_certify_other_products(
     tmp_path, monkeypatch,
 ):
