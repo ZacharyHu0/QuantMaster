@@ -432,7 +432,7 @@ def remove_primary_venv_link(target: Path, primary: Path) -> bool:
         return False
     attributes = getattr(link.lstat(), "st_file_attributes", 0)
     if not link.is_symlink() and not bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT):
-        raise SystemExit(f"{link} 不是目录联接，拒绝自动删除")
+        return False
     if link.resolve() != (primary / ".venv").resolve():
         raise SystemExit(f"{link} 未指向主 worktree 虚拟环境，拒绝自动删除")
     os.rmdir(link)
