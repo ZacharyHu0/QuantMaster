@@ -4,6 +4,7 @@
 
 ### 产品、架构与协作基线
 - 固定日常决策与量化研究双核心、四工作区、市场能力边界、正式/Sandbox 语义及包体与更新预算
+- 删除重复的 `validate`、`grid`、`fund-test`、`mine` 和 `mine-llm` 顶层命令；正式研究统一从 Quant Lab 进入，保留 `factor-test` 与 `backtest` 薄入口
 - 明确模块化单体依赖矩阵、唯一 composition root、不可变稳定槽与开发 worktree 隔离合同
 - 后续任务统一通过 GitHub Issue、Draft PR、Actions 与 Discussion 管理；agent 负责合并和 tag 操作，正式 Release 仍需 owner 明确确认
 - Windows 打包进程在导入应用前将配置、数据与 StockDB 默认根目录绑定到用户 AppData；YAML 与绝对启动覆盖继续优先，缺失或相对路径会在未写盘时明确失败
