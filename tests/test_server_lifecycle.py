@@ -522,6 +522,7 @@ def test_reload_worker_restores_cli_logging(monkeypatch):
 
 
 def test_runtime_worker_heartbeat_is_a_fast_local_lease(isolated_config):
+    from quantmaster.runtime.identity import get_application_identity
     from quantmaster.runtime.worker import RuntimeWorker, runtime_worker_status
 
     worker = RuntimeWorker()
@@ -532,9 +533,35 @@ def test_runtime_worker_heartbeat_is_a_fast_local_lease(isolated_config):
     assert status["available"] is True
     assert status["worker_id"] == worker._worker_id
     assert status["pid"] > 0
+    assert {
+        key: status[key]
+        for key in ("build_sha", "slot_id", "runtime_generation")
+    } == {
+        key: getattr(get_application_identity(), key)
+        for key in ("build_sha", "slot_id", "runtime_generation")
+    }
 
     worker._stop_heartbeat()
     assert runtime_worker_status()["available"] is False
+
+
+def test_runtime_worker_status_rejects_another_application_generation(
+    isolated_config, monkeypatch,
+):
+    from quantmaster.runtime.identity import RUNTIME_GENERATION_ENV
+    from quantmaster.runtime.worker import RuntimeWorker, runtime_worker_status
+
+    monkeypatch.setenv(RUNTIME_GENERATION_ENV, "a" * 32)
+    worker = RuntimeWorker()
+    worker._started = True
+    worker._write_heartbeat()
+    monkeypatch.setenv(RUNTIME_GENERATION_ENV, "b" * 32)
+
+    status = runtime_worker_status()
+
+    assert status["available"] is False
+    assert status["status"] == "unavailable"
+    assert status["reason"] == "runtime_identity_mismatch"
 
 
 def test_runtime_worker_status_reports_a_persisted_bootstrap_failure(isolated_config):

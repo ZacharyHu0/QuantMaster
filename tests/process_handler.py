@@ -9,10 +9,22 @@ from quantmaster.runtime.jobs import JobOutcome
 
 
 def write_artifact(context, spec: dict) -> JobOutcome:
+    from quantmaster.runtime.identity import get_application_identity
+
+    identity = get_application_identity()
     context.progress(40, "计算子进程", "写入可验证结果")
     artifact = context.write_artifact(
         "test.process.result",
-        {"schema_version": "1.0", "pid": os.getpid(), "value": spec["value"]},
+        {
+            "schema_version": "1.0",
+            "pid": os.getpid(),
+            "value": spec["value"],
+            "application_identity": {
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            },
+        },
         {"schema_version": "1.0", "lineage": {"fixture": "process"}},
     )
     return JobOutcome("completed", "isolated", artifact["id"])

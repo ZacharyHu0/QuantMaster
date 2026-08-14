@@ -500,6 +500,9 @@ def test_unified_store_reuses_completed_artifact_for_identical_versioned_input(t
 
 
 def test_unified_runtime_runs_registered_process_handler_outside_supervisor(tmp_path):
+    from quantmaster.runtime.identity import get_application_identity
+
+    identity = get_application_identity()
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     runtime = UnifiedJobRuntime(store, max_workers=1)
     runtime.register(
@@ -515,4 +518,40 @@ def test_unified_runtime_runs_registered_process_handler_outside_supervisor(tmp_
     artifact = store.artifact(completed["result_artifact_id"])
     assert artifact["payload"]["value"] == "fixture"
     assert artifact["payload"]["pid"] != os.getpid()
+    assert artifact["payload"]["application_identity"] == {
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
+    }
     runtime.stop()
+
+
+def test_compute_child_rejects_runtime_identity_before_handler_import(
+    monkeypatch, tmp_path,
+):
+    from quantmaster.runtime.identity import ApplicationIdentity
+    from quantmaster.runtime.jobs import _run_process_handler
+
+    monkeypatch.setenv("QM_BUILD_SHA", "1" * 40)
+    monkeypatch.setenv("QM_SLOT_ID", "slot-a")
+    monkeypatch.setenv("QM_RUNTIME_GENERATION", "a" * 32)
+    messages = []
+
+    class ResultQueue:
+        def put(self, message):
+            messages.append(message)
+
+    _run_process_handler(
+        "tests.process_handler:missing_handler",
+        str(tmp_path / "jobs.sqlite"),
+        "job-id",
+        "owner",
+        "lease-token",
+        {},
+        ApplicationIdentity("1" * 40, "slot-a", "b" * 32),
+        ResultQueue(),
+    )
+
+    assert messages[0]["kind"] == "error"
+    assert messages[0]["type"] == "RuntimeIdentityMismatch"
+    assert messages[0]["detail"] == "runtime_identity_mismatch"

@@ -2,8 +2,9 @@
 # 产物：.artifacts/packages/desktop/QuantMaster(.exe) 单文件；双击运行 = qm app，
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
-from pathlib import Path
+import subprocess
 import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
 
@@ -11,6 +12,30 @@ project_root = Path(SPECPATH).parent
 release_scope = {}
 exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
+git_status = subprocess.run(
+    ["git", "status", "--porcelain", "--untracked-files=normal"],
+    cwd=project_root,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+if git_status:
+    raise SystemExit("QuantMaster packages require a clean Git worktree")
+build_sha = subprocess.run(
+    ["git", "rev-parse", "--verify", "HEAD"],
+    cwd=project_root,
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout.strip()
+if len(build_sha) != 40 or any(character not in "0123456789abcdef" for character in build_sha):
+    raise SystemExit("QuantMaster packages require a full lowercase Git SHA")
+runtime_identity_hook = Path(workpath) / "quantmaster_runtime_identity.py"
+runtime_identity_hook.write_text(
+    "from quantmaster.runtime.identity import bind_packaged_build\n"
+    f"bind_packaged_build({build_sha!r})\n",
+    encoding="utf-8",
+)
 version_info = None
 if sys.platform == "win32":
     from PyInstaller.utils.win32.versioninfo import (
@@ -58,6 +83,7 @@ a = Analysis(
     [str(project_root / "packaging/entry.py")],
     pathex=[str(project_root)],
     datas=datas,
+    runtime_hooks=[str(runtime_identity_hook)],
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",

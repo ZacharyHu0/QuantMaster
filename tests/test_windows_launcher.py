@@ -124,6 +124,18 @@ def test_pyinstaller_collects_only_required_scipy_array_api_modules() -> None:
     assert 'if sys.platform == "win32":' in spec
 
 
+def test_pyinstaller_runtime_hook_binds_clean_full_git_sha() -> None:
+    from pathlib import Path
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+    assert '"status", "--porcelain"' in spec
+    assert '"rev-parse", "--verify", "HEAD"' in spec
+    assert "bind_packaged_build" in spec
+    assert "runtime_hooks=[str(runtime_identity_hook)]" in spec
+
+
 @pytest.mark.parametrize("version", ["1.2", "1.2.3.4", "1.x.3", "-1.2.3"])
 def test_launcher_version_resource_rejects_invalid_versions(version: str) -> None:
     with pytest.raises((ValueError, TypeError)):
