@@ -26,6 +26,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.akshare_source import _require_akshare
+from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.resilience import akshare_call
 from quantmaster.data.storage import BarStore
 from quantmaster.temporal import TemporalContractError
@@ -128,16 +129,68 @@ def _fetch_akshare_daily_indicators(
     return result.reindex(columns=DAILY_FIELDS).astype(float)
 
 
+def _fetch_free_stockdb_daily_indicators(
+    source: FreeStockDBSource,
+    symbol: str,
+    start: str | None,
+    end: str | None,
+) -> pd.DataFrame:
+    """从本机 StockDB 盘后截面提取每日估值字段。
+
+    StockDB 的截面合同目前只证实 ``pe_ttm``、``pb`` 和 ``total_mv``；
+    ``pe``、``dv_ratio`` 不在已验证字段集合中，因此保持为空而不推算或
+    触发另一条远端请求。没有明确区间时不读取全历史，保留原有直接调用
+    ``fetch_daily_indicators(symbol)`` 的提供商行为。
+    """
+    if not start or not end:
+        raise ValueError("本机 StockDB 每日估值读取需要明确 start 和 end")
+
+    frame = source.daily_cross_section([symbol], start, end)
+    required = {"symbol", "date", "pe_ttm", "pb", "total_mv"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"本机 StockDB 截面缺少估值列: {sorted(missing)}")
+
+    code = _six_digit(symbol)
+    observed_code = frame["symbol"].astype(str).str.partition(".")[0].str.zfill(6)
+    frame = frame.loc[observed_code.eq(code)].copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"])
+    frame = frame.loc[
+        frame["date"].between(pd.Timestamp(start), pd.Timestamp(end))
+    ]
+    if frame.empty:
+        raise RuntimeError(f"本机 StockDB 没有返回 {symbol} 的可验证估值日期")
+    if frame["date"].duplicated().any():
+        raise ValueError(f"本机 StockDB 估值截面存在重复日期: {symbol}")
+
+    for field in ("pe_ttm", "pb", "total_mv"):
+        frame[field] = pd.to_numeric(frame[field], errors="coerce")
+    if frame[["pe_ttm", "pb", "total_mv"]].notna().sum().sum() == 0:
+        raise RuntimeError(f"本机 StockDB 没有返回 {symbol} 的可用估值字段")
+
+    result = frame.set_index("date").sort_index().reindex(columns=DAILY_FIELDS)
+    result.index.name = "date"
+    result = result.astype(float)
+    result.attrs.update(frame.attrs)
+    result.attrs.update({
+        "source": "free-stockdb:daily_cross_section",
+        "valuation_fields": ("pe_ttm", "pb", "total_mv"),
+    })
+    return result
+
+
 def fetch_daily_indicators(
     symbol: str,
     start: str | None = None,
     end: str | None = None,
 ) -> pd.DataFrame:  # pragma: no cover - 网络
-    """拉取每日估值指标（AKShare 百度估值，失败时降级 Tushare）。
+    """拉取每日估值指标（本机 StockDB、AKShare，失败时降级 Tushare）。
 
     返回 index=DatetimeIndex 的 DataFrame，列为 pe / pe_ttm / pb / dv_ratio /
-    total_mv。AKShare 当前不提供历史股息率，因此 dv_ratio 保留为空；总市值统一为
-    Tushare 的万元口径。按请求起点选择一、三、五、十年或全部历史窗口。
+    total_mv。StockDB 目前证实 pe_ttm / pb / total_mv，其他字段保留为空；
+    AKShare 当前也不提供历史股息率，因此 dv_ratio 保留为空。按请求起点选择
+    一、三、五、十年或全部历史窗口。
     """
     code = _six_digit(symbol)
     from quantmaster.data.tushare_source import TushareSource
@@ -146,6 +199,12 @@ def fetch_daily_indicators(
     cached_tushare = tushare.cached_daily_indicators(symbol, start=start, end=end)
     if cached_tushare is not None:
         return cached_tushare
+    try:
+        return _fetch_free_stockdb_daily_indicators(
+            FreeStockDBSource(), symbol, start, end,
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as stockdb_error:
+        logger.debug("本机 StockDB 每日指标不可用，继续既有提供商回退: %s", stockdb_error)
     try:
         ak = _require_akshare()
         return _fetch_akshare_daily_indicators(ak, code, start, end)

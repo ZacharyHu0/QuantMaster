@@ -53,6 +53,11 @@ def test_current_akshare_valuation_api_is_normalized(monkeypatch):
         "quantmaster.data.tushare_source.TushareSource.cached_daily_indicators",
         lambda self, symbol, start=None, end=None: None,
     )
+    monkeypatch.setattr(
+        fundamentals,
+        "_fetch_free_stockdb_daily_indicators",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("test uses AKShare")),
+    )
 
     result = fundamentals.fetch_daily_indicators(
         "600000.SH", start="2026-07-29", end="2026-07-30",
@@ -66,6 +71,62 @@ def test_current_akshare_valuation_api_is_normalized(monkeypatch):
     assert result["dv_ratio"].isna().all()
     assert {item["indicator"] for item in calls} == set(values)
     assert {item["period"] for item in calls} == {"近一年"}
+
+
+def test_free_stockdb_daily_indicators_keep_only_verified_fields():
+    class FakeStockDB:
+        def daily_cross_section(self, symbols, start, end):
+            assert symbols == ["600000.SH"]
+            assert (start, end) == ("2026-07-29", "2026-07-30")
+            return pd.DataFrame({
+                "symbol": ["600000.SH", "600000.SH"],
+                "date": ["2026-07-29", "2026-07-30"],
+                "pe_ttm": [17.0, 18.0],
+                "pb": [1.8, 1.9],
+                "total_mv": [100.0, 101.0],
+            })
+
+    result = fundamentals._fetch_free_stockdb_daily_indicators(
+        FakeStockDB(), "600000.SH", "2026-07-29", "2026-07-30",
+    )
+
+    assert list(result.columns) == list(fundamentals.DAILY_FIELDS)
+    assert result.loc["2026-07-30", "pe_ttm"] == 18.0
+    assert result.loc["2026-07-30", "pb"] == 1.9
+    assert result.loc["2026-07-30", "total_mv"] == 101.0
+    assert result["pe"].isna().all()
+    assert result["dv_ratio"].isna().all()
+    assert result.attrs["source"] == "free-stockdb:daily_cross_section"
+
+
+def test_fetch_daily_indicators_uses_free_stockdb_before_remote(monkeypatch):
+    expected = pd.DataFrame(
+        {field: [float(index)] for index, field in enumerate(fundamentals.DAILY_FIELDS)},
+        index=pd.DatetimeIndex(["2026-07-30"], name="date"),
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.cached_daily_indicators",
+        lambda self, symbol, start=None, end=None: None,
+    )
+    monkeypatch.setattr(
+        fundamentals,
+        "_fetch_free_stockdb_daily_indicators",
+        lambda *args: calls.append(args) or expected,
+    )
+    monkeypatch.setattr(
+        fundamentals,
+        "_require_akshare",
+        lambda: (_ for _ in ()).throw(AssertionError("StockDB hit should stop before AKShare")),
+    )
+
+    result = fundamentals.fetch_daily_indicators(
+        "600000.SH", start="2026-07-29", end="2026-07-30",
+    )
+
+    pd.testing.assert_frame_equal(result, expected)
+    assert len(calls) == 1
 
 
 def make_fund_panel(close: pd.DataFrame, seed: int = 3) -> dict[str, pd.DataFrame]:
