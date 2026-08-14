@@ -8,6 +8,7 @@ import pytest
 from quantmaster.data import registry
 from quantmaster.data.base import (
     BarDataEnvelope,
+    BarDataQuality,
     DataSource,
     Market,
     MarketDataUnavailable,
@@ -28,6 +29,46 @@ def _bars(index: pd.DatetimeIndex, value: float = 10.0) -> pd.DataFrame:
         },
         index=index,
     )
+
+
+def test_full_refresh_keeps_the_newest_degraded_candidate(tmp_path, monkeypatch):
+    older = _bars(pd.bdate_range("2024-01-02", "2024-01-05"), 10.0)
+    newer = _bars(pd.bdate_range("2024-01-02", "2024-01-08"), 20.0)
+
+    class Older(DataSource):
+        name = "older"
+        markets = (Market.CN,)
+
+        def daily(self, _symbol, _start, _end):
+            return older
+
+    class Newer(DataSource):
+        name = "newer"
+        markets = (Market.CN,)
+
+        def daily(self, _symbol, _start, _end):
+            return newer
+
+    monkeypatch.setattr(
+        registry, "_request_factories",
+        lambda **_kwargs: {Market.CN: [Older, Newer]},
+    )
+    monkeypatch.setattr(registry, "_is_complete_refresh", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        registry,
+        "_assess_daily_frame",
+        lambda frame, start, end, **kwargs: BarDataQuality(
+            "degraded", start, end, sources=(kwargs["source"],),
+        ),
+    )
+
+    result = registry._full_refresh(
+        "600000.SH", "2024-01-02", "2024-01-08", None,
+        BarStore(tmp_path / "bars"), "normal",
+    )
+
+    assert result.index.max() == pd.Timestamp("2024-01-08")
+    assert result.iloc[-1]["close"] == 20.0
 
 
 def test_stockdb_frame_without_batch_manifest_is_preview_only(monkeypatch):

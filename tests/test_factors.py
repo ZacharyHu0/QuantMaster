@@ -140,7 +140,7 @@ class TestAnalysis:
 
 class TestCacheReplaceSemantics:
     def test_increment_calibrates_mixed_adjustment_bases(self, tmp_path, monkeypatch):
-        """前复权增量通过重叠窗口校准旧缓存，不需要整段重拉。"""
+        """无语义旧缓存通过同源完整替换，不猜测重叠复权比例。"""
         import pandas as pd
 
         from quantmaster.data import registry
@@ -175,8 +175,7 @@ class TestCacheReplaceSemantics:
             conn.execute("UPDATE bar_meta SET updated_at = updated_at - 999999")
 
         registry.refresh_history("600000.SH", "2024-07-01", "2024-12-31", store=store)
-        # 只请求尾部重叠窗口，不再反复重拉半年历史。
-        assert FakeSource.calls[0][0] == "2024-06-24"
+        assert FakeSource.calls[0][0] == "2024-01-02"
         # 价格列整体校准成新基准：不存在 100 与 80 的接缝跳空。
         cached = store.get("600000.SH")
         assert cached.loc["2024-02-01", "close"] == 80.0
@@ -218,7 +217,7 @@ class TestCacheReplaceSemantics:
         assert str(df.index.min().date()) <= "2024-01-03", "长区间请求被新鲜短缓存截断"
 
     def test_partial_refetch_calibrates_prices_and_preserves_old_volume(self, tmp_path, monkeypatch):
-        """价格按新复权基准校准，但旧成交量不应被比例缩放。"""
+        """部分 provider 响应不能与无语义旧缓存拼成正式序列。"""
         import pandas as pd
 
         from quantmaster.data import registry
@@ -252,11 +251,11 @@ class TestCacheReplaceSemantics:
             "600000.SH", "2024-01-02", "2024-12-31", store=store)
         data = result.data
         cached = store.get("600000.SH")
-        assert result.quality.status != "unavailable"
+        assert result.quality.status == "unavailable"
         assert str(data.index.min().date()) == "2024-01-02"
-        assert str(data.index.max().date()) == "2024-12-31"
-        assert cached.loc["2024-02-01", "close"] == 80.0
-        assert cached.loc["2024-05-02", "close"] == 80.0
+        assert str(data.index.max().date()) == "2024-06-28"
+        assert cached.loc["2024-02-01", "close"] == 100.0
+        assert cached.loc["2024-05-02", "close"] == 100.0
         assert cached.loc["2024-02-01", "volume"] == 1e6
 
     def test_sparse_response_is_rejected_when_no_fallback_succeeds(self, tmp_path, monkeypatch):

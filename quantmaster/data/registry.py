@@ -1558,7 +1558,11 @@ def _full_refresh(
             errors.append(
                 f"{factory.__name__}: 数据完整但真实性契约为 {quality.status}，继续后备源"
             )
-            if quality.status == "degraded" and degraded_candidate is None:
+            if quality.status == "degraded" and (
+                degraded_candidate is None
+                or pd.Timestamp(frame.index.max())
+                > pd.Timestamp(degraded_candidate[0].index.max())
+            ):
                 degraded_candidate = (frame, quality, storage_source)
         except (
             httpx.HTTPError,
@@ -2206,6 +2210,11 @@ def _load_history_locked(
         ).loc[start:end]
 
     meta = store.metadata(symbol) or {}
+    try:
+        cached_quality = json.loads(str(meta.get("quality_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        cached_quality = {}
+    cached_semantics = dict(cached_quality.get("semantics") or {})
     requested_end = pd.Timestamp(end).normalize()
     near_current = requested_end >= pd.Timestamp(market_date()) - pd.Timedelta(days=7)
     coverage_start = str(meta.get("coverage_start") or meta.get("start") or "")
@@ -2235,6 +2244,15 @@ def _load_history_locked(
         if not covers_end or force_tail:
             overlap_start = str(cached.index[max(0, len(cached) - 5)].date())
             segments.append((overlap_start, end, "right"))
+
+    # Legacy bytes remain viewable, but an incremental response must not be
+    # spliced onto a cache whose numeric semantics were never recorded.
+    if segments and cached is not None and not cached.empty and not cached_semantics:
+        fetch_start = min(start, str(cached.index.min().date()))
+        fetch_end = max(end, str(cached.index.max().date()))
+        return _full_refresh(
+            symbol, fetch_start, fetch_end, cached, store, priority, provider,
+        ).loc[start:end]
 
     errors: list[str] = []
     all_segments_succeeded = True

@@ -850,7 +850,7 @@ def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
     start = str(dates[0].date())
     end_value = str(end.date())
     registry.refresh_history("600000.SH", start, end_value, store=store)
-    assert TailSource.calls == [(str(dates[-5].date()), end_value)]
+    assert TailSource.calls == [(start, end_value)]
 
     # 同一 TTL 内自动加载完全本地命中；显式“同步最新行情”仍会检查尾部。
     registry.refresh_history("600000.SH", start, end_value, store=store)
