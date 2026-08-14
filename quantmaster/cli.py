@@ -700,26 +700,18 @@ def cmd_factors(args) -> None:
 
 
 def cmd_factor_test(args) -> None:
-    from quantmaster.data.universe import load_universe_analysis
-    from quantmaster.factors import analyze_factor, compute_factor
-    from quantmaster.factors.fundamental import resolve_factor
+    from quantmaster.factors import run_factor_test
 
-    end = args.end or _close_day()
-    factor = resolve_factor(
-        args.expression, load_universe_analysis(args.universe), args.start, end,
+    result = run_factor_test(
+        expression=args.expression,
+        universe=args.universe,
+        start=args.start,
+        end=args.end,
+        quantiles=args.quantiles,
+        neutralize=args.neutralize,
+        refresh=True,
     )
-    panel = _load_panel(args.universe, args.start, end)
-    values = compute_factor(factor, panel)
-    if args.neutralize:
-        from quantmaster.data.industry import load_industry_map
-        from quantmaster.factors.neutral import industry_neutralize
-
-        mapping = load_industry_map()
-        if not mapping:
-            print("⚠️ 行业映射为空（首次需联网抓取），本次未做中性化", file=sys.stderr)
-        values = industry_neutralize(values, mapping)
-    report = analyze_factor(values, panel["close"], name=factor.name, quantiles=args.quantiles)
-    _print_json(report.summary())
+    _print_json(result["summary"])
 
 
 def cmd_backtest(args) -> None:

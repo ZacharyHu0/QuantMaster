@@ -1461,49 +1461,22 @@ class FactorTestRequest(ContractModel):
 
 @app.post("/api/v1/research/factors/test")
 def factors_test(req: FactorTestRequest) -> dict:
-    from quantmaster.data import read_panel
-    from quantmaster.data.universe import load_universe_analysis_snapshot
-    from quantmaster.factors import analyze_factor, compute_factor
-    from quantmaster.factors.fundamental import resolve_factor
+    from quantmaster.factors import run_factor_test
 
-    end = default_close_data_end(req.end)
     try:
-        universe_snapshot = load_universe_analysis_snapshot(
-            req.universe, as_of=end if req.end else None,
+        return run_factor_test(
+            expression=req.expression,
+            universe=req.universe,
+            start=req.start,
+            end=req.end,
+            quantiles=req.quantiles,
+            neutralize=req.neutralize,
+            refresh=False,
         )
-        symbols = list(universe_snapshot.symbols)
-        factor = resolve_factor(req.expression, symbols, req.start, end)
-        market_envelope = read_panel(symbols, req.start, end)
-        panel = market_envelope.require_data()
-        values = compute_factor(factor, panel)
-        neutralized = False
-        industry_evidence = None
-        if req.neutralize:
-            from quantmaster.data.industry import load_industry_analysis_context
-            from quantmaster.factors.neutral import industry_neutralize
-
-            mapping, industry_evidence = load_industry_analysis_context(
-                as_of=end if req.end else None,
-            )
-            if mapping:
-                values = industry_neutralize(values, mapping)
-                neutralized = True
-        report = analyze_factor(values, panel["close"], name=factor.name, quantiles=req.quantiles)
     except MarketDataUnavailable:
         raise
     except Exception:
         raise _logged_bad_request("因子检验") from None
-    return {
-        "summary": report.summary(),
-        "neutralized": neutralized,
-        "ic_series": _series_to_points(report.ic_series.rolling(20, min_periods=5).mean()),
-        "quantile_nav": {
-            col: _series_to_points(report.quantile_returns[col]) for col in report.quantile_returns.columns
-        },
-        "data_quality": market_envelope.quality.to_dict(),
-        "universe_evidence": universe_snapshot.to_dict(),
-        "industry_evidence": industry_evidence,
-    }
 
 
 class ValidateRequest(ContractModel):

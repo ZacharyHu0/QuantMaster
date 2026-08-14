@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -55,3 +56,34 @@ def test_supported_research_command_remains_available() -> None:
         build_parser().parse_args(["lab", "--help"])
 
     assert result.value.code == 0
+
+
+def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, capsys) -> None:
+    observed = []
+
+    def run_factor_test(**kwargs):
+        observed.append(kwargs)
+        return {"summary": {"name": "mom_20d", "ic_mean": 0.0312}}
+
+    monkeypatch.setattr("quantmaster.factors.run_factor_test", run_factor_test)
+    args = build_parser().parse_args([
+        "factor-test",
+        "mom_20d",
+        "--universe", "csi800",
+        "--start", "2023-01-02",
+        "--end", "2023-07-28",
+        "--quantiles", "4",
+        "--neutralize",
+    ])
+
+    assert args.func(args) is None
+    assert json.loads(capsys.readouterr().out) == {"name": "mom_20d", "ic_mean": 0.0312}
+    assert observed == [{
+        "expression": "mom_20d",
+        "universe": "csi800",
+        "start": "2023-01-02",
+        "end": "2023-07-28",
+        "quantiles": 4,
+        "neutralize": True,
+        "refresh": True,
+    }]
