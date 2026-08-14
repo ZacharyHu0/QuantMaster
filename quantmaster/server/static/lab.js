@@ -415,7 +415,7 @@
         ...warnings.map(item => ({...item, blocker:false})),
       ].map(item => `<div class="lab-preflight-issue ${item.blocker ? 'blocker' : ''}"><b>${h(item.message || item.code)}</b><p>${h(item.action || '确认后继续')}</p><small>${h(item.code || 'NOTICE')}</small></div>`).join('') || '<div class="lab-preflight-issue"><b>未发现阻塞项</b><p>任务会使用当前冻结快照和已显示的计算设备。</p><small>READY</small></div>'}</div>
       ${coverageRepairMarkup(report.coverage)}
-      <div class="lab-preflight-estimate"><span>${Number(estimate.sessions || 0).toLocaleString()} 交易日</span><span>${Number(estimate.samples || 0).toLocaleString()} 样本</span><span>特征 ${h(formatBytes(estimate.feature_bytes))}</span><span>磁盘 ${h(formatBytes(estimate.disk_bytes))}</span></div>`;
+      <div class="lab-preflight-estimate"><span>${Number(estimate.sessions || 0).toLocaleString()} 交易日</span><span>${Number(estimate.samples || 0).toLocaleString()} 样本</span><span>特征 ${h(formatBytes(estimate.feature_bytes))}</span><span>磁盘 ${h(formatBytes(estimate.disk_bytes))}</span>${report.operation === 'prepare_data' ? `<span>预计峰值 ${h(formatBytes(estimate.required_peak_bytes))}</span><span>当前可用 ${h(formatBytes(estimate.disk_free_bytes))}</span><span>安全预留 ${h(formatBytes(estimate.reserve_bytes))}</span>` : ''}</div>`;
     confirm.disabled = !report.runnable || providerChoiceRequired;
     confirm.textContent = providerChoiceRequired
       ? '请选择补齐数据源'

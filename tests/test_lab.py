@@ -26,6 +26,7 @@ from quantmaster.lab.dataset import (
     load_csi800_members_as_of,
     load_local_dataset,
 )
+from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.ml import (
     artifact_sha256,
     engineer_features,
@@ -678,10 +679,68 @@ def test_prepare_data_preflight_estimates_atomic_rewrite_peak(tmp_path, monkeypa
 
     estimate = report["estimate"]
     assert estimate["space_purpose"] == "bars_atomic_rewrite"
-    assert estimate["repair_temporary_bytes"] == 3000
-    assert estimate["repair_output_bytes"] == 640
+    assert estimate["repair_temporary_bytes"] > 3000
+    assert estimate["repair_output_bytes"] > 0
+    assert estimate["disk_bytes"] == (
+        estimate["required_peak_bytes"] + estimate["reserve_bytes"]
+    )
+    assert estimate["available_after_reserve_bytes"] == 0
     assert report["runnable"] is False
-    assert report["blockers"][-1]["code"] == "DISK_SPACE_INSUFFICIENT"
+    assert report["blockers"][-1]["code"] == "STORAGE_SPACE_INSUFFICIENT"
+
+
+def test_prepare_data_space_guard_persists_blocked_safe_retry(tmp_path, monkeypatch):
+    _config(tmp_path)
+    service = LabService(LabStore(tmp_path / "lab.sqlite"))
+    plan = {
+        "membership_missing": False,
+        "providers": [{"id": "free-stockdb", "available": True}],
+        "gaps": [{
+            "symbol": "A.SH", "existing_bytes": 1024, "missing_sessions": 1,
+            "segments": [{
+                "start": "2024-01-01", "end": "2024-01-31", "kind": "critical",
+            }],
+        }],
+        "repair_symbol_count": 1, "critical_repair_symbol_count": 1,
+        "research_eligible": False,
+    }
+    monkeypatch.setattr("quantmaster.lab.service.dataset_repair_plan", lambda *_: plan)
+    monkeypatch.setattr(
+        "quantmaster.lab.service.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=1024),
+    )
+    events = []
+
+    def progress(value, phase, detail="", **metadata):
+        events.append({"progress": value, "phase": phase, "detail": detail, **metadata})
+
+    with pytest.raises(LabError) as caught:
+        service.prepare_data(
+            universe="demo", start="2024-01-01", end="2024-01-31",
+            provider="free-stockdb", progress=progress,
+        )
+
+    assert caught.value.code == "STORAGE_SPACE_INSUFFICIENT"
+    blocked = [
+        item for item in events
+        if item.get("metadata", {}).get("status") == "blocked"
+    ]
+    assert blocked[-1]["event_type"] == "partition_checkpoint"
+    assert blocked[-1]["metadata"]["safe_retry_point"] == "bars"
+    assert blocked[-1]["metadata"]["diagnostic_code"] == "STORAGE_SPACE_INSUFFICIENT"
+    assert blocked[-1]["metadata"]["reserve_bytes"] > 0
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [
+        (OSError(28, "No space left on device"), "STORAGE_SPACE_INSUFFICIENT"),
+        (RuntimeError("database or disk is full"), "STORAGE_SPACE_INSUFFICIENT"),
+        (RuntimeError("disk I/O error"), "STORAGE_IO_ERROR"),
+    ],
+)
+def test_classify_lab_storage_failures(failure, code):
+    assert classify_lab_error(failure).code == code
 
 
 def test_partition_checkpoint_is_projected_and_warnings_finish_partial(tmp_path):

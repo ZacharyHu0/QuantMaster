@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from typing import Any
 
 
@@ -48,6 +49,29 @@ def classify_lab_error(exc: Exception) -> LabError:
         return LabError(
             "DATASET_MISSING", "所需本地数据或工件不存在",
             action="先运行数据准备或修复缺失工件", retryable=True, status_code=424,
+        )
+    winerror = getattr(exc, "winerror", None)
+    if (
+        (isinstance(exc, OSError) and exc.errno == errno.ENOSPC)
+        or winerror == 112
+        or "no space left" in lowered
+        or "database or disk is full" in lowered
+        or "sqlite_full" in lowered
+    ):
+        return LabError(
+            "STORAGE_SPACE_INSUFFICIENT", "存储卷空间不足",
+            action="释放对应数据卷空间后从安全重试点继续",
+            retryable=True,
+        )
+    if (
+        "disk i/o error" in lowered
+        or "input/output error" in lowered
+        or "sqlite_ioerr" in lowered
+    ):
+        return LabError(
+            "STORAGE_IO_ERROR", "存储设备或数据库发生 I/O 错误",
+            action="检查卷、文件占用、ACL 与 SQLite WAL 状态后重试",
+            retryable=True, status_code=503,
         )
     if "cuda" in lowered or "显存" in text:
         return LabError(

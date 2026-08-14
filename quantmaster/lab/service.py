@@ -26,7 +26,7 @@ from quantmaster.lab.dataset import (
     load_csi800_membership,
     load_local_dataset,
 )
-from quantmaster.lab.errors import LabError
+from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.models import DataPolicy, FactorSpec
 from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
 from quantmaster.lab.store import LabStore
@@ -42,6 +42,41 @@ from quantmaster.lab.strategy import (
 )
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.trading_sessions import market_date
+
+_SPACE_BYTES_PER_SESSION = 512
+_SPACE_PARTITION_OVERHEAD = 256 * 1024
+_SPACE_SQLITE_HEADROOM = 16 * 1024 * 1024
+_SPACE_MINIMUM_RESERVE = 64 * 1024 * 1024
+
+
+def _repair_space_estimate(
+    repair: dict[str, Any], *, workers: int, probe: Path,
+) -> dict[str, Any]:
+    """Estimate same-volume atomic-write peak with an explicit safety reserve."""
+    candidates = []
+    output_bytes = 0
+    for item in repair.get("gaps") or []:
+        growth = max(
+            _SPACE_PARTITION_OVERHEAD,
+            int(item.get("missing_sessions") or 0) * _SPACE_BYTES_PER_SESSION,
+        )
+        output_bytes += growth
+        candidates.append(int(item.get("existing_bytes") or 0) + growth)
+    temporary_bytes = sum(sorted(candidates, reverse=True)[:max(1, workers)])
+    peak_bytes = temporary_bytes + _SPACE_SQLITE_HEADROOM
+    reserve_bytes = max(_SPACE_MINIMUM_RESERVE, (peak_bytes + 9) // 10)
+    free_bytes = int(shutil.disk_usage(probe).free)
+    return {
+        "disk_bytes": peak_bytes + reserve_bytes,
+        "disk_free_bytes": free_bytes,
+        "required_peak_bytes": peak_bytes,
+        "repair_output_bytes": output_bytes,
+        "repair_temporary_bytes": temporary_bytes,
+        "repair_sqlite_headroom_bytes": _SPACE_SQLITE_HEADROOM,
+        "reserve_bytes": reserve_bytes,
+        "available_after_reserve_bytes": max(0, free_bytes - reserve_bytes),
+        "space_purpose": "bars_atomic_rewrite",
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -381,35 +416,24 @@ class LabService:
         if operation == "prepare_data":
             estimate = dict(report.get("estimate") or {})
             bars_root = get_config().data_root / "bars"
-            existing = sorted(
-                (int(item.get("existing_bytes") or 0) for item in repair.get("gaps") or []),
-                reverse=True,
-            )
             workers = min(4, max(1, int(get_config().lab.max_workers)))
-            rewritten_bytes = sum(existing[:workers])
-            new_bytes = int(repair.get("missing_session_count") or 0) * 64
-            sqlite_headroom = 8 * 1024 * 1024
-            peak_bytes = rewritten_bytes + new_bytes + sqlite_headroom
             probe = bars_root if bars_root.exists() else get_config().data_root
-            free_bytes = shutil.disk_usage(probe).free
-            estimate.update({
-                "disk_bytes": peak_bytes,
-                "disk_free_bytes": free_bytes,
-                "repair_output_bytes": new_bytes,
-                "repair_temporary_bytes": rewritten_bytes,
-                "repair_sqlite_headroom_bytes": sqlite_headroom,
-                "space_purpose": "bars_atomic_rewrite",
-            })
+            estimate.update(_repair_space_estimate(repair, workers=workers, probe=probe))
             report["estimate"] = estimate
-            if peak_bytes > free_bytes and not any(
-                item.get("code") == "DISK_SPACE_INSUFFICIENT"
+            if estimate["disk_bytes"] > estimate["disk_free_bytes"] and not any(
+                item.get("code") == "STORAGE_SPACE_INSUFFICIENT"
                 for item in report.get("blockers") or []
             ):
                 report.setdefault("blockers", []).append({
-                    "code": "DISK_SPACE_INSUFFICIENT",
+                    "code": "STORAGE_SPACE_INSUFFICIENT",
                     "message": "数据补齐所需磁盘空间不足",
                     "action": "释放数据目录所在卷空间，或缩小补齐范围后重试",
-                    "context": {"required_bytes": peak_bytes, "free_bytes": free_bytes},
+                    "context": {
+                        "required_bytes": estimate["disk_bytes"],
+                        "peak_bytes": estimate["required_peak_bytes"],
+                        "free_bytes": estimate["disk_free_bytes"],
+                        "reserve_bytes": estimate["reserve_bytes"],
+                    },
                 })
                 report["runnable"] = False
                 report["state"] = "blocked"
@@ -741,6 +765,38 @@ class LabService:
                     # the durable event metadata above.
                     progress(value, f"数据准备 · {stage}", detail)
 
+        def require_space(
+            stage: str, remaining: list[dict[str, Any]], value: int,
+        ) -> dict[str, Any]:
+            bars_root = get_config().data_root / "bars"
+            probe = bars_root if bars_root.exists() else get_config().data_root
+            estimate = _repair_space_estimate(
+                {"gaps": remaining},
+                workers=min(4, max(1, int(get_config().lab.max_workers))),
+                probe=probe,
+            )
+            if estimate["disk_bytes"] <= estimate["disk_free_bytes"]:
+                return estimate
+            context = {
+                "required_bytes": estimate["disk_bytes"],
+                "peak_bytes": estimate["required_peak_bytes"],
+                "free_bytes": estimate["disk_free_bytes"],
+                "reserve_bytes": estimate["reserve_bytes"],
+                "persisted": len(persisted),
+            }
+            stages[stage] = {"status": "blocked", "stage": stage, **context}
+            checkpoint(
+                value, stage, "blocked", "磁盘空间不足，已在安全边界停止",
+                diagnostic_code="STORAGE_SPACE_INSUFFICIENT",
+                safe_retry_point=stage,
+                **context,
+            )
+            raise LabError(
+                "STORAGE_SPACE_INSUFFICIENT", "数据准备所需磁盘空间不足",
+                action="释放数据目录所在卷空间后，从安全重试点继续",
+                retryable=True, context=context,
+            )
+
         checkpoint(
             1, "universe", "completed",
             f"已规划 {before['repair_symbol_count']} 个行情分区",
@@ -805,37 +861,48 @@ class LabService:
             return str(item["symbol"]), market_envelope.quality.to_dict()
 
         workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
-            futures = {pool.submit(repair, item): item for item in targets}
-            for future in as_completed(futures):
-                item = futures[future]
-                try:
-                    repaired_symbol, quality = future.result()
-                    persisted.append(repaired_symbol)
-                    if quality.get("status") != "verified":
-                        degraded[repaired_symbol] = quality
-                    checkpoint(
-                        5 + int(82 * (completed + 1) / max(1, len(targets))),
-                        "bars", "completed", f"{repaired_symbol} 已持久化",
-                        partition=repaired_symbol, persisted=len(persisted),
-                        total=len(targets), quality_status=quality.get("status", ""),
-                    )
-                except InterruptedError:
-                    raise
-                except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                    failures[str(item["symbol"])] = str(exc)[:300]
-                    checkpoint(
-                        5 + int(82 * (completed + 1) / max(1, len(targets))),
-                        "bars", "failed", str(exc)[:300],
-                        partition=str(item["symbol"]), persisted=len(persisted),
-                        total=len(targets), error_type=type(exc).__name__,
-                    )
-                completed += 1
-                if progress:
-                    progress(
-                        5 + int(82 * completed / max(1, len(targets))),
-                        f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
-                    )
+        require_space("bars", targets, 5)
+        for batch_start in range(0, len(targets), workers):
+            batch = targets[batch_start:batch_start + workers]
+            require_space(
+                "bars", targets[batch_start:],
+                5 + int(82 * completed / max(1, len(targets))),
+            )
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="lab-data-repair",
+            ) as pool:
+                futures = {pool.submit(repair, item): item for item in batch}
+                for future in as_completed(futures):
+                    item = futures[future]
+                    try:
+                        repaired_symbol, quality = future.result()
+                        persisted.append(repaired_symbol)
+                        if quality.get("status") != "verified":
+                            degraded[repaired_symbol] = quality
+                        checkpoint(
+                            5 + int(82 * (completed + 1) / max(1, len(targets))),
+                            "bars", "completed", f"{repaired_symbol} 已持久化",
+                            partition=repaired_symbol, persisted=len(persisted),
+                            total=len(targets), quality_status=quality.get("status", ""),
+                        )
+                    except InterruptedError:
+                        raise
+                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                        failure = classify_lab_error(exc)
+                        failures[str(item["symbol"])] = str(exc)[:300]
+                        checkpoint(
+                            5 + int(82 * (completed + 1) / max(1, len(targets))),
+                            "bars", "failed", str(exc)[:300],
+                            partition=str(item["symbol"]), persisted=len(persisted),
+                            total=len(targets), error_type=type(exc).__name__,
+                            diagnostic_code=failure.code,
+                        )
+                    completed += 1
+                    if progress:
+                        progress(
+                            5 + int(82 * completed / max(1, len(targets))),
+                            f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
+                        )
         clear_local_dataset_caches()
         stages["bars"] = {
             "status": "completed_with_warnings" if failures else "completed",
@@ -846,12 +913,14 @@ class LabService:
         resolved = max(0, int(before[count_key]) - int(after[count_key]))
         snapshot: dict[str, Any] = {}
         if after["research_eligible"]:
+            require_space("dataset", [], 89)
             stages["dataset"] = {"status": "running"}
             _panel, _membership, value = load_local_dataset(
                 universe, start, end, policy=DataPolicy.PREFER_LOCAL.value,
             )
             stages["dataset"] = {"status": "completed"}
             checkpoint(91, "dataset", "completed", "本地研究数据集已物化", persisted=1)
+            require_space("snapshot", [], 93)
             snapshot = self.store.save_snapshot(value)
             stages["snapshot"] = {"status": "completed", "partitions": 1}
             checkpoint(95, "snapshot", "completed", "冻结快照已登记", persisted=1)
