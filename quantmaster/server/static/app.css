@@ -739,7 +739,7 @@
 
   /* -- Tables: dense, aligned numerals, hairline rows, single hover tint -- */
   :where(table){border-collapse:collapse}
-  :where(th){padding:6px 10px;font-size:12px;font-weight:600;letter-spacing:.03em;color:var(--muted);text-align:left;white-space:nowrap;border-bottom:1px solid var(--border)}
+  :where(th){padding:6px 10px;font-size:12px;font-weight:600;letter-spacing:.03em;color:var(--muted);text-align:left;border-bottom:1px solid var(--border)}
   :where(td){padding:5px 10px;border-bottom:1px solid color-mix(in oklch,var(--grid) 55%,transparent);font-variant-numeric:tabular-nums}
   :where(tbody tr:last-child td){border-bottom:0}
   :where(tbody tr){transition:background-color .15s var(--ease-out-quart)}
