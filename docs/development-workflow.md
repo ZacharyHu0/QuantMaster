@@ -154,6 +154,15 @@ The stable application and task worktrees are different execution environments:
 These rules keep the instance used for daily work alive while source files, dependencies, and task
 servers change independently.
 
+Start a task server from the primary checkout with its project interpreter:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\dev\tasks.py serve <slug> --open
+```
+
+Pass `--stockdb-root <absolute-path>` only when the task needs read-only access to an installed
+StockDB SDK. Its process ownership, updater and control database remain isolated from the task.
+
 ## 9. Use GitHub as the management record
 
 The detailed, normative GitHub procedure is [docs/github-workflow.md](github-workflow.md). The

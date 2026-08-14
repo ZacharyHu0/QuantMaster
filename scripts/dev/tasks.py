@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -402,6 +403,83 @@ def registered_worktrees(primary: Path) -> set[Path]:
         for line in git_lines(["worktree", "list", "--porcelain"], cwd=primary)
         if line.startswith("worktree ")
     }
+
+
+def serve(
+    slug: str, *, open_browser: bool = False, stockdb_root: str | None = None,
+) -> None:
+    """Run one registered task as an isolated foreground development instance."""
+
+    if not SLUG_PATTERN.fullmatch(slug):
+        raise SystemExit("无效 slug")
+    stable_root: Path | None = None
+    if stockdb_root is not None:
+        stable_root = Path(stockdb_root).expanduser()
+        if not stable_root.is_absolute():
+            raise SystemExit("--stockdb-root 必须是绝对路径")
+        stable_root = stable_root.resolve()
+    primary = primary_root(ROOT)
+    tasks_root = (primary / ".worktrees").resolve()
+    target = (tasks_root / slug).resolve()
+    registered = registered_worktrees(primary)
+    if target.parent != tasks_root or target not in registered:
+        raise SystemExit(f"任务 worktree 未登记：{target}")
+    branch = git(["branch", "--show-current"], cwd=target).stdout.strip()
+    if branch != f"codex/{slug}":
+        raise SystemExit(f"任务 worktree 分支不匹配：{branch or 'detached HEAD'}")
+
+    task_targets = sorted(
+        path for path in registered
+        if path.parent == tasks_root
+        and git(["branch", "--show-current"], cwd=path).stdout.strip()
+        == f"codex/{path.name}"
+    )
+    port = 18686 + task_targets.index(target)
+    if port > 65535:
+        raise SystemExit("任务 worktree 数量超过可分配端口范围")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", port))
+    except OSError:
+        raise SystemExit(f"开发端口已被占用：127.0.0.1:{port}") from None
+    finally:
+        listener.close()
+
+    artifacts = primary / ".artifacts" / "worktrees" / slug
+    dev = artifacts / "runtime" / "dev"
+    data = dev / "data"
+    managed_stockdb = dev / "free-stockdb"
+    for directory in (dev, data, data / "logs", managed_stockdb):
+        prepare_pytest_directory(directory)
+    config_path = dev / "config.yaml"
+    config_path.write_text(json.dumps({
+        "server": {"host": "127.0.0.1", "port": port},
+        "data": {
+            "free_stockdb_managed": False,
+            "free_stockdb_auto_update": False,
+        },
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment.update({
+        "QM_CONFIG_PATH": str(config_path),
+        "QM_DATA_ROOT": str(data),
+        "QM_FREE_STOCKDB_ROOT": str(managed_stockdb),
+        "QM_FREE_STOCKDB_CONTROL_PATH": str(dev / "control.sqlite"),
+        "QM_FREE_STOCKDB_MANAGED": "false",
+        "QM_FREE_STOCKDB_AUTO_UPDATE": "false",
+    })
+    if stable_root is None:
+        environment.pop("QM_FREE_STOCKDB_SDK_PATH", None)
+    else:
+        environment["QM_FREE_STOCKDB_SDK_PATH"] = str(stable_root / "pybao")
+
+    command = [str(project_python(primary)), "-m", "quantmaster.cli", "serve", "--reload"]
+    if open_browser:
+        command.append("--open")
+    print(f"[task] serving codex/{slug} at http://127.0.0.1:{port}", flush=True)
+    with task_artifact_lease(artifacts):
+        subprocess.run(command, cwd=target, env=environment, check=True)
 
 
 def task_integrated(primary: Path, branch: str) -> bool:
@@ -821,6 +899,10 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     start_parser = commands.add_parser("start")
     start_parser.add_argument("slug")
+    serve_parser = commands.add_parser("serve")
+    serve_parser.add_argument("slug")
+    serve_parser.add_argument("--open", action="store_true")
+    serve_parser.add_argument("--stockdb-root")
     check_parser = commands.add_parser("check")
     check_parser.add_argument("--staged", action="store_true")
     check_parser.add_argument("--base", default="origin/main")
@@ -845,6 +927,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "start":
             start(args.slug)
+        elif args.command == "serve":
+            serve(
+                args.slug, open_browser=args.open,
+                stockdb_root=args.stockdb_root,
+            )
         elif args.command == "check":
             check(cwd, staged=args.staged, base=args.base)
         elif args.command == "ready":
