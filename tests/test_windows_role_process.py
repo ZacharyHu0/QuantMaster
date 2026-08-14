@@ -62,6 +62,24 @@ def test_base_interpreter_falls_back_when_renamed_base_path_does_not_exist(
     assert windows_app._base_interpreter() == canonical.resolve()
 
 
+def test_frozen_role_process_reuses_onefile_archive_without_copying(tmp_path, monkeypatch):
+    from quantmaster.runtime import windows_app
+
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"onefile archive")
+    monkeypatch.setattr(windows_app.os, "name", "nt")
+    monkeypatch.setattr(windows_app.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(windows_app.sys, "executable", str(executable))
+    monkeypatch.setattr(
+        windows_app.shutil,
+        "copy2",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("frozen EXE must not be copied")),
+    )
+
+    assert windows_app._role_executable("Compute Worker") == str(executable.resolve())
+    assert not (tmp_path / "QuantMaster Compute Worker.exe").exists()
+
+
 def test_windows_role_sanitizes_filename_without_losing_job_identity():
     from quantmaster.runtime.windows_app import _safe_role
 
