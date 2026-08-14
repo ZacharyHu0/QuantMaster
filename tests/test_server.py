@@ -399,6 +399,13 @@ class TestBasics:
         assert "data:[{yAxis:0}]" in app_script
         assert "type:'dashed'" in app_script
         assert "prefers-reduced-motion" in app_styles
+        assert "prefers-reduced-transparency:reduce" in app_styles
+        assert "prefers-contrast:more" in app_styles
+        assert (
+            ':where(button,[role="button"],[role="tab"],.mkt-item):active{transform:scale(.98)}'
+            in app_styles
+        )
+        assert ".tab.active{animation:qm-tab .22s var(--ease-out-quart) both}" in app_styles
         assert "--scrollbar-track: #151514" in app_styles
         assert "scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track)" in app_styles
         assert "scrollbar-gutter:stable" in app_styles
