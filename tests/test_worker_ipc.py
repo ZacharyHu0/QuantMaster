@@ -7,6 +7,7 @@ import pytest
 from quantmaster.runtime.maintenance import maintenance_barrier
 from quantmaster.runtime.worker_ipc import (
     RuntimeCommandServer,
+    WorkerCommandError,
     WorkerCommandUnavailable,
     call_worker_command,
     worker_command_endpoint,
@@ -38,6 +39,34 @@ def test_runtime_worker_command_channel_round_trips_without_web_writes(tmp_path)
 
     assert result == {"id": "job-1", "status": "queued"}
     assert received == [("data.refresh.create", {"scope": "market"})]
+
+
+def test_runtime_worker_rejects_mixed_identity_before_handler_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    received = []
+    monkeypatch.setenv("QM_BUILD_SHA", "a" * 40)
+    monkeypatch.setenv("QM_SLOT_ID", "slot-a")
+    monkeypatch.setenv("QM_RUNTIME_GENERATION", "b" * 32)
+    server = RuntimeCommandServer(
+        lambda operation, payload: received.append((operation, payload)) or {},
+        root=tmp_path / "runtime",
+    )
+    server.start()
+    monkeypatch.setenv("QM_RUNTIME_GENERATION", "c" * 32)
+    try:
+        with pytest.raises(WorkerCommandError, match="runtime_identity_mismatch") as exc_info:
+            call_worker_command(
+                "data.refresh.create",
+                {"scope": "market"},
+                root=tmp_path / "runtime",
+            )
+    finally:
+        server.stop()
+
+    assert exc_info.value.code == "runtime_identity_mismatch"
+    assert received == []
 
 
 def test_runtime_worker_stop_completes_during_accept_loop_transition(tmp_path):

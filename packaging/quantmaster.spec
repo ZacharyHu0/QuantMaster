@@ -2,31 +2,17 @@
 # 产物：.artifacts/packages/desktop/QuantMaster(.exe) 单文件；双击运行 = qm app，
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
-import subprocess
 import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
+from scripts.release.check_desktop_artifact import packaged_build_sha
 
 project_root = Path(SPECPATH).parent
 release_scope = {}
 exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
 version = release_scope["VERSION"]
-tracked_tree_changed = subprocess.run(
-    ["git", "diff-index", "--quiet", "HEAD", "--"],
-    cwd=project_root,
-).returncode
-if tracked_tree_changed:
-    raise SystemExit("QuantMaster packages require the tracked Git tree to match HEAD")
-build_sha = subprocess.run(
-    ["git", "rev-parse", "--verify", "HEAD"],
-    cwd=project_root,
-    check=True,
-    capture_output=True,
-    text=True,
-).stdout.strip()
-if len(build_sha) != 40 or any(character not in "0123456789abcdef" for character in build_sha):
-    raise SystemExit("QuantMaster packages require a full lowercase Git SHA")
+build_sha = packaged_build_sha(project_root)
 runtime_identity_hook = Path(workpath) / "quantmaster_runtime_identity.py"
 runtime_identity_hook.write_text(
     "from quantmaster.runtime.identity import bind_packaged_build\n"

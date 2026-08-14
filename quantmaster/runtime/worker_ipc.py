@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.runtime.identity import (
+    ApplicationIdentity,
+    get_application_identity,
+    require_application_identity,
+)
 
 logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 0.5
@@ -71,6 +76,7 @@ class RuntimeCommandServer:
         self.endpoint = worker_command_endpoint(self.root)
         self.family = "AF_PIPE" if os.name == "nt" else "AF_UNIX"
         self._handler = handler
+        self._identity = get_application_identity()
         self._authkey = _authkey(self.root)
         self._listener: Listener | None = None
         self._stop = threading.Event()
@@ -122,6 +128,22 @@ class RuntimeCommandServer:
                         connection.send({"ok": True, "value": {}})
                         self._stop.set()
                         continue
+                    expected_raw = raw.get("application_identity")
+                    expected = ApplicationIdentity(
+                        str(expected_raw.get("build_sha") or ""),
+                        str(expected_raw.get("slot_id") or ""),
+                        str(expected_raw.get("runtime_generation") or ""),
+                    ) if isinstance(expected_raw, dict) else None
+                    try:
+                        require_application_identity(self._identity)
+                    except RuntimeError as exc:
+                        raise WorkerCommandError(
+                            "runtime_identity_mismatch", "runtime_identity_mismatch",
+                        ) from exc
+                    if expected != self._identity:
+                        raise WorkerCommandError(
+                            "runtime_identity_mismatch", "runtime_identity_mismatch",
+                        )
                     payload = raw.get("payload")
                     if not isinstance(payload, dict):
                         raise WorkerCommandError("invalid_command", "本机命令参数无效")
@@ -189,6 +211,7 @@ def call_worker_command(
     endpoint = worker_command_endpoint(base)
     family = "AF_PIPE" if os.name == "nt" else "AF_UNIX"
     deadline = max(0.05, float(timeout))
+    identity = get_application_identity()
     try:
         connection = Client(endpoint, family=family, authkey=_authkey(base))
     except (AuthenticationError, OSError, EOFError) as exc:
@@ -197,7 +220,15 @@ def call_worker_command(
         ) from exc
     with connection:
         try:
-            connection.send({"operation": str(operation), "payload": dict(payload or {})})
+            connection.send({
+                "operation": str(operation),
+                "payload": dict(payload or {}),
+                "application_identity": {
+                    "build_sha": identity.build_sha,
+                    "slot_id": identity.slot_id,
+                    "runtime_generation": identity.runtime_generation,
+                },
+            })
             if not connection.poll(deadline):
                 raise WorkerCommandUnavailable(
                     "worker_unavailable", "后台 runtime-worker 在命令期限内未响应",

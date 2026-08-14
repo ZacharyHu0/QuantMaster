@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import ipaddress
+import multiprocessing
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,9 +13,79 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.release import RELEASE_DATE, VERSION
+from quantmaster.runtime.identity import (
+    ApplicationIdentity,
+    get_application_identity,
+    require_application_identity,
+)
 from quantmaster.runtime.sqlite import connect_sqlite
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
+
+
+def _run_application_identity_probe(expected: ApplicationIdentity, connection: Any) -> None:
+    """Spawn target for the deep doctor process-identity check."""
+
+    try:
+        from quantmaster.runtime.windows_app import initialize_windows_app_process
+
+        initialize_windows_app_process()
+        identity = require_application_identity(expected)
+        connection.send({
+            "build_sha": identity.build_sha,
+            "slot_id": identity.slot_id,
+            "runtime_generation": identity.runtime_generation,
+            "pid": os.getpid(),
+        })
+    except BaseException:
+        connection.send({"error": "compute_identity_probe_failed"})
+    finally:
+        connection.close()
+
+
+def _application_identity_probe(timeout: float = 5.0) -> dict[str, Any]:
+    """Prove that a spawned compute process inherits the exact application identity."""
+
+    expected = get_application_identity()
+    context = multiprocessing.get_context("spawn")
+    receive, send = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_run_application_identity_probe,
+        args=(expected, send),
+        name="qm-compute-identity-probe",
+        daemon=False,
+    )
+    from quantmaster.runtime.windows_app import start_windows_role_process
+
+    start_windows_role_process(process, "Compute Worker")
+    send.close()
+    try:
+        if not receive.poll(max(0.1, float(timeout))):
+            raise RuntimeError("compute_identity_probe_timeout")
+        payload = receive.recv()
+        process.join(timeout=1.0)
+        if process.is_alive() or process.exitcode != 0:
+            raise RuntimeError("compute_identity_probe_failed")
+        if not isinstance(payload, dict) or payload.get("error"):
+            raise RuntimeError("compute_identity_probe_failed")
+        observed = ApplicationIdentity(
+            str(payload.get("build_sha") or ""),
+            str(payload.get("slot_id") or ""),
+            str(payload.get("runtime_generation") or ""),
+        )
+        if observed != expected:
+            raise RuntimeError("runtime_identity_mismatch")
+        return {
+            "build_sha": observed.build_sha,
+            "slot_id": observed.slot_id,
+            "runtime_generation": observed.runtime_generation,
+            "pid": int(payload["pid"]),
+        }
+    finally:
+        receive.close()
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=1.0)
 
 
 def _issue(
@@ -296,6 +368,16 @@ def run_doctor(*, deep: bool = False) -> dict[str, Any]:
         sqlite_issues, checked = _sqlite_issues(root)
         issues.extend(sqlite_issues)
         metrics["sqlite_checked"] = checked
+        try:
+            metrics["application_identity_probe"] = _application_identity_probe()
+        except (OSError, RuntimeError) as exc:
+            metrics["application_identity_probe"] = {"error": str(exc)}
+            issues.append(_issue(
+                "compute_identity_probe_failed",
+                "high",
+                "计算子进程身份检查失败",
+                str(exc),
+            ))
         from quantmaster.operational_diagnostics import safe_operational_metrics
 
         metrics["operations"] = safe_operational_metrics()
