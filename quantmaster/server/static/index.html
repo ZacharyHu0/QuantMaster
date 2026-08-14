@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>QuantMaster</title>
 <link rel="icon" href="/static/brand/quantmaster-favicon.svg" type="image/svg+xml">
+<script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/brand-intro.css">
 <link rel="stylesheet" href="/static/candidates.css">
 <link rel="stylesheet" href="/static/settings.css?rev=%%QM_SETTINGS_CSS_REV%%">
@@ -22,6 +23,7 @@
 <link rel="stylesheet" href="/static/app.css?rev=%%QM_APP_CSS_REV%%">
 
 <link rel="stylesheet" href="/static/charts.css">
+<link rel="stylesheet" href="/static/ink-theme.css">
 </head>
 <body>
 <script src="/static/brand-intro.js"></script>
@@ -1150,9 +1152,24 @@
 <!-- ================= 设置 ================= -->
 <section class="tab" id="tab-settings">
   <div class="settings-heading">
-    <div><span class="eyebrow">LOCAL CONTROL PLANE</span><h2>设置中心</h2>
-      <p>模型、数据、资讯、自动化与研究环境的唯一配置入口。设置先持久化，再由各组件独立确认应用。</p></div>
-    <span class="settings-path" id="settings-config-path">正在读取配置…</span>
+    <div class="settings-heading__copy">
+      <span class="eyebrow">LOCAL CONTROL PLANE</span>
+      <h2>设置中心</h2>
+      <p>模型、数据、资讯、自动化与研究环境的唯一配置入口。设置先持久化，再由各组件独立确认应用。</p>
+    </div>
+    <div class="settings-heading__meta">
+      <span class="settings-path" id="settings-config-path">正在读取配置…</span>
+      <div id="qm-theme-control" class="theme-control" role="radiogroup" aria-labelledby="qm-theme-label">
+        <span id="qm-theme-label" class="theme-control__label">界面主题</span>
+        <div class="theme-control__track">
+          <input class="theme-control__input" type="radio" id="qm-theme-ink" name="qm-theme" value="ink" data-qm-theme-option="ink" checked>
+          <label class="theme-control__option" for="qm-theme-ink">墨韵书房</label>
+          <input class="theme-control__input" type="radio" id="qm-theme-classic" name="qm-theme" value="classic" data-qm-theme-option="classic">
+          <label class="theme-control__option" for="qm-theme-classic">经典</label>
+          <span class="theme-control__thumb" aria-hidden="true"></span>
+        </div>
+      </div>
+    </div>
   </div>
   <div class="settings-shell">
     <label class="settings-nav-mobile" for="settings-section-select">
