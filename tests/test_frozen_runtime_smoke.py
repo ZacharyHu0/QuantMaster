@@ -64,6 +64,7 @@ def test_internal_launcher_exits_on_eof_without_signaling_child(tmp_path, monkey
 
     assert pid_path.read_text(encoding="ascii") == "4321"
     assert calls[0][1]["env"]["QM_LAUNCHER_PID"] == "1234"
+    assert calls[0][1]["stdin"] is smoke_frozen_runtime.subprocess.DEVNULL
 
 
 def test_frozen_teardown_rejects_web_process_that_keeps_log_open(monkeypatch):

@@ -144,6 +144,7 @@ def _run_launcher(
         server = subprocess.Popen(
             [str(executable), "serve", "--no-reload"],
             env=environment,
+            stdin=subprocess.DEVNULL,
             stdout=stdout,
             stderr=stderr,
         )
