@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -411,11 +411,24 @@ def test_paper_accounts_are_isolated_and_strategy_snapshot_is_immutable(tmp_path
         store.create_account(account_spec("账户 A"), symbols=["600000.SH"])
 
 
+@pytest.mark.parametrize(
+    "host_date",
+    (date(2026, 8, 6), date(2026, 8, 15)),
+    ids=("evidence-day", "host-date-rollover"),
+)
 def test_paper_strategy_change_preserves_history_and_schedules_transition(
     tmp_path,
     monkeypatch,
     panel,
+    host_date,
 ):
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.market_date", lambda: host_date,
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.resolve_session_target",
+        lambda: SessionExpectation("2026-08-06", "fixture-clock", True, "fixture"),
+    )
     service, account = make_paper_service(tmp_path, "可编辑账户")
     original_hash = account["strategy_hash"]
     same_strategy = account_spec("任意名称").strategy
