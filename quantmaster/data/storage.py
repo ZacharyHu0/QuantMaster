@@ -207,16 +207,16 @@ class BarStore:
         # the request path.
         self.read_only = (not remote_io_allowed()) if read_only is None else bool(read_only)
         self.meta_db = self.root / "meta.sqlite"
-        if not self.meta_db.is_file():
-            if self.read_only:
-                return
-            self.root.mkdir(parents=True, exist_ok=True)
-            self._migrate_legacy_schema()
-            self._recover_writes()
-            return
-        self._require_current()
         if self.read_only:
+            if self.meta_db.is_file():
+                self._require_current()
             return
+        self.root.mkdir(parents=True, exist_ok=True)
+        with _BarLock(self.root, "__schema__"):
+            if self.meta_db.is_file():
+                self._require_current()
+            else:
+                self._migrate_legacy_schema()
         self._recover_writes()
 
     def _migrate_legacy_schema(self) -> None:

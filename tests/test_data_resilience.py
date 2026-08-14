@@ -90,6 +90,46 @@ def test_local_only_reader_does_not_repair_or_mutate_a_bad_cache(tmp_path):
     assert store.metadata("600000.SH") == before
 
 
+@pytest.mark.parametrize("state", ["legacy", "incomplete", "corrupt"])
+def test_bar_store_initialization_lock_keeps_noncurrent_meta_fail_closed(tmp_path, state):
+    root = tmp_path / "bars"
+    root.mkdir()
+    meta = root / "meta.sqlite"
+    if state == "corrupt":
+        meta.write_bytes(b"not-a-sqlite-database")
+    else:
+        with sqlite3.connect(meta) as connection:
+            if state == "legacy":
+                connection.execute(
+                    "CREATE TABLE bar_meta ("
+                    "symbol TEXT PRIMARY KEY, start TEXT, end TEXT, updated_at REAL)"
+                )
+                connection.execute(
+                    "INSERT INTO bar_meta VALUES ('600000.SH','2024-01-02','2024-01-03',1)"
+                )
+            else:
+                connection.execute("CREATE TABLE unknown_payload(value TEXT)")
+                connection.execute("INSERT INTO unknown_payload VALUES ('preserve-me')")
+
+    with pytest.raises((RuntimeError, sqlite3.DatabaseError)):
+        BarStore(root=root, read_only=False)
+
+    if state == "corrupt":
+        assert meta.read_bytes() == b"not-a-sqlite-database"
+    else:
+        with sqlite3.connect(meta) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+            if state == "legacy":
+                columns = connection.execute("PRAGMA table_info(bar_meta)").fetchall()
+                assert [column[1] for column in columns] == [
+                    "symbol", "start", "end", "updated_at",
+                ]
+            else:
+                assert connection.execute(
+                    "SELECT value FROM unknown_payload"
+                ).fetchone() == ("preserve-me",)
+
+
 def test_local_only_context_rejects_provider_call():
     with local_only_data_access(), pytest.raises(LocalOnlyDataAccessError):
         provider_call("akshare:local-only-test", "blocked", lambda: "unexpected")
@@ -185,13 +225,36 @@ def test_read_panel_uses_one_bounded_batch_read_and_preserves_input_order(tmp_pa
     ]
 
 
-def _hold_cross_process_bar_lock(root: str, start, events) -> None:
-    store = BarStore(Path(root))
-    start.wait(10)
-    with store.lock("600000.SH"):
-        events.put(("enter", os.getpid(), time.monotonic()))
-        time.sleep(0.25)
-        events.put(("exit", os.getpid(), time.monotonic()))
+def _hold_cross_process_bar_lock(
+    root: str, events, schema_visible, follower_started, initializer: bool,
+) -> None:
+    try:
+        if initializer:
+            migrate = BarStore._migrate_legacy_schema
+
+            def pause_after_database_open(store):
+                with sqlite3.connect(store.meta_db):
+                    pass
+                schema_visible.set()
+                if not follower_started.wait(10):
+                    raise TimeoutError("follower did not start")
+                time.sleep(0.25)
+                migrate(store)
+
+            BarStore._migrate_legacy_schema = pause_after_database_open
+        else:
+            if not schema_visible.wait(10):
+                raise TimeoutError("initializer did not open meta.sqlite")
+            follower_started.set()
+        store = BarStore(Path(root))
+        with store.lock("600000.SH"):
+            entered = time.monotonic()
+            time.sleep(0.25)
+            exited = time.monotonic()
+        events.put(("ok", os.getpid(), entered, exited))
+    except Exception as exc:
+        events.put(("error", os.getpid(), repr(exc), 0.0))
+        raise
 
 
 def test_akshare_exponential_retry(isolated_config, monkeypatch):
@@ -951,32 +1014,31 @@ def test_concurrent_same_symbol_history_load_is_single_flight(tmp_path, monkeypa
     pd.testing.assert_frame_equal(results[0].data, results[1].data)
 
 
-def test_same_symbol_lock_serializes_spawned_processes(tmp_path):
+@pytest.mark.parametrize("_attempt", range(3))
+def test_same_symbol_lock_serializes_spawned_processes(tmp_path, _attempt):
     context = multiprocessing.get_context("spawn")
-    start = context.Event()
     events = context.Queue()
+    schema_visible = context.Event()
+    follower_started = context.Event()
     processes = [
         context.Process(
             target=_hold_cross_process_bar_lock,
-            args=(str(tmp_path / "bars"), start, events),
+            args=(
+                str(tmp_path / "bars"), events, schema_visible, follower_started,
+                initializer,
+            ),
         )
-        for _ in range(2)
+        for initializer in (True, False)
     ]
     for process in processes:
         process.start()
-    start.set()
-    records = [events.get(timeout=15) for _ in range(4)]
+    records = [events.get(timeout=15) for _ in range(2)]
     for process in processes:
         process.join(timeout=15)
         assert process.exitcode == 0
 
-    by_process = {}
-    for kind, process_id, timestamp in records:
-        by_process.setdefault(process_id, {})[kind] = timestamp
-    assert len(by_process) == 2
-    intervals = sorted(
-        (value["enter"], value["exit"]) for value in by_process.values()
-    )
+    assert all(record[0] == "ok" for record in records), records
+    intervals = sorted((record[2], record[3]) for record in records)
     assert intervals[1][0] >= intervals[0][1] - 0.02
 
 
