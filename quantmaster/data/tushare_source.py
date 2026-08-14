@@ -42,6 +42,10 @@ from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
+_IDENTITY_COLUMNS = frozenset({
+    "ts_code", "index_code", "l1_code", "exchange", "market", "list_status", "status",
+})
+_DATE_COLUMNS = ("trade_date", "cal_date", "ann_date", "end_date")
 
 
 class TushareProviderError(RuntimeError):
@@ -89,6 +93,64 @@ def _require_tushare():
     # 直接注入 token，避免 ts.set_token() 在用户主目录写 tk.csv；容器和
     # 受限服务账户通常没有 Home 写权限，也不应额外落一份明文密钥文件。
     return ts.pro_api(token)
+
+
+def _validate_tushare_frame(
+    endpoint: str,
+    params: dict[str, Any],
+    frame: pd.DataFrame,
+    *,
+    required_nonempty: bool,
+    required_columns: tuple[str, ...],
+) -> None:
+    declared = tuple(
+        item.strip() for item in str(params.get("fields") or "").split(",") if item.strip()
+    )
+    missing = [column for column in (*required_columns, *declared) if column not in frame.columns]
+    if missing:
+        raise ProviderContractChanged(
+            f"{endpoint} 响应缺少必需列: {', '.join(dict.fromkeys(missing))}"
+        )
+    if required_nonempty and frame.empty:
+        from quantmaster.data.resilience import EmptyProviderResponse
+
+        raise EmptyProviderResponse(f"{endpoint} 返回空数据")
+    if frame.empty:
+        return
+
+    for column in _IDENTITY_COLUMNS.intersection(params).intersection(frame.columns):
+        expected = str(params[column]).strip().casefold()
+        actual = {str(value).strip().casefold() for value in frame[column].dropna()}
+        if actual and actual != {expected}:
+            raise ProviderContractChanged(
+                f"{endpoint} 响应 {column} 与请求不一致: {sorted(actual)} != {expected}"
+            )
+
+    for column in _DATE_COLUMNS:
+        if column not in params or column not in frame.columns:
+            continue
+        expected = pd.Timestamp(parse_provider_date(
+            params[column], field=f"Tushare.params.{column}",
+            provider_format=ProviderDateFormat.YYYYMMDD,
+        ))
+        actual = _parse_tushare_dates(frame[column], field=column, allow_missing=True).dropna()
+        if not actual.empty and set(actual) != {expected}:
+            raise ProviderContractChanged(f"{endpoint} 响应 {column} 与请求日期不一致")
+
+    range_column = next((column for column in _DATE_COLUMNS if column in frame.columns), None)
+    if range_column and (params.get("start_date") or params.get("end_date")):
+        dates = _parse_tushare_dates(frame[range_column], field=range_column, allow_missing=True).dropna()
+        start = pd.Timestamp(parse_provider_date(
+            params["start_date"], field="Tushare.params.start_date",
+            provider_format=ProviderDateFormat.YYYYMMDD,
+        )) if params.get("start_date") else None
+        end = pd.Timestamp(parse_provider_date(
+            params["end_date"], field="Tushare.params.end_date",
+            provider_format=ProviderDateFormat.YYYYMMDD,
+        )) if params.get("end_date") else None
+        if ((start is not None and (dates < start).any()) or
+                (end is not None and (dates > end).any())):
+            raise ProviderContractChanged(f"{endpoint} 响应日期超出请求范围")
 
 
 def _instrument_type(symbol: str) -> str:
@@ -214,15 +276,13 @@ class TushareSource(DataSource):
             except Exception as exc:  # Tushare SDK intentionally raises plain Exception
                 raise TushareProviderError(str(exc).strip() or f"{endpoint} 调用失败") from exc
             frame = result if isinstance(result, pd.DataFrame) else pd.DataFrame(result)
-            if required_nonempty and frame.empty:
-                from quantmaster.data.resilience import EmptyProviderResponse
-
-                raise EmptyProviderResponse(f"{endpoint} 返回空数据")
-            missing = [column for column in required_columns if column not in frame.columns]
-            if missing:
-                raise ProviderContractChanged(
-                    f"{endpoint} 响应缺少必需列: {', '.join(missing)}"
-                )
+            _validate_tushare_frame(
+                endpoint,
+                clean,
+                frame,
+                required_nonempty=required_nonempty,
+                required_columns=required_columns,
+            )
             self.cache.put(
                 endpoint,
                 clean,

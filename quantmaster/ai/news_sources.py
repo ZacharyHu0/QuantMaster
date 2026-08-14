@@ -38,6 +38,7 @@ from quantmaster.ai.news_contracts import (
 )
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError, CredentialStore
+from quantmaster.data.cache_contracts import CacheResultKind
 from quantmaster.runtime.sqlite import connect_sqlite
 
 SOURCE_KINDS = {"builtin", "rss", "json", "html"}
@@ -1459,6 +1460,48 @@ def _allow_builtin_fake_ip(source: dict[str, Any], url: str) -> bool:
     )
 
 
+def _validate_http_representation(
+    source: dict[str, Any], content: bytes, headers: httpx.Headers
+) -> None:
+    if not content.strip():
+        raise NewsContractError("资讯来源返回空响应", code="empty_response")
+
+    media_type = headers.get("content-type", "").partition(";")[0].strip().casefold()
+    source_id = str(source.get("id") or "")
+    kind = str(source.get("kind") or "")
+    expects_json = kind == "json" or source_id in {"sina_live", "eastmoney_fast", "jin10_authorized"}
+    expects_xml = kind == "rss" or source_id in {"nbs_release", "nbs_interpretation"}
+    expected = "json" if expects_json else "xml" if expects_xml else "html"
+    if media_type and expected not in media_type and not (
+        expected == "xml" and media_type in {"application/rss+xml", "text/xml"}
+    ):
+        raise NewsContractError(
+            f"资讯来源 Content-Type 与声明不一致: {media_type}", code="unexpected_media_type"
+        )
+
+    prefix = content[:4096].lstrip().casefold()
+    looks_html = prefix.startswith((b"<!doctype html", b"<html"))
+    if looks_html and expected != "html":
+        raise NewsContractError("资讯接口返回了 HTML 页面", code="html_interstitial")
+    if not looks_html:
+        return
+    soup = BeautifulSoup(content, "html.parser")
+    visible = " ".join(
+        node.get_text(" ", strip=True) for node in soup.select("title, h1, h2, form")
+    ).casefold()
+    markers = {
+        CacheResultKind.PERMISSION_DENIED: ("access denied", "permission denied", "无权限", "禁止访问"),
+        CacheResultKind.INVALID_RESPONSE: (
+            "captcha", "验证码", "login", "登录", "upstream error", "service unavailable",
+        ),
+    }
+    for result_kind, values in markers.items():
+        if any(value in visible for value in values):
+            error = NewsContractError("资讯来源返回拦截或错误页面", code="provider_interstitial")
+            error.result_kind = result_kind
+            raise error
+
+
 def _fetch_bytes(source: dict[str, Any], url: str, store: NewsFetchStore,
                  *, preview: bool = False) -> tuple[bytes | None, str, str]:
     current = url
@@ -1507,6 +1550,7 @@ def _fetch_bytes(source: dict[str, Any], url: str, store: NewsFetchStore,
                         )
                     chunks.append(chunk)
                 content = b"".join(chunks)
+                _validate_http_representation(source, content, response.headers)
                 key = "" if preview else store.save_response(
                     source["id"], current, content, response.headers, response.status_code,
                     official=bool(source.get("is_official")))

@@ -36,6 +36,7 @@ from typing import Any, ClassVar, TypeVar
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.cache_contracts import CacheResultKind
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,32 @@ def provider_capability_reason(exc: BaseException) -> str:
     if _http_status(exc) in {404, 410}:
         return "endpoint_removed"
     return "provider_unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailureResult:
+    """Cache-facing failure semantics; provider failures are never valid empties."""
+
+    kind: CacheResultKind
+    diagnostic_code: str
+    retryable: bool
+
+
+def provider_failure_result(exc: BaseException) -> ProviderFailureResult:
+    failure = classify_provider_failure(exc)
+    if failure == "rate_limit":
+        return ProviderFailureResult(CacheResultKind.RATE_LIMITED, failure, True)
+    if failure in {"permission", "authentication", "http_401_authentication", "http_403_permission"}:
+        return ProviderFailureResult(CacheResultKind.PERMISSION_DENIED, failure, False)
+    if failure in {"contract_changed", "empty_response"}:
+        return ProviderFailureResult(
+            CacheResultKind.INVALID_RESPONSE, failure, failure == "empty_response"
+        )
+    if failure == "capability_missing":
+        return ProviderFailureResult(
+            CacheResultKind.INVALID_RESPONSE, provider_capability_reason(exc), False
+        )
+    return ProviderFailureResult(CacheResultKind.TEMPORARY_FAILURE, failure, True)
 
 
 def _http_status(exc: BaseException) -> int | None:
@@ -1067,15 +1094,27 @@ TUSHARE_LIMITER = TushareRateLimiter()
 class EndpointFrameCache:
     """磁盘持久化的 DataFrame 接口缓存，以文件 mtime 判断新鲜度。"""
 
-    def __init__(self, provider: str = "tushare", root: Path | None = None):
+    def __init__(
+        self,
+        provider: str = "tushare",
+        root: Path | None = None,
+        *,
+        config_revision: str | None = None,
+    ):
         base = Path(root) if root else get_config().data_root / "api_cache"
+        self.provider = provider
+        self.config_revision = config_revision or _provider_revision(provider)
         self.root = base / provider
         self.root.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def _digest(endpoint: str, params: dict) -> str:
+    def _digest(self, endpoint: str, params: dict) -> str:
         payload = json.dumps(
-            {"endpoint": endpoint, "params": params},
+            {
+                "provider": self.provider,
+                "endpoint": endpoint,
+                "params": params,
+                "config_revision": self.config_revision,
+            },
             sort_keys=True, ensure_ascii=False, default=str,
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()[:24]

@@ -17,10 +17,12 @@ import pytest
 
 from quantmaster.data import registry
 from quantmaster.data.base import DataSource, Market
+from quantmaster.data.cache_contracts import CacheResultKind
 from quantmaster.data.resilience import (
     PROVIDER_HEALTH,
     PROVIDER_SCHEDULER,
     CircuitOpenError,
+    EmptyProviderResponse,
     EndpointFrameCache,
     LocalOnlyDataAccessError,
     ProviderContractChanged,
@@ -31,6 +33,7 @@ from quantmaster.data.resilience import (
     classify_provider_failure,
     local_only_data_access,
     provider_call,
+    provider_failure_result,
 )
 from quantmaster.data.storage import BarStore
 from quantmaster.data.tushare_source import TushareSource, _current_session_cache_floor
@@ -452,6 +455,54 @@ def test_tushare_required_nonempty_ignores_poisoned_empty_cache(
     assert len(result) == 1
     assert source._api.calls == 1
     assert len(pd.read_parquet(cache.path_for("daily", params))) == 1
+
+
+def test_endpoint_cache_identity_includes_provider_configuration(tmp_path):
+    first = EndpointFrameCache("tushare", root=tmp_path, config_revision="token-a")
+    second = EndpointFrameCache("tushare", root=tmp_path, config_revision="token-b")
+
+    assert first.path_for("daily", {"ts_code": "600000.SH"}) != second.path_for(
+        "daily", {"ts_code": "600000.SH"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (EmptyProviderResponse("empty"), CacheResultKind.INVALID_RESPONSE),
+        (ProviderContractChanged("schema"), CacheResultKind.INVALID_RESPONSE),
+        (PermissionError("permission denied"), CacheResultKind.PERMISSION_DENIED),
+        (TimeoutError("timeout"), CacheResultKind.TEMPORARY_FAILURE),
+    ],
+)
+def test_provider_failures_never_alias_valid_empty(error, kind):
+    assert provider_failure_result(error).kind == kind
+
+
+def test_tushare_rejects_mismatched_identity_before_caching(
+    tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.provider_call",
+        lambda lane, key, fetch, **kwargs: fetch(),
+    )
+    cache = EndpointFrameCache("tushare", root=tmp_path / "cache", config_revision="test")
+
+    class FakePro:
+        def daily(self, **_params):
+            return pd.DataFrame([{
+                "ts_code": "000001.SZ", "trade_date": "20240102", "close": 10,
+            }])
+
+    source = TushareSource(cache)
+    source._api = FakePro()
+    params = {"ts_code": "600000.SH", "start_date": "20240101", "end_date": "20240103"}
+
+    with pytest.raises(ProviderContractChanged, match="ts_code"):
+        source._call("daily", 1, required_columns=("ts_code", "trade_date"), **params)
+    assert not cache.path_for("daily", params).exists()
 
 
 def test_current_session_rejects_endpoint_cache_written_before_close():

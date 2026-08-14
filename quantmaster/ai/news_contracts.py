@@ -15,23 +15,38 @@ from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
+from quantmaster.data.cache_contracts import CacheResultKind
+
 HealthStatus = Literal["healthy", "degraded", "failed", "not_modified"]
 
 
 class NewsProviderError(RuntimeError):
     """A provider failed without producing a trustworthy batch."""
 
-    def __init__(self, message: str, *, code: str = "provider_error", retryable: bool = True):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "provider_error",
+        retryable: bool = True,
+        result_kind: CacheResultKind = CacheResultKind.TEMPORARY_FAILURE,
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.result_kind = result_kind
 
 
 class NewsContractError(NewsProviderError):
     """The upstream response no longer satisfies its declared schema."""
 
     def __init__(self, message: str, *, code: str = "contract_error"):
-        super().__init__(message, code=code, retryable=False)
+        super().__init__(
+            message,
+            code=code,
+            retryable=False,
+            result_kind=CacheResultKind.INVALID_RESPONSE,
+        )
 
 
 @dataclass(slots=True)

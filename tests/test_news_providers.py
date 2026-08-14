@@ -37,12 +37,28 @@ from quantmaster.ai.news_sources import (
     _ensure_public_url,
     _fetch_bytes,
     _parse_rss,
+    _validate_http_representation,
     fetch_declarative_source,
 )
+from quantmaster.data.cache_contracts import CacheResultKind
 
 
 def _source(source_id: str) -> dict:
     return next(dict(item) for item in BUILTIN_SOURCES if item["id"] == source_id)
+
+
+def test_json_news_contract_rejects_html_interstitial_before_persistence():
+    source = {
+        "id": "custom-json", "kind": "json", "url": "https://example.test/news",
+    }
+    with pytest.raises(NewsContractError) as error:
+        _validate_http_representation(
+            source,
+            b"<html><title>Login required</title><form></form></html>",
+            httpx.Headers({"content-type": "text/html"}),
+        )
+
+    assert error.value.result_kind == CacheResultKind.INVALID_RESPONSE
 
 
 @pytest.mark.parametrize("value", ["20260809", 1786240800000])
