@@ -77,6 +77,28 @@ def test_frozen_teardown_rejects_web_process_that_keeps_log_open(monkeypatch):
         )
 
 
+def test_frozen_doctor_uses_utf8_wire_encoding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess,
+        "run",
+        lambda command, **kwargs: (
+            calls.append((command, kwargs))
+            or SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        ),
+    )
+    environment = {"PYTHONIOENCODING": "cp1252"}
+
+    smoke_frozen_runtime._run_deep_doctor(tmp_path / "QuantMaster.exe", environment)
+
+    assert environment == {"PYTHONIOENCODING": "cp1252"}
+    assert calls[0][1]["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert calls[0][1]["encoding"] == "utf-8"
+    assert calls[0][1]["errors"] == "replace"
+
+
 def test_windows_package_and_release_workflows_run_the_frozen_smoke():
     root = Path(__file__).parents[1]
     ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")

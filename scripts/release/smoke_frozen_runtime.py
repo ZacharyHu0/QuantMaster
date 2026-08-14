@@ -195,6 +195,22 @@ def _start_launcher(
         raise
 
 
+def _run_deep_doctor(
+    executable: Path,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    doctor_env = {**environment, "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run(
+        [str(executable), "doctor", "--deep"],
+        env=doctor_env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90.0,
+        check=False,
+    )
+
+
 def smoke(executable: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("frozen runtime smoke requires Windows")
@@ -273,14 +289,7 @@ def smoke(executable: Path) -> None:
                 doctor_env = dict(environment)
                 for name in _IDENTITY_FIELDS:
                     doctor_env[f"QM_{name.upper()}"] = str(health[name])
-                doctor = subprocess.run(
-                    [str(executable), "doctor", "--deep"],
-                    env=doctor_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=90.0,
-                    check=False,
-                )
+                doctor = _run_deep_doctor(executable, doctor_env)
                 if doctor.returncode:
                     raise RuntimeError(
                         f"frozen deep doctor failed ({doctor.returncode}): {doctor.stderr[-2000:]}"
