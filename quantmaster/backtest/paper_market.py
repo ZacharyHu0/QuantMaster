@@ -326,12 +326,17 @@ def select_next_open_bar(
     local_now = current.astimezone(market_timezone(evidence.market))
     if next_session > local_now.date():
         return None
-    opening_match = next(
-        item.ends_at
-        for item in session_windows(evidence, next_session)
-        if item.phase == MarketPhase.OPENING_AUCTION
-    )
-    if current < opening_match.astimezone(current.tzinfo):
+    windows = session_windows(evidence, next_session)
+    if evidence.market == PaperMarket.CN:
+        # The 09:25 auction result precedes a non-matching cooling-off period.
+        # A daily open is executable only once continuous trading starts.
+        open_available_at = next(item.starts_at for item in windows if item.matching)
+    else:
+        # Preserve each market's explicit opening-auction policy.
+        open_available_at = next(
+            item.ends_at for item in windows if item.phase == MarketPhase.OPENING_AUCTION
+        )
+    if current < open_available_at.astimezone(current.tzinfo):
         return None
     candidates = [bar for bar in bars if bar.session == next_session]
     if len(candidates) > 1:

@@ -144,6 +144,38 @@ def test_recovery_cursor_never_skips_gap_or_uses_future_bar():
         )
 
 
+def test_cn_daily_open_requires_continuous_trading_and_observed_evidence() -> None:
+    calendar = evidence(PaperMarket.CN, ["2026-08-10", "2026-08-11"])
+    open_bar = DailyBarEvidence(
+        "600000.SH", pd.Timestamp("2026-08-11").date(), 10.0,
+        datetime.fromisoformat("2026-08-11T09:26:00+08:00"), "free-stockdb:daily",
+        raw_paper_semantics(),
+    )
+
+    assert select_next_open_bar(
+        [open_bar], after_session="2026-08-10",
+        decision_at=datetime.fromisoformat("2026-08-11T09:29:59+08:00"),
+        evidence=calendar,
+    ) is None
+    assert select_next_open_bar(
+        [open_bar], after_session="2026-08-10",
+        decision_at=datetime.fromisoformat("2026-08-11T09:30:00+08:00"),
+        evidence=calendar,
+    ) == open_bar
+
+    not_yet_observed = DailyBarEvidence(
+        "600000.SH", pd.Timestamp("2026-08-11").date(), 10.0,
+        datetime.fromisoformat("2026-08-11T09:30:01+08:00"), "free-stockdb:daily",
+        raw_paper_semantics(),
+    )
+    with pytest.raises(ValueError, match="未来行情"):
+        select_next_open_bar(
+            [not_yet_observed], after_session="2026-08-10",
+            decision_at=datetime.fromisoformat("2026-08-11T09:30:00+08:00"),
+            evidence=calendar,
+        )
+
+
 def test_late_backfill_cannot_execute_at_historical_open() -> None:
     calendar = evidence(PaperMarket.CN, ["2026-08-10", "2026-08-11"])
     late = DailyBarEvidence(
