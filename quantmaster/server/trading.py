@@ -193,6 +193,8 @@ def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> 
         raise HTTPException(409, "只有已完成回测才能创建模拟账户")
     if run.get("legacy_read_only"):
         raise HTTPException(409, "旧 Swing 回测仅供历史查看，不能创建模拟账户")
+    if (run.get("manifest") or {}).get("formal_eligible") is not True:
+        raise HTTPException(409, "回测缺少正式资格证据，不能创建模拟账户")
     try:
         spec = PaperAccountSpec.model_validate({
             "name": payload.name,

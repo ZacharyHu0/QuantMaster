@@ -110,6 +110,11 @@ qm data sync --assets stock --specs cross_asset_core,forward_returns,qm_style_v1
 qm doctor --deep                                    # 深查存储完整性、运行边界和 API/架构约束
 ```
 
+`qm backtest` 与 Web 回测任务共用同一个可审计执行入口，PIT 候选、行情质量门禁、
+策略快照、撮合与结果清单口径一致。CLI 仍是同步命令，不创建后台任务；Web 仍保留
+持久化进度、取消和恢复。只有带完整正式证据且 `formal_eligible=true` 的新结果可创建
+模拟账户；Sandbox、Quant Lab OOF 和旧的未分类结果仍可查看、比较和导出，但不能晋升。
+
 `qm data plan` 只生成依赖、预热/前瞻窗口、分区数、预估行数和权限阻塞，
 不访问生产数据。确认后再执行 `sync`；设置中心的“研究生产湖”提供相同的
 dry-run、启动、取消和续跑能力。详细数据口径、ArtifactRef 和 Rust 构建见
