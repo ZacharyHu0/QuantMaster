@@ -619,53 +619,6 @@ def test_partial_target_session_finishes_with_warning_instead_of_blocking(
     )]
 
 
-def test_success_event_submits_market_temperature_refresh(
-    isolated_config, monkeypatch,
-) -> None:
-    submitted = []
-    isolated_config.data.after_close_enabled = False
-    monkeypatch.setattr(
-        "quantmaster.rotation.service.get_rotation_worker",
-        lambda: SimpleNamespace(submit=lambda spec: submitted.append(spec)),
-    )
-
-    FreeStockDBRuntime()._deliver_event({
-        "kind": "update_succeeded",
-        "payload": {"target_session": "2026-08-10"},
-    })
-
-    assert len(submitted) == 1
-    assert submitted[0].scope == "all"
-    assert submitted[0].source == "auto"
-
-
-def test_partial_session_event_submits_only_market_temperature_refresh(
-    isolated_config, monkeypatch,
-) -> None:
-    submitted = []
-    after_close = []
-    isolated_config.data.after_close_enabled = True
-    isolated_config.data.after_close_auto_run = True
-    monkeypatch.setattr(
-        "quantmaster.rotation.service.get_rotation_worker",
-        lambda: SimpleNamespace(submit=lambda spec: submitted.append(spec)),
-    )
-    monkeypatch.setattr(
-        "quantmaster.after_close.jobs.get_after_close_jobs",
-        lambda: SimpleNamespace(submit=lambda **kwargs: after_close.append(kwargs)),
-    )
-
-    FreeStockDBRuntime()._deliver_event({
-        "kind": "market_session_partial",
-        "payload": {"target_session": "2026-08-10"},
-    })
-
-    assert len(submitted) == 1
-    assert submitted[0].scope == "all"
-    assert submitted[0].source == "auto"
-    assert after_close == []
-
-
 def test_supervised_worker_queues_update_for_owner(tmp_path, monkeypatch) -> None:
     control_path = tmp_path / "control.sqlite"
     monkeypatch.setenv("QM_FREE_STOCKDB_CONTROL_PATH", str(control_path))

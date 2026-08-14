@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from quantmaster.config import get_config
+from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
 from quantmaster.runtime.supervisor import (
     WorkerSupervisor,
     publish_worker_supervisor_status,
@@ -24,6 +27,135 @@ class _StopEvent(Protocol):
     def wait(self, timeout: float | None = None) -> bool: ...
 
 
+class StockDBEventSource(Protocol):
+    def claim_update_event(self) -> StockDBUpdateEvent | None: ...
+
+    def complete_update_event(self, event_key: str) -> None: ...
+
+
+class StockDBEventDelivery:
+    """Interpret durable StockDB evidence and dispatch its concrete consumers."""
+
+    def __init__(
+        self,
+        source: StockDBEventSource,
+        *,
+        after_close_jobs: Any,
+        rotation_worker: Any,
+        automation_runtime: Any,
+        paper_automation_worker: Any,
+        reset_after_close: Callable[[], None],
+        reset_etf_research: Callable[[], None],
+    ) -> None:
+        self.source = source
+        self.after_close_jobs = after_close_jobs
+        self.rotation_worker = rotation_worker
+        self.automation_runtime = automation_runtime
+        self.paper_automation_worker = paper_automation_worker
+        self.reset_after_close = reset_after_close
+        self.reset_etf_research = reset_etf_research
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def deliver(self, event: StockDBUpdateEvent) -> None:
+        kind = event.kind
+        payload = event.payload
+        cfg = get_config()
+        if kind in {
+            "update_succeeded", "market_session_available", "market_session_partial",
+        }:
+            from quantmaster.rotation.contracts import RotationJobSpec
+
+            target = str(payload.get("target_session") or "")
+            if kind in {"update_succeeded", "market_session_partial"}:
+                self.reset_after_close()
+                self.reset_etf_research()
+            if (
+                kind == "update_succeeded"
+                and cfg.data.after_close_enabled
+                and cfg.data.after_close_auto_run
+            ):
+                self.after_close_jobs.submit(as_of=target, force=False)
+                logger.info("free-stockdb 验收完成，已提交 %s 盘后研究扫描", target)
+            self.rotation_worker.submit(
+                RotationJobSpec(scope="all", source="auto", as_of=target),
+            )
+            if kind == "update_succeeded" and target and cfg.automation.enabled:
+                self.automation_runtime.service.run_task(
+                    "daily_close_pipeline",
+                    actor="free-stockdb",
+                    as_of=target,
+                    business_key=f"daily_close_pipeline:date:{target}",
+                )
+                logger.info("free-stockdb 验收完成，已提交 %s 正式选股流水线", target)
+            if kind == "update_succeeded" and target:
+                requeued = self.paper_automation_worker.requeue_market_data(target)
+                if requeued:
+                    logger.info(
+                        "free-stockdb 验收完成，已重新唤醒 %s 个因行情证据失败的模拟账户（%s）",
+                        requeued,
+                        target,
+                    )
+            logger.info(
+                "free-stockdb %s，已提交 %s 观察刷新",
+                "验收完成" if kind == "update_succeeded" else "目标交易日部分数据可用",
+                target or "最近完成交易日",
+            )
+            return
+        if kind != "update_failed" or not (
+            cfg.data.after_close_notify and cfg.automation.enabled
+        ):
+            return
+        from quantmaster.automation.models import AlertEvent, stable_hash
+
+        target = str(payload.get("target_session") or "未知")
+        validation = dict(payload.get("validation") or {})
+        actual = str(validation.get("actual_session") or "未知")
+        message = str(payload.get("message") or "真实交易日验收未通过")[:500]
+        attempts = payload.get("attempt") or "未知"
+        self.automation_runtime.service.process_event(AlertEvent(
+            kind="task_failure", score=100, severity="warning",
+            data_as_of=datetime.now(UTC).isoformat(),
+            evidence=[
+                f"目标交易日 {target}；本地实际 {actual}", message,
+                f"自动更新已尝试 {attempts} 次",
+            ],
+            dedupe_key=stable_hash({"free_stockdb_update_failed": target}),
+            payload={"title": "free-stockdb 自动更新未完成", "target_session": target},
+        ))
+
+    def poll_once(self) -> bool:
+        event = self.source.claim_update_event()
+        if event is None:
+            return False
+        self.deliver(event)
+        self.source.complete_update_event(event.event_key)
+        return True
+
+    def _run(self) -> None:
+        while not self._stop.wait(1.0):
+            try:
+                self.poll_once()
+            except (ImportError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+                logger.warning("free-stockdb 更新事件消费失败", exc_info=True)
+                self._stop.wait(2.0)
+
+    def start(self) -> None:
+        self._stop.clear()
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(
+                target=self._run, name="free-stockdb-event-bridge", daemon=True,
+            )
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        self._thread = None
+
+
 class _DefaultWorkerPlan:
     """Own the concrete services and ordering hidden from ``runtime.worker``."""
 
@@ -32,6 +164,7 @@ class _DefaultWorkerPlan:
             get_after_close_jobs,
             shutdown_after_close_jobs,
         )
+        from quantmaster.after_close.service import reset_after_close_service
         from quantmaster.ai.news_jobs import get_news_jobs, shutdown_news_jobs
         from quantmaster.analysis.stock_jobs import (
             get_stock_analysis_jobs,
@@ -54,6 +187,7 @@ class _DefaultWorkerPlan:
             get_etf_research_jobs,
             shutdown_etf_research_jobs,
         )
+        from quantmaster.rotation.etf_research import reset_etf_research_service
         from quantmaster.rotation.service import get_rotation_worker
         from quantmaster.server.diagnostics import (
             start_diagnostics_sampler,
@@ -84,6 +218,15 @@ class _DefaultWorkerPlan:
         self.paper_automation_worker = get_paper_automation_worker()
         self.data_refresh_manager = data_refresh_manager
         self.free_stockdb_runtime = free_stockdb_runtime
+        self.stockdb_event_delivery = StockDBEventDelivery(
+            free_stockdb_runtime,
+            after_close_jobs=self.after_close_worker,
+            rotation_worker=self.rotation_worker,
+            automation_runtime=self.runtime,
+            paper_automation_worker=self.paper_automation_worker,
+            reset_after_close=reset_after_close_service,
+            reset_etf_research=reset_etf_research_service,
+        )
         self.settings_manager = settings_manager
         self._publish_capabilities = publish_capabilities
         self._publish_market_overview_snapshot = publish_market_overview_snapshot
@@ -127,7 +270,7 @@ class _DefaultWorkerPlan:
         self.settings_worker.start()
         self.lab_llm_worker.runtime.start()
         self._start_diagnostics_sampler()
-        self.free_stockdb_runtime.start_event_bridge()
+        self.stockdb_event_delivery.start()
         self.data_refresh_manager.start()
         self.repair_worker.start()
         self.backtest_worker.start()
@@ -253,7 +396,7 @@ class _DefaultWorkerPlan:
     def stop(self, enter_phase: Callable[[str, float], None]) -> None:
         enter_phase("stop_producers", 5.0)
         self._stop_diagnostics_sampler()
-        self.free_stockdb_runtime.stop_event_bridge()
+        self.stockdb_event_delivery.stop()
         self.cnn_fear_greed_refresher.stop()
         # Scheduler/channel owners stop before durable workers so no producer
         # can submit during the durable drain.
