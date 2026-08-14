@@ -823,6 +823,7 @@ def test_historical_coverage_is_immutable_even_when_ttl_expired(tmp_path, monkey
 
 def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
     store = BarStore(root=tmp_path / "bars")
+    test_thread = threading.get_ident()
     current = pd.Timestamp("2026-08-14 16:00", tz="Asia/Shanghai")
     monkeypatch.setattr(registry, "market_now", lambda: current.to_pydatetime())
     monkeypatch.setattr(registry, "market_date", lambda: current.date())
@@ -842,7 +843,11 @@ def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
         calls: ClassVar[list[tuple[str, str]]] = []
 
         def daily(self, symbol, start, requested_end):
-            self.calls.append((start, requested_end))
+            # Other tests may still be draining background analysis work while
+            # this process-wide provider factory is patched.  Account only for
+            # calls made by the refresh operation under test.
+            if threading.get_ident() == test_thread:
+                self.calls.append((start, requested_end))
             index = pd.bdate_range(start, requested_end)
             frame = pd.DataFrame({
                 "open": 10.0, "high": 10.0, "low": 10.0,
@@ -858,6 +863,11 @@ def test_current_auto_refresh_only_fetches_tail_overlap(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [TailSource]})
     start = str(dates[0].date())
     end_value = str(end.date())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(
+            TailSource().daily, "600000.SH", "2025-04-01", end_value,
+        ).result()
+    assert TailSource.calls == []
     registry.refresh_history("600000.SH", start, end_value, store=store)
     assert TailSource.calls == [(start, end_value)]
 
