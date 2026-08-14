@@ -152,16 +152,24 @@
 
 ## GitHub management workflow
 
+- The canonical detailed procedure is [docs/github-workflow.md](docs/github-workflow.md). This
+  section is the hard gate for agents; do not rely on chat context or an untracked local process.
 - Every feature, bug, or independent refactor must have a GitHub Issue before implementation. The
   Issue records scope, non-goals, the public seam, data or migration risk, performance budgets, and
-  acceptance checks; the task branch and worktree slug must be linked from it.
+  acceptance checks; the task branch and worktree slug must be linked from it. Set the owner,
+  type/risk labels, milestone, the active v1.16.0 Project, and GitHub parent/blocked-by/blocking
+  relationships before implementation starts.
 - Push the first coherent task commit and open a Draft PR with `Closes #<issue>`. Keep exact tests,
   `tasks.py check`, final `tasks.py ready` lanes, package or UI evidence, and rollback notes in the
-  PR description. Mark it ready only after the committed task has completed its one-time integration
-  alignment and final gate.
+  PR description. The PR must carry the owner, labels, milestone, Project link, parent/blocked links,
+  and requested code review. Mark it ready only after the committed task has completed its one-time
+  integration alignment and final gate.
 - The agent owns PR maintenance, review fixes, GitHub Actions follow-up, squash merge, and the normal
   task-worktree cleanup. Do not bypass the PR with a direct `main` integration unless the owner
   explicitly authorizes an emergency exception.
+- When work starts, a Draft PR is pushed, a blocker appears, a PR merges, or a task is cleaned up,
+  synchronize the Issue, PR, Project status, milestone and parent Epic. Use `In progress`, `In review`,
+  `Blocked`, and `Done` consistently with the Project views; do not leave the state only in a comment.
 - Use GitHub Discussions for architecture proposals and evidence-backed decisions spanning multiple
   tasks. Irreversible migrations, hard package-budget conflicts, and inconclusive Rust or SciPy
   benchmarks pause the affected task and receive a decision post before implementation continues.

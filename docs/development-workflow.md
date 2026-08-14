@@ -156,9 +156,17 @@ servers change independently.
 
 ## 9. Use GitHub as the management record
 
+The detailed, normative GitHub procedure is [docs/github-workflow.md](github-workflow.md). The
+requirements below are the development-phase view of that procedure; they are repository rules,
+not suggestions kept only in an agent prompt.
+
 Every task starts from a GitHub Issue that states its scope, non-goals, public seam, data and
 rollback risk, performance budgets, and acceptance checks. The task branch and PR link that Issue;
 the PR description remains the authoritative validation report.
+
+Before implementation, set the Issue owner, type/risk labels, milestone, active v1.16.0 Project,
+parent Epic, and any `blocked by`/`blocking` relationships. Keep the Issue, PR, Project status and
+parent Epic synchronized as the task moves from `In progress` to `In review`, `Blocked`, and `Done`.
 
 The normal flow is:
 
