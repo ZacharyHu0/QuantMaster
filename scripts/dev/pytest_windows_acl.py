@@ -10,11 +10,11 @@ from _pytest.config import hookimpl
 
 
 def prepare_pytest_directory(path: Path) -> Path:
-    """Create a pytest-owned directory without replacing inherited ACLs."""
-    from quantmaster.runtime.storage_governance import prepare_writable_directory
-
+    """Create a writable pytest directory without replacing inherited ACLs."""
     target = path.resolve()
-    prepare_writable_directory(target)
+    target.mkdir(parents=True, exist_ok=True)
+    if not os.access(target, os.W_OK):
+        raise PermissionError(f"目录不可写: {target}")
     return target
 
 

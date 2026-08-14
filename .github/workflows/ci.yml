@@ -36,6 +36,7 @@ jobs:
           mkdir -p .artifacts/reports &&
           uv run python -m pytest tests/test_architecture.py tests/test_runtime_foundations.py
           tests/test_runtime_jobs.py tests/test_release_sync.py tests/test_settings.py
+          tests/test_task_workflow.py::test_windows_pytest_fixture_tree_inherits_acl_and_is_removable
           --timeout=180
           --junitxml=.artifacts/reports/core-${{ matrix.os }}.xml
           --durations=30

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,72 @@ from quantmaster.runtime.storage_governance import (
     resolve_storage,
     validate_instance_repair_target,
 )
+
+
+def _windows_os() -> SimpleNamespace:
+    return SimpleNamespace(
+        name="nt", access=os.access, R_OK=os.R_OK, W_OK=os.W_OK, environ=os.environ,
+    )
+
+
+def test_acl_inspection_retries_one_transient_timeout(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
+    calls = 0
+
+    def run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+        return subprocess.CompletedProcess(
+            args[0], 0, stdout="OWNER=test-owner\nINHERITED=True\n", stderr="",
+        )
+
+    monkeypatch.setattr(storage_governance, "os", _windows_os())
+    monkeypatch.setattr(storage_governance.subprocess, "run", run)
+
+    status = storage_governance.inspect_acl(tmp_path)
+
+    assert calls == 2
+    assert status.owner == "test-owner"
+    assert status.inherited is True
+    assert status.error == ""
+
+
+def test_acl_inspection_reports_both_timeouts_as_unavailable(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
+    calls = 0
+
+    def timeout(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(storage_governance, "os", _windows_os())
+    monkeypatch.setattr(storage_governance.subprocess, "run", timeout)
+
+    with pytest.raises(RuntimeError, match=r"无法验证.*attempt 1/2 TimeoutExpired.*attempt 2/2"):
+        storage_governance.prepare_writable_directory(tmp_path / "acl-timeout")
+
+    assert calls == 2
+
+
+def test_acl_inspection_distinguishes_confirmed_non_inheritance(monkeypatch, tmp_path):
+    from quantmaster.runtime import storage_governance
+
+    monkeypatch.setattr(storage_governance, "os", _windows_os())
+    monkeypatch.setattr(
+        storage_governance,
+        "inspect_acl",
+        lambda path: storage_governance.ACLStatus(
+            str(path), "test-owner", False, True, True,
+        ),
+    )
+
+    with pytest.raises(PermissionError, match="目录未保留 Windows ACL 继承"):
+        storage_governance.prepare_writable_directory(tmp_path / "protected-acl")
 
 
 def test_temporary_directory_keeps_parent_inheritance_contract(monkeypatch, tmp_path):
