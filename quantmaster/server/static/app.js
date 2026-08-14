@@ -3242,11 +3242,25 @@ function renderRegimeChart(windowKey = activeRegimeWindow) {
     animationEasing:'cubicOut', animationEasingUpdate:'cubicOut',
     grid:{left:42,right:45,top:44,bottom:36},
     legend:{textStyle:{color:INK2},top:0},
+    tooltip:{trigger:'axis',confine:true,
+      axisPointer:{type:'cross',label:{backgroundColor:AXIS}},
+      formatter:params => {
+        const points = Array.isArray(params) ? params : [params];
+        const date = points[0]?.axisValueLabel || points[0]?.axisValue || '';
+        return [esc(date), ...points.map(point => {
+          const raw = Array.isArray(point.value) ? point.value[1] : point.value;
+          const numeric = Number(raw);
+          const value = Number.isFinite(numeric)
+            ? point.seriesName === '牛熊分' ? fixed(numeric,1) : `${fixed(numeric * 100,1)}%`
+            : '—';
+          return `${point.marker}${esc(point.seriesName)}&nbsp;&nbsp;<b>${value}</b>`;
+        })].join('<br>');
+      }},
     xAxis:timeAxis(), yAxis:[valAxis(),{...valAxis(v => (v * 100).toFixed(0) + '%'),min:0,max:1}],
     series:[
       {name:'牛熊分',type:'line',data:history.map(r => [r.date,r.bull_score]),showSymbol:false,smooth:.16,lineStyle:{width:2}},
       {name:'上涨宽度',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.advance_ratio]),showSymbol:false,lineStyle:{width:1.5,color:CHART_COLORS.up}},
-      {name:'站上MA20',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.above_ma20_ratio]),showSymbol:false,lineStyle:{width:1.5,color:CHART_COLORS.compare}},
+      {name:'站上MA20',type:'line',yAxisIndex:1,data:history.map(r => [r.date,r.above_ma20_ratio]),showSymbol:false,lineStyle:{width:1.6,color:CHART_COLORS.warning,type:'dashed'}},
     ],
   }), {notMerge:true});
 }
