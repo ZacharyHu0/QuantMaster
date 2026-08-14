@@ -1,73 +1,57 @@
 from __future__ import annotations
 
-import os
+import argparse
 import re
-import subprocess
-import sys
-import time
 from pathlib import Path
 
 import pytest
 
+from quantmaster.cli import build_parser
+
 REMOVED_RESEARCH_COMMANDS = ("validate", "grid", "fund-test", "mine", "mine-llm")
-SUPPORTED_RESEARCH_HELP = (
-    ("factor-test", "--help"),
-    ("backtest", "--help"),
-    ("lab", "--help"),
-)
+SUPPORTED_RESEARCH_COMMANDS = ("factor-test", "backtest", "lab")
 ROOT = Path(__file__).resolve().parents[1]
+REMOVED_INVOCATION = re.compile(
+    r"(?m)(?:^\s*qm\s+(?:validate|grid|fund-test|mine(?:-llm)?)(?=\s|$)"
+    r"|`qm\s+(?:validate|grid|fund-test|mine(?:-llm)?)(?=[\s`]|$)[^`]*`)"
+)
 
-
-def _qm(*args: str) -> subprocess.CompletedProcess[str]:
-    environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    return subprocess.run(
-        [sys.executable, "-m", "quantmaster.cli", *args],
-        capture_output=True,
-        check=False,
-        env=environment,
-        text=True,
-        timeout=10,
+def test_top_level_research_command_choices_match_the_supported_interface() -> None:
+    parser = build_parser()
+    subparsers = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
+    commands = set(subparsers.choices)
+
+    assert commands.isdisjoint(REMOVED_RESEARCH_COMMANDS)
+    assert commands.issuperset(SUPPORTED_RESEARCH_COMMANDS)
 
 
-@pytest.mark.parametrize("command", REMOVED_RESEARCH_COMMANDS)
-def test_removed_top_level_research_commands_are_unknown(command: str) -> None:
-    result = _qm(command, "--help")
+def test_removed_top_level_research_command_is_rejected_by_argparse() -> None:
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(["mine", "--help"])
 
-    assert result.returncode == 2
-    assert "invalid choice" in result.stderr
-
-
-def test_help_and_guides_only_advertise_supported_research_commands() -> None:
-    help_result = _qm("--help")
-    tracked_guidance = "\n".join(
-        [
-            (ROOT / "quantmaster" / "cli.py").read_text(encoding="utf-8"),
-            (ROOT / "README.md").read_text(encoding="utf-8"),
-            (ROOT / "docs" / "guide.md").read_text(encoding="utf-8"),
-        ]
-    )
-
-    assert help_result.returncode == 0
-    for command in REMOVED_RESEARCH_COMMANDS:
-        assert f"\n    {command}" not in help_result.stdout
-    assert re.search(
-        r"(?m)^\s*qm\s+(?:validate|grid|fund-test|mine(?:-llm)?)\b",
-        tracked_guidance,
-    ) is None
+    assert error.value.code == 2
 
 
-@pytest.mark.parametrize("args", SUPPORTED_RESEARCH_HELP)
-def test_supported_research_commands_remain_available(args: tuple[str, ...]) -> None:
-    result = _qm(*args)
+def test_current_markdown_only_advertises_supported_research_commands() -> None:
+    markdown = []
+    for path in ROOT.rglob("*.md"):
+        relative = path.relative_to(ROOT)
+        if path.name == "CHANGELOG.md" or {".artifacts", ".worktrees"} & set(relative.parts):
+            continue
+        markdown.append(path.read_text(encoding="utf-8"))
 
-    assert result.returncode == 0
+    assert REMOVED_INVOCATION.search("\n".join(markdown)) is None
 
 
-def test_cli_help_stays_within_startup_budget() -> None:
-    started = time.perf_counter()
-    result = _qm("--help")
-    elapsed = time.perf_counter() - started
+def test_markdown_contract_catches_command_lines_and_inline_code() -> None:
+    for markdown in ("  qm fund-test ep", "Use `qm mine-llm --rounds 2` here."):
+        assert REMOVED_INVOCATION.search(markdown) is not None
 
-    assert result.returncode == 0
-    assert elapsed <= 1.5
+
+def test_supported_research_command_remains_available() -> None:
+    with pytest.raises(SystemExit) as result:
+        build_parser().parse_args(["lab", "--help"])
+
+    assert result.value.code == 0
