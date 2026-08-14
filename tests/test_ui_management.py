@@ -118,28 +118,53 @@ def _wait_for_ui_runtime(url) -> None:
 
 
 def _assert_no_ui_process_owners() -> None:
-    frames = sys._current_frames()
-    threads = []
-    for active in threading.enumerate():
-        if active is threading.main_thread() or not active.is_alive():
-            continue
-        frame = frames.get(active.ident) if active.ident is not None else None
-        threads.append({
-            "name": active.name, "ident": active.ident, "daemon": active.daemon,
-            "stack": "".join(traceback.format_stack(frame)) if frame else "unavailable",
-        })
-    children = [
-        {"pid": child.pid, "name": child.name, "exitcode": child.exitcode}
-        for child in multiprocessing.active_children()
-    ]
-    blocking_threads = [
-        item for item in threads
-        if not item["daemon"] and not str(item["name"]).startswith("pytest_timeout ")
-    ]
+    deadline = time.monotonic() + 1
+    while True:
+        frames = sys._current_frames()
+        threads = []
+        for active in threading.enumerate():
+            if active is threading.main_thread() or not active.is_alive():
+                continue
+            frame = frames.get(active.ident) if active.ident is not None else None
+            threads.append({
+                "name": active.name, "ident": active.ident, "daemon": active.daemon,
+                "stack": "".join(traceback.format_stack(frame)) if frame else "unavailable",
+            })
+        children = [
+            {"pid": child.pid, "name": child.name, "exitcode": child.exitcode}
+            for child in multiprocessing.active_children()
+        ]
+        blocking_threads = [
+            item for item in threads
+            if not item["daemon"] and not str(item["name"]).startswith("pytest_timeout ")
+        ]
+        if not blocking_threads and not children:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.01, remaining))
     assert not blocking_threads and not children, (
         f"UI 测试生命周期仍有阻塞所有者: threads={blocking_threads!r} "
         f"children={children!r} daemon_threads={threads!r}"
     )
+
+
+def test_ui_owner_assertion_waits_for_short_lived_runtime_thread() -> None:
+    started = threading.Event()
+
+    def finish_soon() -> None:
+        started.set()
+        time.sleep(0.05)
+
+    owner = threading.Thread(target=finish_soon, name="short-lived-ui-owner")
+    owner.start()
+    assert started.wait(timeout=1)
+    try:
+        _assert_no_ui_process_owners()
+        assert not owner.is_alive()
+    finally:
+        owner.join(timeout=1)
 
 
 def test_after_close_prioritizes_sector_width_without_wide_screen_scroll(live_server):
