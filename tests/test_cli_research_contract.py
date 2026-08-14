@@ -100,3 +100,65 @@ def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, 
         "neutralize": True,
         "refresh": True,
     }]
+
+
+def test_backtest_cli_maps_to_shared_execution_without_a_job_store(
+    monkeypatch, capsys,
+) -> None:
+    observed = []
+
+    def execute_backtest(spec, **kwargs):
+        observed.append((spec, kwargs))
+        return {
+            "manifest": {
+                "research_tier": "sandbox",
+                "formal_eligible": False,
+                "warnings": [{"code": "fixed_universe"}],
+            },
+            "summary": {},
+            "artifact": {
+                "metrics": {"total_return": 0.125},
+                "yearly": {"2023": 0.125},
+                "monthly": {"2023": {"1": 0.01}},
+            },
+        }
+
+    monkeypatch.setattr(
+        "quantmaster.backtest.application.execute_backtest", execute_backtest,
+    )
+    args = build_parser().parse_args([
+        "backtest", "--factor", "ts_corr(rank(volume), rank(close), 20), mom_20d",
+        "--universe", "demo", "--start", "2023-01-02", "--end", "2023-07-28",
+        "--top", "4", "--rebalance", "M", "--weighting", "ic",
+        "--capital", "200000", "--stop-loss", "0.08", "--take-profit", "0.25",
+    ])
+
+    assert args.func(args) is None
+    spec, kwargs = observed[0]
+    assert spec.model_dump(mode="json") == {
+        "name": "",
+        "strategy": {
+            "kind": "factor",
+            "factor": "ts_corr(rank(volume), rank(close), 20), mom_20d",
+            "top_n": 4,
+            "rebalance": "M",
+            "weighting": "ic",
+            "cap_weight": 0.35,
+        },
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-07-28",
+        "benchmark": "000300.SH",
+        "initial_capital": 200000.0,
+        "stop_loss": 0.08,
+        "take_profit": 0.25,
+        "allow_partial": False,
+        "research_tier": "auto",
+    }
+    assert kwargs == {}
+    assert json.loads(capsys.readouterr().out) == {
+        "total_return": 0.125,
+        "research_tier": "sandbox",
+        "formal_eligible": False,
+        "warnings": [{"code": "fixed_universe"}],
+    }

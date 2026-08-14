@@ -305,6 +305,12 @@ qm backtest --factor mom_20d --stop-loss 0.08 --take-profit 0.25 --full
 # --full 额外输出年度收益表和月度收益表
 ```
 
+命令行和 Web 使用同一套候选/PIT、数据质量、策略快照、撮合与报告逻辑，但运行方式
+不同：命令行同步返回且不写 Web 任务账本，Web 任务可离开页面后继续、取消或恢复。
+输出中的 `research_tier`、`formal_eligible` 和 `warnings` 是晋升依据。只有明确为
+`formal_eligible=true` 的新正式结果能创建模拟账户；Sandbox、Lab OOF 与旧的未分类
+结果只允许查看、比较和导出，系统不会用当前规则猜测旧结果等级。
+
 Web 界面「实盘」页既可以逐笔录入，也可以直接导入券商 CSV：选择文件后检查
 自动列映射与逐行预览，再选择严格模式或仅导入有效行。疑似重复默认跳过；最终
 有效记录在一个 SQLite 事务中写入，任一数据库错误都会整批回滚。
