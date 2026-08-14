@@ -191,7 +191,7 @@ def _role_executable(role: str) -> str | None:
         # Copying a one-file archive writes another ~170 MiB and makes its
         # first multiprocessing import race antivirus/archive extraction.
         # The original frozen executable already has the exact spawn contract.
-        return str(Path(sys.executable).resolve())
+        return os.path.abspath(sys.executable)
     # ``sys.executable`` is normally the venv redirector (a tiny executable
     # with no adjacent CPython DLLs). Its renamed copies cannot start outside
     # the original ``python.exe`` name. A base-interpreter copy alongside

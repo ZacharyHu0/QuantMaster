@@ -71,6 +71,13 @@ def test_frozen_role_process_reuses_onefile_archive_without_copying(tmp_path, mo
     monkeypatch.setattr(windows_app.sys, "frozen", True, raising=False)
     monkeypatch.setattr(windows_app.sys, "executable", str(executable))
     monkeypatch.setattr(
+        windows_app,
+        "Path",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("frozen path must not use the host-sensitive Path factory")
+        ),
+    )
+    monkeypatch.setattr(
         windows_app.shutil,
         "copy2",
         lambda *_args: (_ for _ in ()).throw(AssertionError("frozen EXE must not be copied")),
