@@ -1729,6 +1729,15 @@ def test_daily_triggers_manual_and_stockdb_share_trade_date_job(tmp_path, monkey
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     runtime = runtime_module.AutomationRuntime(service)
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_daily_close(*, as_of=""):
+        started.set()
+        assert release.wait(2)
+        return {"status": "completed", "as_of": as_of}
+
+    monkeypatch.setattr(service, "_task_daily_close_pipeline", hold_daily_close)
     moment = datetime(2026, 8, 12, 15, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
     monkeypatch.setattr(
         "quantmaster.automation.service.resolve_session_target",
@@ -1737,22 +1746,26 @@ def test_daily_triggers_manual_and_stockdb_share_trade_date_job(tmp_path, monkey
         ),
     )
 
-    first = runtime.discover_job("daily_close_pipeline", now=moment)
-    second = runtime.discover_job("daily_close_pipeline", now=moment.replace(minute=35))
-    manual = service.run_task("daily_close_pipeline", actor="web", as_of="2026-08-12")
-    stockdb = service.run_task(
-        "daily_close_pipeline", actor="free-stockdb", as_of="2026-08-12",
-        business_key="daily_close_pipeline:date:2026-08-12",
-    )
+    try:
+        first = runtime.discover_job("daily_close_pipeline", now=moment)
+        assert started.wait(2)
+        second = runtime.discover_job("daily_close_pipeline", now=moment.replace(minute=35))
+        manual = service.run_task("daily_close_pipeline", actor="web", as_of="2026-08-12")
+        stockdb = service.run_task(
+            "daily_close_pipeline", actor="free-stockdb", as_of="2026-08-12",
+            business_key="daily_close_pipeline:date:2026-08-12",
+        )
 
-    assert {first["job_id"], second["job_id"], manual["job_id"], stockdb["job_id"]} == {
-        first["job_id"],
-    }
-    job = service.jobs.store.get(first["job_id"])
-    assert job["trigger_count"] == 4
-    assert job["coalesced_count"] == 3
-    service.jobs.stop()
-    service.executor.shutdown(wait=False, cancel_futures=True)
+        assert {first["job_id"], second["job_id"], manual["job_id"], stockdb["job_id"]} == {
+            first["job_id"],
+        }
+        job = service.jobs.store.get(first["job_id"])
+        assert job["trigger_count"] == 4
+        assert job["coalesced_count"] == 3
+    finally:
+        release.set()
+        service.jobs.stop()
+        service.executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_daily_scheduler_uses_the_same_resolved_trade_date_as_manual(tmp_path, monkeypatch):
@@ -1764,6 +1777,15 @@ def test_daily_scheduler_uses_the_same_resolved_trade_date_as_manual(tmp_path, m
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     runtime = runtime_module.AutomationRuntime(service)
+    started = threading.Event()
+    release = threading.Event()
+
+    def hold_daily_close(*, as_of=""):
+        started.set()
+        assert release.wait(2)
+        return {"status": "completed", "as_of": as_of}
+
+    monkeypatch.setattr(service, "_task_daily_close_pipeline", hold_daily_close)
     monkeypatch.setattr(
         "quantmaster.automation.service.resolve_session_target",
         lambda as_of="", now=None: SimpleNamespace(
@@ -1772,15 +1794,19 @@ def test_daily_scheduler_uses_the_same_resolved_trade_date_as_manual(tmp_path, m
     )
     holiday = datetime(2026, 8, 17, 15, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
 
-    scheduled = runtime.discover_job("daily_close_pipeline", now=holiday)
-    manual = service.run_task(
-        "daily_close_pipeline", actor="web", as_of="2026-08-14",
-    )
+    try:
+        scheduled = runtime.discover_job("daily_close_pipeline", now=holiday)
+        assert started.wait(2)
+        manual = service.run_task(
+            "daily_close_pipeline", actor="web", as_of="2026-08-14",
+        )
 
-    assert scheduled["business_key"] == "daily_close_pipeline:date:2026-08-14"
-    assert manual["job_id"] == scheduled["job_id"]
-    service.jobs.stop()
-    service.executor.shutdown(wait=False, cancel_futures=True)
+        assert scheduled["business_key"] == "daily_close_pipeline:date:2026-08-14"
+        assert manual["job_id"] == scheduled["job_id"]
+    finally:
+        release.set()
+        service.jobs.stop()
+        service.executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_daily_close_calendar_unavailable_never_invents_natural_date(
