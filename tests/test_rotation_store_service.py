@@ -1075,7 +1075,11 @@ def test_rotation_reuse_result_deduplicates_warnings_and_marks_partial(tmp_path)
     assert result["snapshot_id"]
 
 
-def test_rotation_provider_plan_preserves_historical_theme_contract(tmp_path):
+def test_rotation_provider_plan_preserves_historical_theme_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "quantmaster.rotation.service._expected_market_session",
+        lambda _now=None, *, as_of="": as_of,
+    )
     service = RotationService(
         RotationStore(tmp_path / "rotation"),
         UnifiedJobStore(tmp_path / "jobs.sqlite"),

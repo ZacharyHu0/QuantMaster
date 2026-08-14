@@ -243,12 +243,24 @@ def test_gate_rejects_nonfinite_and_impossible_ohlcv(service) -> None:
     assert caught.value.coverage["invalid_ohlcv"]["nonfinite_rows"] == 4
 
 
-def test_historical_force_rejects_current_board_taxonomy(service) -> None:
+def test_historical_force_rejects_current_board_taxonomy(service, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.after_close.service.resolve_session_target",
+        lambda as_of: SessionExpectation(
+            as_of, "fixture", True, "verified", "previous_session_complete",
+        ),
+    )
     with pytest.raises(DataGateRejected, match="当前分类"):
         service.scan(as_of="2026-08-05", force=True)
 
 
-def test_historical_force_rejects_future_dated_board_taxonomy(service) -> None:
+def test_historical_force_rejects_future_dated_board_taxonomy(service, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.after_close.service.resolve_session_target",
+        lambda as_of: SessionExpectation(
+            as_of, "fixture", True, "verified", "previous_session_complete",
+        ),
+    )
     original = service.source.board_hierarchy
 
     def future_boards():

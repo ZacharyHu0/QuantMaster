@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from quantmaster.trading_sessions import (
     SessionExpectation,
     SessionExpectationResolver,
@@ -68,9 +70,10 @@ def test_morning_restart_catches_up_previous_verified_session():
     timezone = ZoneInfo("Asia/Shanghai")
     resolver = FixtureResolver(["2026-08-03", "2026-08-04"])
     result = resolver.resolve(datetime(2026, 8, 5, 9, tzinfo=timezone))
-    assert result.ready is True
+    assert result.ready is False
     assert result.session == "2026-08-04"
     assert result.source == "tushare:SSE"
+    assert result.completion == "current_session_closed_waiting_provider"
 
 
 def test_cold_start_without_calendar_returns_actionable_safe_skip():
@@ -92,6 +95,9 @@ def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_c
     ) == "2026-08-04"
     assert SessionExpectation("2026-08-04", "fixture", True, "verified").as_dict() == {
         "session": "2026-08-04", "source": "fixture", "ready": True, "reason": "verified",
+        "completion": "calendar_unavailable",
+        "market_timezone": "Asia/Shanghai",
+        "cutoff_at": "",
     }
 
     research = ResearchFallbackResolver([]).resolve(naive)
@@ -130,8 +136,10 @@ def test_newer_strict_stockdb_marker_advances_stale_research_lake(
         "schema_version": 2,
         "validated_session": "2026-08-13",
         "target_session": "2026-08-13",
+        "updated_at": "2026-08-13T18:33:49+08:00",
         "validation": {
             "accepted": True,
+            "complete": True,
             "target_session": "2026-08-13",
             "actual_session": "2026-08-13",
         },
@@ -162,8 +170,10 @@ def test_stockdb_marker_is_fail_closed_and_obeys_close_cutoff(
         "schema_version": 2,
         "validated_session": "2026-08-13",
         "target_session": "2026-08-13",
+        "updated_at": "2026-08-13T18:33:49+08:00",
         "validation": {
             "accepted": True,
+            "complete": True,
             "target_session": "2026-08-13",
             "actual_session": "2026-08-13",
         },
@@ -188,3 +198,32 @@ def test_stockdb_marker_is_fail_closed_and_obeys_close_cutoff(
     assert resolver.resolve(
         datetime(2026, 8, 13, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
     ).ready is False
+
+
+def test_explicit_target_rejects_future_open_session_and_non_session():
+    resolver = FixtureResolver(["2026-08-13", "2026-08-14"])
+    timezone = ZoneInfo("Asia/Shanghai")
+
+    with pytest.raises(ValueError, match="尚未收盘"):
+        resolver.resolve_explicit(
+            datetime(2026, 8, 14).date(),
+            datetime(2026, 8, 14, 10, tzinfo=timezone),
+        )
+    with pytest.raises(ValueError, match="不是已验证交易日"):
+        resolver.resolve_explicit(
+            datetime(2026, 8, 15).date(),
+            datetime(2026, 8, 17, 20, tzinfo=timezone),
+        )
+
+
+def test_explicit_verified_session_without_local_completion_fails_closed():
+    resolver = FixtureResolver(["2026-08-13"])
+
+    result = resolver.resolve_explicit(
+        datetime(2026, 8, 13).date(),
+        datetime(2026, 8, 14, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is False
+    assert result.source == "tushare:SSE"
+    assert result.completion == "current_session_closed_waiting_provider"
