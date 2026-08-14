@@ -74,6 +74,22 @@ def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
     assert not violations, "runtime wiring must live in bootstrap:\n" + "\n".join(violations)
 
 
+def test_stockdb_data_runtime_does_not_dispatch_domain_events():
+    path = PACKAGE_ROOT / "data" / "free_stockdb_runtime.py"
+    domain_roots = {
+        "after_close", "ai", "analysis", "automation", "backtest", "decision",
+        "factors", "lab", "market", "portfolio", "research", "rotation",
+    }
+    violations = []
+    for imported in _all_imports(path):
+        parts = imported.split(".")
+        if len(parts) >= 3 and parts[:2] == ["quantmaster", "data"]:
+            continue
+        if len(parts) >= 2 and parts[0] == "quantmaster" and parts[1] in domain_roots:
+            violations.append(imported)
+    assert not violations, "StockDB delivery leaked into data:\n" + "\n".join(violations)
+
+
 def test_quantmaster_has_no_top_level_import_cycles():
     paths = [path for path in PACKAGE_ROOT.rglob("*.py") if path.name != "__init__.py"]
     modules = {_module(path): path for path in paths}
