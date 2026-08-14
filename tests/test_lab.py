@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -45,7 +46,7 @@ from quantmaster.lab.robustness import (
     expression_parameter_variants,
     monte_carlo_block_bootstrap,
 )
-from quantmaster.lab.service import LabService
+from quantmaster.lab.service import LabService, get_lab_service
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.validation import benjamini_hochberg, validate_factor_values
 
@@ -80,6 +81,76 @@ def _panel(days=190, symbols=5):
         "low": close * 0.988,
         "volume": pd.DataFrame(rng.lognormal(10, 0.8, close.shape), index, columns),
     }
+
+
+def test_lab_service_owner_reuses_readers_and_writers_per_data_root(tmp_path):
+    _config(tmp_path)
+    writer = get_lab_service()
+    reader = get_lab_service(read_only=True)
+
+    assert get_lab_service() is writer
+    assert get_lab_service(read_only=True) is reader
+    assert reader is not writer
+    assert reader.store.read_only is True
+
+    _config(tmp_path / "next")
+    assert get_lab_service() is not writer
+    assert get_lab_service(read_only=True) is not reader
+
+
+def test_lab_transport_does_not_export_service_lifecycle_owner():
+    from quantmaster.server import lab as lab_api
+
+    assert not hasattr(lab_api, "get_lab_service")
+
+
+def test_cloud_suggestion_job_uses_lab_service_owner_and_publishes_artifact(
+    tmp_path, monkeypatch,
+):
+    _config(tmp_path)
+    from quantmaster.lab.llm_jobs import LabLLMJobs
+
+    class Service:
+        @staticmethod
+        def suggest_revision(*_args, **_kwargs):
+            return {"id": "suggestion-1", "status": "pending"}
+
+    monkeypatch.setattr("quantmaster.lab.service.get_lab_service", lambda: Service())
+    jobs = LabLLMJobs()
+    try:
+        job, created = jobs.submit("factor-1", True, {"rows": 3})
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            completed = jobs.runtime.store.get(job["id"])
+            if completed["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+
+        assert created is True
+        assert completed["status"] == "completed"
+        artifact = jobs.runtime.store.artifact(completed["result_artifact_id"])
+        assert artifact["kind"] == "lab.cloud_suggestion"
+        assert artifact["payload"] == {
+            "schema_version": "1.0",
+            "result": {"id": "suggestion-1", "status": "pending"},
+        }
+        assert artifact["lineage"] == {"version_id": "factor-1"}
+    finally:
+        assert jobs.runtime.stop()["status"] == "stopped"
+
+
+def test_cloud_suggestion_shutdown_releases_the_worker_plan_runtime(tmp_path):
+    _config(tmp_path)
+    from quantmaster.lab.llm_jobs import get_lab_llm_jobs, shutdown_lab_llm_jobs
+
+    shutdown_lab_llm_jobs()
+    first = get_lab_llm_jobs()
+    shutdown_lab_llm_jobs()
+
+    assert first.runtime.snapshot()["status"] == "stopped"
+    second = get_lab_llm_jobs()
+    assert second is not first
+    shutdown_lab_llm_jobs()
 
 
 def test_cloud_suggestion_confirmation_follows_auto_send_setting(tmp_path, monkeypatch):
@@ -1291,9 +1362,7 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         })
         assert queued.status_code == 409
         assert queued.json()["error"]["code"] == "DATA_COVERAGE_INSUFFICIENT"
-        from quantmaster.server import lab as lab_api
-
-        service = lab_api.get_lab_service()
+        service = get_lab_service()
         monkeypatch.setattr(service, "preflight", lambda *_args, **_kwargs: {
             "runnable": True, "state": "ready", "resource_class": "cpu",
             "blockers": [], "warnings": [], "dataset": {},
@@ -1305,7 +1374,7 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         })
         assert queued.status_code == 202
         assert queued.json()["status"] == "queued"
-        lab_api.get_lab_service().store.finish_job(
+        get_lab_service().store.finish_job(
             queued.json()["id"], error="测试失败",
         )
         retried = client.post(f"/api/v1/jobs/{queued.json()['id']}/retry")
@@ -1554,9 +1623,7 @@ def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path, monkeypatch):
             for item in blockers
         )
         cfg.lab.ai_python_mining_enabled = True
-        from quantmaster.server import lab as lab_api
-
-        monkeypatch.setattr(lab_api.get_lab_service(), "preflight", lambda *_args, **_kwargs: {
+        monkeypatch.setattr(get_lab_service(), "preflight", lambda *_args, **_kwargs: {
             "runnable": True, "state": "ready", "resource_class": "external",
             "blockers": [], "warnings": [], "dataset": {},
         })

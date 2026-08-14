@@ -2724,6 +2724,28 @@ class LabService:
         raise ValueError(f"无法执行任务: {kind}")
 
 
+_service: LabService | None = None
+_service_path = ""
+_read_service: LabService | None = None
+_read_service_path = ""
+
+
+def get_lab_service(*, read_only: bool = False) -> LabService:
+    """Return a writer service for commands or a bounded reader for queries."""
+
+    global _service, _service_path, _read_service, _read_service_path
+    expected = str((get_config().data_root / "lab.sqlite").resolve())
+    if read_only:
+        if _read_service is None or expected != _read_service_path:
+            _read_service = LabService(read_only=True)
+            _read_service_path = expected
+        return _read_service
+    if _service is None or expected != _service_path:
+        _service = LabService()
+        _service_path = expected
+    return _service
+
+
 def _expression_fields(expression: str) -> set[str]:
     fields = {"open", "high", "low", "close", "volume", "amount", "turnover", "vwap", "returns"}
     return {name for name in fields if re.search(rf"\b{re.escape(name)}\b", expression)}

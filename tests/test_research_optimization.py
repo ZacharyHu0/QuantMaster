@@ -251,9 +251,9 @@ def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path, monk
         })
         assert created.status_code == 409
         assert created.json()["error"]["code"] == "DATASET_MISSING"
-        from quantmaster.server import lab as lab_api
+        from quantmaster.lab.service import get_lab_service
 
-        monkeypatch.setattr(lab_api.get_lab_service(), "preflight", lambda *_args, **_kwargs: {
+        monkeypatch.setattr(get_lab_service(), "preflight", lambda *_args, **_kwargs: {
             "runnable": True, "state": "ready", "resource_class": "cpu",
             "blockers": [], "warnings": [], "dataset": {},
         })
