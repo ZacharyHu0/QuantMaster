@@ -9,6 +9,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -17,7 +18,10 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.data.free_stockdb_contracts import StockDBIngestSnapshot
+from quantmaster.data.free_stockdb_contracts import (
+    StockDBArtifactIdentity,
+    StockDBIngestSnapshot,
+)
 from quantmaster.data.free_stockdb_ingest import (
     STOCKDB_INGEST_SCHEMA_VERSION,
     StockDBIngestService,
@@ -164,6 +168,50 @@ def _is_exchange_etf_symbol(symbol: str) -> bool:
 
 def _explicit_true(value: Any) -> bool:
     return value is True or str(value).strip().casefold() in {"1", "true", "yes"}
+
+
+@dataclass
+class _EtfScanContext:
+    as_of: str
+    tier: EtfResearchTier
+    progress: Progress
+    cancelled: Cancelled
+    refresh_warnings: tuple[str, ...]
+    end: pd.Timestamp
+    target_source: str
+    profiles: list[EtfProfile]
+    start: pd.Timestamp
+    symbols: list[str]
+    master_id: str
+    identity: StockDBArtifactIdentity
+    cache_key: str
+    ingest_history: list[StockDBIngestSnapshot]
+    ingest: StockDBIngestSnapshot | None = None
+    daily: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class _EtfResearchBuild:
+    rows: list[dict[str, Any]]
+    items: list[EtfResearchItem]
+    sectors: list[dict[str, Any]]
+    queues: dict[str, tuple[str, ...]]
+    candidate_queues: dict[str, tuple[str, ...]]
+    summaries: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class _EtfScanEvidence:
+    actual: str
+    daily: pd.DataFrame
+    factors: pd.DataFrame
+    direct: pd.DataFrame
+    metadata: pd.DataFrame
+    session_dates: list[str]
+    adjustment_capability: dict[str, Any]
+    evidence_hashes: dict[str, str]
+    input_hash: str
+    snapshot_id: str
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -2507,20 +2555,18 @@ class EtfResearchService:
                 refresh_warnings=refresh_warnings,
             )
 
-    def _scan(
+    def _new_scan_context(
         self,
         *,
-        as_of: str = "",
-        tier: str = "production",
-        progress: Progress | None = None,
-        cancelled: Cancelled | None = None,
-        refresh_warnings: list[str] | tuple[str, ...] = (),
-    ) -> EtfResearchSnapshot:
-        cfg = get_config().data
-        if not cfg.free_stockdb_etf_research_enabled:
-            raise RuntimeError("ETF 研究已在设置中停用")
-        progress = progress or (lambda *_: None)
-        cancelled = cancelled or (lambda: False)
+        as_of: str,
+        tier: str,
+        progress: Progress,
+        cancelled: Cancelled,
+        refresh_warnings: list[str] | tuple[str, ...],
+    ) -> _EtfScanContext:
+        source = self.source
+        if source is None:
+            raise RuntimeError("ETF 只读服务不能执行研究扫描")
         selected_tier = self._research_tier(tier)
         end, target_source = self._research_target(as_of)
         progress(3, "确定 ETF 研究日", f"{end.date()} · {target_source}")
@@ -2531,375 +2577,474 @@ class EtfResearchService:
             raise RuntimeError("证券主数据中没有沪深场内 ETF")
         start = end - pd.DateOffset(years=3, days=20)
         symbols = [item.symbol for item in profiles]
-        master_id = "etf_master_" + content_hash([item.to_dict() for item in profiles])[:24]
+        master_id = "etf_master_" + content_hash(
+            [item.to_dict() for item in profiles]
+        )[:24]
         data_session = StockDBIngestService._data_session(str(end.date()))
-        identity = self.source.artifact_identity(data_session=data_session)
-        cache_key = content_hash(
-            {
-                "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
-                "asset": "etf",
-                "artifact": identity.artifact_id,
-                "master": master_id,
-                "start": str(start.date()),
-                "end": str(end.date()),
-                "symbols": symbols,
-                "etf_research_schema": ETF_SCHEMA_VERSION,
-                "tier": selected_tier,
-            }
+        identity = source.artifact_identity(data_session=data_session)
+        cache_key = self._etf_scan_cache_key(
+            identity=identity,
+            master_id=master_id,
+            start=start,
+            end=end,
+            symbols=symbols,
+            tier=selected_tier,
         )
         ingest_history = (
-            self.ingest_store.history(100)
-            if selected_tier == "production"
-            else []
+            self.ingest_store.history(100) if selected_tier == "production" else []
         )
-        ingest = (
-            next(
-                (
-                    item
-                    for item in ingest_history
-                    if item.provenance.get("cache_key") == cache_key and "etf" in item.assets
-                ),
-                None,
-            )
-            if selected_tier == "production"
+        ingest = next(
+            (
+                item
+                for item in ingest_history
+                if item.provenance.get("cache_key") == cache_key and "etf" in item.assets
+            ),
+            None,
+        )
+        daily = (
+            self.ingest_store.load_frame(ingest, "etf_daily")
+            if ingest is not None
+            else pd.DataFrame()
+        )
+        return _EtfScanContext(
+            as_of=as_of,
+            tier=selected_tier,
+            progress=progress,
+            cancelled=cancelled,
+            refresh_warnings=tuple(refresh_warnings),
+            end=end,
+            target_source=target_source,
+            profiles=profiles,
+            start=start,
+            symbols=symbols,
+            master_id=master_id,
+            identity=identity,
+            cache_key=cache_key,
+            ingest_history=ingest_history,
+            ingest=ingest,
+            daily=daily,
+        )
+
+    @staticmethod
+    def _etf_scan_cache_key(
+        *,
+        identity: StockDBArtifactIdentity,
+        master_id: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        symbols: list[str],
+        tier: EtfResearchTier,
+    ) -> str:
+        return content_hash({
+            "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
+            "asset": "etf",
+            "artifact": identity.artifact_id,
+            "master": master_id,
+            "start": str(start.date()),
+            "end": str(end.date()),
+            "symbols": symbols,
+            "etf_research_schema": ETF_SCHEMA_VERSION,
+            "tier": tier,
+        })
+
+    @staticmethod
+    def _normalize_scan_daily(
+        frame: pd.DataFrame,
+        *,
+        symbols: list[str],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        daily = frame.copy()
+        daily["symbol"] = daily.get(
+            "symbol", pd.Series(dtype=str)
+        ).astype(str).str.upper()
+        daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce")
+        return daily[
+            daily["symbol"].isin(symbols)
+            & daily["date"].notna()
+            & daily["date"].ge(start)
+            & daily["date"].le(end)
+        ].copy()
+
+    @staticmethod
+    def _compatible_scan_candidate(
+        candidate: StockDBIngestSnapshot,
+        context: _EtfScanContext,
+        historical_cutoff: pd.Timestamp | None,
+    ) -> bool:
+        if (
+            candidate.status != "complete"
+            or "etf" not in candidate.assets
+            or candidate.artifact_id != context.identity.artifact_id
+            or candidate.start_date > str(context.start.date())
+            or candidate.end_date < str(context.end.date())
+        ):
+            return False
+        candidate_created = pd.to_datetime(
+            candidate.created_at,
+            errors="coerce",
+            utc=True,
+        )
+        return historical_cutoff is None or (
+            pd.notna(candidate_created)
+            and pd.Timestamp(candidate_created) <= historical_cutoff
+        )
+
+    def _find_compatible_scan_ingest(
+        self,
+        context: _EtfScanContext,
+    ) -> StockDBIngestSnapshot | None:
+        target_symbols = set(context.symbols)
+        historical_cutoff = (
+            pd.Timestamp(daily_signal_cutoff(context.end.date())).tz_convert("UTC")
+            if context.as_of
             else None
         )
-        daily = pd.DataFrame()
-        if ingest is not None:
-            daily = self.ingest_store.load_frame(ingest, "etf_daily")
-        if daily.empty and selected_tier == "production":
-            target_symbols = set(symbols)
-            compatible = None
-            historical_cutoff = (
-                pd.Timestamp(daily_signal_cutoff(end.date())).tz_convert("UTC")
-                if as_of
-                else None
-            )
-            for candidate in ingest_history:
-                if (
-                    candidate.status != "complete"
-                    or "etf" not in candidate.assets
-                    or candidate.artifact_id != identity.artifact_id
-                    or candidate.start_date > str(start.date())
-                    or candidate.end_date < str(end.date())
-                ):
-                    continue
-                candidate_created = pd.to_datetime(
-                    candidate.created_at,
-                    errors="coerce",
-                    utc=True,
+        for candidate in context.ingest_history:
+            if not self._compatible_scan_candidate(
+                candidate, context, historical_cutoff
+            ):
+                continue
+            try:
+                cached_profiles = self.ingest_store.load_json(
+                    candidate, "etf_profiles"
                 )
-                if historical_cutoff is not None and (
-                    pd.isna(candidate_created)
-                    or pd.Timestamp(candidate_created) > historical_cutoff
-                ):
-                    continue
-                try:
-                    cached_profiles = self.ingest_store.load_json(candidate, "etf_profiles")
-                except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                cached_symbols = {
-                    str(item.get("symbol") or "").upper()
-                    for item in cached_profiles
-                    if isinstance(item, dict) and item.get("symbol")
-                }
-                if cached_symbols == target_symbols:
-                    compatible = candidate
-                    break
-            if compatible is not None:
-                daily = self.ingest_store.load_frame(compatible, "etf_daily")
-                if not daily.empty:
-                    daily = daily.copy()
-                    daily["symbol"] = daily.get(
-                        "symbol", pd.Series(dtype=str)
-                    ).astype(str).str.upper()
-                    daily["date"] = pd.to_datetime(
-                        daily.get("date"), errors="coerce"
-                    )
-                    daily = daily[
-                        daily["symbol"].isin(target_symbols)
-                        & daily["date"].notna()
-                        & daily["date"].ge(start)
-                        & daily["date"].le(end)
-                    ].copy()
-                    observed_symbols = set(daily["symbol"].unique())
-                    if daily.empty or observed_symbols != target_symbols:
-                        daily = pd.DataFrame()
-                        compatible = None
-                if compatible is not None and not daily.empty:
-                    actual = daily["date"].max().date().isoformat()
-                    session_dates = sorted(
-                        daily["date"]
-                        .dropna()
-                        .dt.strftime("%Y-%m-%d")
-                        .unique()
-                        .tolist()
-                    )
-                    coverage = {
-                        **compatible.coverage,
-                        "status": "complete",
-                        "symbol_ratio": 1.0,
-                        "requested_symbols": len(target_symbols),
-                        "observed_symbols": len(observed_symbols),
-                        "start": str(start.date()),
-                        "end": actual,
-                    }
-                    ingest = self.ingest_store.publish_etf(
-                        daily=daily,
-                        minutes=pd.DataFrame(),
-                        profiles=[item.to_dict() for item in profiles],
-                        as_of_date=actual,
-                        artifact_id=identity.artifact_id,
-                        master_snapshot_id=master_id,
-                        start_date=str(start.date()),
-                        end_date=actual,
-                        coverage=coverage,
-                        provenance={
-                            **compatible.provenance,
-                            "cache_key": cache_key,
-                            "profile_refresh_from": compatible.ingest_id,
-                        },
-                        session_dates=session_dates,
-                        session_source=compatible.session_source,
-                    )
-                    progress(5, "复用 ETF 日线", f"元数据重算复用 {compatible.ingest_id}")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            cached_symbols = {
+                str(item.get("symbol") or "").upper()
+                for item in cached_profiles
+                if isinstance(item, dict) and item.get("symbol")
+            }
+            if cached_symbols == target_symbols:
+                return candidate
+        return None
+
+    def _reuse_compatible_scan_ingest(
+        self,
+        context: _EtfScanContext,
+    ) -> tuple[StockDBIngestSnapshot | None, pd.DataFrame]:
+        compatible = self._find_compatible_scan_ingest(context)
+        if compatible is None:
+            return None, pd.DataFrame()
+        daily = self.ingest_store.load_frame(compatible, "etf_daily")
         if daily.empty:
-            frames = []
-            for offset in range(0, len(symbols), 300):
-                if cancelled():
-                    raise InterruptedError("ETF 研究扫描已取消")
-                batch = symbols[offset : offset + 300]
-                frames.append(
-                    self.source.daily_cross_section(
-                        batch,
-                        str(start.date()),
-                        str(end.date()),
-                    )
+            return None, pd.DataFrame()
+        daily = self._normalize_scan_daily(
+            daily,
+            symbols=context.symbols,
+            start=context.start,
+            end=context.end,
+        )
+        observed_symbols = set(daily["symbol"].unique())
+        if daily.empty or observed_symbols != set(context.symbols):
+            return None, pd.DataFrame()
+        actual = daily["date"].max().date().isoformat()
+        session_dates = sorted(
+            daily["date"].dropna().dt.strftime("%Y-%m-%d").unique().tolist()
+        )
+        coverage = {
+            **compatible.coverage,
+            "status": "complete",
+            "symbol_ratio": 1.0,
+            "requested_symbols": len(context.symbols),
+            "observed_symbols": len(observed_symbols),
+            "start": str(context.start.date()),
+            "end": actual,
+        }
+        ingest = self.ingest_store.publish_etf(
+            daily=daily,
+            minutes=pd.DataFrame(),
+            profiles=[item.to_dict() for item in context.profiles],
+            as_of_date=actual,
+            artifact_id=context.identity.artifact_id,
+            master_snapshot_id=context.master_id,
+            start_date=str(context.start.date()),
+            end_date=actual,
+            coverage=coverage,
+            provenance={
+                **compatible.provenance,
+                "cache_key": context.cache_key,
+                "profile_refresh_from": compatible.ingest_id,
+            },
+            session_dates=session_dates,
+            session_source=compatible.session_source,
+        )
+        context.progress(
+            5, "复用 ETF 日线", f"元数据重算复用 {compatible.ingest_id}"
+        )
+        return ingest, daily
+
+    def _read_scan_daily_batches(
+        self,
+        context: _EtfScanContext,
+        *,
+        report_progress: bool,
+    ) -> pd.DataFrame:
+        if self.source is None:
+            raise RuntimeError("ETF 只读服务不能执行研究扫描")
+        frames: list[pd.DataFrame] = []
+        for offset in range(0, len(context.symbols), 300):
+            if context.cancelled():
+                raise InterruptedError("ETF 研究扫描已取消")
+            batch = context.symbols[offset : offset + 300]
+            frames.append(
+                self.source.daily_cross_section(
+                    batch,
+                    str(context.start.date()),
+                    str(context.end.date()),
                 )
-                progress(
-                    5 + int(50 * (offset + len(batch)) / len(symbols)),
+            )
+            if report_progress:
+                context.progress(
+                    5 + int(50 * (offset + len(batch)) / len(context.symbols)),
                     "读取 ETF 日线",
-                    f"{offset + len(batch)}/{len(symbols)}",
+                    f"{offset + len(batch)}/{len(context.symbols)}",
                 )
-            daily = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def _align_sandbox_scan_daily(
+        self,
+        context: _EtfScanContext,
+        daily: pd.DataFrame,
+    ) -> pd.DataFrame:
+        for _alignment_attempt in range(4):
+            actual_end = pd.Timestamp(daily["date"].max()).normalize()
+            if actual_end == context.end:
+                break
+            context.end = actual_end
+            context.profiles = self.profiles(
+                as_of=context.end.date().isoformat(),
+                tier="sandbox",
+            )
+            if not context.profiles:
+                raise RuntimeError("实际行情日没有可复验的本地 ETF 分析母集")
+            context.symbols = [item.symbol for item in context.profiles]
+            context.start = context.end - pd.DateOffset(years=3, days=20)
+            daily = self._read_scan_daily_batches(context, report_progress=False)
+            if daily.empty:
+                raise RuntimeError("实际行情日没有返回 ETF 日频截面")
+            daily = self._normalize_scan_daily(
+                daily,
+                symbols=context.symbols,
+                start=context.start,
+                end=context.end,
+            )
+            if daily.empty:
+                raise RuntimeError("实际行情日没有可用的 ETF 日频截面")
+        else:
+            raise RuntimeError("ETF sandbox 无法对齐行情日与证据截止时点")
+        context.master_id = "etf_master_" + content_hash(
+            [item.to_dict() for item in context.profiles]
+        )[:24]
+        data_session = StockDBIngestService._data_session(str(context.end.date()))
+        if self.source is None:
+            raise RuntimeError("ETF 只读服务不能执行研究扫描")
+        context.identity = self.source.artifact_identity(data_session=data_session)
+        context.cache_key = self._etf_scan_cache_key(
+            identity=context.identity,
+            master_id=context.master_id,
+            start=context.start,
+            end=context.end,
+            symbols=context.symbols,
+            tier=context.tier,
+        )
+        return daily
+
+    def _new_scan_ingest(
+        self,
+        context: _EtfScanContext,
+        daily: pd.DataFrame,
+    ) -> StockDBIngestSnapshot:
+        if self.source is None:
+            raise RuntimeError("ETF 只读服务不能执行研究扫描")
+        actual = pd.Timestamp(daily["date"].max()).date().isoformat()
+        latest = daily[daily["date"].dt.date == date.fromisoformat(actual)]
+        observed = int(latest["symbol"].nunique())
+        ratio = observed / len(context.symbols)
+        required_ratio = float(
+            latest[["open", "high", "low", "close", "volume"]]
+            .notna()
+            .all(axis=1)
+            .mean()
+        )
+        if context.tier == "production" and (
+            ratio < 0.80 or required_ratio < 0.95
+        ):
+            raise RuntimeError(
+                "ETF 完整性门未通过："
+                f"覆盖 {observed}/{len(context.symbols)}，OHLCV {required_ratio:.1%}"
+            )
+        coverage = {
+            "status": (
+                "complete"
+                if ratio >= 0.80
+                and required_ratio >= 0.95
+                and context.tier == "production"
+                else "degraded"
+            ),
+            "expected_symbols": len(context.symbols),
+            "observed_symbols": observed,
+            "symbol_ratio": round(ratio, 6),
+            "required_ohlcv_ratio": round(required_ratio, 6),
+            "tier": context.tier,
+            "formal_eligible": context.tier == "production",
+        }
+        sessions = sorted(
+            daily["date"].dropna().dt.strftime("%Y-%m-%d").unique().tolist()
+        )
+        coverage["fields"] = StockDBIngestService.field_contracts(
+            daily,
+            actual,
+            asset_class="etf",
+            source=self.source.name,
+        )
+        provenance = {
+            "cache_key": context.cache_key,
+            "upstream": "vendor-declared-unverified",
+            "upstream_evidence": "not_provided",
+            "distribution": "free-stockdb",
+            "artifact": context.identity.to_dict(),
+            "ingest_schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
+            "price_storage": "raw",
+            "tier": context.tier,
+        }
+        if context.tier == "production":
+            return self.ingest_store.publish_etf(
+                daily=daily,
+                minutes=pd.DataFrame(),
+                profiles=[item.to_dict() for item in context.profiles],
+                as_of_date=actual,
+                artifact_id=context.identity.artifact_id,
+                master_snapshot_id=context.master_id,
+                start_date=str(context.start.date()),
+                end_date=str(context.end.date()),
+                coverage=coverage,
+                provenance=provenance,
+                session_dates=sessions,
+                session_source="stockdb_broad_coverage",
+            )
+        content_hashes = {
+            "etf_daily": _stockdb_frame_hash(daily),
+            "etf_minutes": _stockdb_frame_hash(pd.DataFrame()),
+            "etf_profiles": content_hash(
+                [item.to_dict() for item in context.profiles]
+            ),
+        }
+        logical = {
+            "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
+            "asset": "etf-preview",
+            "as_of_date": actual,
+            "artifact_id": context.identity.artifact_id,
+            "master_snapshot_id": context.master_id,
+            "start_date": str(context.start.date()),
+            "end_date": str(context.end.date()),
+            "content_hashes": content_hashes,
+            "coverage": coverage,
+            "session_dates": sessions,
+            "session_source": "stockdb_local_preview",
+        }
+        return StockDBIngestSnapshot(
+            ingest_id="preview_sdi_" + content_hash(logical)[:24],
+            as_of_date=actual,
+            artifact_id=context.identity.artifact_id,
+            master_snapshot_id=context.master_id,
+            start_date=str(context.start.date()),
+            end_date=str(context.end.date()),
+            assets={
+                "etf": {
+                    "daily_rows": len(daily),
+                    "minute_rows": 0,
+                    "symbols": len(context.profiles),
+                }
+            },
+            coverage=coverage,
+            content_hashes=content_hashes,
+            provenance=provenance,
+            session_dates=tuple(sessions),
+            session_source="stockdb_local_preview",
+            status="degraded",
+            issues=("本地母集不代表完整市场目录",),
+        )
+
+    def _resolve_scan_ingest(
+        self,
+        context: _EtfScanContext,
+    ) -> tuple[StockDBIngestSnapshot, pd.DataFrame]:
+        daily = context.daily if context.daily is not None else pd.DataFrame()
+        ingest = context.ingest
+        if daily.empty and context.tier == "production":
+            ingest, daily = self._reuse_compatible_scan_ingest(context)
+        if daily.empty:
+            daily = self._read_scan_daily_batches(context, report_progress=True)
             if daily.empty:
                 raise RuntimeError("free-stockdb 没有返回 ETF 日频截面")
-            daily = daily.copy()
-            daily["symbol"] = daily.get("symbol", pd.Series(dtype=str)).astype(str).str.upper()
-            daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce")
-            daily = daily[
-                daily["symbol"].isin(symbols)
-                & daily["date"].notna()
-                & daily["date"].ge(start)
-                & daily["date"].le(end)
-            ].copy()
+            daily = self._normalize_scan_daily(
+                daily,
+                symbols=context.symbols,
+                start=context.start,
+                end=context.end,
+            )
             if daily.empty:
                 raise RuntimeError("free-stockdb 没有返回目标日之前的 ETF 日频截面")
-            if selected_tier == "sandbox" and as_of:
-                for _alignment_attempt in range(4):
-                    actual_end = pd.Timestamp(daily["date"].max()).normalize()
-                    if actual_end == end:
-                        break
-                    end = actual_end
-                    profiles = self.profiles(
-                        as_of=end.date().isoformat(),
-                        tier="sandbox",
-                    )
-                    if not profiles:
-                        raise RuntimeError("实际行情日没有可复验的本地 ETF 分析母集")
-                    symbols = [item.symbol for item in profiles]
-                    start = end - pd.DateOffset(years=3, days=20)
-                    aligned_frames = []
-                    for offset in range(0, len(symbols), 300):
-                        if cancelled():
-                            raise InterruptedError("ETF 研究扫描已取消")
-                        batch = symbols[offset : offset + 300]
-                        aligned_frames.append(
-                            self.source.daily_cross_section(
-                                batch,
-                                str(start.date()),
-                                str(end.date()),
-                            )
-                        )
-                    daily = (
-                        pd.concat(aligned_frames, ignore_index=True)
-                        if aligned_frames
-                        else pd.DataFrame()
-                    )
-                    if daily.empty:
-                        raise RuntimeError("实际行情日没有返回 ETF 日频截面")
-                    daily["symbol"] = daily.get(
-                        "symbol", pd.Series(dtype=str)
-                    ).astype(str).str.upper()
-                    daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce")
-                    daily = daily[
-                        daily["symbol"].isin(symbols)
-                        & daily["date"].notna()
-                        & daily["date"].ge(start)
-                        & daily["date"].le(end)
-                    ].copy()
-                    if daily.empty:
-                        raise RuntimeError("实际行情日没有可用的 ETF 日频截面")
-                else:
-                    raise RuntimeError("ETF sandbox 无法对齐行情日与证据截止时点")
-                master_id = "etf_master_" + content_hash(
-                    [item.to_dict() for item in profiles]
-                )[:24]
-                data_session = StockDBIngestService._data_session(str(end.date()))
-                identity = self.source.artifact_identity(data_session=data_session)
-                cache_key = content_hash(
-                    {
-                        "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
-                        "asset": "etf",
-                        "artifact": identity.artifact_id,
-                        "master": master_id,
-                        "start": str(start.date()),
-                        "end": str(end.date()),
-                        "symbols": symbols,
-                        "etf_research_schema": ETF_SCHEMA_VERSION,
-                        "tier": selected_tier,
-                    }
-                )
-            actual = pd.Timestamp(daily["date"].max()).date().isoformat()
-            latest = daily[
-                daily["date"].dt.date == date.fromisoformat(actual)
-            ]
-            observed = int(latest["symbol"].nunique())
-            ratio = observed / len(symbols)
-            required_ratio = float(
-                latest[["open", "high", "low", "close", "volume"]].notna().all(axis=1).mean()
-            )
-            if selected_tier == "production" and (ratio < 0.80 or required_ratio < 0.95):
-                raise RuntimeError(
-                    f"ETF 完整性门未通过：覆盖 {observed}/{len(symbols)}，OHLCV {required_ratio:.1%}"
-                )
-            coverage = {
-                "status": (
-                    "complete"
-                    if ratio >= 0.80 and required_ratio >= 0.95
-                    and selected_tier == "production"
-                    else "degraded"
-                ),
-                "expected_symbols": len(symbols),
-                "observed_symbols": observed,
-                "symbol_ratio": round(ratio, 6),
-                "required_ohlcv_ratio": round(required_ratio, 6),
-                "tier": selected_tier,
-                "formal_eligible": selected_tier == "production",
-            }
-            etf_sessions = sorted(
-                pd.to_datetime(
-                    daily["date"],
-                    errors="coerce",
-                )
-                .dropna()
-                .dt.strftime("%Y-%m-%d")
-                .unique()
-                .tolist()
-            )
-            coverage["fields"] = StockDBIngestService.field_contracts(
-                daily,
-                actual,
-                asset_class="etf",
-                source=self.source.name,
-            )
-            ingest_provenance = {
-                "cache_key": cache_key,
-                "upstream": "vendor-declared-unverified",
-                "upstream_evidence": "not_provided",
-                "distribution": "free-stockdb",
-                "artifact": identity.to_dict(),
-                "ingest_schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
-                "price_storage": "raw",
-                "tier": selected_tier,
-            }
-            if selected_tier == "production":
-                ingest = self.ingest_store.publish_etf(
-                    daily=daily,
-                    minutes=pd.DataFrame(),
-                    profiles=[item.to_dict() for item in profiles],
-                    as_of_date=actual,
-                    artifact_id=identity.artifact_id,
-                    master_snapshot_id=master_id,
-                    start_date=str(start.date()),
-                    end_date=str(end.date()),
-                    coverage=coverage,
-                    provenance=ingest_provenance,
-                    session_dates=etf_sessions,
-                    session_source="stockdb_broad_coverage",
-                )
-            else:
-                content_hashes = {
-                    "etf_daily": _stockdb_frame_hash(daily),
-                    "etf_minutes": _stockdb_frame_hash(pd.DataFrame()),
-                    "etf_profiles": content_hash([item.to_dict() for item in profiles]),
-                }
-                logical = {
-                    "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
-                    "asset": "etf-preview",
-                    "as_of_date": actual,
-                    "artifact_id": identity.artifact_id,
-                    "master_snapshot_id": master_id,
-                    "start_date": str(start.date()),
-                    "end_date": str(end.date()),
-                    "content_hashes": content_hashes,
-                    "coverage": coverage,
-                    "session_dates": etf_sessions,
-                    "session_source": "stockdb_local_preview",
-                }
-                ingest = StockDBIngestSnapshot(
-                    ingest_id="preview_sdi_" + content_hash(logical)[:24],
-                    as_of_date=actual,
-                    artifact_id=identity.artifact_id,
-                    master_snapshot_id=master_id,
-                    start_date=str(start.date()),
-                    end_date=str(end.date()),
-                    assets={
-                        "etf": {
-                            "daily_rows": len(daily),
-                            "minute_rows": 0,
-                            "symbols": len(profiles),
-                        }
-                    },
-                    coverage=coverage,
-                    content_hashes=content_hashes,
-                    provenance=ingest_provenance,
-                    session_dates=tuple(etf_sessions),
-                    session_source="stockdb_local_preview",
-                    status="degraded",
-                    issues=("本地母集不代表完整市场目录",),
-                )
+            if context.tier == "sandbox" and context.as_of:
+                daily = self._align_sandbox_scan_daily(context, daily)
+            ingest = self._new_scan_ingest(context, daily)
         if ingest is None:
             raise RuntimeError("ETF 行情摄取未生成")
-        actual = ingest.as_of_date
-        daily["symbol"] = daily["symbol"].astype(str).str.upper()
-        daily["date"] = pd.to_datetime(daily["date"], errors="coerce")
-        session_dates = sorted(daily["date"].dropna().dt.date.astype(str).unique().tolist())
-        factors, adjustment_capability = self._adjustment_factors(
-            daily, progress=progress, cancelled=cancelled, as_of=as_of
+        return ingest, daily
+
+    @staticmethod
+    def _eligible_scan_shares(
+        direct: pd.DataFrame,
+        *,
+        actual: str,
+        as_of: str,
+    ) -> pd.DataFrame:
+        if direct.empty:
+            return direct
+        eligible = direct.copy()
+        eligible["trade_date"] = pd.to_datetime(
+            eligible["trade_date"], errors="coerce"
         )
-        direct = self._direct_share_observations()
-        if not direct.empty:
-            direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
-            direct["symbol"] = direct["symbol"].astype(str).str.upper()
-            eligible_direct = direct["trade_date"].dt.date <= date.fromisoformat(actual)
-            if as_of:
-                acquired = pd.to_datetime(
-                    direct.get("acquired_at"), errors="coerce", utc=True,
-                )
-                cutoff = pd.Timestamp(
-                    daily_signal_cutoff(date.fromisoformat(actual))
-                ).tz_convert("UTC")
-                eligible_direct &= acquired.notna() & acquired.le(cutoff)
-                direct = direct.assign(acquired_at=acquired)
-            direct = direct.loc[eligible_direct]
-        metadata_cache = self._profile_metadata_frame.copy()
-        # Keep a separate refresh-only fingerprint for the authoritative metadata
-        # input.  It is not used to build a historical profile (so it cannot
-        # introduce look-ahead), but it lets the UI notice a changed local source
-        # and request an explicit rescan for either current or historical views.
-        metadata_source_cache = self._direct_metadata()
-        evidence_hashes = {
+        eligible["symbol"] = eligible["symbol"].astype(str).str.upper()
+        included = eligible["trade_date"].dt.date <= date.fromisoformat(actual)
+        if as_of:
+            acquired = pd.to_datetime(
+                eligible.get("acquired_at"), errors="coerce", utc=True
+            )
+            cutoff = pd.Timestamp(
+                daily_signal_cutoff(date.fromisoformat(actual))
+            ).tz_convert("UTC")
+            included &= acquired.notna() & acquired.le(cutoff)
+            eligible = eligible.assign(acquired_at=acquired)
+        return eligible.loc[included]
+
+    def _scan_evidence_hashes(
+        self,
+        context: _EtfScanContext,
+        ingest: StockDBIngestSnapshot,
+        daily: pd.DataFrame,
+        factors: pd.DataFrame,
+        direct: pd.DataFrame,
+        metadata: pd.DataFrame,
+    ) -> dict[str, str]:
+        metadata_columns = (
+            "symbol",
+            "name",
+            "benchmark",
+            "benchmark_code",
+            "benchmark_type",
+            "benchmark_level",
+            "index_type",
+            "index_provider",
+            "fund_type",
+            "invest_type",
+            "mgt_fee",
+            "metadata_source",
+        )
+        hashes = {
             "行情": content_hash(ingest.content_hashes),
             "份额": _frame_hash(
                 direct,
@@ -2915,117 +3060,146 @@ class EtfResearchService:
                 ),
             ),
             "复权": _frame_hash(
-                factors, ("symbol", "date", "adj_factor", "source", "acquired_at")
+                factors,
+                ("symbol", "date", "adj_factor", "source", "acquired_at"),
             ),
             "元数据": (
-                _frame_hash(
-                    metadata_cache,
-                    (
-                        "symbol",
-                        "name",
-                        "benchmark",
-                        "benchmark_code",
-                        "benchmark_type",
-                        "benchmark_level",
-                        "index_type",
-                        "index_provider",
-                        "fund_type",
-                        "invest_type",
-                        "mgt_fee",
-                        "metadata_source",
-                    ),
-                )
-                if not metadata_cache.empty
-                else content_hash([profile.to_dict() for profile in profiles])
+                _frame_hash(metadata, metadata_columns)
+                if not metadata.empty
+                else content_hash([item.to_dict() for item in context.profiles])
             ),
+            "元数据源": _frame_hash(self._direct_metadata(), metadata_columns),
         }
-        evidence_hashes["元数据源"] = _frame_hash(
-            metadata_source_cache,
-            (
-                "symbol",
-                "name",
-                "benchmark",
-                "benchmark_code",
-                "benchmark_type",
-                "benchmark_level",
-                "index_type",
-                "index_provider",
-                "fund_type",
-                "invest_type",
-                "mgt_fee",
-                "metadata_source",
-            ),
-        )
         denominator = self._profile_capabilities.get("denominator") or {}
         if denominator:
-            evidence_hashes["母集"] = content_hash(
-                denominator
-            )
-        if selected_tier == "sandbox":
-            evidence_hashes["行情明细"] = _stockdb_frame_hash(daily)
+            hashes["母集"] = content_hash(denominator)
+        if context.tier == "sandbox":
+            hashes["行情明细"] = _stockdb_frame_hash(daily)
         else:
-            self.store.freeze_adjustments(factors, evidence_hashes["复权"])
+            self.store.freeze_adjustments(factors, hashes["复权"])
+        return hashes
+
+    def _prepare_scan_evidence(
+        self,
+        context: _EtfScanContext,
+        ingest: StockDBIngestSnapshot,
+        daily: pd.DataFrame,
+    ) -> _EtfScanEvidence:
+        actual = ingest.as_of_date
+        daily = daily.copy()
+        daily["symbol"] = daily["symbol"].astype(str).str.upper()
+        daily["date"] = pd.to_datetime(daily["date"], errors="coerce")
+        session_dates = sorted(
+            daily["date"].dropna().dt.date.astype(str).unique().tolist()
+        )
+        factors, adjustment_capability = self._adjustment_factors(
+            daily,
+            progress=context.progress,
+            cancelled=context.cancelled,
+            as_of=context.as_of,
+        )
+        direct = self._eligible_scan_shares(
+            self._direct_share_observations(),
+            actual=actual,
+            as_of=context.as_of,
+        )
+        metadata = self._profile_metadata_frame.copy()
+        evidence_hashes = self._scan_evidence_hashes(
+            context, ingest, daily, factors, direct, metadata
+        )
         input_evidence: dict[str, Any] = {
             "ingest_id": ingest.ingest_id,
             "research_model_version": ETF_RESEARCH_MODEL_VERSION,
             "evidence_hashes": evidence_hashes,
         }
-        if selected_tier == "sandbox":
+        if context.tier == "sandbox":
             input_evidence.update({"tier": "sandbox", "formal_eligible": False})
         input_hash = content_hash(input_evidence)
-        snapshot_id = (
-            ("etf_" if selected_tier == "production" else "etf_preview_")
-            + hashlib.sha256(f"{actual}:{ETF_RESEARCH_MODEL_VERSION}:{input_hash}".encode()).hexdigest()[:24]
+        prefix = "etf_" if context.tier == "production" else "etf_preview_"
+        digest = hashlib.sha256(
+            f"{actual}:{ETF_RESEARCH_MODEL_VERSION}:{input_hash}".encode()
+        ).hexdigest()[:24]
+        return _EtfScanEvidence(
+            actual=actual,
+            daily=daily,
+            factors=factors,
+            direct=direct,
+            metadata=metadata,
+            session_dates=session_dates,
+            adjustment_capability=adjustment_capability,
+            evidence_hashes=evidence_hashes,
+            input_hash=input_hash,
+            snapshot_id=prefix + digest,
         )
-        existing = self.store.get(snapshot_id) if selected_tier == "production" else None
-        if existing is not None:
-            existing = self.store.publish(existing)
-            self.ingest_store.pin(
-                existing.ingest_id,
-                "etf_research",
-                existing.snapshot_id,
-                {"as_of_date": existing.as_of_date},
-            )
-            progress(100, "复用 ETF 板块研究", existing.snapshot_id)
-            return existing
 
-        progress(70, "计算 ETF 板块证据", "趋势、位置、活跃度分别公开")
+    def _existing_scan_snapshot(
+        self,
+        context: _EtfScanContext,
+        evidence: _EtfScanEvidence,
+    ) -> EtfResearchSnapshot | None:
+        if context.tier != "production":
+            return None
+        existing = self.store.get(evidence.snapshot_id)
+        if existing is None:
+            return None
+        existing = self.store.publish(existing)
+        self.ingest_store.pin(
+            existing.ingest_id,
+            "etf_research",
+            existing.snapshot_id,
+            {"as_of_date": existing.as_of_date},
+        )
+        context.progress(100, "复用 ETF 板块研究", existing.snapshot_id)
+        return existing
+
+    @staticmethod
+    def _prepared_scan_groups(
+        daily: pd.DataFrame,
+        factors: pd.DataFrame,
+        direct: pd.DataFrame,
+    ) -> tuple[
+        dict[str, pd.DataFrame],
+        dict[str, pd.DataFrame],
+        dict[str, pd.DataFrame],
+    ]:
         metric_columns = [
             column
-            for column in ("symbol", "date", "close", "pct_chg", "amount", "adj_factor")
+            for column in (
+                "symbol", "date", "close", "pct_chg", "amount", "adj_factor"
+            )
             if column in daily
         ]
-        metric_daily = daily[metric_columns].copy()
         metric_daily = (
-            metric_daily.dropna(subset=["symbol", "date"])
+            daily[metric_columns]
+            .dropna(subset=["symbol", "date"])
             .sort_values(["symbol", "date"])
             .drop_duplicates(["symbol", "date"], keep="last")
         )
         for column in ("close", "pct_chg", "amount", "adj_factor"):
             if column in metric_daily:
-                metric_daily[column] = pd.to_numeric(metric_daily[column], errors="coerce")
+                metric_daily[column] = pd.to_numeric(
+                    metric_daily[column], errors="coerce"
+                )
         daily_groups = {
-            str(symbol): group for symbol, group in metric_daily.groupby("symbol", sort=False)
+            str(symbol): group
+            for symbol, group in metric_daily.groupby("symbol", sort=False)
         }
         metric_factors = factors
         if not factors.empty:
             factor_columns = [
-                column for column in ("symbol", "date", "adj_factor", "source") if column in factors
+                column
+                for column in ("symbol", "date", "adj_factor", "source")
+                if column in factors
             ]
             metric_factors = (
                 factors[factor_columns]
                 .sort_values(["symbol", "date"])
                 .drop_duplicates(["symbol", "date"], keep="last")
             )
-        factor_groups = (
-            {
-                str(symbol): group
-                for symbol, group in metric_factors.groupby("symbol", sort=False)
-            }
-            if not metric_factors.empty
-            else {}
-        )
-        session_index = {value: index for index, value in enumerate(session_dates)}
+        factor_groups = {
+            str(symbol): group
+            for symbol, group in metric_factors.groupby("symbol", sort=False)
+        } if not metric_factors.empty else {}
         direct_groups: dict[str, pd.DataFrame] = {}
         if not direct.empty:
             prepared_direct = direct.copy()
@@ -3033,7 +3207,9 @@ class EtfResearchService:
                 prepared_direct.get("shares"), errors="coerce"
             )
             prepared_direct = (
-                prepared_direct.dropna(subset=["symbol", "trade_date", "shares"])
+                prepared_direct.dropna(
+                    subset=["symbol", "trade_date", "shares"]
+                )
                 .sort_values(["symbol", "trade_date"])
                 .drop_duplicates(["symbol", "trade_date"], keep="last")
             )
@@ -3041,8 +3217,84 @@ class EtfResearchService:
                 str(symbol): group
                 for symbol, group in prepared_direct.groupby("symbol", sort=False)
             }
+        return daily_groups, factor_groups, direct_groups
+
+    @staticmethod
+    def _scan_research_item(
+        row: dict[str, Any],
+        *,
+        representative_symbol: str,
+        daily_covered: bool,
+        actual: str,
+        snapshot_id: str,
+        ingest: StockDBIngestSnapshot,
+    ) -> EtfResearchItem:
+        profile: EtfProfile = row["profile"]
+        metrics = {
+            key: value for key, value in row["metrics"].items() if key != "history"
+        }
+        return EtfResearchItem(
+            symbol=profile.symbol,
+            name=profile.name,
+            category=profile.category,
+            asset_class=profile.asset_class,
+            sector_id=profile.sector_id,
+            sector_name=profile.sector_name,
+            normalized_index=profile.normalized_index,
+            benchmark_code=profile.benchmark_code,
+            is_representative=profile.symbol == representative_symbol,
+            representative_symbol=representative_symbol,
+            metrics=metrics,
+            funds=row["funds"],
+            metadata={
+                "manager": profile.manager,
+                "custodian": profile.custodian,
+                "management_fee": profile.management_fee,
+                "total_size": row["total_size"],
+                "benchmark_type": profile.benchmark_type,
+                "benchmark_level": profile.benchmark_level,
+                "index_type": profile.index_type,
+                "index_provider": profile.index_provider,
+                "list_date": profile.list_date,
+                "metadata_effective_as_of": profile.metadata_effective_as_of,
+                "classification_confidence": profile.classification_confidence,
+                "classification_evidence": profile.classification_evidence,
+            },
+            coverage={
+                "daily": daily_covered,
+                "adjustment": metrics.get("adjustment_status")
+                in {"official", "verified_local"},
+                "shares": row["funds"].get("status")
+                in {"confirmed_zero", "confirmed_change"},
+            },
+            provenance={
+                "price": "free-stockdb:vendor-upstream-unverified",
+                "adjustment": metrics.get("adjustment_source") or "unavailable",
+                "shares": row["funds"].get("source") or "unavailable",
+                "metadata": profile.metadata_source,
+                "classification": profile.classification_source,
+            },
+            as_of_date=actual,
+            snapshot_id=snapshot_id,
+            ingest_id=ingest.ingest_id,
+            artifact_id=ingest.artifact_id,
+        )
+
+    def _build_scan_research(
+        self,
+        context: _EtfScanContext,
+        ingest: StockDBIngestSnapshot,
+        evidence: _EtfScanEvidence,
+    ) -> _EtfResearchBuild:
+        context.progress(70, "计算 ETF 板块证据", "趋势、位置、活跃度分别公开")
+        daily_groups, factor_groups, direct_groups = self._prepared_scan_groups(
+            evidence.daily, evidence.factors, evidence.direct
+        )
+        session_index = {
+            value: index for index, value in enumerate(evidence.session_dates)
+        }
         rows: list[dict[str, Any]] = []
-        for profile in profiles:
+        for profile in context.profiles:
             metric = adjusted_daily_metrics(
                 daily_groups.get(profile.symbol, pd.DataFrame()),
                 factor_groups.get(profile.symbol),
@@ -3051,81 +3303,105 @@ class EtfResearchService:
             observations = direct_groups.get(profile.symbol, pd.DataFrame())
             funds = fund_evidence(
                 observations,
-                as_of_date=actual,
-                session_dates=session_dates,
+                as_of_date=evidence.actual,
+                session_dates=evidence.session_dates,
                 fallback_price=metric.get("close"),
                 session_index=session_index,
                 prepared=True,
             )
             total_size = None
             if not observations.empty and "total_size" in observations:
-                sizes = pd.to_numeric(observations["total_size"], errors="coerce").dropna()
+                sizes = pd.to_numeric(
+                    observations["total_size"], errors="coerce"
+                ).dropna()
                 total_size = float(sizes.iloc[-1]) if not sizes.empty else None
-            if total_size is None and funds.get("share") is not None and metric.get("close") is not None:
+            if (
+                total_size is None
+                and funds.get("share") is not None
+                and metric.get("close") is not None
+            ):
                 total_size = float(funds["share"] * metric["close"])
-            rows.append(
-                {
-                    "profile": profile,
-                    "metrics": metric,
-                    "funds": funds,
-                    "total_size": total_size,
-                }
+            rows.append({
+                "profile": profile,
+                "metrics": metric,
+                "funds": funds,
+                "total_size": total_size,
+            })
+        sectors, representatives, queues, candidate_queues, summaries = (
+            build_sector_research(rows)
+        )
+        items = [
+            self._scan_research_item(
+                row,
+                representative_symbol=representatives[row["profile"].symbol],
+                daily_covered=row["profile"].symbol in daily_groups,
+                actual=evidence.actual,
+                snapshot_id=evidence.snapshot_id,
+                ingest=ingest,
             )
-        sectors, representative_by_symbol, queues, candidate_queues, summaries = build_sector_research(rows)
-        items: list[EtfResearchItem] = []
-        for row in rows:
-            profile = row["profile"]
-            metrics = {key: value for key, value in row["metrics"].items() if key != "history"}
-            representative_symbol = representative_by_symbol[profile.symbol]
-            items.append(
-                EtfResearchItem(
-                    symbol=profile.symbol,
-                    name=profile.name,
-                    category=profile.category,
-                    asset_class=profile.asset_class,
-                    sector_id=profile.sector_id,
-                    sector_name=profile.sector_name,
-                    normalized_index=profile.normalized_index,
-                    benchmark_code=profile.benchmark_code,
-                    is_representative=profile.symbol == representative_symbol,
-                    representative_symbol=representative_symbol,
-                    metrics=metrics,
-                    funds=row["funds"],
-                    metadata={
-                        "manager": profile.manager,
-                        "custodian": profile.custodian,
-                        "management_fee": profile.management_fee,
-                        "total_size": row["total_size"],
-                        "benchmark_type": profile.benchmark_type,
-                        "benchmark_level": profile.benchmark_level,
-                        "index_type": profile.index_type,
-                        "index_provider": profile.index_provider,
-                        "list_date": profile.list_date,
-                        "metadata_effective_as_of": profile.metadata_effective_as_of,
-                        "classification_confidence": profile.classification_confidence,
-                        "classification_evidence": profile.classification_evidence,
-                    },
-                    coverage={
-                        "daily": profile.symbol in daily_groups,
-                        "adjustment": metrics.get("adjustment_status")
-                        in {"official", "verified_local"},
-                        "shares": row["funds"].get("status") in {"confirmed_zero", "confirmed_change"},
-                    },
-                    provenance={
-                        "price": "free-stockdb:vendor-upstream-unverified",
-                        "adjustment": metrics.get("adjustment_source") or "unavailable",
-                        "shares": row["funds"].get("source") or "unavailable",
-                        "metadata": profile.metadata_source,
-                        "classification": profile.classification_source,
-                    },
-                    as_of_date=actual,
-                    snapshot_id=snapshot_id,
-                    ingest_id=ingest.ingest_id,
-                    artifact_id=ingest.artifact_id,
-                )
+            for row in rows
+        ]
+        items.sort(
+            key=lambda item: (
+                ETF_CATEGORIES.index(item.category), item.sector_name, item.symbol
             )
-        items.sort(key=lambda item: (ETF_CATEGORIES.index(item.category), item.sector_name, item.symbol))
+        )
+        return _EtfResearchBuild(
+            rows=rows,
+            items=items,
+            sectors=sectors,
+            queues=queues,
+            candidate_queues=candidate_queues,
+            summaries=summaries,
+        )
 
+    def _scan(
+        self,
+        *,
+        as_of: str = "",
+        tier: str = "production",
+        progress: Progress | None = None,
+        cancelled: Cancelled | None = None,
+        refresh_warnings: list[str] | tuple[str, ...] = (),
+    ) -> EtfResearchSnapshot:
+        cfg = get_config().data
+        if not cfg.free_stockdb_etf_research_enabled:
+            raise RuntimeError("ETF 研究已在设置中停用")
+        progress = progress or (lambda *_: None)
+        cancelled = cancelled or (lambda: False)
+        context = self._new_scan_context(
+            as_of=as_of,
+            tier=tier,
+            progress=progress,
+            cancelled=cancelled,
+            refresh_warnings=refresh_warnings,
+        )
+        ingest, daily = self._resolve_scan_ingest(context)
+        selected_tier = context.tier
+        end = context.end
+        target_source = context.target_source
+        progress = context.progress
+        if ingest is None:
+            raise RuntimeError("ETF 行情摄取未生成")
+        evidence = self._prepare_scan_evidence(context, ingest, daily)
+        existing = self._existing_scan_snapshot(context, evidence)
+        if existing is not None:
+            return existing
+        research = self._build_scan_research(context, ingest, evidence)
+        items = research.items
+        actual = evidence.actual
+        daily = evidence.daily
+        factors = evidence.factors
+        direct = evidence.direct
+        metadata_cache = evidence.metadata
+        adjustment_capability = evidence.adjustment_capability
+        evidence_hashes = evidence.evidence_hashes
+        input_hash = evidence.input_hash
+        snapshot_id = evidence.snapshot_id
+        sectors = research.sectors
+        queues = research.queues
+        candidate_queues = research.candidate_queues
+        summaries = research.summaries
         share_date = (
             direct["trade_date"].max().date().isoformat()
             if not direct.empty and direct["trade_date"].notna().any()

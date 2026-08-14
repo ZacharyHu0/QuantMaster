@@ -17,7 +17,10 @@ from quantmaster.data.free_stockdb_compatibility import (
     publish_validation,
     quantmaster_indicators,
 )
-from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
+from quantmaster.data.free_stockdb_contracts import (
+    StockDBArtifactIdentity,
+    StockDBIngestSnapshot,
+)
 from quantmaster.data.free_stockdb_ingest import StockDBIngestService, StockDBIngestStore
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instrument_snapshots import (
@@ -594,6 +597,60 @@ class _EtfSource:
                 "amount": 1000,
             }
         )
+
+
+def test_etf_compatible_ingest_respects_historical_knowledge_cutoff():
+    identity = StockDBArtifactIdentity(
+        artifact_id="etf-artifact",
+        sdk={"available": True, "sha256": "1" * 64},
+    )
+    context = SimpleNamespace(
+        identity=identity,
+        start=pd.Timestamp("2023-07-01"),
+        end=pd.Timestamp("2026-08-08"),
+    )
+    candidate = StockDBIngestSnapshot(
+        ingest_id="sdi-history",
+        as_of_date="2026-08-08",
+        artifact_id=identity.artifact_id,
+        master_snapshot_id="etf-master",
+        start_date="2023-01-01",
+        end_date="2026-08-08",
+        assets={"etf": {}},
+        coverage={"status": "complete"},
+        content_hashes={},
+        provenance={},
+        created_at="2026-08-08T07:00:00+00:00",
+    )
+
+    assert EtfResearchService._compatible_scan_candidate(
+        candidate,
+        context,
+        pd.Timestamp("2026-08-08T07:00:00+00:00"),
+    )
+    assert not EtfResearchService._compatible_scan_candidate(
+        candidate,
+        context,
+        pd.Timestamp("2026-08-08T06:59:59+00:00"),
+    )
+
+
+def test_etf_daily_batch_cancellation_stops_before_source_read():
+    source = _EtfSource()
+    service = object.__new__(EtfResearchService)
+    service.source = source
+    context = SimpleNamespace(
+        symbols=["510300.SH"],
+        start=pd.Timestamp("2023-07-01"),
+        end=pd.Timestamp("2026-08-08"),
+        cancelled=lambda: True,
+        progress=lambda *_args: None,
+    )
+
+    with pytest.raises(InterruptedError, match="ETF 研究扫描已取消"):
+        service._read_scan_daily_batches(context, report_progress=True)
+
+    assert source.daily_calls == 0
 
 
 def test_etf_scan_builds_v3_sector_radar_and_loads_minutes_only_on_demand(
