@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from os import environ
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,32 @@ def prepare_pytest_directory(path: Path) -> Path:
     if not os.access(target, os.W_OK):
         raise PermissionError(f"目录不可写: {target}")
     return target
+
+
+def _install_task_artifact_lease(config: Any) -> None:
+    """Keep direct pytest runs from racing task-worktree removal."""
+    from scripts.dev.tasks import task_artifact_lease
+
+    cwd = Path.cwd().resolve()
+    if cwd.parent.name != ".worktrees":
+        return
+    primary = cwd.parents[1]
+    artifacts = (primary / ".artifacts" / "worktrees" / cwd.name).resolve()
+    if environ.get("QM_TASK_LEASE_HELD") == str(artifacts):
+        return
+    previous = environ.get("QM_TASK_LEASE_HELD")
+    lease = task_artifact_lease(artifacts)
+    lease.__enter__()
+    environ["QM_TASK_LEASE_HELD"] = str(artifacts)
+
+    def release() -> None:
+        if previous is None:
+            environ.pop("QM_TASK_LEASE_HELD", None)
+        else:
+            environ["QM_TASK_LEASE_HELD"] = previous
+        lease.__exit__(None, None, None)
+
+    config.add_cleanup(release)
 
 
 def _install_inheriting_tmp_path_factory(config: Any) -> None:
@@ -53,6 +80,7 @@ def _install_inheriting_tmp_path_factory(config: Any) -> None:
 
 @hookimpl(trylast=True)
 def pytest_configure(config: Any) -> None:
+    _install_task_artifact_lease(config)
     if os.name != "nt":
         return
     cache = getattr(config, "cache", None)
