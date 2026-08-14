@@ -15,6 +15,7 @@ import httpx
 import pandas as pd
 import pytest
 
+from quantmaster.config import Config, set_config
 from quantmaster.data import registry
 from quantmaster.data.base import DataSource, Market
 from quantmaster.data.cache_contracts import CacheResultKind
@@ -286,6 +287,44 @@ def test_tushare_rate_limit_is_shared_in_data_root(isolated_config, monkeypatch)
     limiter.wait()
     assert sleeps == [pytest.approx(0.1)]
     assert (isolated_config.data_root / "tushare_rate.sqlite").exists()
+
+
+def test_provider_fixture_drains_late_failure_before_config_switch(
+    tmp_path, isolated_config,
+):
+    from conftest import _drain_provider_scheduler
+
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def fail_later():
+        entered.set()
+        assert release.wait(1)
+        raise RuntimeError("ProxyError: prior test offline")
+
+    def run() -> None:
+        try:
+            with pytest.raises(RuntimeError, match="prior test offline"):
+                provider_call("tushare:daily", "prior-test", fail_later)
+        finally:
+            finished.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert entered.wait(1)
+    threading.Timer(0.05, release.set).start()
+    _drain_provider_scheduler()
+    assert finished.wait(1)
+    assert PROVIDER_HEALTH.status("tushare:daily")["tushare:daily"]["state"] == "open"
+
+    next_config = Config()
+    next_config.data.root = str(tmp_path / "next-test-data")
+    next_config.data_root.mkdir(parents=True)
+    set_config(next_config)
+    try:
+        assert provider_call("tushare:daily", "fake-client", lambda: "ok") == "ok"
+    finally:
+        set_config(isolated_config)
 
 
 def test_tushare_qfq_units_and_disk_cache(tmp_path, isolated_config, monkeypatch):
