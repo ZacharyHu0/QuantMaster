@@ -118,6 +118,23 @@ def _wait_for_ui_runtime(url) -> None:
 
 
 def _assert_no_ui_process_owners() -> None:
+    deadline = time.monotonic() + 1
+    while True:
+        blocking_threads = [
+            active for active in threading.enumerate()
+            if active is not threading.main_thread()
+            and active.is_alive()
+            and not active.daemon
+            and not active.name.startswith("pytest_timeout ")
+        ]
+        children = multiprocessing.active_children()
+        if not blocking_threads and not children:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.01, remaining))
+
     frames = sys._current_frames()
     threads = []
     for active in threading.enumerate():
@@ -140,6 +157,23 @@ def _assert_no_ui_process_owners() -> None:
         f"UI 测试生命周期仍有阻塞所有者: threads={blocking_threads!r} "
         f"children={children!r} daemon_threads={threads!r}"
     )
+
+
+def test_ui_owner_assertion_waits_for_short_lived_runtime_thread() -> None:
+    started = threading.Event()
+
+    def finish_soon() -> None:
+        started.set()
+        time.sleep(0.05)
+
+    owner = threading.Thread(target=finish_soon, name="short-lived-ui-owner")
+    owner.start()
+    assert started.wait(timeout=1)
+    try:
+        _assert_no_ui_process_owners()
+        assert not owner.is_alive()
+    finally:
+        owner.join(timeout=1)
 
 
 def test_after_close_prioritizes_sector_width_without_wide_screen_scroll(live_server):
