@@ -670,7 +670,7 @@ def test_remove_task_artifacts_targets_denied_child_without_enumerating(
             calls.append("enumerate")
             return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
         calls.append("restore-target")
-        assert Path(environment["QM_TASK_ARTIFACT_BLOCKED"]) == blocked.resolve()
+        assert type(blocked)(environment["QM_TASK_ARTIFACT_BLOCKED"]) == blocked.resolve()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)

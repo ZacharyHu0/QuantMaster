@@ -572,7 +572,7 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
     except PermissionError as exc:
-        blocked = Path(exc.filename or artifact_root).resolve()
+        blocked = type(artifact_root)(exc.filename or artifact_root).resolve()
         if blocked != artifact_root and artifact_root not in blocked.parents:
             raise SystemExit(f"拒绝恢复任务工件之外的 ACL：{blocked}") from None
         restore_inheritance(blocked)
@@ -580,13 +580,13 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
             shutil.rmtree(artifact_root, onexc=make_writable)
             return
         except PermissionError as exc:
-            blocked = Path(exc.filename or artifact_root)
+            blocked = type(artifact_root)(exc.filename or artifact_root)
             raise SystemExit(
                 "Windows ACL 阻止删除任务工件："
                 f"{blocked}；已恢复继承但删除仍失败"
             ) from None
     except OSError as exc:
-        blocked = Path(exc.filename or artifact_root)
+        blocked = type(artifact_root)(exc.filename or artifact_root)
         raise SystemExit(
             "Windows ACL 阻止删除任务工件："
             f"{blocked}；{exc}"
