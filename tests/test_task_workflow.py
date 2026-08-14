@@ -396,6 +396,41 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     assert ["branch", "-D", "codex/recovery"] in calls
 
 
+def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+    calls: list[str] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+
+    def fake_git(args, **_kwargs):
+        if args[:2] == ["branch", "-D"]:
+            calls.append("branch")
+        return Result()
+
+    def blocked_artifacts(*_args):
+        calls.append("artifacts")
+        raise SystemExit("Windows ACL blocked")
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
+    monkeypatch.setattr(tasks, "record_task_completion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(tasks, "remove_task_artifacts", blocked_artifacts)
+    monkeypatch.setattr(tasks, "git", fake_git)
+
+    with pytest.raises(SystemExit, match="ACL blocked"):
+        remove("recovery")
+
+    assert calls == ["artifacts"]
+    assert artifacts.exists()
+
+
 def test_remove_intent_recovers_checkout_after_git_partially_removed_it(monkeypatch, tmp_path):
     from scripts.dev import tasks
 
@@ -532,17 +567,58 @@ def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)
     monkeypatch.setattr(tasks.os, "name", "nt")
+
+    def restore(command, **_kwargs):
+        assert "$ErrorActionPreference='Stop'" in command[-1]
+        calls.append("restore")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    remove_task_artifacts(primary, "recovery")
+
+    assert calls == ["remove", "restore", "remove"]
+
+
+def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+    calls: list[str] = []
+    original_rmtree = tasks.shutil.rmtree
+
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    def remove_once_blocked(path, **kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", path)
+        return original_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "valid_task_completion", lambda root, slug: True)
     monkeypatch.setattr(
-        tasks.subprocess,
-        "run",
+        tasks, "task_artifact_lease", lambda path: tasks.contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove_once_blocked)
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
         lambda *args, **kwargs: calls.append("restore") or SimpleNamespace(
             returncode=0, stdout="", stderr="",
         ),
     )
 
-    remove_task_artifacts(primary, "recovery")
+    remove("recovery")
+    remove("recovery")
 
     assert calls == ["remove", "restore", "remove"]
+    assert not artifacts.exists()
 
 
 def test_remove_refuses_unintegrated_recovery_branch(monkeypatch, tmp_path):
