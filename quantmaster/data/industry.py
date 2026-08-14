@@ -14,6 +14,7 @@ import os
 import time
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Literal
 
 from quantmaster.config import get_config
 from quantmaster.data.resilience import akshare_call
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 CACHE_TTL_DAYS = 1
 CURRENT_ONLY_SCHEMA_VERSION = 3
 CURRENT_ONLY_SOURCE = "current-only-migration"
+IndustryReadMode = Literal["formal", "sandbox_current"]
 
 
 class IndustrySnapshotIncomplete(RuntimeError):
@@ -212,6 +214,50 @@ def _current_only_payload(payload: dict, *, history: bool) -> dict:
     return {**payload, "mapping": normalized}
 
 
+def _exact_instant(value: object, *, field: str, required: bool = True) -> datetime | None:
+    """Parse an exact provider/observation instant without local-time guessing."""
+    if value in (None, ""):
+        if required:
+            raise IndustrySnapshotIntegrityError(f"行业快照缺少 {field}")
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise IndustrySnapshotIntegrityError(f"行业快照 {field} 非法") from exc
+    if parsed.tzinfo is None:
+        raise IndustrySnapshotIntegrityError(f"行业快照 {field} 必须包含时区")
+    return parsed.astimezone(UTC)
+
+
+def _temporal_contract(payload: dict) -> tuple[date, datetime]:
+    """Validate canonical effective/knowledge fields for formal PIT use."""
+    try:
+        effective = date.fromisoformat(str(payload["effective_session_date"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IndustrySnapshotIntegrityError(
+            "行业快照缺少有效的 effective_session_date"
+        ) from exc
+    first_observed = _exact_instant(
+        payload.get("first_observed_at"), field="first_observed_at",
+    )
+    assert first_observed is not None
+    announced = _exact_instant(
+        payload.get("announced_at"), field="announced_at", required=False,
+    )
+    published = _exact_instant(
+        payload.get("published_at"), field="published_at", required=False,
+    )
+    if announced is not None and published is not None and published < announced:
+        raise IndustrySnapshotIntegrityError(
+            "行业快照 published_at 早于 announced_at"
+        )
+    if published is not None and first_observed < published:
+        raise IndustrySnapshotIntegrityError(
+            "行业快照 first_observed_at 早于 published_at"
+        )
+    return effective, first_observed
+
+
 def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -230,7 +276,8 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
     if history and path.stem.rsplit("--", 1)[-1] != expected:
         raise IndustrySnapshotIntegrityError(f"行业快照文件名哈希失败: {path.name}")
     if payload.get("snapshot_complete"):
-        effective = str(payload.get("effective_as_of") or "")
+        effective_date, first_observed = _temporal_contract(payload)
+        effective = effective_date.isoformat()
         evidence = dict(payload.get("universe_evidence") or {})
         if str(evidence.get("as_of") or "") != effective:
             raise IndustrySnapshotIntegrityError(
@@ -240,17 +287,13 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
             catalog_acquired = datetime.fromisoformat(
                 str(evidence.get("acquired_at") or "").replace("Z", "+00:00")
             )
-            industry_observed = datetime.fromisoformat(
-                str(payload.get("observed_at") or "").replace("Z", "+00:00")
-            )
         except ValueError as exc:
             raise IndustrySnapshotIntegrityError(
                 f"行业快照时间证据非法: {path.name}"
             ) from exc
         if (
             catalog_acquired.tzinfo is None
-            or industry_observed.tzinfo is None
-            or catalog_acquired > industry_observed
+            or catalog_acquired.astimezone(UTC) > first_observed
         ):
             raise IndustrySnapshotIntegrityError(
                 f"行业快照早于证券目录采集时间: {path.name}"
@@ -277,36 +320,71 @@ def _verified_industry_payload(path: Path, *, history: bool = False) -> dict:
 
 
 def save_industry_map(
-    mapping: dict[str, str], *, effective_as_of: str | date | None = None,
-    observed_at: str | datetime | None = None,
+    mapping: dict[str, str], *, effective_session_date: str | date,
+    first_observed_at: str | datetime,
+    announced_at: str | datetime | None = None,
+    published_at: str | datetime | None = None,
     snapshot_complete: bool = True,
     source: str = "manual",
     expected_symbols: int | None = None,
     missing_symbols: list[str] | tuple[str, ...] = (),
     universe_evidence: dict[str, object] | None = None,
 ) -> None:
-    """Persist a dated immutable observation as well as the current pointer."""
+    """Persist an explicitly timed industry observation and current pointer.
+
+    ``effective_session_date`` is the membership's business date.
+    ``first_observed_at`` is when this installation first had the information.
+    Provider announcement/publication instants stay optional rather than being
+    guessed; neither effective nor observed time is ever filled from today/now.
+    """
     effective = (
-        effective_as_of.isoformat()
-        if isinstance(effective_as_of, date)
-        else str(effective_as_of or market_date().isoformat())
+        effective_session_date.isoformat()
+        if isinstance(effective_session_date, date)
+        else str(effective_session_date)
     )
     try:
         effective = date.fromisoformat(effective).isoformat()
     except ValueError as exc:
         raise ValueError("行业快照日期需要使用 YYYY-MM-DD 格式") from exc
-    if observed_at is None:
-        observed = datetime.now(UTC)
-    elif isinstance(observed_at, datetime):
-        observed = observed_at
+    if isinstance(first_observed_at, datetime):
+        observed = first_observed_at
     else:
         try:
-            observed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+            observed = datetime.fromisoformat(
+                str(first_observed_at).replace("Z", "+00:00")
+            )
         except ValueError as exc:
-            raise ValueError("行业快照 observed_at 需要使用带时区的 ISO 时间") from exc
+            raise ValueError(
+                "行业快照 first_observed_at 需要使用带时区的 ISO 时间"
+            ) from exc
     if observed.tzinfo is None:
-        raise ValueError("行业快照 observed_at 必须包含时区")
+        raise ValueError("行业快照 first_observed_at 必须包含时区")
     observed = observed.astimezone(UTC)
+    temporal_values: dict[str, str | None] = {}
+    for field, value in (("announced_at", announced_at), ("published_at", published_at)):
+        if value is None:
+            temporal_values[field] = None
+            continue
+        try:
+            parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(f"行业快照 {field} 需要使用带时区的 ISO 时间") from exc
+        if parsed.tzinfo is None:
+            raise ValueError(f"行业快照 {field} 必须包含时区")
+        temporal_values[field] = parsed.astimezone(UTC).isoformat()
+    if (
+        temporal_values["announced_at"]
+        and temporal_values["published_at"]
+        and str(temporal_values["published_at"]) < str(temporal_values["announced_at"])
+    ):
+        raise ValueError("行业快照 published_at 不能早于 announced_at")
+    if (
+        temporal_values["published_at"]
+        and observed < datetime.fromisoformat(str(temporal_values["published_at"]))
+    ):
+        raise ValueError("行业快照 first_observed_at 不能早于 published_at")
     if snapshot_complete:
         if universe_evidence is None:
             universe_symbols, universe_evidence = _active_cn_universe(as_of=effective)
@@ -319,7 +397,9 @@ def save_industry_map(
                 universe_evidence, market="CN", asset_type="stock",
             )
         if str((universe_evidence or {}).get("as_of") or "") != effective:
-            raise IndustrySnapshotIncomplete("行业 effective_as_of 与证券目录 as_of 不一致")
+            raise IndustrySnapshotIncomplete(
+                "行业 effective_session_date 与证券目录 as_of 不一致"
+            )
         try:
             catalog_acquired = datetime.fromisoformat(
                 str((universe_evidence or {}).get("acquired_at") or "").replace("Z", "+00:00")
@@ -327,7 +407,9 @@ def save_industry_map(
         except ValueError as exc:
             raise IndustrySnapshotIncomplete("证券目录 acquired_at 非法") from exc
         if catalog_acquired.tzinfo is None or catalog_acquired.astimezone(UTC) > observed:
-            raise IndustrySnapshotIncomplete("行业 observed_at 早于证券目录 acquired_at")
+            raise IndustrySnapshotIncomplete(
+                "行业 first_observed_at 早于证券目录 acquired_at"
+            )
         evidence_count = int(str((universe_evidence or {}).get("expected_count") or 0))
         expected_value = int(expected_symbols) if expected_symbols is not None else len(universe_symbols)
         if (
@@ -344,9 +426,10 @@ def save_industry_map(
         expected_symbols = evidence_count
     payload = {
         "schema_version": 2,
-        "updated_at": observed.timestamp(),
-        "observed_at": observed.isoformat(),
-        "effective_as_of": effective,
+        "announced_at": temporal_values["announced_at"],
+        "published_at": temporal_values["published_at"],
+        "first_observed_at": observed.isoformat(),
+        "effective_session_date": effective,
         "snapshot_complete": bool(snapshot_complete),
         "quality": "verified_complete" if snapshot_complete else "degraded_merged_partial",
         "source": source,
@@ -395,13 +478,9 @@ def _load_snapshot_payload(as_of: str) -> dict:
             payload = _verified_industry_payload(
                 path, history=path.parent == history,
             )
-            effective = date.fromisoformat(str(payload.get("effective_as_of") or ""))
-            observed = datetime.fromisoformat(
-                str(payload.get("observed_at") or "").replace("Z", "+00:00")
-            )
-            if observed.tzinfo is None:
+            if payload.get("schema_version") == CURRENT_ONLY_SCHEMA_VERSION:
                 continue
-            observed = observed.astimezone(UTC)
+            effective, observed = _temporal_contract(payload)
             mapping = payload.get("mapping", {}) if isinstance(payload, dict) else {}
             expected_count = int(payload.get("expected_symbols") or 0)
             observed_count = int(payload.get("observed_symbols") or 0)
@@ -420,15 +499,20 @@ def _load_snapshot_payload(as_of: str) -> dict:
     if candidates:
         return max(candidates, key=lambda item: (item[0], item[1]))[2]
     raise RuntimeError(
-        f"{target.isoformat()} 上海 15:00 前没有带 observed_at 的行业分类快照；"
+        f"{target.isoformat()} 上海 15:00 前没有带 first_observed_at 的行业分类快照；"
         "拒绝用当前行业映射重算历史结果"
     )
 
 
 def load_industry_map(
     refresh: bool = False, *, as_of: str | None = None,
+    mode: IndustryReadMode = "formal",
 ) -> dict[str, str]:
     """Read current classification or a strictly dated historical snapshot."""
+    if mode not in {"formal", "sandbox_current"}:
+        raise ValueError("行业读取模式必须是 formal 或 sandbox_current")
+    if as_of and mode == "sandbox_current":
+        raise ValueError("sandbox_current 不能用于历史行业读取")
     if as_of:
         payload = _load_snapshot_payload(as_of)
         return {
@@ -444,8 +528,12 @@ def load_industry_map(
             data = _verified_industry_payload(path)
             cached = data.get("mapping", {})
             if data.get("schema_version") == CURRENT_ONLY_SCHEMA_VERSION:
-                if not refresh:
+                if mode == "sandbox_current" and not refresh:
                     return cached
+                if not refresh:
+                    raise LegacyIndustrySnapshotError(
+                        "current-only 行业投影仅允许显式 sandbox_current 预览"
+                    )
                 # A deliberate refresh may still replace this import with a
                 # provider observation, but it never rewrites it as history.
                 cached = {}
@@ -456,7 +544,12 @@ def load_industry_map(
                 and active_symbols
                 and not missing_current
             )
-            age_seconds = time.time() - float(data.get("updated_at") or 0)
+            if data.get("schema_version") == CURRENT_ONLY_SCHEMA_VERSION:
+                observed_epoch = float(data.get("updated_at") or 0)
+            else:
+                _effective, first_observed = _temporal_contract(data)
+                observed_epoch = first_observed.timestamp()
+            age_seconds = time.time() - observed_epoch
             fresh = (
                 complete
                 and 0 <= age_seconds < CACHE_TTL_DAYS * 86400
@@ -465,19 +558,21 @@ def load_industry_map(
             # A pre-v2 projection is useful only as a degraded live preview.
             # Current refresh treats it as no formal cache and replaces it only
             # after a complete provider observation passes the new contract.
-            pass
+            if not refresh:
+                raise
         except IndustrySnapshotIntegrityError:
             raise
     if cached and fresh and not refresh:
         return cached
     try:
         fetched = fetch_industry_map()
-        if isinstance(fetched, tuple):
-            mapping, provider_complete, source = fetched
-        else:
-            mapping = fetched
-            provider_complete = True
-            source = "provider:unverified-completeness"
+        if not isinstance(fetched, tuple) or len(fetched) != 4:
+            raise IndustrySnapshotIncomplete(
+                "行业 provider 缺少 effective_session_date/first_observed_at 时间证据"
+            )
+        mapping, provider_complete, source, temporal_evidence = fetched
+        if not isinstance(temporal_evidence, dict):
+            raise IndustrySnapshotIncomplete("行业 provider 时间证据结构非法")
         if mapping:
             active_symbols, universe_evidence = _active_cn_universe()
             observed_mapping = {
@@ -495,6 +590,10 @@ def load_industry_map(
             resolved = observed_mapping if complete else {**cached, **observed_mapping}
             save_industry_map(
                 resolved,
+                effective_session_date=temporal_evidence.get("effective_session_date"),
+                first_observed_at=temporal_evidence.get("first_observed_at"),
+                announced_at=temporal_evidence.get("announced_at"),
+                published_at=temporal_evidence.get("published_at"),
                 snapshot_complete=bool(complete),
                 source=str(source),
                 expected_symbols=len(active_symbols) if active_symbols else None,
@@ -520,9 +619,13 @@ def load_industry_map(
     raise RuntimeError("行业映射源未返回可验证的完整快照")
 
 
-def load_cached_industry_map(*, as_of: str | None = None) -> dict[str, str]:
+def load_cached_industry_map(
+    *, as_of: str | None = None, mode: IndustryReadMode = "formal",
+) -> dict[str, str]:
     """只读本地白名单缓存；AutoMiner 构造特征时绝不隐式触网。"""
     if as_of:
+        if mode == "sandbox_current":
+            raise ValueError("sandbox_current 不能用于历史行业读取")
         payload = _load_snapshot_payload(as_of)
         return {
             str(key): str(value)
@@ -534,6 +637,13 @@ def load_cached_industry_map(*, as_of: str | None = None) -> dict[str, str]:
         return {}
     try:
         payload = _verified_industry_payload(path)
+        if (
+            payload.get("schema_version") == CURRENT_ONLY_SCHEMA_VERSION
+            and mode != "sandbox_current"
+        ):
+            raise LegacyIndustrySnapshotError(
+                "current-only 行业投影仅允许显式 sandbox_current 预览"
+            )
         mapping = payload.get("mapping", {}) if isinstance(payload, dict) else {}
         return {str(key): str(value) for key, value in mapping.items() if value}
     except IndustrySnapshotIntegrityError:
@@ -562,8 +672,10 @@ def load_industry_evidence(*, as_of: str | None = None) -> dict[str, object]:
             else "verified" if payload.get("snapshot_complete") else "degraded"
         ),
         "source": str(payload.get("source") or CURRENT_ONLY_SOURCE),
-        "observed_at": str(payload.get("observed_at") or ""),
-        "effective_as_of": str(payload.get("effective_as_of") or ""),
+        "announced_at": str(payload.get("announced_at") or ""),
+        "published_at": str(payload.get("published_at") or ""),
+        "first_observed_at": str(payload.get("first_observed_at") or ""),
+        "effective_session_date": str(payload.get("effective_session_date") or ""),
         "expected_symbols": payload.get("expected_symbols"),
         "observed_symbols": payload.get("observed_symbols"),
         "missing_symbols": list(payload.get("missing_symbols") or []),
@@ -573,7 +685,7 @@ def load_industry_evidence(*, as_of: str | None = None) -> dict[str, object]:
 
 
 def load_industry_analysis_context(
-    *, as_of: str | None = None,
+    *, as_of: str | None = None, mode: IndustryReadMode = "formal",
 ) -> tuple[dict[str, str], dict[str, object]]:
     """Return the best PIT-safe mapping for analysis plus its formal eligibility.
 
@@ -584,7 +696,7 @@ def load_industry_analysis_context(
     cutoff; they never fall back to today's projection.
     """
     try:
-        mapping = load_industry_map(as_of=as_of)
+        mapping = load_industry_map(as_of=as_of, mode=mode)
         evidence = load_industry_evidence(as_of=as_of)
         return mapping, {
             **evidence,
@@ -605,7 +717,7 @@ def load_industry_analysis_context(
             "正式行业证据不可用；结果已降级为研究预览，详细信息已写入本机日志"
         )
     try:
-        mapping = load_cached_industry_map(as_of=as_of)
+        mapping = load_cached_industry_map(as_of=as_of, mode=mode)
     except (
         FileNotFoundError,
         IndustrySnapshotIncomplete,
@@ -629,8 +741,10 @@ def load_industry_analysis_context(
     ):
         evidence = {
             "source": "unavailable",
-            "observed_at": "",
-            "effective_as_of": str(as_of or ""),
+            "announced_at": "",
+            "published_at": "",
+            "first_observed_at": "",
+            "effective_session_date": str(as_of or ""),
             "expected_symbols": None,
             "observed_symbols": len(mapping),
             "missing_symbols": [],

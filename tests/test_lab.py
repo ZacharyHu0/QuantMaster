@@ -198,17 +198,48 @@ def test_lab_sandbox_feature_entry_preserves_news_preview_eligibility(tmp_path, 
     assert news["evidence"]["sources"][0]["source_id"] == "sina_live"
 
 
-def test_point_in_time_membership_updates_indexes_independently():
+def test_legacy_membership_requires_explicit_current_sandbox_and_is_not_backdated():
     records = pd.DataFrame([
         {"trade_date": "2024-01-02", "index_code": "A", "symbol": "AAA"},
         {"trade_date": "2024-01-03", "index_code": "B", "symbol": "BBB"},
         {"trade_date": "2024-01-05", "index_code": "A", "symbol": "CCC"},
     ])
     calendar = pd.bdate_range("2024-01-02", "2024-01-08")
-    mask = build_membership_mask(records, calendar)
-    assert mask.loc["2024-01-03", ["AAA", "BBB"]].all()
-    assert not mask.loc["2024-01-05", "AAA"]
-    assert mask.loc["2024-01-05", ["BBB", "CCC"]].all()
+    with pytest.raises(RuntimeError, match="sandbox_current"):
+        build_membership_mask(records, calendar)
+
+    mask = build_membership_mask(records, calendar, mode="sandbox_current")
+    assert not mask.iloc[:-1].to_numpy().any()
+    assert mask.loc["2024-01-08", ["BBB", "CCC"]].all()
+    assert not mask.loc["2024-01-08", "AAA"]
+
+
+def test_formal_membership_uses_first_observed_cutoff_and_effective_session():
+    records = pd.DataFrame([
+        {
+            "effective_session_date": "2024-01-02", "index_code": "A",
+            "symbol": "AAA", "published_at": "2024-01-01T08:00:00Z",
+            "first_observed_at": "2024-01-02T06:59:00Z",
+        },
+        {
+            "effective_session_date": "2024-01-03", "index_code": "A",
+            "symbol": "BBB", "published_at": "2024-01-02T08:00:00Z",
+            "first_observed_at": "2024-01-04T07:01:00Z",
+        },
+    ])
+    calendar = pd.DatetimeIndex(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
+
+    strict = build_membership_mask(records, calendar)
+    assert strict.loc["2024-01-03", "AAA"]
+    assert not strict.loc["2024-01-04", "BBB"]
+    assert strict.loc["2024-01-05", "BBB"]
+    assert not strict.loc["2024-01-05", "AAA"]
+
+    published = build_membership_mask(
+        records, calendar, knowledge_mode="trusted_published",
+    )
+    assert published.loc["2024-01-03", "BBB"]
+    assert not published.loc["2024-01-03", "AAA"]
 
 
 def test_production_fundamentals_use_observed_sessions_for_date_only_announcements(
@@ -746,9 +777,21 @@ def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path,
     from quantmaster.data.storage import BarStore
 
     records = pd.DataFrame([
-        {"index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH"},
-        {"index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "B.SH"},
-        {"index_code": "000300.SH", "trade_date": "2023-07-03", "symbol": "A.SH"},
+        {
+            "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH",
+            "published_at": "2023-01-01T08:00:00Z",
+            "acquired_at": "2023-01-02T06:59:00Z",
+        },
+        {
+            "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "B.SH",
+            "published_at": "2023-01-01T08:00:00Z",
+            "acquired_at": "2023-01-02T06:59:00Z",
+        },
+        {
+            "index_code": "000300.SH", "trade_date": "2023-07-03", "symbol": "A.SH",
+            "published_at": "2023-07-02T08:00:00Z",
+            "acquired_at": "2023-07-03T06:59:00Z",
+        },
     ])
     monkeypatch.setattr(
         "quantmaster.lab.dataset._cached_membership_records",
@@ -807,6 +850,8 @@ def test_local_snapshot_blocks_production_when_bar_quality_is_degraded(
 
     records = pd.DataFrame([{
         "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH",
+        "published_at": "2023-01-01T08:00:00Z",
+        "acquired_at": "2023-01-02T06:59:00Z",
     }])
     monkeypatch.setattr(
         "quantmaster.lab.dataset._cached_membership_records",
@@ -848,6 +893,8 @@ def test_verified_tail_does_not_upgrade_unverified_legacy_history(
 
     records = pd.DataFrame([{
         "index_code": "000300.SH", "trade_date": "2023-01-02", "symbol": "A.SH",
+        "published_at": "2023-01-01T08:00:00Z",
+        "acquired_at": "2023-01-02T06:59:00Z",
     }])
     monkeypatch.setattr(
         "quantmaster.lab.dataset._cached_membership_records",

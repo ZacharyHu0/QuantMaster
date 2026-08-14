@@ -38,7 +38,13 @@ _INSPECTION_CACHE: OrderedDict[
 ] = OrderedDict()
 
 
-def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataFrame:
+def build_membership_mask(
+    records: pd.DataFrame,
+    calendar: Iterable,
+    *,
+    mode: Literal["formal_historical", "sandbox_current"] = "formal_historical",
+    knowledge_mode: Literal["strict_observed", "trusted_published"] = "strict_observed",
+) -> pd.DataFrame:
     """把月度指数成分快照扩展为逐交易日可用掩码。
 
     每个指数独立沿用最近一个已公布快照，再取指数之间的并集。这样沪深300
@@ -47,27 +53,64 @@ def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataF
     dates = pd.DatetimeIndex(pd.to_datetime(list(calendar))).normalize().unique().sort_values()
     if records is None or records.empty or dates.empty:
         return pd.DataFrame(index=dates, dtype=bool)
+    if mode not in {"formal_historical", "sandbox_current"}:
+        raise ValueError("成员读取模式必须是 formal_historical 或 sandbox_current")
+    if knowledge_mode not in {"strict_observed", "trusted_published"}:
+        raise ValueError("成员知识模式必须是 strict_observed 或 trusted_published")
     frame = records.copy()
-    frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.normalize()
+    effective_column = (
+        "effective_session_date" if "effective_session_date" in frame else "trade_date"
+    )
+    if effective_column not in frame:
+        raise RuntimeError("成员记录缺少 effective_session_date")
+    frame["effective_session_date"] = pd.to_datetime(
+        frame[effective_column], errors="coerce",
+    ).dt.normalize()
     if "index_code" not in frame:
         frame["index_code"] = "index"
-    if {"published_at", "acquired_at"} <= set(frame.columns):
+    observed_column = (
+        "first_observed_at" if "first_observed_at" in frame else "acquired_at"
+    )
+    if "published_at" in frame and observed_column in frame:
         frame["published_at"] = pd.to_datetime(frame["published_at"], utc=True, errors="coerce")
-        frame["acquired_at"] = pd.to_datetime(frame["acquired_at"], utc=True, errors="coerce")
-        frame = frame.dropna(subset=["published_at", "acquired_at"])
+        frame["first_observed_at"] = pd.to_datetime(
+            frame[observed_column], utc=True, errors="coerce",
+        )
+        if "announced_at" in frame:
+            frame["announced_at"] = pd.to_datetime(
+                frame["announced_at"], utc=True, errors="coerce",
+            )
+        required_knowledge = (
+            "first_observed_at"
+            if knowledge_mode == "strict_observed"
+            else "published_at"
+        )
+        frame = frame.dropna(
+            subset=["effective_session_date", "first_observed_at", required_knowledge],
+        )
+        if frame.empty:
+            raise RuntimeError(
+                f"正式历史成员缺少 {required_knowledge} 点时证据"
+            )
         all_symbols = sorted(set(frame["symbol"].dropna().astype(str)))
         events = []
-        for (code, effective, acquired, published), group in frame.groupby(
-            ["index_code", "trade_date", "acquired_at", "published_at"], sort=True,
-        ):
+        grouped = frame.groupby(
+            ["index_code", "effective_session_date", "first_observed_at", "published_at"],
+            sort=True, dropna=False,
+        )
+        for (code, effective, observed, published), group in grouped:
             effective = pd.Timestamp(effective)
+            knowledge_at = (
+                pd.Timestamp(observed)
+                if knowledge_mode == "strict_observed"
+                else pd.Timestamp(published)
+            )
             available = max(
-                pd.Timestamp(acquired),
-                pd.Timestamp(published),
+                knowledge_at,
                 pd.Timestamp(daily_signal_cutoff(effective.date())).tz_convert("UTC"),
             )
             events.append((
-                available, str(code), effective, pd.Timestamp(acquired),
+                available, str(code), effective, pd.Timestamp(observed),
                 tuple(group["symbol"].dropna().astype(str)),
             ))
         events.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
@@ -89,28 +132,37 @@ def build_membership_mask(records: pd.DataFrame, calendar: Iterable) -> pd.DataF
                     selected.update(versions[max(eligible_dates)][1])
             rows.append([symbol in selected for symbol in all_symbols])
         return pd.DataFrame(rows, index=dates, columns=all_symbols, dtype=bool)
+    if mode != "sandbox_current":
+        raise RuntimeError(
+            "正式历史成员缺少 published_at/first_observed_at 点时证据；"
+            "旧 current-only 数据只允许显式 sandbox_current 预览"
+        )
     snapshots: dict[str, list[tuple[pd.Timestamp, tuple[str, ...]]]] = {}
-    for (code, snapshot_date), group in frame.groupby(["index_code", "trade_date"], sort=True):
+    for (code, snapshot_date), group in frame.groupby(
+        ["index_code", "effective_session_date"], sort=True,
+    ):
         snapshots.setdefault(str(code), []).append(
             (pd.Timestamp(snapshot_date), tuple(group["symbol"].dropna().astype(str)))
         )
     all_symbols = sorted(set(frame["symbol"].dropna().astype(str)))
     symbol_positions = {symbol: position for position, symbol in enumerate(all_symbols)}
     array: Any = np.zeros((len(dates), len(all_symbols)), dtype=bool)
-    for index_snapshots in snapshots.values():
-        for position, (snapshot_date, members) in enumerate(index_snapshots):
-            row_start = int(dates.searchsorted(snapshot_date, side="left"))
-            row_end = (
-                int(dates.searchsorted(index_snapshots[position + 1][0], side="left"))
-                if position + 1 < len(index_snapshots) else len(dates)
-            )
-            if row_start >= row_end or row_start >= len(dates):
-                continue
-            member_positions = [
-                symbol_positions[symbol] for symbol in members if symbol in symbol_positions
-            ]
-            if member_positions:
-                array[row_start:row_end, member_positions] = True
+    # Legacy membership is a current projection, not a historical series.  It
+    # may label the final preview session only and is never backfilled over the
+    # requested history.
+    if len(dates):
+        current_members: set[str] = set()
+        for index_snapshots in snapshots.values():
+            eligible = [item for item in index_snapshots if item[0] <= dates[-1]]
+            if eligible:
+                current_members.update(max(eligible, key=lambda item: item[0])[1])
+        member_positions = [
+            symbol_positions[symbol]
+            for symbol in current_members
+            if symbol in symbol_positions
+        ]
+        if member_positions:
+            array[-1, member_positions] = True
     return pd.DataFrame(array, index=dates, columns=all_symbols, dtype=bool)
 
 

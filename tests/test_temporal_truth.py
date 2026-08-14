@@ -452,14 +452,14 @@ def test_industry_history_keeps_preclose_observation_when_current_is_postclose(
     )
     save_industry_map(
         {"600000.SH": "银行-收盘前"},
-        effective_as_of="2026-08-09",
-        observed_at="2026-08-09T07:00:00+00:00",
+        effective_session_date="2026-08-09",
+        first_observed_at="2026-08-09T07:00:00+00:00",
         expected_symbols=1,
     )
     save_industry_map(
         {"600000.SH": "银行-盘后修订"},
-        effective_as_of="2026-08-09",
-        observed_at="2026-08-09T07:30:00+00:00",
+        effective_session_date="2026-08-09",
+        first_observed_at="2026-08-09T07:30:00+00:00",
         expected_symbols=1,
     )
     # Keep the current-pointer assertion inside the one-day freshness window;

@@ -29,6 +29,10 @@ MAPPING = {
     "300750.SZ": "电池", "002594.SZ": "电池",
     "600519.SH": "白酒",   # 单成员行业
 }
+INDUSTRY_TIME = {
+    "effective_session_date": "2026-08-09",
+    "first_observed_at": "2026-08-09T07:00:00+00:00",
+}
 _TRUSTED_UNIVERSES = {}
 
 
@@ -77,17 +81,41 @@ class TestIndustryMapCache:
 
         _trust_industry_universe(monkeypatch, MAPPING)
         monkeypatch.setattr(mod, "_active_cn_symbols", lambda: set(MAPPING))
-        save_industry_map(MAPPING)
-        assert load_industry_map() == MAPPING
+        save_industry_map(MAPPING, **INDUSTRY_TIME)
+        assert load_industry_map(as_of="2026-08-09") == MAPPING
+        evidence = load_industry_evidence()
+        assert evidence["effective_session_date"] == "2026-08-09"
+        assert evidence["first_observed_at"] == "2026-08-09T07:00:00+00:00"
+
+    def test_save_requires_explicit_effective_and_first_observed_times(self):
+        with pytest.raises(TypeError, match="effective_session_date"):
+            save_industry_map(MAPPING)  # type: ignore[call-arg]
+
+    def test_announcement_publication_and_observation_remain_distinct(self, monkeypatch):
+        _trust_industry_universe(monkeypatch, MAPPING)
+        save_industry_map(
+            MAPPING,
+            **INDUSTRY_TIME,
+            announced_at="2026-08-08T08:00:00+00:00",
+            published_at="2026-08-08T09:00:00+00:00",
+        )
+
+        evidence = load_industry_evidence(as_of="2026-08-09")
+        assert evidence["announced_at"] == "2026-08-08T08:00:00+00:00"
+        assert evidence["published_at"] == "2026-08-08T09:00:00+00:00"
+        assert evidence["first_observed_at"] == "2026-08-09T07:00:00+00:00"
 
     def test_partial_refresh_merges_without_deleting_old_blocks(self, monkeypatch):
         """刷新只取得一个板块时，旧缓存的其他完整板块仍然可用。"""
         from quantmaster.data import industry as mod
 
         _trust_industry_universe(monkeypatch, MAPPING)
-        save_industry_map(MAPPING)
+        save_industry_map(MAPPING, **INDUSTRY_TIME)
         partial = {"600000.SH": "银行（新口径）", "000001.SZ": "银行（新口径）"}
-        monkeypatch.setattr(mod, "fetch_industry_map", lambda: partial)
+        monkeypatch.setattr(
+            mod, "fetch_industry_map",
+            lambda: (partial, False, "test:partial", INDUSTRY_TIME),
+        )
         _trust_industry_universe(monkeypatch, set(MAPPING) | {"000001.SZ"})
         monkeypatch.setattr(mod, "_active_cn_symbols", lambda: set(MAPPING) | {"000001.SZ"})
 
@@ -103,10 +131,15 @@ class TestIndustryMapCache:
         from quantmaster.data import industry as mod
 
         _trust_industry_universe(monkeypatch, {"600000.SH", "000001.SZ"})
-        save_industry_map({"600000.SH": "银行", "000001.SZ": "旧分类"})
+        save_industry_map(
+            {"600000.SH": "银行", "000001.SZ": "旧分类"}, **INDUSTRY_TIME,
+        )
         monkeypatch.setattr(
             mod, "fetch_industry_map",
-            lambda: ({"600000.SH": "银行（完整新口径）"}, True, "test:complete"),
+            lambda: (
+                {"600000.SH": "银行（完整新口径）"}, True, "test:complete",
+                INDUSTRY_TIME,
+            ),
         )
         _trust_industry_universe(monkeypatch, {"600000.SH"})
         monkeypatch.setattr(mod, "_active_cn_symbols", lambda: {"600000.SH"})
@@ -118,7 +151,7 @@ class TestIndustryMapCache:
         from quantmaster.data import industry as mod
 
         _trust_industry_universe(monkeypatch, MAPPING)
-        save_industry_map(MAPPING, observed_at="2026-08-09T07:00:00+00:00")
+        save_industry_map(MAPPING, **INDUSTRY_TIME)
         monkeypatch.setattr(mod.time, "time", lambda: 1_800_000_000.0)
 
         def fail_fetch():
@@ -169,8 +202,8 @@ class TestIndustryMapCache:
         _trust_industry_universe(monkeypatch, MAPPING)
         save_industry_map(
             MAPPING,
-            effective_as_of="2026-08-09",
-            observed_at="2026-08-09T07:00:00+00:00",
+            effective_session_date="2026-08-09",
+            first_observed_at="2026-08-09T07:00:00+00:00",
             expected_symbols=len(MAPPING),
         )
         assert load_industry_map(as_of="2026-08-09") == MAPPING
@@ -223,14 +256,14 @@ class TestIndustryMapCache:
         assert "content_sha256" not in migrated
         assert migrated["projection"] == "current_only"
         assert migrated["updated_at"] == 1785119503.0
-        assert load_industry_map() == {
+        assert load_industry_map(mode="sandbox_current") == {
             "600519.SH": "食品饮料", "000001.SZ": "银行",
         }
         evidence = load_industry_evidence()
         assert evidence["status"] == "degraded"
         assert evidence["content_hash"] == ""
-        mapping, context = load_industry_analysis_context()
-        assert mapping == load_industry_map()
+        mapping, context = load_industry_analysis_context(mode="sandbox_current")
+        assert mapping == load_industry_map(mode="sandbox_current")
         assert context["formal_eligible"] is False
         with pytest.raises(RuntimeError, match="拒绝用当前行业映射"):
             load_industry_map(as_of="2026-07-27")
@@ -242,8 +275,8 @@ class TestIndustryMapCache:
         _trust_industry_universe(monkeypatch, MAPPING)
         save_industry_map(
             MAPPING,
-            effective_as_of="2026-08-09",
-            observed_at="2026-08-09T07:00:00+00:00",
+            effective_session_date="2026-08-09",
+            first_observed_at="2026-08-09T07:00:00+00:00",
             expected_symbols=len(MAPPING),
         )
         snapshot = next(
@@ -291,8 +324,8 @@ def test_industry_manifest_freezes_shared_catalog_evidence(monkeypatch):
     mapping = {symbol: "银行" for symbol in symbols}
     save_industry_map(
         mapping,
-        effective_as_of="2026-08-09",
-        observed_at="2026-08-09T07:00:00+00:00",
+        effective_session_date="2026-08-09",
+        first_observed_at="2026-08-09T07:00:00+00:00",
         expected_symbols=2,
         universe_evidence=evidence,
     )
@@ -336,14 +369,14 @@ def test_industry_rejects_wrong_day_or_catalog_acquired_after_observation(monkey
     with pytest.raises(RuntimeError, match="as_of 不一致"):
         save_industry_map(
             MAPPING,
-            effective_as_of="2026-08-09",
-            observed_at="2026-08-09T07:00:00+00:00",
+            effective_session_date="2026-08-09",
+            first_observed_at="2026-08-09T07:00:00+00:00",
             universe_evidence=wrong_day,
         )
     with pytest.raises(RuntimeError, match="早于证券目录"):
         save_industry_map(
             MAPPING,
-            effective_as_of="2026-08-09",
-            observed_at="2026-08-09T06:59:00+00:00",
+            effective_session_date="2026-08-09",
+            first_observed_at="2026-08-09T06:59:00+00:00",
             universe_evidence=evidence,
         )
