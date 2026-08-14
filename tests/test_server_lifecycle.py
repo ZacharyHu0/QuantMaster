@@ -101,6 +101,17 @@ def test_parent_watcher_stops_without_requesting_shutdown(monkeypatch):
     assert requested == []
 
 
+def test_explicit_launcher_pid_overrides_onefile_bootloader_parent(monkeypatch):
+    monkeypatch.setenv("QM_LAUNCHER_PID", "54321")
+    monkeypatch.setattr(
+        lifecycle.os,
+        "getppid",
+        lambda: (_ for _ in ()).throw(AssertionError("must not watch the bootloader")),
+    )
+
+    assert lifecycle.server_parent_pid() == 54321
+
+
 def test_windows_console_handler_routes_ctrl_c_to_coordinated_shutdown(monkeypatch):
     import ctypes
 

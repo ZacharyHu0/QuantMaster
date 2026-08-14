@@ -6,9 +6,9 @@ import argparse
 import ctypes
 import json
 import os
-import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -83,14 +83,115 @@ def _pid_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def _wait_stopped(server: subprocess.Popen[Any], worker_pid: int) -> None:
-    deadline = time.monotonic() + 15.0
-    server.wait(timeout=max(0.1, deadline - time.monotonic()))
-    while time.monotonic() < deadline:
-        if not _pid_alive(worker_pid):
+def _wait_stopped(pids: dict[str, int], *, timeout: float = 15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        survivors = [f"{role} {pid}" for role, pid in pids.items() if _pid_alive(pid)]
+        if not survivors:
             return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "frozen application processes outlived launcher: " + ", ".join(survivors)
+            )
         time.sleep(0.1)
-    raise RuntimeError(f"runtime-worker {worker_pid} outlived the frozen application")
+
+
+def _terminate_exact_process(pid: int, executable: Path) -> None:
+    """Best-effort failure cleanup, guarded by the exact packaged image path."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x101001, False, int(pid))
+    if not handle:
+        return
+    try:
+        size = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            raise RuntimeError(f"cannot verify frozen cleanup process {pid}")
+        if os.path.normcase(buffer.value) != os.path.normcase(str(executable)):
+            raise RuntimeError(f"refusing to terminate non-package process {pid}: {buffer.value}")
+        if not kernel32.TerminateProcess(handle, 1):
+            raise RuntimeError(f"cannot terminate frozen cleanup process {pid}")
+        if kernel32.WaitForSingleObject(handle, 5000) != 0:
+            raise RuntimeError(f"frozen cleanup process {pid} did not stop")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _run_launcher(
+    executable: Path,
+    stdout_path: Path,
+    stderr_path: Path,
+    pid_path: Path,
+) -> int:
+    """Start the frozen tree and stay alive until the smoke parent closes stdin."""
+    environment = os.environ.copy()
+    environment["QM_LAUNCHER_PID"] = str(os.getpid())
+    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+        "w", encoding="utf-8",
+    ) as stderr:
+        server = subprocess.Popen(
+            [str(executable), "serve", "--no-reload"],
+            env=environment,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        pid_path.write_text(str(server.pid), encoding="ascii")
+        sys.stdin.read()
+    return 0
+
+
+def _start_launcher(
+    executable: Path,
+    environment: dict[str, str],
+    stdout_path: Path,
+    stderr_path: Path,
+    pid_path: Path,
+) -> tuple[subprocess.Popen[Any], int]:
+    launcher = subprocess.Popen(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--internal-launcher",
+            str(executable),
+            str(stdout_path),
+            str(stderr_path),
+            str(pid_path),
+        ],
+        env=environment,
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                return launcher, int(pid_path.read_text(encoding="ascii"))
+            except (OSError, ValueError):
+                if launcher.poll() is not None:
+                    raise RuntimeError(
+                        f"frozen launcher exited early ({launcher.returncode})"
+                    ) from None
+                time.sleep(0.1)
+        raise RuntimeError("frozen launcher did not publish its child PID")
+    except BaseException:
+        if launcher.stdin is not None:
+            launcher.stdin.close()
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=5.0)
+        raise
 
 
 def smoke(executable: Path) -> None:
@@ -145,16 +246,12 @@ def smoke(executable: Path) -> None:
 
         stdout_path = root / "serve.stdout.log"
         stderr_path = root / "serve.stderr.log"
-        worker_pid = 0
-        with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-            "w", encoding="utf-8",
-        ) as stderr:
-            server = subprocess.Popen(
-                [str(executable), "serve", "--no-reload"],
-                env=environment,
-                stdout=stdout,
-                stderr=stderr,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        pid_path = root / "serve.pid"
+        pids: dict[str, int] = {}
+        launcher: subprocess.Popen[Any] | None = None
+        try:
+            launcher, pids["bootloader"] = _start_launcher(
+                executable, environment, stdout_path, stderr_path, pid_path,
             )
             try:
                 base_url = f"http://127.0.0.1:{port}/api/v1"
@@ -162,13 +259,14 @@ def smoke(executable: Path) -> None:
                     f"{base_url}/health",
                     lambda value: value.get("status") == "ok",
                 )
+                pids["web"] = int(health["process_pid"])
                 runtime = _wait_json(
                     f"{base_url}/settings/runtime",
                     lambda value: bool((value.get("worker") or {}).get("available")),
                 )
                 worker = dict(runtime["worker"])
-                worker_pid = int(worker["pid"])
-                if worker_pid == int(health["process_pid"]):
+                pids["runtime-worker"] = int(worker["pid"])
+                if pids["runtime-worker"] == pids["web"]:
                     raise RuntimeError("runtime-worker did not start in a distinct process")
 
                 doctor_env = dict(environment)
@@ -190,8 +288,13 @@ def smoke(executable: Path) -> None:
                 compute = dict(report["metrics"]["application_identity_probe"])
                 _assert_same_identity(health, worker, compute)
 
-                server.send_signal(signal.CTRL_BREAK_EVENT)
-                _wait_stopped(server, worker_pid)
+                if launcher.stdin is None:
+                    raise RuntimeError("frozen launcher stdin is unavailable")
+                launcher.stdin.close()
+                launcher.wait(timeout=5.0)
+                if launcher.returncode:
+                    raise RuntimeError(f"frozen launcher failed ({launcher.returncode})")
+                _wait_stopped(pids)
                 try:
                     socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
                 except OSError:
@@ -199,15 +302,34 @@ def smoke(executable: Path) -> None:
                 else:
                     raise RuntimeError("frozen runtime port remained bound after shutdown")
             except BaseException as exc:
-                if server.poll() is None:
-                    server.kill()
-                    server.wait(timeout=5.0)
-                stderr.flush()
+                if launcher.stdin is not None and not launcher.stdin.closed:
+                    launcher.stdin.close()
+                if launcher.poll() is None:
+                    launcher.kill()
+                    launcher.wait(timeout=5.0)
+                cleanup_errors = []
+                for pid in dict.fromkeys(reversed(tuple(pids.values()))):
+                    try:
+                        _terminate_exact_process(pid, executable)
+                    except RuntimeError as cleanup_exc:
+                        cleanup_errors.append(str(cleanup_exc))
                 detail = stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-                raise RuntimeError(f"{exc}\n--- frozen server stderr ---\n{detail}") from exc
+                cleanup = "\n".join(cleanup_errors)
+                raise RuntimeError(
+                    f"{exc}\n--- frozen server stderr ---\n{detail}"
+                    + (f"\n--- cleanup errors ---\n{cleanup}" if cleanup else "")
+                ) from exc
+        finally:
+            if launcher is not None and launcher.poll() is None:
+                launcher.kill()
+                launcher.wait(timeout=5.0)
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--internal-launcher":
+        if len(sys.argv) != 6:
+            raise RuntimeError("internal frozen launcher requires four paths")
+        return _run_launcher(*(Path(value) for value in sys.argv[2:]))
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=Path)
     args = parser.parse_args()

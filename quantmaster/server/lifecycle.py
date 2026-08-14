@@ -382,6 +382,20 @@ def watch_parent_exit(
         return
 
 
+def server_parent_pid() -> int:
+    """Return the real launcher PID when a frozen bootloader sits in between."""
+    raw = os.environ.get("QM_LAUNCHER_PID")
+    if raw is None:
+        return os.getppid()
+    try:
+        pid = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("QM_LAUNCHER_PID must be a positive integer") from exc
+    if pid <= 0:
+        raise RuntimeError("QM_LAUNCHER_PID must be a positive integer")
+    return pid
+
+
 def install_windows_console_handler(
     request_shutdown: Callable[[], None],
     shutdown_complete: threading.Event,
@@ -947,7 +961,7 @@ def run_uvicorn_foreground(
         app, host=host, port=port, log_level=log_level,
         log_config=None, access_log=False,
     ))
-    parent_pid = os.getppid()
+    parent_pid = server_parent_pid()
     stop_watcher = threading.Event()
     shutdown_complete = threading.Event()
 
