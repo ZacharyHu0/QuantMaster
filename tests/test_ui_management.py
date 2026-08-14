@@ -181,7 +181,7 @@ def test_after_close_prioritizes_sector_width_without_wide_screen_scroll(live_se
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
-        page.goto(f"{url}/#select/after-close")
+        page.goto(f"{url}/#today/after-close")
         workbench = page.locator(".after-close-workbench")
         workbench.wait_for(state="visible")
 
@@ -394,13 +394,12 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert settings.inner_text() == ""
         assert settings.locator(".settings-gear").count() == 1
         assert page.locator("#nav.workspace-nav button").all_inner_texts() == [
-            "观察",
-            "选股",
+            "今日",
             "研究",
-            "交易",
-            "自动化",
+            "账户",
+            "运行",
         ]
-        assert page.locator('[data-workspace-pages="observe"] button').all_inner_texts() == [
+        assert page.locator('[data-workspace-pages="today"] button').all_inner_texts() == [
             "行情",
             "市场温度",
             "市场风格",
@@ -409,9 +408,22 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "细分题材",
             "ETF 研究",
             "资讯",
+            "盘后扫描",
+            "候选",
+            "个股分析",
+            "决策",
         ]
-        page.get_by_role("button", name="自动化", exact=True).click()
-        assert page.locator(".workspace-context").is_hidden()
+        page.get_by_role("button", name="研究", exact=True).click()
+        assert page.url.endswith("#research/lab")
+        assert page.locator("#tab-lab").is_visible()
+        page.get_by_role("button", name="账户", exact=True).click()
+        assert page.url.endswith("#account/paper")
+        assert page.locator("#tab-paper").is_visible()
+        page.get_by_role("button", name="运行", exact=True).click()
+        assert page.url.endswith("#runtime/automation")
+        runtime_pages = page.locator('[data-workspace-pages="runtime"]')
+        assert runtime_pages.is_visible()
+        assert runtime_pages.locator("button").all_inner_texts() == ["任务与消息"]
         settings.click()
         config_path = page.locator("#settings-config-path")
         config_path.wait_for(state="visible")
@@ -645,10 +657,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "坏日期,000001,卖出,11,100,5\n",
             encoding="utf-8-sig",
         )
-        page.locator('header [data-workspace="trade"]').click()
-        trade_pages = page.locator('header [data-workspace-pages="trade"]')
-        playwright_sync.expect(trade_pages).to_be_visible()
-        trade_pages.locator('[data-tab="ledger"]').click()
+        page.locator('header [data-workspace="account"]').click()
+        account_pages = page.locator('header [data-workspace-pages="account"]')
+        playwright_sync.expect(account_pages).to_be_visible()
+        account_pages.locator('[data-tab="ledger"]').click()
         ledger_tab = page.locator("#tab-ledger")
         playwright_sync.expect(ledger_tab).to_be_visible()
         playwright_sync.expect(ledger_tab).to_have_class(
@@ -1919,7 +1931,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         page.route("**/api/v1/news/sources*", source_handler)
         page.goto(url)
 
-        page.get_by_role("button", name="自动化", exact=True).click()
+        page.get_by_role("button", name="运行", exact=True).click()
         page.locator("#automation-overview").get_by_text(
             "重要消息摘要已暂停",
             exact=True,
@@ -2114,7 +2126,7 @@ def test_market_style_confirmation_path_chart_layout(live_server):
             "**/api/v1/market/structure",
             lambda route: route.fulfill(json=payload),
         )
-        page.goto(f"{url}/#observe/style")
+        page.goto(f"{url}/#today/style")
 
         path_chart = page.locator("#rotation-style-path-chart")
         path_chart.locator("canvas").wait_for(state="visible")
@@ -2369,7 +2381,7 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
             lambda route: route.fulfill(json=taxonomy),
         )
         page.route("**/api/v1/rotation/preferences", preferences_handler)
-        page.goto(f"{url}/#observe/industry")
+        page.goto(f"{url}/#today/industry")
 
         l1_tab = page.locator('[data-rotation-industry-level="L1"]')
         l2_tab = page.locator('[data-rotation-industry-level="L2"]')
@@ -2602,7 +2614,7 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
             lambda message: console_errors.append(message.text) if message.type == "error" else None,
         )
         page.route("**/api/v1/rotation/themes?*", themes_handler)
-        page.goto(f"{url}/#observe/themes")
+        page.goto(f"{url}/#today/themes")
 
         page.get_by_role("heading", name="重点关注题材", exact=True).wait_for()
         cards = page.locator(".rotation-theme-focus-card")
@@ -2755,7 +2767,7 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
             "**/api/v1/market/temperature",
             lambda route: (requests.append(route.request.url), route.fulfill(json=payload))[-1],
         )
-        page.goto(f"{url}/#observe/temperature")
+        page.goto(f"{url}/#today/temperature")
 
         five = page.locator('[data-temperature-window="5"]')
         playwright_sync.expect(five).to_have_attribute("aria-pressed", "true")
@@ -2806,18 +2818,23 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
             reduced_motion="reduce",
         )
         page_errors = []
+        console_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.goto(f"{url}/#observe/temperature")
+        page.on(
+            "console",
+            lambda message: console_errors.append(message.text) if message.type == "error" else None,
+        )
+        page.goto(f"{url}/#today/temperature")
 
         page.locator("#market-temperature-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/temperature")
+        assert page.url.endswith("#today/temperature")
         assert page.locator("#market-temperature-view h2").inner_text() == "市场温度"
         assert page.locator("#market-quotes-view").is_hidden()
         _wait_for_text(page.locator("#market-temperature-content"), "等待")
 
         page.get_by_role("tab", name="市场风格", exact=True).click()
         page.locator("#market-style-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/style")
+        assert page.url.endswith("#today/style")
 
         page.get_by_role("tab", name="轮动总览", exact=True).click()
         page.locator("#rotation-overview-view").wait_for(state="visible")
@@ -2827,19 +2844,19 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         assert page.locator("[data-rotation-data-progress]").get_attribute("aria-label")
         assert page.locator(".rotation-source-status details").count() == 2
         assert page.locator(".toast", has_text="上游").count() == 0
-        assert page.url.endswith("#observe/rotation")
+        assert page.url.endswith("#today/rotation")
         _wait_for_text(page.locator("#rotation-overview-content"), "等待")
         assert page.locator("#rotation-overview-view #rotation-industry-scatter").count() == 0
-        page.goto(f"{url}/#observe/rotation")
+        page.goto(f"{url}/#today/rotation")
         page.locator("#rotation-overview-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/rotation")
+        assert page.url.endswith("#today/rotation")
         assert "· 0%" not in page.locator('[data-rotation-asof="overview"]').inner_text()
         page.get_by_role("tab", name="行业周期", exact=True).click()
         page.locator("#rotation-industry-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/industry")
+        assert page.url.endswith("#today/industry")
         page.get_by_role("tab", name="细分题材", exact=True).click()
         page.locator("#rotation-themes-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/themes")
+        assert page.url.endswith("#today/themes")
         playwright_sync.expect(page.locator("#rotation-themes-content")).to_contain_text(
             re.compile("等待|计算"),
             timeout=30_000,
@@ -2849,12 +2866,35 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         assert "· 0%" not in theme_meta
         page.get_by_role("tab", name="ETF 研究", exact=True).click()
         page.locator("#rotation-etf-view").wait_for(state="visible")
-        assert page.url.endswith("#observe/etfs")
+        assert page.url.endswith("#today/etfs")
 
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.reload()
+        page.locator("#rotation-etf-view").wait_for(state="visible")
+        assert page.url.endswith("#today/etfs")
+
+        page.evaluate("location.hash = '#observe/temperature'")
+        page.wait_for_timeout(50)
+        assert page.url.endswith("#observe/temperature")
+        assert page.locator("#rotation-etf-view").is_visible()
         status_width = page.locator(".rotation-source-status").bounding_box()["width"]
         assert status_width <= 390
+
+        page.evaluate(
+            """() => {
+              sessionStorage.setItem('quantmaster.workspacePage.v1', JSON.stringify({observe:'news'}));
+              sessionStorage.removeItem('quantmaster.workspacePage.v2');
+              sessionStorage.removeItem('quantmaster.activeTab');
+              history.replaceState(null, '', '/');
+            }"""
+        )
+        page.reload()
+        page.locator("#market-quotes-view").wait_for(state="visible")
+        assert page.url.endswith("/")
+        assert page.locator("#tab-news").is_hidden()
+
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert page_errors == []
+        assert console_errors == []
         browser.close()
 
 
@@ -3211,7 +3251,7 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         page.route("**/api/v1/rotation/etfs**", route_api)
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.goto(f"{url}/#observe/etfs")
+        page.goto(f"{url}/#today/etfs")
         page.locator("#rotation-etf-view").wait_for(state="visible")
         playwright_sync.expect(page.locator(".etf-summary")).to_have_count(3)
         playwright_sync.expect(page.locator("#rotation-etf-map")).to_be_visible()
@@ -3381,7 +3421,7 @@ def test_etf_v21_auto_research_runs_once_and_returns_to_latest(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.route("**/api/v1/rotation/etfs**", route_api)
-        page.goto(f"{url}/#observe/etfs")
+        page.goto(f"{url}/#today/etfs")
         for _ in range(40):
             if calls["scan"] == 1:
                 break
@@ -3535,7 +3575,7 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         page = context.new_page()
         page.route("**/api/v1/**", route_api)
         page.goto(url)
-        page.get_by_role("button", name="选股", exact=True).click()
+        page.get_by_role("button", name="今日", exact=True).click()
         page.get_by_role("tab", name="个股分析", exact=True).click()
         page.locator("#stock-analysis-query").fill("600519.SH")
         assert page.locator('input[name="mode"][value="deep"]').is_checked()

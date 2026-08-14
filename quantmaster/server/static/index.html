@@ -34,11 +34,10 @@
     </button>
   </h1>
   <nav id="nav" class="workspace-nav" aria-label="工作台">
-    <button data-workspace="observe" class="active" type="button">观察</button>
-    <button data-workspace="select" type="button">选股</button>
+    <button data-workspace="today" class="active" type="button">今日</button>
     <button data-workspace="research" type="button">研究</button>
-    <button data-workspace="trade" type="button">交易</button>
-    <button data-workspace="automation" data-workspace-page="automation" data-tab="automation" type="button">自动化</button>
+    <button data-workspace="account" type="button">账户</button>
+    <button data-workspace="runtime" type="button">运行</button>
   </nav>
   <div class="header-version-stack">
     <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
@@ -81,7 +80,7 @@
   </div>
   </div>
   <nav class="workspace-context" aria-label="当前工作台页面">
-    <div class="workspace-context-group" data-workspace-pages="observe" aria-label="观察页面">
+    <div class="workspace-context-group" data-workspace-pages="today" aria-label="今日页面">
       <section class="workspace-context-section" aria-label="市场观察">
       <span class="workspace-context-label" aria-hidden="true">市场</span>
       <div role="tablist" aria-label="市场观察">
@@ -103,12 +102,14 @@
       <span class="workspace-context-label">信息</span>
       <div role="tablist" aria-label="市场信息"><button type="button" role="tab" data-tab="news" data-workspace-page="news" aria-selected="false" tabindex="-1">资讯</button></div>
       </section>
+      <section class="workspace-context-section" aria-label="研究决策流程">
+      <span class="workspace-context-label">决策</span>
+      <div role="tablist" aria-label="研究决策流程"><button type="button" role="tab" data-tab="after-close" data-workspace-page="after-close" aria-selected="false" tabindex="-1">盘后扫描</button><button type="button" role="tab" data-tab="candidates" data-workspace-page="candidates" aria-selected="false" tabindex="-1">候选</button><button type="button" role="tab" data-tab="stock-analysis" data-workspace-page="stock-analysis" aria-selected="false" tabindex="-1">个股分析</button><button type="button" role="tab" data-tab="decision" data-workspace-page="decision" aria-selected="false" tabindex="-1">决策</button></div>
+      </section>
     </div>
-    <div class="workspace-context-group" data-workspace-pages="select" aria-label="选股页面" hidden><div role="tablist" aria-label="选股流程">
-      <button type="button" role="tab" data-tab="after-close" data-workspace-page="after-close" aria-selected="false" tabindex="-1">盘后扫描</button><button type="button" role="tab" data-tab="candidates" data-workspace-page="candidates" aria-selected="false" tabindex="-1">候选</button><button type="button" role="tab" data-tab="stock-analysis" data-workspace-page="stock-analysis" aria-selected="false" tabindex="-1">个股分析</button><button type="button" role="tab" data-tab="decision" data-workspace-page="decision" aria-selected="false" tabindex="-1">决策</button>
-    </div></div>
     <div class="workspace-context-group" data-workspace-pages="research" aria-label="研究页面" hidden><div role="tablist" aria-label="研究工具"><button type="button" role="tab" data-tab="lab" data-workspace-page="lab" aria-selected="false" tabindex="-1">Quant Lab</button><button type="button" role="tab" data-tab="backtest" data-workspace-page="backtest" aria-selected="false" tabindex="-1">回测</button></div></div>
-    <div class="workspace-context-group" data-workspace-pages="trade" aria-label="交易页面" hidden><div role="tablist" aria-label="交易工作台"><button type="button" role="tab" data-tab="paper" data-workspace-page="paper" aria-selected="false" tabindex="-1">模拟盘</button><button type="button" role="tab" data-tab="ledger" data-workspace-page="ledger" aria-selected="false" tabindex="-1">实盘</button></div></div>
+    <div class="workspace-context-group" data-workspace-pages="account" aria-label="账户页面" hidden><div role="tablist" aria-label="账户工作台"><button type="button" role="tab" data-tab="paper" data-workspace-page="paper" aria-selected="false" tabindex="-1">模拟盘</button><button type="button" role="tab" data-tab="ledger" data-workspace-page="ledger" aria-selected="false" tabindex="-1">真实账户账本</button></div></div>
+    <div class="workspace-context-group" data-workspace-pages="runtime" aria-label="运行页面" hidden><div role="tablist" aria-label="运行工作台"><button type="button" role="tab" data-tab="automation" data-workspace-page="automation" aria-selected="false" tabindex="-1">任务与消息</button></div></div>
   </nav>
   <aside class="release-popover" id="release-popover" role="dialog" aria-modal="false" aria-labelledby="release-popover-title" hidden>
     <div class="release-popover-head">
@@ -206,7 +207,7 @@
       </form>
     </div>
     <div class="table-scroll" id="asset-list"><div class="msg">正在读取本地列表…</div></div>
-    <div class="hint">自选与关注保存在本地，持有来自实盘账本；下方“我的股票”会随市场行情同步并显示走势图。</div>
+    <div class="hint">自选与关注保存在本地，持有来自真实账户账本；下方“我的股票”会随市场行情同步并显示走势图。</div>
   </div>
   <div id="mkt-groups"><div class="msg">正在读取本地市场缓存…</div></div>
   <div class="panel market-detail-panel" id="kline-panel" style="display:none">
@@ -776,36 +777,6 @@
   <div class="lab-announcer" id="lab-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
 </section>
 
-<!-- ================= 因子 ================= -->
-<section class="tab" id="tab-factor">
-  <form class="controls" id="factor-form">
-    <label>因子（内置名或表达式）
-      <input name="expression" list="factor-list" value="rev_5d" style="min-width:320px"
-             placeholder="如 rank(-delta(close, 5))">
-    </label>
-    <datalist id="factor-list"></datalist>
-    <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-    <label>开始<input name="start" type="date" value="2022-01-01"></label>
-    <label>分组数<input name="quantiles" type="number" value="5" min="2" max="10"></label>
-    <label style="flex-direction:row;align-items:center;gap:6px;padding-bottom:9px">
-      <input type="checkbox" name="neutralize" style="min-width:auto"> 行业中性化
-    </label>
-    <button class="primary" type="submit">因子体检</button>
-  </form>
-  <div class="hint">内置因子与 <b>基本面因子</b>（ep/bp/dividend_yield/small_cap/roe，首次使用自动拉取估值/财务数据）见下拉提示；
-    表达式算子：rank/zscore/ts_mean/ts_std/ts_rank/delta/delay/pct_change/ts_corr/ema… 字段：open/high/low/close/volume/amount/turnover/vwap/returns</div>
-  <div id="factor-out"></div>
-  <div class="panel" style="margin-top:16px">
-    <h3>样本外验证（防过拟合）：用上方的因子与候选，切分日前为训练期、后为验证期</h3>
-    <form class="controls" id="validate-form">
-      <label>切分日期<input name="split" type="date" value="2024-07-01"></label>
-      <label>滚动分段数<input name="n_splits" type="number" value="4" min="2" max="10"></label>
-      <button class="primary" type="submit">验证</button>
-    </form>
-    <div id="validate-out"><div class="hint">挖出来的高 IC 因子务必先过这一关：验证期 IC 掉一半是常态，归零/翻号说明过拟合。</div></div>
-  </div>
-</section>
-
 <!-- ================= 回测 ================= -->
 <section class="tab" id="tab-backtest">
   <div class="trading-heading">
@@ -832,6 +803,7 @@
             </button>
             <div class="factor-completion-menu" id="bt-factor-options" role="listbox" aria-label="因子候选" popover="manual"></div>
           </div>
+          <datalist id="factor-list"></datalist>
         </label>
         <label data-bt-field="factor">合成<select name="weighting"><option value="equal">等权</option><option value="ic">滚动 IC 加权</option></select></label>
         <label data-bt-field="factor">调仓<select name="rebalance"><option value="W">每周</option><option value="M">每月</option><option value="D">每日</option></select></label>
@@ -870,24 +842,6 @@
       </div>
     </section>
   </div>
-</section>
-
-<!-- ================= 挖掘 ================= -->
-<section class="tab" id="tab-mine">
-  <div class="row">
-    <div class="panel">
-      <h3>遗传规划挖掘（本地计算，无需 API key）</h3>
-      <form class="controls" id="gp-form">
-        <label>候选<div class="candidate-field"><select name="universe" data-candidate-select="fixed"><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">查看</button></div></label>
-        <label>开始<input name="start" type="date" value="2022-01-01"></label>
-        <label>代数<input name="generations" type="number" value="5" min="1" max="30"></label>
-        <label>种群<input name="population" type="number" value="40" min="10" max="200"></label>
-        <button class="primary" type="submit">开始挖掘</button>
-      </form>
-      <div class="hint">随机生成表达式树 → 按 |RankIC| 适应度进化。耗时与 代数×种群 成正比。</div>
-    </div>
-  </div>
-  <div id="mine-out"></div>
 </section>
 
 <!-- ================= 模拟盘 ================= -->

@@ -67,7 +67,7 @@ function sourceForPath(path) {
     ['/api/v1/research/decision', '每日决策'],
     ['/api/v1/research/factors', '因子研究'], ['/api/v1/backtests', '策略回测'],
     ['/api/v1/research/mining', '因子挖掘'], ['/api/v1/paper', '模拟交易'],
-    ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '实盘账本'],
+    ['/api/v1/news', '资讯分析'], ['/api/v1/portfolio/ledger', '真实账户账本'],
     ['/api/v1/rotation', '板块联动'],
     ['/api/v1/after-close', '盘后扫描'],
     ['/api/v1/jobs', '后台任务'],
@@ -1660,19 +1660,18 @@ async function streamJson(path, opts, onProgress) {
 
 /* ---------- 导航 ---------- */
 const ACTIVE_TAB_STORAGE_KEY = 'quantmaster.activeTab';
-const ACTIVE_WORKSPACE_PAGE_KEY = 'quantmaster.workspacePage.v1';
+const ACTIVE_WORKSPACE_PAGE_KEY = 'quantmaster.workspacePage.v2';
 const TAB_WORKSPACE = {
-  market:'observe', rotation:'observe', news:'observe',
-  'after-close':'select', candidates:'select', 'stock-analysis':'select', decision:'select',
-  lab:'research', backtest:'research', paper:'trade', ledger:'trade', automation:'automation',
+  market:'today', rotation:'today', news:'today',
+  'after-close':'today', candidates:'today', 'stock-analysis':'today', decision:'today',
+  lab:'research', backtest:'research', paper:'account', ledger:'account', automation:'runtime',
 };
 const DEFAULT_WORKSPACE_PAGE = {
-  observe:'quotes', select:'after-close', research:'lab', trade:'paper', automation:'automation',
+  today:'quotes', research:'lab', account:'paper', runtime:'automation',
 };
 const ROUTE_PAGE = {
-  observe:{quotes:'market', temperature:'market', style:'market', rotation:'rotation', industry:'rotation', themes:'rotation', 'etf-flows':'rotation', news:'news'},
-  select:{'after-close':'after-close', candidates:'candidates', 'stock-analysis':'stock-analysis', decision:'decision'},
-  research:{lab:'lab', backtest:'backtest'}, trade:{paper:'paper', ledger:'ledger'}, automation:{automation:'automation'},
+  today:{quotes:'market', temperature:'market', style:'market', rotation:'rotation', industry:'rotation', themes:'rotation', etfs:'rotation', news:'news', 'after-close':'after-close', candidates:'candidates', 'stock-analysis':'stock-analysis', decision:'decision'},
+  research:{lab:'lab', backtest:'backtest'}, account:{paper:'paper', ledger:'ledger'}, runtime:{automation:'automation'},
 };
 
 function storedActiveTab() {
@@ -1712,7 +1711,7 @@ function routeForControl(control) {
   const workspace = workspaceForTab(control?.dataset.tab || '');
   const page = control?.dataset.workspacePage || '';
   if (!workspace || !page) return '';
-  return workspace === 'automation' ? '#automation' : `#${workspace}/${page}`;
+  return `#${workspace}/${page}`;
 }
 
 function updateRoute(control) {
@@ -1721,9 +1720,6 @@ function updateRoute(control) {
 }
 
 function pageControl(workspace, page) {
-  if (workspace === 'automation' && page === 'automation') {
-    return document.querySelector('header [data-workspace="automation"][data-tab="automation"]');
-  }
   const expectedTab = ROUTE_PAGE[workspace]?.[page];
   return Array.from(document.querySelectorAll(`header [data-workspace-pages="${workspace}"] [data-tab]`)).find(control =>
     control.dataset.workspacePage === page && (!expectedTab || control.dataset.tab === expectedTab),
@@ -1752,7 +1748,7 @@ function loadActiveTab(tab) {
   if ((tab === 'market' || tab === 'rotation')
       && typeof window.loadRotationFeature === 'function') window.loadRotationFeature(tab);
   if (tab === 'ledger') loadLedger();
-  if (tab === 'news') loadNews();
+  if (tab === 'news' && typeof window.loadNews === 'function') window.loadNews();
   if (tab === 'stock-analysis' && typeof window.loadStockAnalysis === 'function') {
     window.loadStockAnalysis();
   }
@@ -1808,10 +1804,6 @@ document.querySelector('header').addEventListener('click', e => {
   const workspaceControl = e.target.closest('[data-workspace]');
   if (workspaceControl) {
     const workspace = workspaceControl.dataset.workspace;
-    if (workspace === 'automation') {
-      activateTab(workspaceControl);
-      return;
-    }
     const page = storedWorkspacePage(workspace) || DEFAULT_WORKSPACE_PAGE[workspace];
     pageControl(workspace, page)?.click();
     return;
@@ -1822,9 +1814,8 @@ document.querySelector('header').addEventListener('click', e => {
 });
 
 function routeFromHash() {
-  const match = location.hash.match(/^#(observe|select|research|trade)\/([a-z-]+)$/);
+  const match = location.hash.match(/^#(today|research|account|runtime)\/([a-z-]+)$/);
   if (match && ROUTE_PAGE[match[1]]?.[match[2]]) return {workspace:match[1], page:match[2]};
-  if (location.hash === '#automation') return {workspace:'automation', page:'automation'};
   return null;
 }
 
@@ -1841,7 +1832,7 @@ if (restoredControl) {
 window.addEventListener('hashchange', () => {
   const route = routeFromHash();
   // 市场与轮动的同级页还要切换本页视图，由 rotation.js 统一接管。
-  if (!route || route.workspace === 'observe') return;
+  if (!route || route.workspace === 'today') return;
   const control = pageControl(route.workspace, route.page);
   if (control) activateTab(control, {persist:true, load:true, route:false});
 });
@@ -1855,7 +1846,7 @@ let activeAssetList = 'favorites';
 const assetListEmpty = {
   favorites:'暂无自选标的，可从右上方添加。',
   following:'暂无重点关注标的。',
-  holdings:'实盘账本中暂无持仓。',
+  holdings:'真实账户账本中暂无持仓。',
 };
 
 function renderAssetList() {
@@ -3758,132 +3749,7 @@ async function loadFactorList() {
 loadFactorList();
 document.addEventListener('quantmaster:factors-changed', loadFactorList);
 
-document.getElementById('factor-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('factor-out');
-  out.innerHTML = '<div class="msg">计算中…（首次需拉取行情）</div>';
-  try {
-    const fd = new FormData(form);
-    const data = await post('/api/v1/research/factors/test', {
-      expression: fd.get('expression'), universe: fd.get('universe'),
-      start: fd.get('start'), quantiles: +fd.get('quantiles'),
-      neutralize: form.querySelector('[name=neutralize]').checked });
-    const s = data.summary;
-    const neutralNote = form.querySelector('[name=neutralize]').checked && !data.neutralized
-      ? '<div class="hint" style="color:var(--s4)">⚠️ 行业映射为空（首次需联网抓取，约1-2分钟），本次未做中性化</div>' : '';
-    out.innerHTML = `
-      ${neutralNote}
-      <div class="cards">
-        <div class="card"><div class="k">RankIC 均值${data.neutralized ? '（行业中性）' : ''}</div><div class="v ${cls(s.ic_mean)}">${s.ic_mean}</div></div>
-        <div class="card"><div class="k">ICIR</div><div class="v">${s.icir}</div></div>
-        <div class="card"><div class="k">IC&gt;0 占比</div><div class="v">${pct(s.ic_positive_ratio)}</div></div>
-        <div class="card"><div class="k">多空年化</div><div class="v ${cls(s.long_short_annual)}">${pct(s.long_short_annual)}</div></div>
-        <div class="card"><div class="k">单调性</div><div class="v">${s.monotonicity}</div></div>
-        <div class="card"><div class="k">Top组换手/日</div><div class="v">${pct(s.top_quantile_turnover)}</div></div>
-      </div>
-      <div class="row">
-        <div class="panel"><h3>RankIC（20日滚动均值）</h3><div class="chart-sm" id="ic-chart"></div></div>
-        <div class="panel"><h3>分层净值（Q1 最低分 → Q${Object.keys(data.quantile_nav).length} 最高分）</h3><div class="chart-sm" id="q-chart"></div></div>
-      </div>
-      <div class="hint">经验参考：|IC均值| &gt; 0.03 值得关注；单调性接近 ±1 说明分层有序；换手过高会被交易成本侵蚀。</div>`;
-    mkChart('ic-chart').setOption(baseOpt({
-      xAxis: timeAxis(), yAxis: valAxis(),
-      series: [{ name: 'RankIC(20d)', type: 'line', data: data.ic_series, showSymbol: false, lineStyle: { width: 2 } },
-               { name: '0', type: 'line', data: data.ic_series.map(p => [p[0], 0]), showSymbol: false, lineStyle: { width: 1, color: AXIS }, tooltip: { show: false }, silent: true }],
-    }));
-    const qNames = Object.keys(data.quantile_nav);
-    mkChart('q-chart').setOption(baseOpt({
-      legend: { textStyle: { color: INK2 }, top: 0 },
-      xAxis: timeAxis(), yAxis: valAxis(),
-      series: qNames.map(q => ({ name: q, type: 'line', data: data.quantile_nav[q], showSymbol: false, lineStyle: { width: 2 } })),
-    }));
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-
-document.getElementById('validate-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('validate-out');
-  out.innerHTML = '<div class="msg">验证中…</div>';
-  try {
-    const ff = new FormData(document.getElementById('factor-form'));
-    const fd = new FormData(form);
-    const r = await post('/api/v1/research/factors/validate', {
-      expression: ff.get('expression'), universe: ff.get('universe'), start: ff.get('start'),
-      split: fd.get('split'), n_splits: +fd.get('n_splits') });
-    const verdictColor = r.verdict === '稳健' ? 'up' : (r.verdict === '衰减' ? '' : 'down');
-    out.innerHTML = `
-      <div class="cards">
-        <div class="card"><div class="k">训练期 RankIC（${r.is_days}天）</div><div class="v">${r.is_ic}</div></div>
-        <div class="card"><div class="k">验证期 RankIC（${r.oos_days}天）</div><div class="v">${r.oos_ic}</div></div>
-        <div class="card"><div class="k">训练期 ICIR</div><div class="v">${r.is_icir}</div></div>
-        <div class="card"><div class="k">验证期 ICIR</div><div class="v">${r.oos_icir}</div></div>
-        <div class="card"><div class="k">衰减度</div><div class="v">${r.degradation == null ? '—' : pct(r.degradation)}</div></div>
-        <div class="card"><div class="k">结论</div><div class="v ${verdictColor}">${esc(r.verdict)}</div></div>
-      </div>
-      <table><thead><tr><th>分段</th><th>起止</th><th>天数</th><th>RankIC</th><th>ICIR</th></tr></thead>
-      <tbody>${(r.segments || []).map((s, i) => `<tr><td>${i + 1}</td><td>${esc(s.start)} ~ ${esc(s.end)}</td>
-        <td>${s.days}</td><td class="${cls(s.ic_mean)}">${s.ic_mean == null ? '—' : (+s.ic_mean).toFixed(4)}</td>
-        <td>${s.icir == null ? '—' : (+s.icir).toFixed(3)}</td></tr>`).join('')}</tbody></table>`;
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-
-/* ---------- 挖掘 ---------- */
-function renderMined(list, extraCols) {
-  const rows = list.map(f => `<tr><td><code class="mined-expr" style="cursor:pointer" title="点击填入因子页验证">${esc(f.expression)}</code></td>
-    <td class="${cls(f.ic_mean)}">${(+f.ic_mean).toFixed(4)}</td><td>${(+f.icir).toFixed(3)}</td>${extraCols(f)}</tr>`).join('');
-  return `<div class="panel"><h3>挖掘结果（点击表达式 → 跳转因子页体检）</h3>
-    <table><thead><tr><th>表达式</th><th>RankIC</th><th>ICIR</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
-}
-document.getElementById('mine-out').addEventListener('click', e => {
-  const code = e.target.closest('code.mined-expr');
-  if (!code) return;
-  document.querySelector('#factor-form [name=expression]').value = code.textContent;
-  document.querySelector('nav button[data-tab="lab"]').click();
-  if (window.quantLabOpenExpression) window.quantLabOpenExpression(code.textContent);
-});
-document.getElementById('gp-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  const out = document.getElementById('mine-out');
-  out.innerHTML = '<div class="msg">遗传规划进化中，视参数可能需要几分钟…</div>';
-  try {
-    const fd = new FormData(form);
-    const data = await post('/api/v1/research/mining/genetic', {
-      universe: fd.get('universe'), start: fd.get('start'),
-      generations: +fd.get('generations'), population: +fd.get('population') });
-    out.innerHTML = renderMined(data.factors, f => `<td>fitness=${(+f.fitness).toFixed(4)}</td>`);
-  } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-/* ---------- 资讯 ---------- */
-async function loadNews() {
-  const out = document.getElementById('news-out');
-  try {
-    const data = await api('/api/v1/news?limit=80');
-    if (!data.items.length) { out.innerHTML = '<div class="msg">尚无数据，点击上方抓取。</div>'; return; }
-    out.innerHTML = `<table><thead><tr><th>时间</th><th>摘要/内容</th><th>类型</th><th>情绪</th><th>相关标的</th></tr></thead>
-      <tbody>${data.items.map(n => `<tr>
-        <td style="white-space:nowrap">${esc((n.published_at || '').slice(0, 16))}</td>
-        <td>${esc(n.summary || n.content.slice(0, 80))}</td>
-        <td>${n.event_type ? `<span class="badge">${esc(n.event_type)}</span>` : ''}</td>
-        <td class="${cls(n.sentiment)}">${n.sentiment ? (+n.sentiment).toFixed(2) : ''}</td>
-        <td>${(n.symbols || []).map(s => `<span class="badge">${esc(s)}</span>`).join(' ')}</td></tr>`).join('')}
-      </tbody></table>`;
-  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
-}
-document.getElementById('news-form').onsubmit = async e => {
-  e.preventDefault(); const form = e.target; busy(form, true);
-  try {
-    const skip = form.querySelector('[name=skip_llm]').checked;
-    const job = await post('/api/v1/news/crawl?skip_llm=' + skip, {});
-    document.getElementById('news-out').innerHTML = `<div class="msg">${job.coalesced ? '已关联到现有' : '已提交'}资讯刷新任务；现有快照会继续可用。</div>`;
-    await loadNews();
-  } catch (err) { document.getElementById('news-out').innerHTML = `<div class="err">${esc(err.message)}</div>`; }
-  busy(form, false);
-};
-
-/* ---------- 实盘 ---------- */
+/* ---------- 真实账户账本 ---------- */
 async function loadLedgerNav() {
   try {
     const r = await api('/api/v1/portfolio/ledger/nav');
@@ -3940,7 +3806,7 @@ document.getElementById('trade-form').onsubmit = async e => {
       side: fd.get('side'), price: +fd.get('price'), shares: +fd.get('shares'), fee: +fd.get('fee') });
     await loadLedger();
     await loadAssetLists(false);
-  } catch (err) { reportLocalError('实盘账本', '成交记录未能保存', err); }
+  } catch (err) { reportLocalError('真实账户账本', '成交记录未能保存', err); }
   busy(form, false);
 };
 document.getElementById('cash-form').onsubmit = async e => {
@@ -3949,6 +3815,6 @@ document.getElementById('cash-form').onsubmit = async e => {
     const fd = new FormData(form);
     await post('/api/v1/portfolio/ledger/cashflow', { date: fd.get('date'), amount: +fd.get('amount'), kind: fd.get('kind') });
     await loadLedger();
-  } catch (err) { reportLocalError('实盘账本', '资金流水未能保存', err); }
+  } catch (err) { reportLocalError('真实账户账本', '资金流水未能保存', err); }
   busy(form, false);
 };
