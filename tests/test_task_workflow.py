@@ -1,7 +1,10 @@
 """Contracts for isolated task development and impact-based validation."""
 
+import json
 import os
+import socket
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,6 +49,155 @@ def _hold_direct_pytest_task_lease(primary: str, ready, release) -> None:
     if not release.wait(10):
         raise RuntimeError("test did not release direct pytest lease")
     cleanups.pop()()
+
+
+def _temporary_task_repo(
+    tmp_path: Path, **branches: str,
+) -> tuple[Path, Path, dict[str, Path]]:
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    python = primary / ".venv" / "Scripts" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    targets: dict[str, Path] = {}
+    for slug in branches:
+        target = primary / ".worktrees" / slug
+        target.mkdir(parents=True)
+        targets[slug] = target
+    return primary, python, targets
+
+
+def _capture_task_launches(
+    monkeypatch, tasks, primary: Path, python: Path,
+    targets: dict[str, Path], branches: dict[str, str],
+) -> list[dict]:
+    launches = []
+    real_run = subprocess.run
+
+    def capture_process(command, *args, **kwargs):
+        if command and command[0] == str(python):
+            artifacts = primary / ".artifacts" / "worktrees" / kwargs["cwd"].name
+            launches.append({
+                "command": command, **kwargs,
+                "leased": tasks.task_artifacts_active(artifacts),
+            })
+            return subprocess.CompletedProcess(command, 0)
+        if command and command[0] == "git":
+            assert command[:3] == [
+                "git", "-c", f"safe.directory={Path(kwargs['cwd']).as_posix()}",
+            ]
+            git_args = command[3:]
+            if git_args == ["worktree", "list", "--porcelain"]:
+                records = [f"worktree {primary}", "branch refs/heads/main"]
+                records.extend(
+                    line
+                    for slug, target in targets.items()
+                    for line in (f"worktree {target}", f"branch refs/heads/{branches[slug]}")
+                )
+                return subprocess.CompletedProcess(command, 0, stdout="\n".join(records), stderr="")
+            if git_args == ["branch", "--show-current"]:
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=branches[Path(kwargs["cwd"]).name] + "\n", stderr="",
+                )
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(tasks, "ROOT", primary)
+    monkeypatch.setattr(tasks.subprocess, "run", capture_process)
+    return launches
+
+
+def test_serve_runs_registered_tasks_with_isolated_runtime(tmp_path, monkeypatch):
+    from scripts.dev import tasks
+
+    branches = {"alpha": "codex/alpha", "beta": "codex/beta"}
+    primary, python, targets = _temporary_task_repo(tmp_path, **branches)
+    stable_stockdb = tmp_path / "stable-stockdb"
+    stable_stockdb.mkdir()
+    launches = _capture_task_launches(
+        monkeypatch, tasks, primary, python, targets, branches,
+    )
+
+    assert tasks.main([
+        "serve", "alpha", "--open", "--stockdb-root", str(stable_stockdb),
+    ]) == 0
+    assert tasks.main(["serve", "beta"]) == 0
+
+    alpha_dev = primary / ".artifacts/worktrees/alpha/runtime/dev"
+    beta_dev = primary / ".artifacts/worktrees/beta/runtime/dev"
+    alpha, beta = launches
+    assert alpha["command"] == [
+        str(python), "-m", "quantmaster.cli", "serve", "--reload", "--open",
+    ]
+    assert alpha["cwd"] == targets["alpha"]
+    assert json.loads((alpha_dev / "config.yaml").read_text(encoding="utf-8")) == {
+        "server": {"host": "127.0.0.1", "port": 18686},
+        "data": {"free_stockdb_managed": False, "free_stockdb_auto_update": False},
+    }
+    assert alpha["env"]["QM_CONFIG_PATH"] == str(alpha_dev / "config.yaml")
+    assert alpha["env"]["QM_DATA_ROOT"] == str(alpha_dev / "data")
+    assert alpha["env"]["QM_FREE_STOCKDB_ROOT"] == str(alpha_dev / "free-stockdb")
+    assert alpha["env"]["QM_FREE_STOCKDB_SDK_PATH"] == str(stable_stockdb / "pybao")
+    assert alpha["env"]["QM_FREE_STOCKDB_CONTROL_PATH"] == str(alpha_dev / "control.sqlite")
+    assert alpha["env"]["QM_FREE_STOCKDB_MANAGED"] == "false"
+    assert alpha["env"]["QM_FREE_STOCKDB_AUTO_UPDATE"] == "false"
+    assert (alpha_dev / "data/logs").is_dir()
+    assert (alpha_dev / "free-stockdb").is_dir()
+    assert beta["cwd"] == targets["beta"]
+    assert json.loads((beta_dev / "config.yaml").read_text(encoding="utf-8"))["server"] == {
+        "host": "127.0.0.1", "port": 18687,
+    }
+    assert beta["env"]["QM_CONFIG_PATH"] == str(beta_dev / "config.yaml")
+    assert beta["env"]["QM_DATA_ROOT"] == str(beta_dev / "data")
+    assert beta["env"]["QM_FREE_STOCKDB_CONTROL_PATH"] == str(beta_dev / "control.sqlite")
+    assert alpha["leased"] is beta["leased"] is True
+
+
+def test_serve_port_allocation_ignores_non_task_worktrees(tmp_path, monkeypatch):
+    from scripts.dev import tasks
+
+    branches = {"aaa": "feature/not-a-task", "alpha": "codex/alpha"}
+    primary, python, targets = _temporary_task_repo(tmp_path, **branches)
+    launches = _capture_task_launches(
+        monkeypatch, tasks, primary, python, targets, branches,
+    )
+
+    assert tasks.main(["serve", "alpha"]) == 0
+    config = json.loads(Path(launches[0]["env"]["QM_CONFIG_PATH"]).read_text(encoding="utf-8"))
+    assert config["server"]["port"] == 18686
+
+
+def test_serve_rejects_invalid_task_and_stockdb_before_launch(tmp_path, monkeypatch):
+    from scripts.dev import tasks
+
+    branches = {"alpha": "codex/alpha"}
+    primary, python, targets = _temporary_task_repo(tmp_path, **branches)
+    launches = _capture_task_launches(
+        monkeypatch, tasks, primary, python, targets, branches,
+    )
+
+    with pytest.raises(SystemExit, match="未登记"):
+        tasks.main(["serve", "missing"])
+    with pytest.raises(SystemExit, match="必须是绝对路径"):
+        tasks.main(["serve", "alpha", "--stockdb-root", "relative-stockdb"])
+    assert launches == []
+
+
+def test_serve_rejects_occupied_port_before_launch(tmp_path, monkeypatch):
+    from scripts.dev import tasks
+
+    branches = {"alpha": "codex/alpha"}
+    primary, python, targets = _temporary_task_repo(tmp_path, **branches)
+    launches = _capture_task_launches(
+        monkeypatch, tasks, primary, python, targets, branches,
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 18686))
+    try:
+        with pytest.raises(SystemExit, match="开发端口已被占用"):
+            tasks.main(["serve", "alpha"])
+    finally:
+        listener.close()
+    assert launches == []
 
 
 def test_documentation_only_changes_skip_python_tests():
