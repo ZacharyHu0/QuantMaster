@@ -1274,6 +1274,20 @@ def test_product_history_replays_frozen_ingest_and_factors_after_restart(tmp_pat
     assert restarted_source.calls == 0
 
 
+def test_product_history_rejects_symbol_outside_snapshot_universe(tmp_path):
+    store, ingest_store, snapshot, _daily, _factors = _published_replay_snapshot(
+        tmp_path
+    )
+    service = EtfResearchService(
+        source=_MutableReplaySource(pd.DataFrame()),
+        ingest_store=ingest_store,
+        store=store,
+    )
+
+    with pytest.raises(RuntimeError, match=r"ETF 不在指定研究快照中: 159920\.SZ"):
+        service.product_history("159920.SZ", snapshot_id=snapshot.snapshot_id)
+
+
 def test_old_snapshot_without_frozen_factors_fails_closed_after_restart(tmp_path):
     store, ingest_store, snapshot, _daily, factors = _published_replay_snapshot(
         tmp_path,

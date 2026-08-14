@@ -599,6 +599,29 @@ class _EtfSource:
         )
 
 
+def test_etf_intraday_session_filter_normalizes_timezone_and_bounds():
+    frame = pd.DataFrame({
+        "date": [
+            "2026-08-08T01:30:00+00:00",
+            "2026-08-08T07:00:00+00:00",
+            "2026-08-08T07:01:00+00:00",
+            "not-a-date",
+        ],
+        "close": [1.0, 1.1, 1.2, 1.3],
+    })
+
+    filtered = EtfResearchService._intraday_session_only(
+        frame,
+        start=pd.Timestamp("2026-08-08 09:30:00"),
+        end=pd.Timestamp("2026-08-08 15:00:00"),
+    )
+
+    assert filtered["date"].tolist() == [
+        pd.Timestamp("2026-08-08 09:30:00"),
+        pd.Timestamp("2026-08-08 15:00:00"),
+    ]
+
+
 def test_etf_compatible_ingest_respects_historical_knowledge_cutoff():
     identity = StockDBArtifactIdentity(
         artifact_id="etf-artifact",

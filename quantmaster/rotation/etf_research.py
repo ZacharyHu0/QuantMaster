@@ -2255,100 +2255,134 @@ class EtfResearchService:
             }
         return result
 
-    def intraday(self, symbol: str, *, as_of_date: str) -> dict[str, Any]:
-        """Read and cache one ETF minute series only when its trend view requests it."""
+    @staticmethod
+    def _local_intraday_stamp(raw: Any) -> pd.Timestamp:
+        parsed = pd.to_datetime(raw, errors="coerce")
+        if pd.isna(parsed):
+            return pd.NaT
+        stamp = pd.Timestamp(parsed)
+        if stamp.tzinfo is not None:
+            stamp = stamp.tz_convert("Asia/Shanghai").tz_localize(None)
+        return stamp
 
-        canonical = str(symbol or "").strip().upper()
-        if _EXCHANGE_ETF_SYMBOL.fullmatch(canonical) is None:
-            raise ValueError("ETF 代码格式无效")
-        session = pd.Timestamp(as_of_date).date().isoformat()
-        session_start = pd.Timestamp(f"{session} 09:30:00")
-        session_end = pd.Timestamp(f"{session} 15:00:00")
+    @classmethod
+    def _intraday_session_only(
+        cls,
+        value: pd.DataFrame,
+        *,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if value is None or value.empty:
+            return pd.DataFrame()
+        result = value.copy()
+        result["date"] = result.get(
+            "date", pd.Series(pd.NaT, index=result.index)
+        ).map(cls._local_intraday_stamp)
+        return result[
+            result["date"].notna() & result["date"].between(start, end)
+        ].copy()
 
-        def session_only(value: pd.DataFrame) -> pd.DataFrame:
-            if value is None or value.empty:
-                return pd.DataFrame()
-            result = value.copy()
-
-            def local_stamp(raw: Any) -> pd.Timestamp:
-                parsed = pd.to_datetime(raw, errors="coerce")
-                if pd.isna(parsed):
-                    return pd.NaT
-                stamp = pd.Timestamp(parsed)
-                if stamp.tzinfo is not None:
-                    stamp = stamp.tz_convert("Asia/Shanghai").tz_localize(None)
-                return stamp
-
-            result["date"] = result.get(
-                "date", pd.Series(pd.NaT, index=result.index)
-            ).map(local_stamp)
-            return result[
-                result["date"].notna()
-                & result["date"].between(session_start, session_end)
-            ].copy()
-
+    def _intraday_evidence_path(self, canonical: str, session: str) -> Path:
         evidence_root = (self.store.root / "evidence" / "intraday").resolve()
         safe_symbol = canonical.replace(".", "_")
-        target = confined_path(
+        return confined_path(
             evidence_root,
             f"{safe_symbol}_{session}.parquet",
             label="ETF 分钟证据",
         )
-        frame = pd.DataFrame()
-        cache_hit = False
-        if target.is_file():
-            try:
-                frame = session_only(pd.read_parquet(target))
-                cache_hit = not frame.empty
-            except (OSError, ValueError):
-                frame = pd.DataFrame()
-        if frame.empty and not remote_io_allowed():
-            # A trend-tab read may show its last local minute snapshot, but it
-            # must never turn into a FreeStockDB request.  The explicit scan
-            # job owns network acquisition and later atomically publishes it.
-            return {
-                "symbol": canonical,
-                "date": session,
-                "status": "missing",
-                "source": "local-cache",
-                "cache_hit": cache_hit,
-                "metrics": {"rows": 0, "complete_session": False, "scoring_input": False},
-                "series": [],
-                "issue": "snapshot_unavailable",
-            }
-        if frame.empty:
-            start = f"{session} 09:30:00"
-            end = f"{session} 15:00:00"
-            if self.source is None:
-                raise RuntimeError("ETF 分钟数据仅可由后台刷新任务获取")
-            frame = session_only(
-                self.source.intraday_many([canonical], start, end, "1m")
+
+    def _cached_intraday_frame(
+        self,
+        target: Path,
+        *,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> tuple[pd.DataFrame, bool]:
+        if not target.is_file():
+            return pd.DataFrame(), False
+        try:
+            frame = self._intraday_session_only(
+                pd.read_parquet(target), start=start, end=end
             )
-            if not frame.empty:
-                evidence_root.mkdir(parents=True, exist_ok=True)
-                fd, temp_name = tempfile.mkstemp(
-                    prefix=".intraday.",
-                    suffix=".parquet.tmp",
-                    dir=evidence_root,
-                )
-                os.close(fd)
-                temp = Path(temp_name)
-                try:
-                    frame.to_parquet(temp, index=False)
-                    os.replace(temp, target)
-                finally:
-                    temp.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            return pd.DataFrame(), False
+        return frame, not frame.empty
+
+    def _fetch_intraday_frame(
+        self,
+        canonical: str,
+        target: Path,
+        *,
+        session: str,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> pd.DataFrame:
+        if self.source is None:
+            raise RuntimeError("ETF 分钟数据仅可由后台刷新任务获取")
+        frame = self._intraday_session_only(
+            self.source.intraday_many(
+                [canonical],
+                f"{session} 09:30:00",
+                f"{session} 15:00:00",
+                "1m",
+            ),
+            start=start,
+            end=end,
+        )
         if frame.empty:
-            return {
-                "symbol": canonical,
-                "date": session,
-                "status": "missing",
-                "source": "free-stockdb",
-                "cache_hit": cache_hit,
-                "metrics": {"rows": 0, "complete_session": False, "scoring_input": False},
-                "series": [],
-            }
-        values = session_only(frame)
+            return frame
+        evidence_root = target.parent
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=".intraday.", suffix=".parquet.tmp", dir=evidence_root
+        )
+        os.close(fd)
+        temp = Path(temp_name)
+        try:
+            frame.to_parquet(temp, index=False)
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+        return frame
+
+    @staticmethod
+    def _missing_intraday_payload(
+        canonical: str,
+        session: str,
+        *,
+        source: str,
+        cache_hit: bool,
+        issue: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "symbol": canonical,
+            "date": session,
+            "status": "missing",
+            "source": source,
+            "cache_hit": cache_hit,
+            "metrics": {
+                "rows": 0,
+                "complete_session": False,
+                "scoring_input": False,
+            },
+            "series": [],
+        }
+        if issue:
+            payload["issue"] = issue
+        return payload
+
+    def _ready_intraday_payload(
+        self,
+        canonical: str,
+        session: str,
+        frame: pd.DataFrame,
+        *,
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+        cache_hit: bool,
+    ) -> dict[str, Any]:
+        values = self._intraday_session_only(frame, start=start, end=end)
         if "symbol" not in values:
             values["symbol"] = canonical
         for column in ("close", "volume", "amount"):
@@ -2360,7 +2394,11 @@ class EtfResearchService:
         values = values.dropna(subset=["date"]).sort_values("date")
         metrics = self._minute_metrics(values).get(
             canonical,
-            {"rows": len(values), "complete_session": False, "scoring_input": False},
+            {
+                "rows": len(values),
+                "complete_session": False,
+                "scoring_input": False,
+            },
         )
         return {
             "symbol": canonical,
@@ -2376,33 +2414,60 @@ class EtfResearchService:
                     "volume": float(row.volume) if pd.notna(row.volume) else None,
                     "amount": float(row.amount) if pd.notna(row.amount) else None,
                 }
-                for row in values[["date", "close", "volume", "amount"]].itertuples(index=False)
+                for row in values[
+                    ["date", "close", "volume", "amount"]
+                ].itertuples(index=False)
             ],
         }
 
-    def product_history(
-        self,
-        symbol: str,
-        *,
-        snapshot_id: str,
-        tier: str = "production",
-    ) -> list[dict[str, Any]]:
-        """Replay history exclusively from evidence frozen by the selected tier."""
+    def intraday(self, symbol: str, *, as_of_date: str) -> dict[str, Any]:
+        """Read and cache one ETF minute series only when its trend view requests it."""
 
-        canonical = str(symbol or "").upper()
-        selected_tier = self._research_tier(tier)
-        preview = selected_tier == "sandbox"
-        snapshot = self.resolve_snapshot(str(snapshot_id or ""), tier=selected_tier)
-        if snapshot is None:
-            raise RuntimeError(f"ETF 研究快照不存在或契约已淘汰: {snapshot_id}")
-        if snapshot.snapshot_id != str(snapshot_id or ""):
-            raise RuntimeError(
-                "ETF 快照路径与内部标识不匹配: "
-                f"requested={snapshot_id}, embedded={snapshot.snapshot_id}"
+        canonical = str(symbol or "").strip().upper()
+        if _EXCHANGE_ETF_SYMBOL.fullmatch(canonical) is None:
+            raise ValueError("ETF 代码格式无效")
+        session = pd.Timestamp(as_of_date).date().isoformat()
+        start = pd.Timestamp(f"{session} 09:30:00")
+        end = pd.Timestamp(f"{session} 15:00:00")
+        target = self._intraday_evidence_path(canonical, session)
+        frame, cache_hit = self._cached_intraday_frame(
+            target, start=start, end=end
+        )
+        if frame.empty and not remote_io_allowed():
+            return self._missing_intraday_payload(
+                canonical,
+                session,
+                source="local-cache",
+                cache_hit=cache_hit,
+                issue="snapshot_unavailable",
             )
-        if not any(item.symbol == canonical for item in snapshot.items):
-            raise RuntimeError(f"ETF 不在指定研究快照中: {canonical}")
-        input_evidence: dict[str, Any] = {
+        if frame.empty:
+            frame = self._fetch_intraday_frame(
+                canonical, target, session=session, start=start, end=end
+            )
+        if frame.empty:
+            return self._missing_intraday_payload(
+                canonical,
+                session,
+                source="free-stockdb",
+                cache_hit=cache_hit,
+            )
+        return self._ready_intraday_payload(
+            canonical,
+            session,
+            frame,
+            start=start,
+            end=end,
+            cache_hit=cache_hit,
+        )
+
+    @staticmethod
+    def _history_input_evidence(
+        snapshot: EtfResearchSnapshot,
+        *,
+        preview: bool,
+    ) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
             "ingest_id": snapshot.ingest_id,
             "research_model_version": snapshot.research_model_version,
             "evidence_hashes": snapshot.evidence_hashes,
@@ -2410,71 +2475,81 @@ class EtfResearchService:
         if preview:
             if snapshot.tier != "sandbox" or snapshot.formal_eligible:
                 raise RuntimeError("ETF sandbox preview 发布资格契约无效")
-            input_evidence.update({"tier": "sandbox", "formal_eligible": False})
+            evidence.update({"tier": "sandbox", "formal_eligible": False})
         elif snapshot.tier != "production" or not snapshot.formal_eligible:
             raise RuntimeError("ETF production 快照发布资格契约无效")
-        expected_input_hash = content_hash(input_evidence)
+        return evidence
+
+    def _validated_history_snapshot(
+        self,
+        canonical: str,
+        *,
+        snapshot_id: str,
+        tier: str,
+    ) -> tuple[EtfResearchSnapshot, bool, tuple[str, str, str]]:
+        selected_tier = self._research_tier(tier)
+        preview = selected_tier == "sandbox"
+        requested = str(snapshot_id or "")
+        snapshot = self.resolve_snapshot(requested, tier=selected_tier)
+        if snapshot is None:
+            raise RuntimeError(f"ETF 研究快照不存在或契约已淘汰: {snapshot_id}")
+        if snapshot.snapshot_id != requested:
+            raise RuntimeError(
+                "ETF 快照路径与内部标识不匹配: "
+                f"requested={snapshot_id}, embedded={snapshot.snapshot_id}"
+            )
+        if not any(item.symbol == canonical for item in snapshot.items):
+            raise RuntimeError(f"ETF 不在指定研究快照中: {canonical}")
+        expected_input_hash = content_hash(
+            self._history_input_evidence(snapshot, preview=preview)
+        )
         if expected_input_hash != snapshot.input_hash:
             raise RuntimeError(
-                f"ETF 快照输入哈希不匹配: snapshot={snapshot.input_hash}, actual={expected_input_hash}"
+                "ETF 快照输入哈希不匹配: "
+                f"snapshot={snapshot.input_hash}, actual={expected_input_hash}"
             )
-        expected_snapshot_id = (
-            ("etf_preview_" if preview else "etf_")
-            + hashlib.sha256(
-                f"{snapshot.as_of_date}:{snapshot.research_model_version}:{snapshot.input_hash}".encode()
-            ).hexdigest()[:24]
-        )
+        prefix = "etf_preview_" if preview else "etf_"
+        digest = hashlib.sha256(
+            (
+                f"{snapshot.as_of_date}:"
+                f"{snapshot.research_model_version}:{snapshot.input_hash}"
+            ).encode()
+        ).hexdigest()[:24]
+        expected_snapshot_id = prefix + digest
         if expected_snapshot_id != snapshot.snapshot_id:
             raise RuntimeError(
-                f"ETF 快照标识不匹配: snapshot={snapshot.snapshot_id}, actual={expected_snapshot_id}"
+                "ETF 快照标识不匹配: "
+                f"snapshot={snapshot.snapshot_id}, actual={expected_snapshot_id}"
             )
         key = (canonical, snapshot.snapshot_id, snapshot.input_hash)
-        cached = self._detail_history_cache.get(key)
-        if cached is not None:
-            return cached
+        return snapshot, preview, key
 
-        if preview:
-            with self._preview_lock:
-                daily = self._preview_daily.get(snapshot.snapshot_id, pd.DataFrame()).copy()
-                factors = self._preview_factors.get(snapshot.snapshot_id, pd.DataFrame()).copy()
-            if daily.empty:
-                raise RuntimeError(f"ETF sandbox preview 行情已过期: {snapshot.snapshot_id}")
-            actual_daily_hash = _stockdb_frame_hash(daily)
-            if actual_daily_hash != snapshot.evidence_hashes.get("行情明细"):
-                raise RuntimeError("ETF sandbox preview 行情内存证据哈希不匹配")
-            actual_factor_hash = _frame_hash(factors, _ADJUSTMENT_COLUMNS)
-            if actual_factor_hash != snapshot.evidence_hashes.get("复权"):
-                raise RuntimeError("ETF sandbox preview 复权内存证据哈希不匹配")
-            end = pd.Timestamp(snapshot.as_of_date).normalize()
-            daily["symbol"] = daily.get("symbol", pd.Series(dtype=str)).astype(str).str.upper()
-            daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce")
-            daily = daily[
-                daily["symbol"].eq(canonical)
-                & daily["date"].notna()
-                & daily["date"].le(end)
-            ]
-            if daily.empty:
-                raise RuntimeError(
-                    f"ETF sandbox preview 行情中没有 {canonical} 截至 {snapshot.as_of_date} 的记录"
-                )
-            if not factors.empty and "symbol" in factors:
-                factors = factors[factors["symbol"].astype(str).str.upper().eq(canonical)]
-            history = adjusted_daily_metrics(daily, factors).get("history") or []
-            self._detail_history_cache.clear()
-            self._detail_history_cache[key] = history
-            return history
+    def _sandbox_history_frames(
+        self,
+        snapshot: EtfResearchSnapshot,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        with self._preview_lock:
+            daily = self._preview_daily.get(
+                snapshot.snapshot_id, pd.DataFrame()
+            ).copy()
+            factors = self._preview_factors.get(
+                snapshot.snapshot_id, pd.DataFrame()
+            ).copy()
+        if daily.empty:
+            raise RuntimeError(
+                f"ETF sandbox preview 行情已过期: {snapshot.snapshot_id}"
+            )
+        actual_daily_hash = _stockdb_frame_hash(daily)
+        if actual_daily_hash != snapshot.evidence_hashes.get("行情明细"):
+            raise RuntimeError("ETF sandbox preview 行情内存证据哈希不匹配")
+        actual_factor_hash = _frame_hash(factors, _ADJUSTMENT_COLUMNS)
+        if actual_factor_hash != snapshot.evidence_hashes.get("复权"):
+            raise RuntimeError("ETF sandbox preview 复权内存证据哈希不匹配")
+        return daily, factors
 
-        ingest = self.ingest_store.get(snapshot.ingest_id)
-        if ingest is None:
-            raise RuntimeError(
-                f"ETF 快照引用的 StockDB 摄取已缺失: {snapshot.ingest_id}"
-            )
-        if ingest.ingest_id != snapshot.ingest_id:
-            raise RuntimeError(
-                "StockDB 摄取清单路径与内部标识不匹配: "
-                f"requested={snapshot.ingest_id}, embedded={ingest.ingest_id}"
-            )
-        expected_ingest_id = "sdi_" + content_hash(
+    @staticmethod
+    def _expected_history_ingest_id(ingest: StockDBIngestSnapshot) -> str:
+        return "sdi_" + content_hash(
             {
                 "schema_version": STOCKDB_INGEST_SCHEMA_VERSION,
                 "asset": "etf",
@@ -2489,6 +2564,22 @@ class EtfResearchService:
                 "session_source": ingest.session_source,
             }
         )[:24]
+
+    def _production_history_frames(
+        self,
+        snapshot: EtfResearchSnapshot,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        ingest = self.ingest_store.get(snapshot.ingest_id)
+        if ingest is None:
+            raise RuntimeError(
+                f"ETF 快照引用的 StockDB 摄取已缺失: {snapshot.ingest_id}"
+            )
+        if ingest.ingest_id != snapshot.ingest_id:
+            raise RuntimeError(
+                "StockDB 摄取清单路径与内部标识不匹配: "
+                f"requested={snapshot.ingest_id}, embedded={ingest.ingest_id}"
+            )
+        expected_ingest_id = self._expected_history_ingest_id(ingest)
         if expected_ingest_id != ingest.ingest_id:
             raise RuntimeError(
                 "StockDB 摄取清单内容哈希不匹配: "
@@ -2509,19 +2600,35 @@ class EtfResearchService:
         daily = self.ingest_store.load_frame(ingest, "etf_daily")
         expected_daily_hash = str(ingest.content_hashes.get("etf_daily") or "")
         if not expected_daily_hash or daily.empty:
-            raise RuntimeError(f"ETF 快照的冻结行情证据缺失: {snapshot.ingest_id}")
+            raise RuntimeError(
+                f"ETF 快照的冻结行情证据缺失: {snapshot.ingest_id}"
+            )
         actual_daily_hash = _stockdb_frame_hash(daily)
         if actual_daily_hash != expected_daily_hash:
             raise RuntimeError(
                 "ETF 冻结行情证据哈希不匹配: "
                 f"snapshot={expected_daily_hash}, actual={actual_daily_hash}"
             )
-
         factors = self.store.load_frozen_adjustments(
             snapshot.evidence_hashes.get("复权", "")
         )
+        return daily, factors
+
+    def _history_from_frames(
+        self,
+        canonical: str,
+        snapshot: EtfResearchSnapshot,
+        daily: pd.DataFrame,
+        factors: pd.DataFrame,
+        *,
+        key: tuple[str, str, str],
+        preview: bool,
+    ) -> list[dict[str, Any]]:
         end = pd.Timestamp(snapshot.as_of_date).normalize()
-        daily["symbol"] = daily.get("symbol", pd.Series(dtype=str)).astype(str).str.upper()
+        daily = daily.copy()
+        daily["symbol"] = daily.get(
+            "symbol", pd.Series(dtype=str)
+        ).astype(str).str.upper()
         daily["date"] = pd.to_datetime(daily.get("date"), errors="coerce")
         daily = daily[
             daily["symbol"].eq(canonical)
@@ -2529,13 +2636,47 @@ class EtfResearchService:
             & daily["date"].le(end)
         ]
         if daily.empty:
-            raise RuntimeError(f"ETF 冻结行情中没有 {canonical} 截至 {snapshot.as_of_date} 的记录")
+            label = "ETF sandbox preview 行情" if preview else "ETF 冻结行情"
+            raise RuntimeError(
+                f"{label}中没有 {canonical} 截至 {snapshot.as_of_date} 的记录"
+            )
         if not factors.empty and "symbol" in factors:
-            factors = factors[factors["symbol"].astype(str).str.upper().eq(canonical)]
+            factors = factors[
+                factors["symbol"].astype(str).str.upper().eq(canonical)
+            ]
         history = adjusted_daily_metrics(daily, factors).get("history") or []
         self._detail_history_cache.clear()
         self._detail_history_cache[key] = history
         return history
+
+    def product_history(
+        self,
+        symbol: str,
+        *,
+        snapshot_id: str,
+        tier: str = "production",
+    ) -> list[dict[str, Any]]:
+        """Replay history exclusively from evidence frozen by the selected tier."""
+
+        canonical = str(symbol or "").upper()
+        snapshot, preview, key = self._validated_history_snapshot(
+            canonical, snapshot_id=snapshot_id, tier=tier
+        )
+        cached = self._detail_history_cache.get(key)
+        if cached is not None:
+            return cached
+        if preview:
+            daily, factors = self._sandbox_history_frames(snapshot)
+        else:
+            daily, factors = self._production_history_frames(snapshot)
+        return self._history_from_frames(
+            canonical,
+            snapshot,
+            daily,
+            factors,
+            key=key,
+            preview=preview,
+        )
 
     def scan(
         self,
