@@ -78,11 +78,9 @@ def publish_market_overview_snapshot() -> dict[str, Any]:
     previous pointer.
     """
 
-    # Kept as a lazy import so ordinary Web snapshot reads never import the
-    # FastAPI application or its optional provider integrations.
-    from quantmaster.server.app import _market_overview_data
+    from quantmaster.market.overview import build_market_overview_data
 
-    data = _market_overview_data(refresh="local")
+    data = build_market_overview_data(refresh="local")
     if not isinstance(data, dict):
         raise RuntimeError("市场快照构建器返回了无效结果")
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
