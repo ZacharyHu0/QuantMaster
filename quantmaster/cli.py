@@ -7,11 +7,8 @@ qm select --universe demo --horizon 3          每日短周期选股
 qm factors                                  列出内置因子
 qm factor-test "rank(-delta(close, 5))"     因子体检
 qm backtest --factor mom_20d --top 5        因子选股回测（--full 输出年/月收益，--stop-loss 止损）
-qm validate "expr" --split 2024-01-01       样本外验证（防过拟合）
-qm grid --factors mom_20d,rev_5d            参数网格扫描
-qm fund-test ep                             基本面因子体检（PE/PB/股息/市值/ROE）
-qm mine --generations 8                     遗传规划挖因子
-qm mine-llm --rounds 2                      LLM 挖因子
+qm lab discover --method genetic           提交可恢复的因子发现任务
+qm lab validate <version_id>               对候选版本执行统一样本外验证
 qm crawl [--skip-llm]                       抓取财经快讯
 qm paper create --name 动量观察 --factor mom_20d  创建独立模拟账户
 qm ledger import trades.csv                 导入券商成交
@@ -784,92 +781,6 @@ def cmd_backtest(args) -> None:
         print((monthly_return_table(result.returns) * 100).round(2).to_string())
 
 
-def cmd_validate(args) -> None:
-    """样本外验证：防过拟合的第一道关卡。"""
-    from quantmaster.backtest import train_test_ic, walk_forward_ic
-    from quantmaster.data.universe import load_universe_analysis
-    from quantmaster.factors.fundamental import resolve_factor
-
-    end = args.end or _close_day()
-    factor = resolve_factor(
-        args.expression, load_universe_analysis(args.universe), args.start, end,
-    )
-    panel = _load_panel(args.universe, args.start, end)
-    result = train_test_ic(factor, panel, split=args.split)
-    _print_json(result)
-    print("\n== 滚动分段 IC（稳定性） ==")
-    print(walk_forward_ic(factor, panel, n_splits=args.splits).to_string())
-
-
-def cmd_grid(args) -> None:
-    from quantmaster.backtest import grid_search
-    from quantmaster.data import refresh_history
-
-    end = args.end or _close_day()
-    panel = _load_panel(args.universe, args.start, end)
-    benchmark = None
-    try:
-        benchmark = _usable_market_data(
-            refresh_history(args.benchmark, args.start, end), label=args.benchmark,
-        )["close"]
-    except Exception:
-        pass
-    table = grid_search(
-        panel,
-        factor_names=args.factors.split(","),
-        top_ns=[int(x) for x in args.tops.split(",")],
-        rebalances=args.rebalances.split(","),
-        metric=args.metric,
-        benchmark_close=benchmark,
-    )
-    print(table.to_string(index=False))
-
-
-def cmd_fund_test(args) -> None:
-    """基本面因子体检（需要网络拉取估值/财务数据，结果会缓存）。"""
-    from quantmaster.data import refresh_panel
-    from quantmaster.data.fundamentals import fundamental_panel
-    from quantmaster.data.universe import load_universe_analysis
-    from quantmaster.factors import analyze_factor, compute_factor, make_fundamental_factors
-
-    end = args.end or _close_day()
-    symbols = load_universe_analysis(args.universe)
-    panel = _usable_market_data(
-        refresh_panel(symbols, args.start, end), label=f"{args.universe} 面板",
-    )
-    fund = fundamental_panel(symbols, args.start, end)
-    factors = make_fundamental_factors(fund)
-    if args.factor not in factors:
-        print(f"可用基本面因子: {sorted(factors)}", file=sys.stderr)
-        raise SystemExit(1)
-    values = compute_factor(factors[args.factor], panel)
-    report = analyze_factor(values, panel["close"], name=args.factor, quantiles=args.quantiles)
-    _print_json(report.summary())
-
-
-def cmd_mine(args) -> None:
-    from quantmaster.factors.mining import GeneticMiner
-
-    panel = _load_panel(args.universe, args.start, args.end or _close_day())
-    miner = GeneticMiner(population=args.population, generations=args.generations, seed=args.seed)
-    mined = miner.mine(panel, top_n=args.top)
-    print(f"\n{'fitness':>8} {'RankIC':>8} {'ICIR':>7}  expression")
-    for m in mined:
-        print(f"{m.fitness:8.4f} {m.ic_mean:8.4f} {m.icir:7.3f}  {m.expression}")
-
-
-def cmd_mine_llm(args) -> None:
-    from quantmaster.factors.mining import LLMFactorMiner
-
-    panel = _load_panel(args.universe, args.start, args.end or _close_day())
-    mined = LLMFactorMiner().mine(panel, n=args.n, rounds=args.rounds)
-    print(f"\n{'RankIC':>8} {'ICIR':>7} 达标  expression / 逻辑")
-    for m in mined:
-        print(f"{m.ic_mean:8.4f} {m.icir:7.3f} {'✅' if m.valid else '❌'}  {m.expression}")
-        if m.rationale:
-            print(f"{'':>26}{m.rationale}")
-
-
 def cmd_crawl(args) -> None:
     from quantmaster.ai.crawler import AICrawler
 
@@ -1588,44 +1499,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--take-profit", type=float, default=None, help="止盈线，如 0.25")
     p.add_argument("--full", action="store_true", help="输出年度/月度收益表")
     p.set_defaults(func=cmd_backtest)
-
-    p = sub.add_parser("validate", help="因子样本外验证（防过拟合）")
-    p.add_argument("expression", help="内置因子名或表达式")
-    common(p)
-    p.add_argument("--split", required=True, help="训练/验证切分日期，如 2024-01-01")
-    p.add_argument("--splits", type=int, default=4, help="滚动分段数")
-    p.set_defaults(func=cmd_validate)
-
-    p = sub.add_parser("grid", help="参数网格扫描（因子×持仓数×调仓频率）")
-    common(p)
-    p.add_argument("--factors", default="mom_20d,rev_5d", help="逗号分隔的因子名/表达式")
-    p.add_argument("--tops", default="3,5,10", help="逗号分隔的持仓数")
-    p.add_argument("--rebalances", default="W,M", help="逗号分隔的调仓频率")
-    p.add_argument(
-        "--metric", default="sharpe", choices=["sharpe", "annual_return", "max_drawdown", "calmar"]
-    )
-    p.add_argument("--benchmark", default="000300.SH")
-    p.set_defaults(func=cmd_grid)
-
-    p = sub.add_parser("fund-test", help="基本面因子体检（ep/bp/dividend_yield/small_cap/roe）")
-    p.add_argument("factor", help="基本面因子名")
-    common(p)
-    p.add_argument("--quantiles", type=int, default=5)
-    p.set_defaults(func=cmd_fund_test)
-
-    p = sub.add_parser("mine", help="遗传规划因子挖掘")
-    common(p)
-    p.add_argument("--generations", type=int, default=8)
-    p.add_argument("--population", type=int, default=60)
-    p.add_argument("--top", type=int, default=10)
-    p.add_argument("--seed", type=int, default=42)
-    p.set_defaults(func=cmd_mine)
-
-    p = sub.add_parser("mine-llm", help="LLM 因子挖掘")
-    common(p)
-    p.add_argument("--n", type=int, default=8)
-    p.add_argument("--rounds", type=int, default=2)
-    p.set_defaults(func=cmd_mine_llm)
 
     p = sub.add_parser("crawl", help="抓取财经快讯（+LLM 标注）")
     p.add_argument("--skip-llm", action="store_true", help="只抓取不做 LLM 标注")

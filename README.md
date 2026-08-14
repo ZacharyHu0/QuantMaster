@@ -92,8 +92,6 @@ qm factor-test "rank(-delta(close, 5))"              # 因子体检：IC/分层/
 qm backtest --factor mom_20d --top 5                 # 因子选股回测
 qm backtest --strategy decision --profile stable --holding-days 3 --top 5 # 固化 Champion 回测
 qm daily --strategy decision --holding-days 3         # 更新→Hybrid 快照→模拟调仓
-qm mine --generations 8                              # 遗传规划挖因子
-qm mine-llm --rounds 2                               # LLM 挖因子（需配置 API key）
 qm crawl                                             # 抓取财经快讯 + LLM 情绪标注
 qm ledger import my_trades.csv                       # 导入实盘成交记录
 qm ledger report                                     # 实盘收益报告

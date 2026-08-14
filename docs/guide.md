@@ -103,9 +103,9 @@ f = FuncFactor("ep", my_pe_factor, description="盈利收益率 E/P")
 ## 3.5 基本面因子与多因子合成
 
 ```bash
-# 基本面因子体检（首次会拉取估值/财务数据并缓存，稍慢）
-qm fund-test ep            # 盈利收益率 1/PE
-qm fund-test small_cap     # 小市值因子（A股历史上最强的因子之一，注意风格切换风险）
+# 探索性基本面因子体检；正式候选仍须进入 Quant Lab 统一验证
+qm factor-test ep
+qm factor-test small_cap
 ```
 
 Python 中做多因子合成：
@@ -195,15 +195,15 @@ AI 自动任务默认只发送表达式结构和本地验证指标。发送匿�
 深度模型，版本都必须经过统一验证和人工批准后才能成为研究 Champion；该操作不连接券商。
 
 ```bash
-# 遗传规划（本地算力，无需 key）：种群60 × 8代，约几分钟
-qm mine --generations 8 --population 60 --start 2020-01-01 --end 2022-12-31
+# 遗传规划（本地算力，无需 key）：提交可恢复的候选发现任务
+qm lab discover --method genetic --population 60 --generations 8 \
+  --start 2020-01-01 --end 2022-12-31
 
-# 拿挖出的表达式做样本外验证（这是防过拟合的关键一步）
-qm validate "<挖出的表达式>" --split 2023-01-01 --start 2020-01-01
-# 输出训练期/验证期 IC 对比、衰减度、以及 稳健/衰减/疑似过拟合/失效 结论
+# 对已持久化候选版本执行统一样本外验证
+qm lab validate <version_id> --start 2020-01-01 --end 2026-01-01
 
-# 参数网格扫描：别只看单点参数的好结果，稳健的策略应该在邻近参数上也不差
-qm grid --factors mom_20d,rev_5d,low_vol_20d --tops 3,5,10 --rebalances W,M
+# 共享多周期优化仍产出 Shadow 候选，不会自动晋升 Champion
+qm lab optimize --models ridge --max-trials 40
 ```
 
 LLM 挖掘需要先配 key（任选其一）：
@@ -215,7 +215,7 @@ export OPENAI_API_KEY=sk-...                     # OpenAI
 #   llm: { provider: openai-compatible, model: deepseek-chat,
 #          base_url: https://api.deepseek.com/v1, api_key: sk-... }
 
-qm mine-llm --rounds 2
+qm lab discover --method llm --rounds 2
 ```
 
 ## 5. 资讯与消息面因子
