@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict
@@ -648,7 +649,7 @@ class LabService:
                 job = manager.submit(
                     kind, clean, preflight=admission, business_key=schedule_key,
                 )
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
                 self.store.update_mining_run(
                     run["id"], status="failed", result={"error": str(exc)[:1000]},
                 )

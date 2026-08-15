@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
 import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from quantmaster.config import get_config
 from quantmaster.lab.errors import classify_lab_error
@@ -53,9 +54,9 @@ class LabJobManager:
             from quantmaster.lab.service import get_lab_service
 
             service = get_lab_service()
-        self.service = service
+        self.service: Any = service
         try:
-            self.service._job_manager = self
+            cast(Any, self.service)._job_manager = self
         except AttributeError:
             pass
         self._path = _jobs_path()
@@ -287,7 +288,10 @@ class LabJobManager:
             return JobOutcome(status, detail, str(artifact["id"]))
         except InterruptedError:
             raise
-        except Exception as exc:
+        except (
+            ArithmeticError, AttributeError, ImportError, LookupError, OSError,
+            RuntimeError, sqlite3.Error, TypeError, ValueError,
+        ) as exc:
             failure = classify_lab_error(exc)
             error_info = failure.to_dict()
             artifact = self._artifact(
@@ -379,7 +383,9 @@ class LabJobManager:
         start = max(0, int(offset))
         return projected[start:start + max(1, min(500, int(limit)))]
 
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+    def events(
+        self, job_id: str, after: int = 0, limit: int = 500,
+    ) -> builtins.list[dict[str, Any]]:
         store = self._read_store()
         self._project(store, store.get(job_id), summary=True)
         return store.events(job_id, after, limit)
@@ -418,7 +424,7 @@ class LabJobManager:
             "status": "disabled", "accepting": False, "active_tasks": 0,
         }
 
-    def active_job_ids(self) -> list[str]:
+    def active_job_ids(self) -> builtins.list[str]:
         runtime = self._runtime
         if runtime is None:
             return []

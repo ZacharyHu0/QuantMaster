@@ -110,21 +110,30 @@ def _json_object(raw: Any, field: str) -> dict[str, Any]:
     return value
 
 
-def _domain_links(connection: sqlite3.Connection, jobs: dict[str, sqlite3.Row]) -> set[str]:
+def _table_job_links(
+    connection: sqlite3.Connection,
+    jobs: dict[str, sqlite3.Row],
+    table: str,
+    expected_kind: str,
+) -> set[str]:
     conflicts: set[str] = set()
-    for table, expected_kind in (
-        ("optimization_studies", "optimize"),
-        ("mining_runs", "discover_python"),
-    ):
-        for row in connection.execute(f"SELECT id,job_id FROM {table}"):
-            job_id = str(row["job_id"] or "")
-            if not job_id:
-                continue
-            job = jobs.get(job_id)
-            if job is None:
-                conflicts.add(f"{table}:{row['id']}:dangling_job")
-            elif str(job["kind"]) != expected_kind:
-                conflicts.add(f"{table}:{row['id']}:job_kind")
+    for row in connection.execute(f"SELECT id,job_id FROM {table}"):
+        job_id = str(row["job_id"] or "")
+        if not job_id:
+            continue
+        job = jobs.get(job_id)
+        if job is None:
+            conflicts.add(f"{table}:{row['id']}:dangling_job")
+        elif str(job["kind"]) != expected_kind:
+            conflicts.add(f"{table}:{row['id']}:job_kind")
+    return conflicts
+
+
+def _job_domain_links(
+    connection: sqlite3.Connection,
+    jobs: dict[str, sqlite3.Row],
+) -> set[str]:
+    conflicts: set[str] = set()
     for job_id, row in jobs.items():
         try:
             params = _json_object(row["params_json"], "params_json")
@@ -145,6 +154,11 @@ def _domain_links(connection: sqlite3.Connection, jobs: dict[str, sqlite3.Row]) 
             ).fetchone()
             if link is None or str(link["job_id"] or "") not in {"", job_id}:
                 conflicts.add(f"{job_id}:dangling_mining_run")
+    return conflicts
+
+
+def _domain_foreign_links(connection: sqlite3.Connection) -> set[str]:
+    conflicts: set[str] = set()
     for row in connection.execute("SELECT id,experiment_id FROM optimization_studies"):
         experiment_id = str(row["experiment_id"] or "")
         if experiment_id and connection.execute(
@@ -164,6 +178,15 @@ def _domain_links(connection: sqlite3.Connection, jobs: dict[str, sqlite3.Row]) 
     return conflicts
 
 
+def _domain_links(connection: sqlite3.Connection, jobs: dict[str, sqlite3.Row]) -> set[str]:
+    return (
+        _table_job_links(connection, jobs, "optimization_studies", "optimize")
+        | _table_job_links(connection, jobs, "mining_runs", "discover_python")
+        | _job_domain_links(connection, jobs)
+        | _domain_foreign_links(connection)
+    )
+
+
 def _artifact_path(root: Path, raw: Any) -> Path:
     value = str(raw or "")
     candidate = Path(value)
@@ -179,8 +202,7 @@ def _artifact_path(root: Path, raw: Any) -> Path:
     return resolved
 
 
-def _study_evidence_conflicts(
-    root: Path,
+def _trial_evidence_conflicts(
     study_id: str,
     result: dict[str, Any],
 ) -> set[str]:
@@ -206,12 +228,15 @@ def _study_evidence_conflicts(
     if recommended is not None:
         if not isinstance(recommended, dict) or recommended.get("number") not in numbers:
             conflicts.add(f"optimization_studies:{study_id}:dangling_trial")
+    return conflicts
 
+
+def _nested_artifact_paths(
+    study_id: str,
+    result: dict[str, Any],
+) -> tuple[set[str], list[tuple[str, Any]]]:
+    conflicts: set[str] = set()
     paths: list[tuple[str, Any]] = []
-    if result.get("prediction_artifact"):
-        paths.append(("prediction_artifact", result["prediction_artifact"]))
-    if result.get("manifest"):
-        paths.append(("manifest", result["manifest"]))
     folds = result.get("fold_artifacts")
     if folds is not None:
         if not isinstance(folds, list):
@@ -232,12 +257,35 @@ def _study_evidence_conflicts(
         result.get(field) for field in ("prediction_artifact", "manifest", "fold_artifacts")
     ):
         conflicts.add(f"optimization_studies:{study_id}:candidate_artifacts")
+    return conflicts, paths
+
+
+def _artifact_evidence_conflicts(
+    root: Path,
+    study_id: str,
+    result: dict[str, Any],
+) -> set[str]:
+    conflicts, paths = _nested_artifact_paths(study_id, result)
+    for field in ("prediction_artifact", "manifest"):
+        if result.get(field):
+            paths.append((field, result[field]))
     for label, value in paths:
         try:
             _artifact_path(root, value)
         except (FileNotFoundError, OSError, ValueError):
             conflicts.add(f"optimization_studies:{study_id}:{label}:dangling")
     return conflicts
+
+
+def _study_evidence_conflicts(
+    root: Path,
+    study_id: str,
+    result: dict[str, Any],
+) -> set[str]:
+    return (
+        _trial_evidence_conflicts(study_id, result)
+        | _artifact_evidence_conflicts(root, study_id, result)
+    )
 
 
 def _mining_artifact_conflicts(
