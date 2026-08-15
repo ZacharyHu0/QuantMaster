@@ -65,12 +65,31 @@ datas = [
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
     collect_submodules("apscheduler") +
-    collect_submodules("lark_oapi", filter=lambda name: name != "lark_oapi.adapter.flask") +
     collect_submodules("qrcode", filter=lambda name: not name.startswith("qrcode.tests"))
 )
+lark_oapi_hidden = [
+    "lark_oapi",
+    "lark_oapi.api.im.v1",
+    "lark_oapi.channel",
+    "lark_oapi.channel.events",
+    "lark_oapi.core",
+    "lark_oapi.ws",
+    "lark_oapi.ws.client",
+]
 scipy_array_api_hidden = [
     "scipy._external.array_api_compat.common._fft",
     "scipy._external.array_api_compat.numpy.fft",
+]
+pyarrow_unused_hidden = [
+    "pyarrow.acero",
+    "pyarrow.cuda",
+    "pyarrow.dataset",
+    "pyarrow.feather",
+    "pyarrow.flight",
+    "pyarrow.gandiva",
+    "pyarrow.json",
+    "pyarrow.substrait",
+    "pyarrow.parquet.encryption",
 ]
 
 a = Analysis(
@@ -81,10 +100,11 @@ a = Analysis(
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",
-    ] + optional_hidden + scipy_array_api_hidden,
+    ] + optional_hidden + lark_oapi_hidden + scipy_array_api_hidden,
     excludes=[
         "tkinter", "matplotlib", "torch", "dask", "pytest", "_pytest",
-        "qrcode.tests", "lark_oapi.adapter.flask",
+        "qrcode.tests", "lark_oapi.adapter",
+        *pyarrow_unused_hidden,
     ],
 )
 pyz = PYZ(a.pure)
