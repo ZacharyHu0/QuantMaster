@@ -223,7 +223,8 @@ def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, 
     with pytest.raises(RuntimeError) as captured:
         run.cleanup_run_root(run_root)
 
-    assert f"retained evidence at {run_root}" in str(captured.value)
+    assert "retained evidence at <local-path>" in str(captured.value)
+    assert str(run_root) not in str(captured.value)
     assert attempts == [run_root] * run._CLEANUP_ATTEMPTS
 
 

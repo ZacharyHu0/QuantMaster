@@ -30,6 +30,8 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from quantmaster.logging_config import redact_sensitive_text
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STALE_HOURS = 48
 HTTP_PER_PAGE = 100
@@ -82,7 +84,14 @@ def normalized_title(title: str) -> str:
     return re.sub(r"\s+", " ", title.strip().lower())
 
 
+def assert_public_github_body(body: str) -> None:
+    """Fail closed before a comment can publish a path or credential."""
+    if redact_sensitive_text(body) != body:
+        raise ValueError("拒绝发送包含本地路径或敏感信息的 GitHub 文本")
+
+
 def comment_issue(owner: str, repo: str, number: int, body: str) -> None:
+    assert_public_github_body(body)
     result = run(
         [
             "gh", "issue", "comment", str(number),
@@ -107,6 +116,7 @@ def close_issue(owner: str, repo: str, number: int, reason: str = "completed") -
 
 
 def comment_pr(owner: str, repo: str, number: int, body: str) -> None:
+    assert_public_github_body(body)
     result = run(
         [
             "gh", "pr", "comment", str(number),

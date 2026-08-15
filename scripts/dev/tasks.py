@@ -24,6 +24,8 @@ try:
 except ModuleNotFoundError:
     from pytest_windows_acl import prepare_pytest_directory
 
+from quantmaster.logging_config import redact_sensitive_text
+
 ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -273,7 +275,7 @@ def valid_task_remove_intent(primary: Path, target: Path, branch: str) -> bool:
 
 
 def run(command: list[str], *, cwd: Path) -> None:
-    print(f"[task] {' '.join(command)}", flush=True)
+    print(f"[task] {redact_sensitive_text(' '.join(command))}", flush=True)
     primary = primary_root(cwd)
     artifacts = primary / ".artifacts" / "worktrees" / cwd.name
     env = os.environ.copy()
@@ -486,7 +488,7 @@ def start(slug: str) -> None:
         artifact_root / "runtime" / "tests" / "provider-cache",
     ):
         prepare_pytest_directory(directory)
-    print(f"[task] created {branch} at {target}")
+    print(f"[task] created {branch} (local path omitted)")
 
 
 def registered_worktrees(primary: Path) -> set[Path]:
@@ -1096,7 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
                 adopt_legacy_orphans=args.adopt_legacy_orphans,
             )
     except (RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"[task] FAILED: {exc}", file=sys.stderr)
+        print(f"[task] FAILED: {redact_sensitive_text(exc)}", file=sys.stderr)
         return 1
     return 0
 
