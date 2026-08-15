@@ -37,6 +37,7 @@ from quantmaster.server.security import (
     require_csrf,
     require_local,
 )
+from quantmaster.server.settings_control import register_settings_control
 from quantmaster.settings import (
     SecretMutations,
     SettingsDocument,
@@ -50,6 +51,8 @@ settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
 logger = logging.getLogger(__name__)
+
+
 
 
 def _require_runtime_worker() -> dict[str, Any]:
@@ -416,6 +419,9 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     result["apply_status"] = apply_status
     result["runtime"] = _runtime_status()
     return result
+
+
+register_settings_control(settings_manager, _apply_runtime)
 
 
 def _llm_cancellation_after_save(

@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 def market_symbols() -> list[str]:
     from quantmaster.data.akshare_source import A_SHARE_INDEXES, FUTURES_MAIN
-    from quantmaster.data.yfinance_source import GLOBAL_REFS
+    from quantmaster.data.reference_catalog import GLOBAL_REFS
 
     return list(dict.fromkeys([
         *A_SHARE_INDEXES,
@@ -97,9 +97,9 @@ class DataRefreshManager:
         if not universe:
             raise ValueError("指定候选刷新需要选择候选")
         if universe.lower() == "csi800":
-            from quantmaster.lab.dataset import load_csi800_membership
+            from quantmaster.schema_access import schema_target
 
-            membership = load_csi800_membership(start, end)
+            membership = schema_target("membership_loader")(start, end)
             return sorted(symbol for symbol in membership if membership[symbol].any())
         from quantmaster.data.universe import load_universe
 
@@ -183,9 +183,9 @@ class DataRefreshManager:
     @staticmethod
     def _publish_market_snapshot() -> None:
         try:
-            from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
+            from quantmaster.schema_access import schema_target
 
-            publish_market_overview_snapshot()
+            schema_target("market_overview_publisher")()
         except (OSError, RuntimeError, ValueError, TypeError):
             logger.warning("数据刷新后发布市场快照失败", exc_info=True)
 

@@ -579,6 +579,101 @@ def rotation_etfs(
     }
 
 
+def _etf_overview_summaries(
+    lookup: dict[str, dict[str, Any]], queues: dict[str, list[str]],
+    candidate_queues: dict[str, list[str]], position_available: bool,
+    strongest: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    strict_low = (
+        lookup.get(queues.get("low_turn", [""])[0]) if queues.get("low_turn") else None
+    )
+    staged_low = (
+        lookup.get(candidate_queues.get("stage_low_rebound", [""])[0])
+        if candidate_queues.get("stage_low_rebound") else None
+    )
+    strict_risk = lookup.get(queues.get("risk", [""])[0]) if queues.get("risk") else None
+    staged_risk = (
+        lookup.get(candidate_queues.get("stage_high_activity", [""])[0])
+        if candidate_queues.get("stage_high_activity") else None
+    )
+    weakening = lookup.get(queues.get("weakening", [""])[0]) if queues.get("weakening") else None
+    summaries: list[dict[str, Any]] = []
+    summaries.append({
+        "kind": "strongest", "title": "趋势最强",
+        "sector_id": strongest["sector_id"] if strongest else "",
+        "sector_name": strongest["sector_name"] if strongest else "",
+        "state": strongest["state"] if strongest else "none",
+        "evaluation_status": "confirmed" if strongest else "unavailable",
+        "text": (
+            f"代表 {strongest['representative']['name']} · 趋势 {strongest['trend_strength']:.0f}"
+            if strongest else "收益或成交额证据不足，暂无法比较"
+        ),
+    })
+    low = strict_low or staged_low
+    summaries.append({
+        "kind": "low_turn", "title": "低位机会",
+        "sector_id": low["sector_id"] if low else "",
+        "sector_name": low["sector_name"] if low else "",
+        "state": low["state"] if low else "none",
+        "evaluation_status": "confirmed" if strict_low else "candidate" if staged_low else (
+            "confirmed" if position_available else "unavailable"
+        ),
+        "text": (
+            f"{low['state_label']} · 趋势 {low['trend_strength']:.0f}" if strict_low
+            else "60 日阶段低位候选，尚缺长期确认" if staged_low
+            else "本期未发现满足严格或阶段候选条件的板块" if position_available
+            else "阶段位置证据不足，暂无法评估"
+        ),
+    })
+    risk = strict_risk or staged_risk or weakening
+    risk_status, risk_text = (
+        ("confirmed", "长期高位拥挤风险已确认") if strict_risk else
+        ("candidate", "60 日阶段高位活跃候选") if staged_risk else
+        ("confirmed", "严格走弱，留意趋势延续") if weakening else
+        ("confirmed", "本期未发现拥挤、阶段高位活跃或严格走弱板块") if position_available else
+        ("unavailable", "位置证据不足，暂无法评估")
+    )
+    summaries.append({
+        "kind": "risk", "title": "主要风险",
+        "sector_id": risk["sector_id"] if risk else "",
+        "sector_name": risk["sector_name"] if risk else "",
+        "state": risk["state"] if risk else "none",
+        "evaluation_status": risk_status, "text": risk_text,
+    })
+    return summaries
+
+
+def _etf_map_config(asset: str, selected: list[dict[str, Any]]) -> tuple[str, int, str, bool]:
+    long_coverage = (
+        sum(item.get("metrics", {}).get("position_250d") is not None for item in selected)
+        / len(selected) if selected else 0.0
+    )
+    use_long = asset != "money" and long_coverage >= 0.8
+    if asset == "money":
+        return "", 0, "货币 ETF 不评估高低位", use_long
+    return (
+        ("position_250d", 250, "250 日复权位置", use_long)
+        if use_long else ("position_60d", 60, "60 日阶段位置", use_long)
+    )
+
+
+def _etf_map_ids(compact: list[dict[str, Any]], critical_ids: set[str]) -> list[str]:
+    ranked = sorted(
+        compact,
+        key=lambda item: (item.get("activity_score") is not None, item.get("activity_score") or -1),
+        reverse=True,
+    )
+    map_ids = [item["sector_id"] for item in compact if item["sector_id"] in critical_ids]
+    for item in ranked:
+        if len(map_ids) >= 40 and len(critical_ids) <= 40:
+            break
+        if item["sector_id"] not in map_ids:
+            map_ids.append(item["sector_id"])
+        if len(map_ids) >= max(40, len(critical_ids)):
+            break
+    return map_ids
+
+
 def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
     capabilities = dict(snapshot.capabilities)
     metadata_capability = dict(capabilities.get("metadata") or {})
@@ -603,118 +698,11 @@ def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
     lookup = {item["sector_id"]: item for item in selected}
     rankable = [item for item in selected if item.get("trend_strength") is not None]
     strongest = max(rankable, key=lambda item: item["trend_strength"], default=None)
-    strict_low = lookup.get(queues.get("low_turn", [""])[0]) if queues.get("low_turn") else None
-    staged_low = (
-        lookup.get(candidate_queues.get("stage_low_rebound", [""])[0])
-        if candidate_queues.get("stage_low_rebound")
-        else None
-    )
-    strict_risk = lookup.get(queues.get("risk", [""])[0]) if queues.get("risk") else None
-    staged_risk = (
-        lookup.get(candidate_queues.get("stage_high_activity", [""])[0])
-        if candidate_queues.get("stage_high_activity")
-        else None
-    )
-    weakening = (
-        lookup.get(queues.get("weakening", [""])[0]) if queues.get("weakening") else None
-    )
     position_available = any(item.get("display_position") is not None for item in selected)
-    summaries: list[dict[str, Any]] = []
-    if strongest:
-        summaries.append(
-            {
-                "kind": "strongest",
-                "title": "趋势最强",
-                "sector_id": strongest["sector_id"],
-                "sector_name": strongest["sector_name"],
-                "state": strongest["state"],
-                "evaluation_status": "confirmed",
-                "text": (
-                    f"代表 {strongest['representative']['name']} · "
-                    f"趋势 {strongest['trend_strength']:.0f}"
-                ),
-            }
-        )
-    else:
-        summaries.append(
-            {
-                "kind": "strongest",
-                "title": "趋势最强",
-                "sector_id": "",
-                "sector_name": "",
-                "state": "none",
-                "evaluation_status": "unavailable",
-                "text": "收益或成交额证据不足，暂无法比较",
-            }
-        )
-    low = strict_low or staged_low
-    summaries.append(
-        {
-            "kind": "low_turn",
-            "title": "低位机会",
-            "sector_id": low["sector_id"] if low else "",
-            "sector_name": low["sector_name"] if low else "",
-            "state": low["state"] if low else "none",
-            "evaluation_status": (
-                "confirmed"
-                if strict_low
-                else (
-                    "candidate"
-                    if staged_low
-                    else ("confirmed" if position_available else "unavailable")
-                )
-            ),
-            "text": (
-                f"{low['state_label']} · 趋势 {low['trend_strength']:.0f}"
-                if strict_low
-                else (
-                    "60 日阶段低位候选，尚缺长期确认"
-                    if staged_low
-                    else (
-                        "本期未发现满足严格或阶段候选条件的板块"
-                        if position_available
-                        else "阶段位置证据不足，暂无法评估"
-                    )
-                )
-            ),
-        }
+    summaries = _etf_overview_summaries(
+        lookup, queues, candidate_queues, position_available, strongest,
     )
-    risk = strict_risk or staged_risk or weakening
-    if strict_risk:
-        risk_status, risk_text = "confirmed", "长期高位拥挤风险已确认"
-    elif staged_risk:
-        risk_status, risk_text = "candidate", "60 日阶段高位活跃候选"
-    elif weakening:
-        risk_status, risk_text = "confirmed", "严格走弱，留意趋势延续"
-    elif position_available:
-        risk_status, risk_text = "confirmed", "本期未发现拥挤、阶段高位活跃或严格走弱板块"
-    else:
-        risk_status, risk_text = "unavailable", "位置证据不足，暂无法评估"
-    summaries.append(
-        {
-            "kind": "risk",
-            "title": "主要风险",
-            "sector_id": risk["sector_id"] if risk else "",
-            "sector_name": risk["sector_name"] if risk else "",
-            "state": risk["state"] if risk else "none",
-            "evaluation_status": risk_status,
-            "text": risk_text,
-        }
-    )
-
-    long_coverage = (
-        sum(item.get("metrics", {}).get("position_250d") is not None for item in selected)
-        / len(selected)
-        if selected
-        else 0.0
-    )
-    use_long = asset != "money" and long_coverage >= 0.8
-    map_metric = "position_250d" if use_long else "position_60d"
-    map_horizon = 250 if use_long else 60
-    if asset == "money":
-        map_metric, map_horizon, map_label = "", 0, "货币 ETF 不评估高低位"
-    else:
-        map_label = "250 日复权位置" if use_long else "60 日阶段位置"
+    map_metric, map_horizon, map_label, use_long = _etf_map_config(asset, selected)
 
     compact: list[dict[str, Any]] = []
     for item in selected:
@@ -773,19 +761,7 @@ def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
         or item["candidate_codes"]
         or item["risk_badges"]
     }
-    ranked_for_map = sorted(
-        compact,
-        key=lambda item: (item.get("activity_score") is not None, item.get("activity_score") or -1),
-        reverse=True,
-    )
-    map_ids = [item["sector_id"] for item in compact if item["sector_id"] in critical_ids]
-    for item in ranked_for_map:
-        if len(map_ids) >= 40 and len(critical_ids) <= 40:
-            break
-        if item["sector_id"] not in map_ids:
-            map_ids.append(item["sector_id"])
-        if len(map_ids) >= max(40, len(critical_ids)):
-            break
+    map_ids = _etf_map_ids(compact, critical_ids)
     map_coverage = (
         sum(item.get("display_position") is not None for item in compact) / len(compact)
         if compact
@@ -806,6 +782,54 @@ def _etf_overview_payload(snapshot, asset: str) -> dict[str, Any]:
             "sector_ids": map_ids,
         },
     }
+
+
+def _etf_evidence_hashes(
+    service: Any, snapshot: Any, latest_input: Any, current_hashes: dict[str, str],
+    generated_ns: int, content_hash: Any, frame_hash: Any, pd: Any, rotation_store: Any,
+) -> dict[str, str]:
+    factor_path = service.store.root / "evidence" / "adjustment_factors.parquet"
+    evidence_paths = {
+        "份额": getattr(rotation_store, "etf_path", None),
+        "复权": factor_path,
+        "元数据源": getattr(rotation_store, "etf_metadata_path", None),
+    }
+    fallback_labels: set[str] = set()
+    for label, path in evidence_paths.items():
+        if path is None:
+            fallback_labels.add(label)
+            continue
+        try:
+            stat = path.stat()
+        except (FileNotFoundError, OSError):
+            fallback_labels.add(label)
+            continue
+        previous_hash = snapshot.evidence_hashes.get(label, "")
+        if previous_hash and generated_ns >= 0 and stat.st_mtime_ns <= generated_ns:
+            current_hashes[label] = previous_hash
+        else:
+            current_hashes[label] = content_hash({
+                "path": str(path), "mtime_ns": stat.st_mtime_ns, "size": stat.st_size,
+            })
+    if "份额" in fallback_labels:
+        direct = service._direct_share_observations()
+        if not direct.empty and "trade_date" in direct:
+            direct = direct.copy()
+            direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
+            direct = direct[direct["trade_date"].dt.date <= pd.Timestamp(latest_input.as_of_date).date()]
+        current_hashes["份额"] = frame_hash(direct, (
+            "symbol", "trade_date", "shares", "total_size", "nav", "close",
+            "share_source", "source",
+        ))
+    if "复权" in fallback_labels:
+        current_hashes["复权"] = snapshot.evidence_hashes.get("复权", content_hash([]))
+    if "元数据源" in fallback_labels:
+        current_hashes["元数据源"] = frame_hash(service._direct_metadata(), (
+            "symbol", "name", "benchmark", "benchmark_code", "benchmark_type",
+            "benchmark_level", "index_type", "index_provider", "fund_type",
+            "invest_type", "mgt_fee", "metadata_source",
+        ))
+    return current_hashes
 
 
 def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
@@ -850,80 +874,14 @@ def _etf_refresh_hint(service: Any, snapshot: Any | None) -> dict[str, Any]:
 
     generated_at = pd.to_datetime(snapshot.generated_at, errors="coerce", utc=True)
     generated_ns = int(generated_at.value) if pd.notna(generated_at) else -1
-    factor_path = service.store.root / "evidence" / "adjustment_factors.parquet"
     try:
         rotation_store = RotationStore(read_only=True)
     except (OSError, RuntimeError, TypeError, ValueError):
         rotation_store = None
-    evidence_paths = {
-        "份额": getattr(rotation_store, "etf_path", None),
-        "复权": factor_path,
-        "元数据源": getattr(rotation_store, "etf_metadata_path", None),
-    }
-    fallback_labels: set[str] = set()
-    for label, path in evidence_paths.items():
-        if path is None:
-            fallback_labels.add(label)
-            continue
-        try:
-            stat = path.stat()
-        except (FileNotFoundError, OSError):
-            fallback_labels.add(label)
-            continue
-        previous_hash = snapshot.evidence_hashes.get(label, "")
-        if previous_hash and generated_ns >= 0 and stat.st_mtime_ns <= generated_ns:
-            # The immutable snapshot was created after this artifact. Its canonical hash
-            # remains valid, so a GET need not sort and hash up to millions of local rows.
-            current_hashes[label] = previous_hash
-        else:
-            # A changed filesystem identity requests one recomputation. The scan calculates
-            # the canonical hash and reuses the snapshot if the rewritten content is equal.
-            current_hashes[label] = content_hash(
-                {"path": str(path), "mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
-            )
-
-    if "份额" in fallback_labels:
-        direct = service._direct_share_observations()
-        if not direct.empty and "trade_date" in direct:
-            direct = direct.copy()
-            direct["trade_date"] = pd.to_datetime(direct["trade_date"], errors="coerce")
-            direct = direct[
-                direct["trade_date"].dt.date <= pd.Timestamp(latest_input.as_of_date).date()
-            ]
-        current_hashes["份额"] = _frame_hash(
-            direct,
-            (
-                "symbol",
-                "trade_date",
-                "shares",
-                "total_size",
-                "nav",
-                "close",
-                "share_source",
-                "source",
-            ),
-        )
-    if "复权" in fallback_labels:
-        current_hashes["复权"] = snapshot.evidence_hashes.get("复权", content_hash([]))
-    if "元数据源" in fallback_labels:
-        metadata = service._direct_metadata()
-        current_hashes["元数据源"] = _frame_hash(
-            metadata,
-            (
-                "symbol",
-                "name",
-                "benchmark",
-                "benchmark_code",
-                "benchmark_type",
-                "benchmark_level",
-                "index_type",
-                "index_provider",
-                "fund_type",
-                "invest_type",
-                "mgt_fee",
-                "metadata_source",
-            ),
-        )
+    current_hashes = _etf_evidence_hashes(
+        service, snapshot, latest_input, current_hashes, generated_ns,
+        content_hash, _frame_hash, pd, rotation_store,
+    )
     changed = [
         label
         for label, value in current_hashes.items()

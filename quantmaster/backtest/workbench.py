@@ -22,6 +22,7 @@ from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.schema_access import register_backtest_store
 
 logger = logging.getLogger(__name__)
 BACKTEST_SCHEMA_VERSION = 1
@@ -603,3 +604,6 @@ def get_backtest_worker() -> BacktestWorker:
         _worker = BacktestWorker()
         _worker_root = root
     return _worker
+
+
+register_backtest_store(BacktestStore)

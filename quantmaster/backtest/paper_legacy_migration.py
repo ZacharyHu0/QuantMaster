@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, NamedTuple
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 SOURCE_NAME = "ledger_paper.sqlite"
@@ -236,7 +236,7 @@ class PaperLegacyMigrator:
 
 
 def register_paper_legacy_migrator() -> None:
-    from quantmaster.data.legacy_migration import register_migrator
+    from quantmaster.data.migration_contracts import register_migrator
 
     register_migrator(PaperLegacyMigrator())
 

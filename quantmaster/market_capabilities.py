@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from quantmaster.data.base import Market, guess_market
+from quantmaster.market_identity import Market, guess_market
 
 
 class MarketCapability(StrEnum):

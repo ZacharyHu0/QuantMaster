@@ -44,6 +44,7 @@ from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.schema_access import register_paper_store, register_schema_target
 from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)
@@ -1754,7 +1755,7 @@ class PaperService:
         loaded_live = panel is None
         market_quality = None
         if panel is None:
-            from quantmaster.data import refresh_panel
+            from quantmaster import data as data_api
 
             expectation = resolve_session_target()
             if not expectation.ready or not expectation.session:
@@ -1769,7 +1770,7 @@ class PaperService:
                 )
             end = pd.Timestamp(expectation.session)
             start = end - pd.Timedelta(days=lookback_days)
-            market_envelope = refresh_panel(
+            market_envelope = data_api.refresh_panel(
                 symbols, str(start.date()), str(end.date()), work_class="normal",
             )
             panel = market_envelope.require_data()
@@ -1971,11 +1972,11 @@ class PaperService:
         )
         decision_at = observed_at
         if panel is None:
-            from quantmaster.data import read_panel, refresh_panel
+            from quantmaster import data as data_api
 
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
             end = market_date().isoformat()
-            market_envelope = read_panel(symbols, start, end)
+            market_envelope = data_api.read_panel(symbols, start, end)
             if market_envelope.quality.partial or market_envelope.quality.missing_symbols:
                 if calendar is None:
                     raise ValueError("本地行情存在缺口，但缺少已验证交易日历，拒绝远程补齐")
@@ -1983,10 +1984,10 @@ class PaperService:
                     gap = inspect_local_daily_bars(symbol, start, end, calendar)
                     missing = [value.isoformat() for value in gap.missing_sessions]
                     if missing:
-                        refresh_panel(
+                        data_api.refresh_panel(
                             [symbol], min(missing), max(missing), mode="incremental",
                         )
-                market_envelope = read_panel(symbols, start, end)
+                market_envelope = data_api.read_panel(symbols, start, end)
             panel = market_envelope.require_data()
             if (
                 market_envelope.quality.status != "verified"
@@ -2511,3 +2512,7 @@ def get_paper_service(*, read_only: bool = False) -> PaperService:
             _service = PaperService()
             _service_root = root
     return _service
+
+
+register_paper_store(PaperStore)
+register_schema_target("paper_schema_version", lambda: PAPER_SCHEMA_VERSION)

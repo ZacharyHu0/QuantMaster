@@ -1573,9 +1573,9 @@ class NewsStore:
         top_symbols = sorted(
             symbol_counts.items(), key=lambda item: (-item[1], item[0]),
         )[:24]
-        from quantmaster.data import read_stock_names
+        from quantmaster import data as data_api
 
-        symbol_names = read_stock_names([symbol for symbol, _count in top_symbols])
+        symbol_names = data_api.read_stock_names([symbol for symbol, _count in top_symbols])
         data["top_symbols"] = [
             {
                 "symbol": symbol,
@@ -1601,10 +1601,10 @@ class NewsStore:
                 until=now,
                 minimum_confidence=minimum,
             )
-        from quantmaster.data import read_stock_names
+        from quantmaster import data as data_api
 
         symbols = [str(row["symbol"]) for row in rows]
-        symbol_names = read_stock_names(symbols)
+        symbol_names = data_api.read_stock_names(symbols)
         return {
             "days": window_days,
             "top_symbols": [
@@ -1891,7 +1891,7 @@ class AICrawler:
                         "资讯分析租约已转交其他 worker",
                         code="claim_lost", retryable=True,
                     )
-                from quantmaster.automation.news import importance_score
+                from quantmaster.news_scoring import importance_score
 
                 prepared: list[tuple[int, NewsItem]] = []
                 for item, result in zip(items, parsed, strict=True):

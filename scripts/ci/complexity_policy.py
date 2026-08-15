@@ -26,9 +26,20 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE_FILE = Path(__file__).with_name("complexity_baseline.json")
+FINAL_CEILING = 130
 # Fallback ceiling for bootstrapping the very first baseline file.  Once
 # ``complexity_baseline.json`` exists, it becomes the authoritative ceiling.
-FALLBACK_BASELINE = 170
+FALLBACK_BASELINE = FINAL_CEILING
+
+TRANSPORT_ORCHESTRATION_PREFIXES = (
+    "quantmaster/server/",
+    "quantmaster/cli.py",
+    "quantmaster/automation/",
+    "quantmaster/lab/service.py",
+    "quantmaster/lab/worker.py",
+    "quantmaster/backtest/application.py",
+    "quantmaster/research/jobs.py",
+)
 
 _MESSAGE_RE = re.compile(r"^(?P<name>`[^`]+`)\s+is too complex\s*\((?P<score>\d+)\s*>\s*\d+\)")
 
@@ -40,6 +51,13 @@ def _repo_relative(path: str) -> str:
         return Path(path).relative_to(ROOT).as_posix()
     except (ValueError, OSError):
         return path.replace("\\", "/")
+
+
+def _is_transport_orchestration(path: str) -> bool:
+    return any(
+        path == prefix.rstrip("/") or path.startswith(prefix)
+        for prefix in TRANSPORT_ORCHESTRATION_PREFIXES
+    )
 
 
 def run_ruff_c901() -> list[dict[str, Any]]:
@@ -217,10 +235,27 @@ def main(argv: list[str] | None = None) -> int:
     current = normalize_findings(raw_findings)
     current_count = len(current)
 
+    outer_findings = [
+        (finding["file"], finding["function"])
+        for finding in current
+        if _is_transport_orchestration(finding["file"])
+    ]
+    if outer_findings:
+        print("transport/orchestration C901 findings are forbidden:", file=sys.stderr)
+        for path, function in outer_findings:
+            print(f"{path}: {function}", file=sys.stderr)
+        return 1
+
     if args.accept:
         if not args.reason:
             print("--accept requires --reason for the audit trail", file=sys.stderr)
             return 2
+        if current_count > FINAL_CEILING:
+            print(
+                f"cannot accept {current_count} C901 findings above final ceiling "
+                f"{FINAL_CEILING}", file=sys.stderr,
+            )
+            return 1
         save_baseline(current, args.reason)
         print(f"complexity baseline accepted: {current_count} C901 findings")
         print(f"  reason: {args.reason}")
@@ -232,13 +267,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline_data = load_baseline()
-    baseline_count = baseline_data["count"] if baseline_data else FALLBACK_BASELINE
+    baseline_count = min(
+        int(baseline_data["count"]) if baseline_data else FALLBACK_BASELINE,
+        FINAL_CEILING,
+    )
 
     if current_count > baseline_count:
         print_diff(baseline_count, current, current_count)
         return 1
 
-    print(f"complexity policy ok: {current_count}/{baseline_count} C901 ceiling")
+    print(
+        f"complexity policy ok: {current_count}/{baseline_count} C901 ceiling; "
+        "transport/orchestration: 0",
+    )
     return 0
 
 

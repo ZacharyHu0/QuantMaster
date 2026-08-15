@@ -7,6 +7,10 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from quantmaster.actor_context import ActorContext
+
+__all__ = ["ActorContext", "AlertEvent", "LedgerIntent", "stable_hash", "utc_now"]
+
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -44,27 +48,6 @@ class AlertEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-@dataclass(slots=True)
-class ActorContext:
-    channel: Literal["weixin", "feishu"]
-    target: str
-    account_id: str
-    chat_type: Literal["direct", "group"]
-    sender_id: str
-    sender_name: str = ""
-    message_id: str = ""
-    reply_to: str = ""
-    reply_text: str = ""
-
-    @property
-    def actor_key(self) -> str:
-        return f"{self.channel}:{self.account_id}:{self.sender_id}"
-
-    @property
-    def route_key(self) -> str:
-        return f"{self.channel}:{self.account_id}:{self.target}"
 
 
 @dataclass(slots=True)

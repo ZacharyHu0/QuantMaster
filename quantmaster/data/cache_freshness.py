@@ -23,8 +23,9 @@ from typing import Any, ClassVar
 
 import pandas as pd
 
-from quantmaster.data.base import Market, guess_market
+from quantmaster.data.base import Market
 from quantmaster.data.cache_contracts import CacheResultKind, cache_registry
+from quantmaster.market_identity import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation
 

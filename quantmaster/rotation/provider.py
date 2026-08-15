@@ -28,6 +28,7 @@ from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.rotation.store import ETF_OBSERVATION_COLUMNS, RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
+from quantmaster.rotation_provider_access import register_rotation_provider
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
 logger = logging.getLogger(__name__)
@@ -723,17 +724,14 @@ class RotationProvider:
         from quantmaster.research.contracts import ArtifactKind, AssetClass, Frequency
         from quantmaster.research.engine import ResearchEngine
         from quantmaster.research.lake import ResearchLake
-        from quantmaster.rotation.service import _expected_market_session
 
         # Before the close, today's official calendar entry is already open but
         # the daily endpoint legitimately has no completed bar yet.  Planning to
         # the same completed-session boundary used by snapshot freshness avoids
         # turning that expected empty response into a provider circuit failure.
-        end = (
-            _expected_market_session(as_of=as_of)
-            if as_of
-            else _expected_market_session()
-        )
+        from quantmaster.rotation.service import _expected_market_session
+
+        end = _expected_market_session(as_of=as_of) if as_of else _expected_market_session()
         if not end:
             raise RuntimeError("无法确认最近完成交易日；请配置 Tushare 日历或先同步全市场日线")
         catalog_snapshot_id = ""
@@ -1989,3 +1987,10 @@ class RotationProvider:
             "share_source": "etf_share_size" if share_size_available else "fund_share",
             "issues": issues,
         }
+
+
+def _rotation_provider_factory(*args: Any, **kwargs: Any) -> RotationProvider:
+    return RotationProvider(*args, **kwargs)
+
+
+register_rotation_provider(_rotation_provider_factory)

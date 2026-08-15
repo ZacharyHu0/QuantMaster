@@ -1463,3 +1463,8 @@ def readiness() -> dict[str, Any]:
             "network_required_for_research": False,
         },
     }
+
+
+from quantmaster.schema_access import register_membership_loader  # noqa: E402
+
+register_membership_loader(load_csi800_membership)

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.after_close.models import SCHEMA_VERSION, AfterCloseSnapshot
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 

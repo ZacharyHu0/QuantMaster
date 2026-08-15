@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 
 from quantmaster.automation.models import ActorContext
+from quantmaster.automation.runtime_control import reload_jobs as reload_automation_jobs
 from quantmaster.automation.service import AutomationService
 from quantmaster.trading_sessions import market_date
 
@@ -64,9 +65,11 @@ def stock_analysis_query(text: str) -> str:
 
 class BotCommandRouter:
     def __init__(self, service: AutomationService,
-                 reply: Callable[[ActorContext, str], None]):
+                 reply: Callable[[ActorContext, str], None],
+                 reload_jobs: Callable[[], None] | None = None):
         self.service = service
         self.reply = reply
+        self._reload_jobs = reload_jobs or reload_automation_jobs
 
     def _bound(self, actor: ActorContext) -> dict:
         target = self.service.store.target_by_route(actor.channel, actor.account_id, actor.target)
@@ -140,76 +143,63 @@ class BotCommandRouter:
         if actor.channel == "feishu" and actor.chat_type == "group":
             self.service.executor.submit(self.service.maintain_conversation, actor)
 
-    def execute(self, actor: ActorContext, text: str) -> str:
-        if HELP_PATTERN.fullmatch(text):
-            return self._help(actor)
+    def _confirmation(self, actor: ActorContext, text: str) -> str | None:
+        match = re.fullmatch(r"确认(?:\s+([a-f0-9]{16,32}))?\s+(\d{6})", text)
+        if not match:
+            return None
+        self.service.require_owner(actor, private=True)
+        intent_id = match.group(1)
+        if not intent_id:
+            pending = self.service.store.latest_pending_action(actor.actor_key, actor.route_key)
+            if not pending:
+                raise ValueError("当前私聊没有待确认操作")
+            intent_id = pending["id"]
+        result = self.service.confirm_ledger(actor, intent_id, match.group(2))
+        return f"确认完成：{result['type']}，{'已写入' if result['created'] else '此前已写入'}。"
 
-        binding = re.fullmatch(r"绑定(?:\s+QuantMaster)?\s+([A-Fa-f0-9]{8})", text)
-        if binding:
-            target = self.service.bind(actor, binding.group(1))
-            return (
-                f"已绑定为「{target['label']}」，默认推送强度：均衡。\n"
-                "现在可以直接问「大盘怎么样」；发送「帮助」查看完整使用说明。"
-            )
-
-        self._bound(actor)
-        confirm = re.fullmatch(r"确认(?:\s+([a-f0-9]{16,32}))?\s+(\d{6})", text)
-        if confirm:
-            self.service.require_owner(actor, private=True)
-            intent_id = confirm.group(1)
-            if not intent_id:
-                pending = self.service.store.latest_pending_action(actor.actor_key, actor.route_key)
-                if not pending:
-                    raise ValueError("当前私聊没有待确认操作")
-                intent_id = pending["id"]
-            result = self.service.confirm_ledger(actor, intent_id, confirm.group(2))
-            return f"确认完成：{result['type']}，{'已写入' if result['created'] else '此前已写入'}。"
-
+    def _policy_change(self, actor: ActorContext, text: str) -> str | None:
         policy = re.search(r"(?:调成|设置为|推送强度为?)\s*(保守|均衡|敏感)", text)
-        natural_policy = None
-        if not policy:
-            if re.search(r"(?:提醒|推送).*(?:少一点|少些|低频|安静一点)", text):
-                natural_policy = "保守"
-            elif re.search(r"(?:提醒|推送).*(?:正常|适中|均衡)", text):
-                natural_policy = "均衡"
-            elif re.search(r"(?:提醒|推送).*(?:多一点|积极一点|敏感一点)", text):
-                natural_policy = "敏感"
-        if policy:
-            natural_policy = policy.group(1)
-        if natural_policy:
-            self.service.require_owner(actor)
-            target = self._bound(actor)
-            before = target["preset"]
-            after = PRESET_NAMES[natural_policy]
-            self.service.update_policy(target["id"], after, target["overrides"], None, actor.actor_key)
-            return (
-                f"当前会话推送强度已从 {PRESET_LABELS.get(before, before)}"
-                f"调整为 {PRESET_LABELS[after]}。"
+        natural = policy.group(1) if policy else None
+        if natural is None:
+            patterns = (
+                (r"(?:提醒|推送).*(?:少一点|少些|低频|安静一点)", "保守"),
+                (r"(?:提醒|推送).*(?:正常|适中|均衡)", "均衡"),
+                (r"(?:提醒|推送).*(?:多一点|积极一点|敏感一点)", "敏感"),
             )
+            natural = next((name for pattern, name in patterns if re.search(pattern, text)), None)
+        if natural is None:
+            return None
+        self.service.require_owner(actor)
+        target = self._bound(actor)
+        before = target["preset"]
+        after = PRESET_NAMES[natural]
+        self.service.update_policy(target["id"], after, target["overrides"], None, actor.actor_key)
+        return (
+            f"当前会话推送强度已从 {PRESET_LABELS.get(before, before)}"
+            f"调整为 {PRESET_LABELS[after]}。"
+        )
 
+    def _task_command(self, actor: ActorContext, text: str) -> str | None:
         for label, task in TASK_NAMES.items():
             if label not in text:
                 continue
             if text.startswith(("暂停", "停掉", "关闭")):
                 self.service.require_owner(actor)
                 self.service.update_schedule(task, action="pause", schedule=None, actor=actor.actor_key)
-                from quantmaster.automation.runtime import get_runtime
-                get_runtime().reload_jobs()
+                self._reload_jobs()
                 return f"已暂停 {label}。"
             if text.startswith(("恢复", "开启")):
                 self.service.require_owner(actor)
                 self.service.update_schedule(task, action="resume", schedule=None, actor=actor.actor_key)
-                from quantmaster.automation.runtime import get_runtime
-                get_runtime().reload_jobs()
+                self._reload_jobs()
                 return f"已恢复 {label}。"
             if text.startswith(("运行", "执行", "立即")):
                 self.service.require_owner(actor, private=task == "paper_rebalance_proposal")
                 result = self.service.run_task(task, actor=actor.actor_key)
-                return (
-                    f"任务已受理，run_id={result['run_id']}；"
-                    "结果会按当前会话的推送内容设置发送。"
-                )
+                return f"任务已受理，run_id={result['run_id']}；结果会按当前会话的推送内容设置发送。"
+        return None
 
+    def _ledger_command(self, actor: ActorContext, text: str) -> str | None:
         trade = re.fullmatch(
             r"(?:记一笔|记录)?\s*(买入|卖出)\s+(\d{6}(?:\.(?:SH|SZ|BJ))?)\s+"
             r"([\d.]+)\s*股?\s+(?:价格|@)\s*([\d.]+)(?:\s+费用\s*([\d.]+))?", text, re.I)
@@ -223,7 +213,6 @@ class BotCommandRouter:
             return (f"成交预览：{trade.group(1)} {trade.group(2)} {trade.group(3)}股 "
                     f"@{trade.group(4)}，费用 {trade.group(5) or 0}。\n"
                     f"5 分钟内回复「确认 {intent['code']}」提交。")
-
         cash = re.fullmatch(r"(?:记录)?\s*(入金|出金|分红)\s*([\d.]+)", text)
         if cash:
             kind = {"入金": "deposit", "出金": "withdraw", "分红": "dividend"}[cash.group(1)]
@@ -233,9 +222,24 @@ class BotCommandRouter:
             return (
                 f"现金流预览：{cash.group(1)} {cash.group(2)} 元。\n"
                 f"5 分钟内回复「确认 {intent['code']}」提交。")
+        return None
 
+    def execute(self, actor: ActorContext, text: str) -> str:
+        if HELP_PATTERN.fullmatch(text):
+            return self._help(actor)
+        binding = re.fullmatch(r"绑定(?:\s+QuantMaster)?\s+([A-Fa-f0-9]{8})", text)
+        if binding:
+            target = self.service.bind(actor, binding.group(1))
+            return (
+                f"已绑定为「{target['label']}」，默认推送强度：均衡。\n"
+                "现在可以直接问「大盘怎么样」；发送「帮助」查看完整使用说明。"
+            )
+        self._bound(actor)
+        for handler in (self._confirmation, self._policy_change, self._task_command, self._ledger_command):
+            result = handler(actor, text)
+            if result is not None:
+                return result
         for label, view in VIEW_NAMES.items():
             if label in text:
                 return self._brief(self.service.query(view))
-
         return self.service.contextual_chat(actor, text)

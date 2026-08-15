@@ -13,19 +13,15 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:  # pragma: no cover
-    from quantmaster.runtime.jobs import JobContext, UnifiedJobStore
-
 
 _http_request_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "quantmaster_http_request_active", default=False,
@@ -107,7 +103,7 @@ class LLMExecutionCoordinator:
         root = get_config().data_root
         self.path = Path(path) if path else root / "_runtime" / "llm_revisions.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._stores: weakref.WeakSet[UnifiedJobStore] = weakref.WeakSet()
+        self._stores: weakref.WeakSet[Any] = weakref.WeakSet()
         self._lock = threading.RLock()
         with self._conn() as connection:
             connection.execute(
@@ -123,7 +119,7 @@ class LLMExecutionCoordinator:
     def _conn(self):
         return connect_sqlite(self.path, timeout=5.0, row_factory=True)
 
-    def register_store(self, store: UnifiedJobStore) -> None:
+    def register_store(self, store: Any) -> None:
         self._stores.add(store)
 
     def revision(self, scope: str = "global") -> str:
@@ -144,16 +140,15 @@ class LLMExecutionCoordinator:
             )
         return value
 
-    def _job_stores(self) -> list[UnifiedJobStore]:
+    def _job_stores(self) -> list[Any]:
         """Return physical ledgers once, including a web process with no runtime."""
         stores = {str(store.path.resolve()): store for store in list(self._stores)}
         # The web process intentionally does not start a runtime, but must
         # still durably fence jobs as soon as settings are saved.
-        from quantmaster.runtime.jobs import UnifiedJobStore
-
         default_path = get_config().data_root / "jobs.sqlite"
-        if str(default_path.resolve()) not in stores:
-            stores[str(default_path.resolve())] = UnifiedJobStore(default_path)
+        if str(default_path.resolve()) not in stores and _job_store_factory is not None:
+            store = _job_store_factory(default_path)
+            stores[str(default_path.resolve())] = store
         return list(stores.values())
 
     def rotate(
@@ -185,7 +180,7 @@ class LLMExecutionCoordinator:
         return bool(revision) and self.revision(scope) == revision
 
     @contextmanager
-    def lease(self, context: JobContext | Any, scope: str, revision: str) -> Iterator[None]:
+    def lease(self, context: Any, scope: str, revision: str) -> Iterator[None]:
         if not self.current(scope, revision):
             raise InterruptedError("LLM configuration revision is no longer current")
         token = _execution_lease.set((str(context.job_id), scope, revision, context))
@@ -208,8 +203,6 @@ class LLMExecutionCoordinator:
                 status = str(job.get("status") or "")
                 if status in counts[scope]:
                     counts[scope][status] += 1
-        from quantmaster.ai.llm import llm_gate_status, news_llm_gate_status
-
         config = get_config()
         limits = {
             "global": {"max_concurrency": max(1, int(config.llm.max_concurrency)),
@@ -217,7 +210,6 @@ class LLMExecutionCoordinator:
             "news": {"max_concurrency": max(1, int(config.news.annotation_max_concurrency)),
                      "queue_timeout_seconds": float(config.llm.queue_timeout)},
         }
-        gates = {"global": llm_gate_status(), "news": news_llm_gate_status()}
         return {
             "revisions": {scope: self.revision(scope) for scope in counts},
             "registered_job_stores": len(stores),
@@ -225,7 +217,7 @@ class LLMExecutionCoordinator:
             "limits": limits,
             "scopes": {
                 scope: {"revision": self.revision(scope), "jobs": counts[scope],
-                        "gate": gates[scope], "limits": limits[scope]}
+                        "limits": limits[scope]}
                 for scope in counts
             },
         }
@@ -234,6 +226,12 @@ class LLMExecutionCoordinator:
 _instance: LLMExecutionCoordinator | None = None
 _instance_root = ""
 _instance_lock = threading.Lock()
+_job_store_factory: Callable[[Path], Any] | None = None
+
+
+def register_job_store_factory(factory: Callable[[Path], Any]) -> None:
+    global _job_store_factory
+    _job_store_factory = factory
 
 
 def get_llm_execution_coordinator() -> LLMExecutionCoordinator:

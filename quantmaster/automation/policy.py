@@ -30,6 +30,34 @@ EVENT_KINDS = (
 )
 
 
+def _validate_numeric_settings(value: dict[str, Any]) -> None:
+    bounds = (
+        ("confirmation_bars", 1, 3, "确认根数必须为 1–3"),
+        ("cooldown_minutes", 15, 120, "冷却时间必须为 15–120 分钟"),
+        ("hourly_cap", 1, 30, "每小时上限必须为 1–30"),
+    )
+    for key, lower, upper, message in bounds:
+        if not lower <= int(value[key]) <= upper:
+            raise ValueError(message)
+    for number in [value["regime_threshold"], *value["news_thresholds"].values()]:
+        if not 0 <= float(number) <= 100:
+            raise ValueError("推送阈值必须为 0–100")
+
+
+def _resolve_event_types(value: dict[str, Any]) -> None:
+    event_types = value.get("event_types")
+    if event_types is None:
+        value["event_types"] = list(EVENT_KINDS)
+        return
+    if not isinstance(event_types, (list, tuple, set)) or isinstance(event_types, str):
+        raise ValueError("推送内容必须为事件类型列表")
+    invalid = set(event_types) - set(EVENT_KINDS)
+    if invalid:
+        raise ValueError(f"未知事件类型: {', '.join(sorted(invalid))}")
+    selected = set(event_types)
+    value["event_types"] = [kind for kind in EVENT_KINDS if kind in selected]
+
+
 def resolved_policy(preset: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     if preset not in PRESETS:
         raise ValueError("preset 仅支持 conservative/balanced/sensitive")
@@ -43,26 +71,8 @@ def resolved_policy(preset: str, overrides: dict[str, Any] | None = None) -> dic
     value.update({key: child for key, child in overrides.items() if key != "news_thresholds"})
     if "news_thresholds" in overrides:
         value["news_thresholds"].update(overrides["news_thresholds"])
-    if not 1 <= int(value["confirmation_bars"]) <= 3:
-        raise ValueError("确认根数必须为 1–3")
-    if not 15 <= int(value["cooldown_minutes"]) <= 120:
-        raise ValueError("冷却时间必须为 15–120 分钟")
-    if not 1 <= int(value["hourly_cap"]) <= 30:
-        raise ValueError("每小时上限必须为 1–30")
-    for number in [value["regime_threshold"], *value["news_thresholds"].values()]:
-        if not 0 <= float(number) <= 100:
-            raise ValueError("推送阈值必须为 0–100")
-    if "event_types" not in value:
-        value["event_types"] = list(EVENT_KINDS)
-    else:
-        event_types = value["event_types"]
-        if not isinstance(event_types, (list, tuple, set)) or isinstance(event_types, str):
-            raise ValueError("推送内容必须为事件类型列表")
-        invalid = set(event_types) - set(EVENT_KINDS)
-        if invalid:
-            raise ValueError(f"未知事件类型: {', '.join(sorted(invalid))}")
-        selected = set(event_types)
-        value["event_types"] = [kind for kind in EVENT_KINDS if kind in selected]
+    _validate_numeric_settings(value)
+    _resolve_event_types(value)
     return value
 
 

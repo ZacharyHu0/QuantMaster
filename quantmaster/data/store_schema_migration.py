@@ -8,7 +8,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 
@@ -157,18 +157,20 @@ class StoreSchemaMigrator:
 
     @staticmethod
     def _upgrade_lab(root: Path) -> None:
-        from quantmaster.lab.store import LabStore
+        from quantmaster.schema_access import schema_factory
 
-        store = LabStore.__new__(LabStore)
+        store_type = schema_factory("lab_store")
+        store = store_type.__new__(store_type)
         store.path = LAB.path(root)
         store.read_only = False
         store._migrate_legacy_schema()
 
     @staticmethod
     def _upgrade_rotation(root: Path, target: _SchemaTarget) -> None:
-        from quantmaster.rotation.store import RotationStore
+        from quantmaster.schema_access import schema_factory
 
-        rotation = RotationStore.__new__(RotationStore)
+        store_type = schema_factory("rotation_store")
+        rotation = store_type.__new__(store_type)
         rotation.root = root / "rotation"
         rotation.read_only = False
         rotation.cache_path = ROTATION_CACHE.path(root)

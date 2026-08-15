@@ -31,6 +31,7 @@ from quantmaster.data.free_stockdb_ingest import _frame_hash as _stockdb_frame_h
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, remote_io_allowed
+from quantmaster.etf_contract import is_exchange_etf as _is_exchange_etf
 from quantmaster.research.contracts import content_hash
 from quantmaster.rotation.etf_models import (
     ETF_RESEARCH_MODEL_VERSION,
@@ -53,6 +54,8 @@ from quantmaster.trading_sessions import (
     market_now,
     resolve_session_target,
 )
+
+is_exchange_etf = _is_exchange_etf
 
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]
@@ -361,19 +364,6 @@ def etf_directory_master_hash(frame: pd.DataFrame) -> str:
             "observed_symbols": observed_symbols,
             "rows": sorted(rows, key=lambda row: row["symbol"]),
         }
-    )
-
-
-def is_exchange_etf(instrument: Instrument) -> bool:
-    if instrument.exchange not in {"SH", "SZ"}:
-        return False
-    if instrument.status.casefold() not in {"listed", "active", "l"}:
-        return False
-    text = instrument.name.upper()
-    if "LOF" in text or "联接" in text:
-        return False
-    return instrument.asset_type == "etf" or (
-        instrument.asset_type == "fund" and ("ETF" in text or "交易型" in text)
     )
 
 

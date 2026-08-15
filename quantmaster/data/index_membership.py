@@ -8,13 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from quantmaster.research.contracts import (
+from quantmaster.index_source_access import index_source
+from quantmaster.research_access import research_lake
+from quantmaster.research_primitives import (
     ArtifactKind,
     AssetClass,
     Frequency,
-    content_hash,
 )
-from quantmaster.research.lake import ResearchLake
+from quantmaster.runtime.json import content_hash
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 CSI800_INDEXES = ("000300.SH", "000905.SH")
@@ -140,7 +141,7 @@ def _validated_snapshot_records(records: pd.DataFrame) -> pd.DataFrame:
 
 
 def cache_csi800_records(
-    records: pd.DataFrame, *, lake: ResearchLake | None = None,
+    records: pd.DataFrame, *, lake: Any | None = None,
     acquired_at: str | datetime | None = None,
 ) -> int:
     """Atomically merge monthly CSI800 snapshots into date partitions."""
@@ -149,7 +150,7 @@ def cache_csi800_records(
     )
     if frame.empty:
         return 0
-    target = lake or ResearchLake()
+    target = lake or research_lake()
     written = 0
     for stamp, group in frame.groupby("trade_date", sort=True):
         trade_date = pd.Timestamp(stamp).strftime("%Y-%m-%d")
@@ -182,11 +183,11 @@ def load_cached_csi800_records(
     *,
     pull: bool = True,
     source=None,
-    lake: ResearchLake | None = None,
+    lake: Any | None = None,
     max_snapshot_age_days: int = MAX_CSI800_SNAPSHOT_AGE_DAYS,
 ) -> pd.DataFrame:
     """Read local PIT evidence first and refresh only missing/stale indexes."""
-    target = lake or ResearchLake()
+    target = lake or research_lake()
     lake_records = _normalize(target.read_range(
         ArtifactKind.RAW, AssetClass.STOCK, Frequency.DAILY,
         CSI800_DATASET, start, end,
@@ -214,9 +215,7 @@ def load_cached_csi800_records(
     if pull and refresh_indexes:
         try:
             if source is None:
-                from quantmaster.data.tushare_source import TushareSource
-
-                source = TushareSource()
+                source = index_source()
             fetched = [source.index_weights(code, start, end) for code in refresh_indexes]
             nonempty = [item for item in fetched if item is not None and not item.empty]
             if nonempty:
@@ -239,7 +238,7 @@ def load_cached_csi800_members_as_of(
     *,
     pull: bool = True,
     source=None,
-    lake: ResearchLake | None = None,
+    lake: Any | None = None,
     max_snapshot_age_days: int = MAX_CSI800_SNAPSHOT_AGE_DAYS,
 ) -> dict[str, Any]:
     """Return evidenced membership known at ``as_of`` or fail closed.

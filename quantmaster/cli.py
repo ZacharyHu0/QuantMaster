@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import sys
+from typing import Any
 
 import pandas as pd
 
@@ -55,7 +56,7 @@ def _usable_market_data(envelope, *, label: str):
 
 
 def _load_panel(universe: str, start: str, end: str):
-    from quantmaster.data import refresh_panel
+    from quantmaster.data.registry import refresh_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
 
     universe_snapshot = load_universe_analysis_snapshot(universe)
@@ -177,6 +178,92 @@ def cmd_automation(args) -> None:
     )
 
 
+def _lab_doctor(service, args) -> None:
+    report = service.doctor()
+    if args.json:
+        _print_json(report)
+        return
+    print("检查\t状态\t详情\t修复动作")
+    for item in report["checks"]:
+        print(f"{item['name']}\t{item['state']}\t{item['detail']}\t{item['action']}")
+    print(f"\n总体: {report['state']} · {'可运行' if report['runnable'] else '已阻止'}")
+
+
+def _lab_read(service, args) -> None:
+    if args.lab_cmd == "benchmark":
+        _print_json(service.benchmark_local(
+            universe=args.universe, start=args.start, end=args.end or _close_day(), runs=args.runs,
+        ))
+    elif args.lab_cmd == "list":
+        _print_json(service.store.list_factors(status=args.status, search=args.search, limit=args.limit))
+    elif args.lab_cmd == "jobs":
+        _print_json({"items": service.store.jobs(args.limit)})
+    else:
+        _print_json({"items": service.store.studies(args.limit)})
+
+
+def _lab_control(service, args) -> None:
+    if args.lab_cmd == "resume":
+        _print_json(service.resume_study(args.study_id))
+    elif args.lab_cmd == "approve":
+        _print_json(service.store.approve(args.version_id, actor="cli", reason=args.reason))
+    else:
+        _print_json(service.store.deploy(
+            args.version_id, universe=args.universe, horizon=args.horizon, actor="cli",
+        ))
+
+
+def _lab_study(service, args) -> None:
+    if args.lab_cmd == "optimize":
+        study = service.create_study({
+            "universe": args.universe, "start": args.start,
+            "end": args.end or _close_day(),
+            "models": [item.strip() for item in args.models.split(",") if item.strip()],
+            "budget_hours": args.budget_hours, "max_trials": args.max_trials,
+            "top_n": args.top, "sequence_length": args.sequence_length,
+            "research_tier": args.research_tier,
+        })
+        _print_json({
+            "study": study,
+            "hint": "Study 已进入可恢复队列；只会产出 Shadow 候选，不会自动晋升 Champion",
+        })
+        return
+    job = service.enqueue("bias_audit", {
+        "version_id": args.version_id, "universe": args.universe,
+        "start": args.start, "end": args.end or _close_day(),
+    })
+    _print_json({"job": job, "hint": "偏差审计已进入研究队列"})
+
+
+def _lab_enqueue(service, args) -> dict[str, Any]:
+    end = args.end or _close_day()
+    base = {"universe": args.universe, "start": args.start, "end": end}
+    if args.lab_cmd == "prepare-data":
+        return service.enqueue("prepare_data", base)
+    if args.lab_cmd in {"validate", "score"}:
+        return service.enqueue("validate", {"version_id": args.version_id, **base})
+    if args.lab_cmd == "train":
+        return service.enqueue("train", {
+            **base, "model": args.model, "horizon": args.horizon,
+            "sequence_length": args.sequence_length, "config": {"epochs": args.epochs},
+        })
+    kind = {"llm": "discover_llm", "python": "discover_python"}.get(
+        args.method, "discover_genetic",
+    )
+    params = {**base, "horizon": args.horizon}
+    if args.method == "llm":
+        params.update({"rounds": args.rounds, "count": args.top})
+    elif args.method == "python":
+        params.update({
+            "rounds": args.rounds,
+            "candidate_limit": args.candidates,
+            "finalists": args.finalists,
+        })
+    else:
+        params.update({"top_n": args.top, "population": args.population, "generations": args.generations})
+    return service.enqueue(kind, params)
+
+
 def cmd_lab(args) -> None:
     """Quant Lab 的独立 Worker、研究任务和人工审批入口。"""
     from quantmaster.lab.service import LabService
@@ -188,127 +275,29 @@ def cmd_lab(args) -> None:
         return
     service = LabService()
     if args.lab_cmd == "doctor":
-        report = service.doctor()
-        if args.json:
-            _print_json(report)
-        else:
-            print("检查\t状态\t详情\t修复动作")
-            for item in report["checks"]:
-                print(
-                    f"{item['name']}\t{item['state']}\t{item['detail']}\t{item['action']}"
-                )
-            print(f"\n总体: {report['state']} · {'可运行' if report['runnable'] else '已阻止'}")
+        _lab_doctor(service, args)
         return
-    if args.lab_cmd == "benchmark":
-        _print_json(service.benchmark_local(
-            universe=args.universe, start=args.start,
-            end=args.end or _close_day(), runs=args.runs,
-        ))
+    if args.lab_cmd in {"benchmark", "list", "studies"}:
+        _lab_read(service, args)
         return
-    if args.lab_cmd == "list":
-        _print_json(service.store.list_factors(status=args.status, search=args.search, limit=args.limit))
+    if args.lab_cmd in {"resume", "approve", "deploy"}:
+        _lab_control(service, args)
+        return
+    if args.lab_cmd in {"optimize", "audit"}:
+        _lab_study(service, args)
         return
     if args.lab_cmd == "jobs":
         from quantmaster.lab.jobs import list_lab_jobs
 
         _print_json({"items": list_lab_jobs(args.limit)})
         return
-    if args.lab_cmd == "studies":
-        _print_json({"items": service.store.studies(args.limit)})
-        return
-    if args.lab_cmd == "resume":
-        _print_json(service.resume_study(args.study_id))
-        return
-    if args.lab_cmd == "approve":
-        _print_json(service.store.approve(args.version_id, actor="cli", reason=args.reason))
-        return
-    if args.lab_cmd == "deploy":
-        _print_json(
-            service.store.deploy(args.version_id, universe=args.universe, horizon=args.horizon, actor="cli")
-        )
-        return
-    if args.lab_cmd == "optimize":
-        study = service.create_study(
-            {
-                "universe": args.universe,
-                "start": args.start,
-                "end": args.end or _close_day(),
-                "models": [item.strip() for item in args.models.split(",") if item.strip()],
-                "budget_hours": args.budget_hours,
-                "max_trials": args.max_trials,
-                "top_n": args.top,
-                "sequence_length": args.sequence_length,
-                "research_tier": args.research_tier,
-            }
-        )
-        _print_json(
-            {
-                "study": study,
-                "hint": "Study 已进入可恢复队列；只会产出 Shadow 候选，不会自动晋升 Champion",
-            }
-        )
-        return
-    if args.lab_cmd == "audit":
-        job = service.enqueue(
-            "bias_audit",
-            {
-                "version_id": args.version_id,
-                "universe": args.universe,
-                "start": args.start,
-                "end": args.end or _close_day(),
-            },
-        )
-        _print_json({"job": job, "hint": "偏差审计已进入研究队列"})
-        return
-
-    end = args.end or _close_day()
-    base = {"universe": args.universe, "start": args.start, "end": end}
-    if args.lab_cmd == "prepare-data":
-        job = service.enqueue("prepare_data", base)
-    elif args.lab_cmd in {"validate", "score"}:
-        job = service.enqueue("validate", {"version_id": args.version_id, **base})
-    elif args.lab_cmd == "discover":
-        kind = {
-            "llm": "discover_llm",
-            "python": "discover_python",
-        }.get(args.method, "discover_genetic")
-        params = {**base, "horizon": args.horizon, "top_n": args.top}
-        if args.method == "llm":
-            params = {**base, "horizon": args.horizon, "count": args.top, "rounds": args.rounds}
-        elif args.method == "python":
-            params = {
-                **base,
-                "horizon": args.horizon,
-                "rounds": args.rounds,
-                "candidate_limit": args.candidates,
-                "finalists": args.finalists,
-            }
-        else:
-            params.update({"population": args.population, "generations": args.generations})
-        job = service.enqueue(kind, params)
-    elif args.lab_cmd == "train":
-        job = service.enqueue(
-            "train",
-            {
-                **base,
-                "model": args.model,
-                "horizon": args.horizon,
-                "sequence_length": args.sequence_length,
-                "config": {"epochs": args.epochs},
-            },
-        )
-    else:  # pragma: no cover - argparse 保证子命令完整
-        raise ValueError(f"未知 lab 子命令: {args.lab_cmd}")
-    _print_json(
-        {
-            "job": job,
-            "hint": "任务已进入可恢复队列；由 qm serve 或 qm lab worker 执行",
-        }
-    )
-
-
+    job = _lab_enqueue(service, args)
+    _print_json({
+        "job": job,
+        "hint": "任务已进入可恢复队列；由 qm serve 或 qm lab worker 执行",
+    })
 def cmd_fetch(args) -> None:
-    from quantmaster.data import refresh_bars
+    from quantmaster.data.registry import refresh_bars
     from quantmaster.data.universe import load_universe_analysis
 
     symbols = load_universe_analysis(args.universe)
@@ -364,9 +353,9 @@ def cmd_regime(args) -> None:
 
 
 def cmd_select(args) -> None:
-    from quantmaster.data import refresh_panel
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.names import read_stock_names
+    from quantmaster.data.registry import refresh_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
@@ -887,8 +876,9 @@ def cmd_daily(args) -> None:
     from quantmaster.ai.crawler import AICrawler
     from quantmaster.backtest.paper_accounts import get_paper_service
     from quantmaster.backtest.spec import PaperAccountSpec
-    from quantmaster.data import read_stock_names, refresh_history, refresh_panel
     from quantmaster.data.industry import load_industry_analysis_context
+    from quantmaster.data.names import read_stock_names
+    from quantmaster.data.registry import refresh_history, refresh_panel
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.decision import DecisionStore, hybrid_daily_selection
 
@@ -1040,7 +1030,7 @@ def cmd_ledger(args) -> None:
     if args.ledger_cmd == "nav":
         import pandas as pd
 
-        from quantmaster.data import refresh_history
+        from quantmaster.data.registry import refresh_history
         from quantmaster.data.storage import BarStore
         from quantmaster.portfolio import daily_nav, nav_warnings, nav_with_benchmark
 
@@ -1114,86 +1104,63 @@ def _research_assets(value: str):
         raise ValueError("资产只支持 stock,etf,future") from exc
 
 
-def cmd_data(args) -> None:
-    """Versioned research lake, capability and production job commands."""
+def _data_preview(engine, args) -> None:
+    trade_date = args.date or _close_day()
+    frame = engine.preview_date(args.dataset, trade_date)
+    rows = json.loads(frame.head(args.limit).to_json(
+        orient="records", date_format="iso", force_ascii=False,
+    ))
+    _print_json({
+        "tier": "sandbox", "dataset_id": args.dataset, "trade_date": trade_date,
+        "row_count": len(frame), "returned_rows": len(rows),
+        "quality": dict(frame.attrs.get("research_partition_quality") or {}), "rows": rows,
+    })
+
+
+def _data_jobs(args) -> None:
+    from quantmaster.research.jobs import get_research_job_manager
+
+    manager = get_research_job_manager()
+    if args.data_cmd in {"jobs", "status"}:
+        _print_json({"items": manager.list(args.limit)})
+    elif args.data_cmd == "cancel":
+        _print_json(manager.cancel(args.job_id))
+    else:
+        resumed = manager.resume(args.job_id)
+        _print_json(manager.wait(resumed["id"]))
+
+
+def _data_materialize(engine, args) -> None:
+    from quantmaster.data.instruments import InstrumentStore
+    from quantmaster.data.storage import BarStore
+
+    symbols = [item.strip().upper() for item in args.symbols.split(",") if item.strip()]
+    if not symbols:
+        candidates = BarStore().symbols()
+        instruments = InstrumentStore().get_many(candidates)
+        symbols = [
+            symbol for symbol in candidates
+            if instruments.get(symbol) and instruments[symbol].asset_type == args.asset
+        ]
+    records = engine.lake.materialize_bar_store(
+        symbols, args.start, args.end or _close_day(), asset_class=_research_assets(args.asset)[0],
+    )
+    _print_json({
+        "asset_class": args.asset, "symbols": len(symbols),
+        "partitions": len(records), "rows": sum(item["row_count"] for item in records),
+    })
+
+
+def _data_plan_or_execute(engine, args) -> None:
     from quantmaster.research import KernelBackend
-    from quantmaster.research.engine import ResearchEngine, save_plan
-
-    engine = ResearchEngine()
-    if args.data_cmd == "catalog":
-        _print_json(engine.catalog())
-        return
-    if args.data_cmd == "capabilities":
-        _print_json(engine.capabilities())
-        return
-    if args.data_cmd == "preview":
-        trade_date = args.date or _close_day()
-        frame = engine.preview_date(args.dataset, trade_date)
-        rows = json.loads(
-            frame.head(args.limit).to_json(
-                orient="records", date_format="iso", force_ascii=False,
-            )
-        )
-        _print_json({
-            "tier": "sandbox",
-            "dataset_id": args.dataset,
-            "trade_date": trade_date,
-            "row_count": len(frame),
-            "returned_rows": len(rows),
-            "quality": dict(frame.attrs.get("research_partition_quality") or {}),
-            "rows": rows,
-        })
-        return
-    if args.data_cmd in {"jobs", "status", "cancel", "resume"}:
-        from quantmaster.research.jobs import get_research_job_manager
-
-        manager = get_research_job_manager()
-        if args.data_cmd in {"jobs", "status"}:
-            _print_json({"items": manager.list(args.limit)})
-        elif args.data_cmd == "cancel":
-            _print_json(manager.cancel(args.job_id))
-        else:
-            resumed = manager.resume(args.job_id)
-            _print_json(manager.wait(resumed["id"]))
-        return
-    if args.data_cmd == "materialize":
-        from quantmaster.data.instruments import InstrumentStore
-        from quantmaster.data.storage import BarStore
-
-        symbols = [item.strip().upper() for item in args.symbols.split(",") if item.strip()]
-        if not symbols:
-            candidates = BarStore().symbols()
-            instruments = InstrumentStore().get_many(candidates)
-            symbols = [
-                symbol
-                for symbol in candidates
-                if (instruments.get(symbol) and instruments[symbol].asset_type == args.asset)
-            ]
-        records = engine.lake.materialize_bar_store(
-            symbols,
-            args.start,
-            args.end or _close_day(),
-            asset_class=_research_assets(args.asset)[0],
-        )
-        _print_json(
-            {
-                "asset_class": args.asset,
-                "symbols": len(symbols),
-                "partitions": len(records),
-                "rows": sum(item["row_count"] for item in records),
-            }
-        )
-        return
+    from quantmaster.research.engine import save_plan
 
     end = args.end or _close_day()
     plan = engine.plan(
-        args.start,
-        end,
-        asset_classes=_research_assets(args.assets),
+        args.start, end, asset_classes=_research_assets(args.assets),
         datasets=tuple(item.strip() for item in args.datasets.split(",") if item.strip()) or None,
         spec_ids=tuple(item.strip() for item in args.specs.split(",") if item.strip()) or None,
-        mode=args.mode,
-        backend=KernelBackend(args.backend),
+        mode=args.mode, backend=KernelBackend(args.backend),
     )
     if args.data_cmd == "plan":
         if args.output:
@@ -1204,10 +1171,30 @@ def cmd_data(args) -> None:
     def progress(index, total, task):
         print(f"[{index}/{total}] {task.key}", file=sys.stderr)
 
-    result = engine.execute(plan, progress=progress)
-    _print_json(result)
+    _print_json(engine.execute(plan, progress=progress))
 
 
+def cmd_data(args) -> None:
+    """Versioned research lake, capability and production job commands."""
+    from quantmaster.research.engine import ResearchEngine
+
+    engine = ResearchEngine()
+    if args.data_cmd == "catalog":
+        _print_json(engine.catalog())
+        return
+    if args.data_cmd == "capabilities":
+        _print_json(engine.capabilities())
+        return
+    if args.data_cmd == "preview":
+        _data_preview(engine, args)
+        return
+    if args.data_cmd in {"jobs", "status", "cancel", "resume"}:
+        _data_jobs(args)
+        return
+    if args.data_cmd == "materialize":
+        _data_materialize(engine, args)
+        return
+    _data_plan_or_execute(engine, args)
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qm", description="QuantMaster — A股量化研究平台")
     parser.add_argument(

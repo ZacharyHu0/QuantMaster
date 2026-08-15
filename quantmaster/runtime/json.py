@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
@@ -133,6 +134,10 @@ def strict_json_dumps(
     if default is not None:
         options["default"] = default
     return json.dumps(sanitize_json(value), **options)
+
+
+def content_hash(value: Any) -> str:
+    return hashlib.sha256(strict_json_dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 class StrictJSONResponse(JSONResponse):

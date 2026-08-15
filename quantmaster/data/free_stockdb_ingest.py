@@ -27,8 +27,8 @@ from quantmaster.data.free_stockdb_contracts import (
 )
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.resilience import remote_io_allowed
-from quantmaster.research.contracts import content_hash
 from quantmaster.runtime.derived import DerivedArtifactCatalog
+from quantmaster.runtime.json import content_hash
 
 Progress = Callable[[int, str, str], None]
 Cancelled = Callable[[], bool]

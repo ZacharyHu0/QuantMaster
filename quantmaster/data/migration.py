@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from quantmaster.config import get_config
+from quantmaster.config_manager_access import new_config_manager
 from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
-from quantmaster.settings import ConfigManager
 
 
 class MigrationError(ValueError):
@@ -515,8 +515,8 @@ def restore_backup_path(root: Path, backup_root: Path, relative: str) -> None:
 
 
 class DataMigrationManager:
-    def __init__(self, config_manager: ConfigManager | None = None):
-        self.config_manager = config_manager or ConfigManager()
+    def __init__(self, config_manager=None):
+        self.config_manager = config_manager or new_config_manager()
         self._tasks: dict[str, MigrationTask] = {}
         self._lock = threading.RLock()
         self._active_id: str | None = None
@@ -667,4 +667,16 @@ class DataMigrationManager:
             self._finish(task, "failed", str(exc))
 
 
-migration_manager = DataMigrationManager()
+class _MigrationManagerProxy:
+    _value: DataMigrationManager | None = None
+
+    def _manager(self) -> DataMigrationManager:
+        if self._value is None:
+            self._value = DataMigrationManager()
+        return self._value
+
+    def __getattr__(self, name: str):
+        return getattr(self._manager(), name)
+
+
+migration_manager = _MigrationManagerProxy()

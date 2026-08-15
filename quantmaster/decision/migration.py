@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.decision.schema import (
     DECISION_PAYLOAD_SCHEMA_VERSION,
     DecisionSchemaError,

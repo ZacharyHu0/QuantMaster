@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.instrument_source_access import instrument_source
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import market_date
 
@@ -112,8 +113,8 @@ def _display_market(market: str) -> str:
 
 def _seed_records() -> list[dict[str, Any]]:
     """快照损坏时仍能让演示候选和全球参考标的离线工作。"""
-    from quantmaster.data.universe import DEMO_STOCK_NAMES
-    from quantmaster.data.yfinance_source import GLOBAL_REFS, REFERENCE_IDENTITIES
+    from quantmaster.data.catalog import DEMO_STOCK_NAMES
+    from quantmaster.data.reference_catalog import GLOBAL_REFS, REFERENCE_IDENTITIES
 
     rows: list[dict[str, Any]] = []
     for symbol, name in DEMO_STOCK_NAMES.items():
@@ -153,7 +154,7 @@ def _seed_records() -> list[dict[str, Any]]:
 
 
 def _reference_records() -> list[dict[str, Any]]:
-    from quantmaster.data.yfinance_source import GLOBAL_REFS, REFERENCE_IDENTITIES
+    from quantmaster.data.reference_catalog import GLOBAL_REFS, REFERENCE_IDENTITIES
 
     records = []
     for symbol, (provider, name) in GLOBAL_REFS.items():
@@ -961,13 +962,13 @@ class InstrumentStore:
 def _online_yahoo_records(query: str, limit: int) -> list[dict[str, Any]]:
     """按需补齐日/韩等未随包发布的市场；失败不影响本地搜索。"""
     from quantmaster.data.resilience import provider_call
-    from quantmaster.data.yfinance_source import _require_yfinance
+    from quantmaster.yahoo_access import yahoo_loader
 
     requested = re.sub(r"^(TYO|TSE|JP|KRX|KOSPI|KOSDAQ):", "", query.strip(), flags=re.I)
     key = f"lookup:{_normalized_alias(requested)}:{limit}"
 
     def fetch():
-        result = _require_yfinance().Search(
+        result = yahoo_loader().Search(
             requested, max_results=max(5, limit), news_count=0,
             enable_fuzzy_query=False, raise_errors=True,
         )
@@ -1111,9 +1112,7 @@ def refresh_authoritative_instrument_catalog(
     """Fetch, freeze, and project one authoritative Tushare catalog observation."""
     selected_store = store or InstrumentStore()
     if source is None:
-        from quantmaster.data.tushare_source import TushareSource
-
-        source = TushareSource()
+        source = instrument_source()
     from quantmaster.data.instrument_snapshots import (
         TUSHARE_CATALOG_QUERY,
         freeze_instrument_catalog,
@@ -1262,7 +1261,7 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
         return instrument
     from datetime import timedelta
 
-    from quantmaster.data.registry import refresh_history
+    from quantmaster.market_data_access import refresh_history
 
     end = market_date()
     start = end - timedelta(days=21)
