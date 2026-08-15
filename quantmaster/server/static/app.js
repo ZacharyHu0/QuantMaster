@@ -1773,11 +1773,14 @@ let marketStreamCycle = 0;
 let marketFearGreed = null;
 const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
+let todayChartsRetry = 0;
 let todayRenderGeneration = 0;
 function todayCharts() {
   if (!todayChartsPromise) {
-    const pending = import('./today-charts.js').catch(error => {
+    const retry = todayChartsRetry;
+    const pending = import(`./today-charts.js${retry ? `?retry=${retry}` : ''}`).catch(error => {
       if (todayChartsPromise === pending) todayChartsPromise = null;
+      todayChartsRetry = retry + 1;
       throw error;
     });
     todayChartsPromise = pending;
@@ -1841,7 +1844,7 @@ function renderFearGreedVisuals(root = document) {
     root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
       module.renderFearGreedHistory(element, marketFearGreed);
     });
-  });
+  }, () => {});
 }
 
 function rsiSparkPoints(history) {
@@ -2172,7 +2175,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
         if (generation === todayRenderGeneration && root.isConnected) {
           module.renderMarketSpark(root,item,changeSeries);
         }
-      });
+      }, () => {});
     });
   }
   return {

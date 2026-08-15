@@ -94,9 +94,14 @@ def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict
         for workspace, page_name in targets:
             context = browser.new_context(viewport={"width": 1280, "height": 900})
             page = context.new_page()
-            requested: list[str] = []
+            requested: list[tuple[str, str]] = []
             errors: list[str] = []
-            page.on("request", lambda request, items=requested: items.append(request.url))
+            page.on(
+                "request",
+                lambda request, items=requested: items.append(
+                    (request.url, request.resource_type)
+                ),
+            )
             page.on("pageerror", lambda error, items=errors: items.append(str(error)))
             page.add_init_script(
                 """window.__qmBudgetMounted = [];
@@ -109,20 +114,24 @@ def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict
             page.wait_for_function(
                 "route => window.__qmBudgetMounted.includes(route)", arg=route,
             )
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(250)
+            page.wait_for_load_state("networkidle")
             assert errors == [], {route: errors}
 
-            occurrences: list[tuple[str, Path]] = []
-            for request_url in requested:
+            occurrences: list[tuple[str, Path, str]] = []
+            for request_url, resource_type in requested:
                 resource = _static_request_path(request_url)
                 if resource is not None:
-                    occurrences.append(resource)
-            sizes = {path: resource.stat().st_size for path, resource in occurrences}
+                    occurrences.append((*resource, resource_type))
+            sizes = {path: resource.stat().st_size for path, resource, _ in occurrences}
             owned = [
-                (path, resource) for path, resource in occurrences
+                (path, resource, resource_type)
+                for path, resource, resource_type in occurrences
                 if path not in shell_paths and path != "/static/echarts.min.js"
             ]
-            owned_sizes = {path: resource.stat().st_size for path, resource in owned}
-            owned_bytes = sum(resource.stat().st_size for _, resource in owned)
+            owned_sizes = {path: resource.stat().st_size for path, resource, _ in owned}
+            owned_bytes = sum(resource.stat().st_size for _, resource, _ in owned)
             views[f"#{route}"] = {
                 "owned_bytes": owned_bytes,
                 "request_count": len(owned),
@@ -134,12 +143,13 @@ def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict
                 echarts_vendor_bytes = sizes["/static/echarts.min.js"]
             if route == "today/quotes":
                 initial_static_bytes = sum(
-                    resource.stat().st_size for path, resource in occurrences
-                    if Path(path).suffix in {".css", ".js"}
+                    resource.stat().st_size for _, resource, resource_type in occurrences
+                    if resource_type in {"script", "stylesheet"}
                 )
                 initial_static = {
-                    path: size for path, size in sizes.items()
-                    if Path(path).suffix in {".css", ".js"}
+                    path: resource.stat().st_size
+                    for path, resource, resource_type in occurrences
+                    if resource_type in {"script", "stylesheet"}
                 }
             context.close()
         browser.close()
@@ -778,6 +788,12 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
 
         failed = browser.new_page()
         account_requests = 0
+        market_requests = 0
+
+        def count_market(route):
+            nonlocal market_requests
+            market_requests += 1
+            route.continue_()
 
         def fail_account_once(route):
             nonlocal account_requests
@@ -788,8 +804,10 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
                 route.continue_()
 
         failed.route("**/static/workspaces/account.js*", fail_account_once)
+        failed.route("**/api/v1/market/overview", count_market)
         failed.goto(url)
         failed.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        initial_market_requests = market_requests
         failed.get_by_role("button", name="账户", exact=True).click()
         alert = failed.get_by_role("alert")
         playwright_sync.expect(alert).to_contain_text("工作区加载失败")
@@ -797,6 +815,7 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
             re.compile(r"(?:^|\s)active(?:\s|$)")
         )
         assert failed.url.endswith("#today/quotes")
+        assert market_requests == initial_market_requests
         failed.get_by_role("button", name="账户", exact=True).click()
         failed.wait_for_url(re.compile(r"#account/paper$"))
         failed.locator("#tab-paper").wait_for(state="visible")
@@ -893,6 +912,45 @@ def test_workspace_mount_resource_failures_retry_script_and_today_feature(live_s
         feature_page.wait_for_url(re.compile(r"#today/rotation$"))
         feature_page.locator("#tab-rotation").wait_for(state="visible")
         assert feature_requests == 2
+
+        today_page = browser.new_page(viewport={"width": 1280, "height": 900})
+        today_requests = 0
+        today_errors = []
+        today_responses = []
+
+        def fail_today_charts_once(route):
+            nonlocal today_requests
+            today_requests += 1
+            if today_requests == 1:
+                route.abort()
+            else:
+                route.continue_()
+
+        today_page.on("pageerror", lambda error: today_errors.append(str(error)))
+        today_page.on(
+            "response",
+            lambda response: today_responses.append(response.ok)
+            if "/static/today-charts.js" in response.url else None,
+        )
+        today_page.route("**/static/today-charts.js*", fail_today_charts_once)
+        today_page.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json={
+            "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
+            "as_of": "2026-07-21T08:00:00+08:00",
+            "history": [{"date": "2026-07-20", "score": 22.0}],
+            "thresholds": {"fear_greed_rare": 10, "rsi_add": 22},
+        }))
+        today_page.goto(url)
+        today_page.wait_for_url(re.compile(r"#today/quotes$"))
+        today_page.wait_for_timeout(1_000)
+        assert today_requests == 1
+        today_page.get_by_role("button", name="账户", exact=True).click()
+        today_page.wait_for_url(re.compile(r"#account/paper$"))
+        today_page.get_by_role("button", name="今日", exact=True).click()
+        today_page.wait_for_url(re.compile(r"#today/quotes$"))
+        today_page.wait_for_timeout(2_000)
+        assert today_requests == 2
+        assert today_errors == []
+        assert today_responses[-1] is True
         browser.close()
 
 
@@ -1217,6 +1275,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "600519.SH",
             "000001.SZ",
         ]
+        page.locator('header [data-workspace="account"]').click()
+        page.get_by_role("heading", name="先处理尚未生效的更改", exact=True).wait_for()
+        assert page.url.endswith("#today/candidates")
+        page.get_by_role("button", name="继续编辑", exact=True).click()
         page.get_by_role("button", name="创建候选", exact=True).click()
         page.get_by_role("heading", name="ui_candidate", exact=True).wait_for()
         page.locator('[data-candidate-name="ui_candidate"]').wait_for(state="visible")
@@ -1488,6 +1550,23 @@ def test_help_handbook_search_routes_and_calculators(live_server):
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1360, "height": 900})
+        page.add_init_script(
+            """(() => {
+              const NativeObserver = window.IntersectionObserver;
+              window.__helpObservers = {created: 0, disconnected: 0};
+              window.IntersectionObserver = function(...args) {
+                const observer = new NativeObserver(...args);
+                window.__helpObservers.created += 1;
+                const disconnect = observer.disconnect.bind(observer);
+                observer.disconnect = () => {
+                  window.__helpObservers.disconnected += 1;
+                  disconnect();
+                };
+                return observer;
+              };
+              window.IntersectionObserver.prototype = NativeObserver.prototype;
+            })();"""
+        )
         page.route(
             "**/api/v1/settings",
             lambda route: route.fulfill(
@@ -1503,6 +1582,7 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert help_button.bounding_box()["x"] < settings_button.bounding_box()["x"]
         help_button.click()
         page.locator("#help-start").wait_for(state="visible")
+        assert page.evaluate("window.__helpObservers.created") == 1
         _wait_for_text(page.locator("#help-settings-status"), "已载入")
         assert page.locator("#help-settings-status").inner_text().startswith("已载入")
         assert page.locator("#help-article h2").count() == 28
@@ -1540,9 +1620,11 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.locator('[data-help-link="models"]').click()
         page.locator('#help-models [data-help-tab="decision"]').click()
         page.locator("#tab-decision").wait_for(state="visible")
+        assert page.evaluate("window.__helpObservers.disconnected") == 1
 
         help_button.click()
         page.locator("#tab-help").wait_for(state="visible")
+        assert page.evaluate("window.__helpObservers.created") == 2
         for width, height in ((1360, 900), (900, 900), (390, 844)):
             page.set_viewport_size({"width": width, "height": height})
             _wait_for_document_fit(page)
@@ -4154,4 +4236,194 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         page.get_by_text("六维证据总体偏强，但仍需等待新披露。").wait_for()
         restored = page.evaluate("JSON.parse(localStorage.getItem('qm.stock-analysis.active.v2'))")
         assert restored["jobId"] == "job-stock"
+        browser.close()
+
+
+def test_stock_analysis_remount_resumes_nonterminal_poll_and_clock(live_server):
+    url, _ = live_server
+    event_calls = {"count": 0}
+
+    def route_api(route):
+        path = route.request.url.split("?", 1)[0]
+        if path.endswith("/api/v1/market/stock-analyses/analysis-active"):
+            route.fulfill(json={"analysis_id": "analysis-active", "status": "running"})
+        elif path.endswith("/api/v1/jobs/job-active/events"):
+            event_calls["count"] += 1
+            route.fulfill(json={"items": []})
+        elif path.endswith("/api/v1/jobs/job-active"):
+            route.fulfill(json={
+                "id": "job-active", "status": "running", "progress": 20,
+                "phase": "证据采集中", "estimated_remaining_seconds": 30,
+            })
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script(
+            """localStorage.setItem('qm.stock-analysis.active.v2', JSON.stringify({
+              analysisId:'analysis-active', jobId:'job-active', query:'600519.SH', mode:'deep',
+              status:'running', phase:'证据采集中', startedAt:Date.now() - 3000, eta:30,
+            }));"""
+        )
+        page.route("**/api/v1/**", route_api)
+        page.goto(f"{url}/#today/stock-analysis")
+        page.get_by_text("证据采集中", exact=True).wait_for()
+        page.wait_for_timeout(1_100)
+        assert event_calls["count"] >= 1
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        paused_calls = event_calls["count"]
+        page.wait_for_timeout(1_100)
+        assert event_calls["count"] == paused_calls
+
+        page.get_by_role("button", name="今日", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/stock-analysis$"))
+        elapsed = page.locator("#stock-analysis-elapsed").inner_text()
+        page.wait_for_timeout(1_100)
+        assert event_calls["count"] > paused_calls
+        assert page.locator("#stock-analysis-elapsed").inner_text() != elapsed
+        browser.close()
+
+
+def test_settings_remount_resumes_pending_autosave_and_active_data_poll(live_server):
+    url, _ = live_server
+    data_polls = {"count": 0}
+    saves = {"count": 0}
+
+    def route_api(route):
+        request = route.request
+        path = request.url.split("?", 1)[0]
+        if path.endswith("/api/v1/jobs") and "domain=data" in request.url:
+            route.fulfill(json={"items": [{
+                "id": "data-active", "status": "running", "progress": 10,
+                "next_index": 1, "total": 10, "succeeded": 1, "failures": [],
+            }]})
+        elif path.endswith("/api/v1/jobs/data-active"):
+            data_polls["count"] += 1
+            route.fulfill(json={
+                "id": "data-active", "status": "running", "progress": 10,
+                "next_index": 1, "total": 10, "succeeded": 1, "failures": [],
+            })
+        elif path.endswith("/api/v1/settings/validate"):
+            route.fulfill(json={"normalized": request.post_data_json})
+        elif path.endswith("/api/v1/settings") and request.method == "PUT":
+            saves["count"] += 1
+            route.fulfill(json={
+                "status": "ok", "settings": request.post_data_json, "runtime": {},
+                "warnings": [], "changed_fields": [], "restart_required": [],
+                "apply_status": {}, "persisted_revision": saves["count"],
+            })
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/**", route_api)
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.wait_for_timeout(1_000)
+        assert data_polls["count"] >= 1
+
+        page.locator('[data-settings-section="server"]').click()
+        port = page.locator('[name="server.port"]')
+        next_port = str(int(port.input_value()) + 1)
+        port.evaluate(
+            """(input, value) => {
+              input.value = value;
+              input.dispatchEvent(new Event('input', {bubbles:true}));
+              document.querySelector('header [data-workspace="account"]').click();
+            }""",
+            next_port,
+        )
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        paused_polls = data_polls["count"]
+        page.wait_for_timeout(1_000)
+        assert data_polls["count"] == paused_polls
+        assert saves["count"] == 0
+
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        page.wait_for_timeout(1_000)
+        assert data_polls["count"] > paused_polls
+        assert saves["count"] == 1
+        browser.close()
+
+
+def test_settings_remount_resumes_only_active_research_and_migrations(live_server):
+    url, _ = live_server
+    polls = {"research": 0, "migration": 0, "contract": 0}
+    active = {
+        "research": {
+            "id": "research-active", "status": "running", "progress": 20,
+            "next_index": 1, "total": 5, "succeeded": 1, "failures": [],
+        },
+        "migration": {
+            "id": "migration-active", "status": "running", "progress": 20,
+            "phase": "复制数据",
+        },
+        "contract": {
+            "id": "contract-active", "status": "running", "domain": "decision",
+            "phase": "扫描", "total": 10, "checked": 2, "converted": 0,
+            "blank": 0, "review": 0, "conflicts": 0, "unknown_results": [],
+        },
+    }
+
+    def route_api(route):
+        request = route.request
+        path = request.url.split("?", 1)[0]
+        if path.endswith("/api/v1/research/data/catalog"):
+            route.fulfill(json={"datasets": [], "specs": []})
+        elif path.endswith("/api/v1/research/data/capabilities"):
+            route.fulfill(json={"data": [], "kernel": {"backend": "python"}})
+        elif path.endswith("/api/v1/research/data/jobs"):
+            route.fulfill(json={"items": [active["research"]]})
+        elif path.endswith("/api/v1/research/data/jobs/research-active"):
+            polls["research"] += 1
+            route.fulfill(json=active["research"])
+        elif path.endswith("/api/v1/data/migrations") and request.method == "POST":
+            route.fulfill(json=active["migration"])
+        elif path.endswith("/api/v1/data/migrations/migration-active"):
+            polls["migration"] += 1
+            route.fulfill(json=active["migration"])
+        elif path.endswith("/api/v1/data/contract-migrations"):
+            route.fulfill(json={
+                "available_types": ["decision"], "latest": active["contract"],
+            })
+        elif path.endswith("/api/v1/data/contract-migrations/contract-active"):
+            polls["contract"] += 1
+            route.fulfill(json=active["contract"])
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/**", route_api)
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+
+        page.locator('[data-settings-section="research-data"]').click()
+        page.locator("#research-artifacts > summary").click()
+        page.get_by_text("研究生产中", exact=False).wait_for()
+        page.locator('[data-settings-section="local-data"]').click()
+        page.locator("#migration-target").fill("C:/QuantMaster-migration-test")
+        page.locator("#migration-start").click()
+        page.wait_for_timeout(1_000)
+        assert all(count >= 1 for count in polls.values()), polls
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.wait_for_timeout(300)
+        paused = dict(polls)
+        page.wait_for_timeout(2_100)
+        assert polls == paused
+
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        page.wait_for_timeout(2_100)
+        assert all(polls[name] > paused[name] for name in polls), {"before": paused, "after": polls}
         browser.close()

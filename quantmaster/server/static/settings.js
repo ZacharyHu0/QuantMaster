@@ -6,9 +6,12 @@ const settingsFeature = (() => {
     config: null,
     secretActions: { llm: 'keep', tushare: 'keep' },
     migrationTimer: null,
+    migrationId: '',
     dataRefreshTimer: null,
+    dataRefreshId: '',
     dataRefreshPreview: null,
     researchTimer: null,
+    researchId: '',
     researchPreview: null,
     researchCatalog: null,
     researchControlsLoaded: false,
@@ -36,6 +39,7 @@ const settingsFeature = (() => {
   const form = document.getElementById('settings-form');
   let freeStockDbPollTimer = null;
   let freeStockDbPollFailures = 0;
+  let mounted = false;
 
   function scheduleFreeStockDbPoll(delay = 1000) {
     if (freeStockDbPollTimer !== null) return;
@@ -832,12 +836,12 @@ const settingsFeature = (() => {
           document.querySelector('[data-settings-section="lab"].active')) loadAutomationOverview();
     } catch (error) {
       setSaveState('error', `自动保存失败：${error.message}`);
-      if (error.status === 423) {
+      if (mounted && error.status === 423) {
         state.retryTimer = setTimeout(flushAutosave, 1200);
       }
     } finally {
       state.saveInFlight = false;
-      if (state.saveQueued || state.editRevision > revision) {
+      if (mounted && (state.saveQueued || state.editRevision > revision)) {
         state.autoSaveTimer = setTimeout(flushAutosave, 0);
       }
     }
@@ -1146,7 +1150,7 @@ const settingsFeature = (() => {
       const job = latest.items?.[0];
       if (job) {
         renderDataRefresh(job);
-        if (['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
+        if (mounted && ['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
       }
     } catch (_) { /* 首次使用时没有任务是正常状态。 */ }
   }
@@ -1175,6 +1179,7 @@ const settingsFeature = (() => {
     const resume = document.getElementById('data-refresh-resume');
     resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
     resume.dataset.jobId = task.id;
+    state.dataRefreshId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
     const runtimeKey = `persistent:health:refresh:${task.id}`;
     if (['running', 'cancelling'].includes(task.status)) {
       window.QuantMasterRunInfo.add('info', '数据同步', '行情尾部正在增量同步', {
@@ -1200,7 +1205,7 @@ const settingsFeature = (() => {
     try {
       const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}`);
       renderDataRefresh(task);
-      if (['running', 'cancelling'].includes(task.status)) {
+      if (mounted && ['running', 'cancelling'].includes(task.status)) {
         state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
       }
     } catch (error) {
@@ -1332,7 +1337,7 @@ const settingsFeature = (() => {
       const latest = (jobs.items || [])[0];
       if (latest) {
         renderResearchJob(latest);
-        if (['running', 'cancelling'].includes(latest.status)) pollResearchJob(latest.id);
+        if (mounted && ['running', 'cancelling'].includes(latest.status)) pollResearchJob(latest.id);
       }
     } catch (error) {
       document.getElementById('research-capabilities').innerHTML = `<span class="err">研究目录不可用：${html(error.message)}</span>`;
@@ -1364,6 +1369,7 @@ const settingsFeature = (() => {
     const resume = document.getElementById('research-resume');
     resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
     resume.dataset.jobId = task.id;
+    state.researchId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
   }
 
   async function pollResearchJob(id) {
@@ -1371,7 +1377,7 @@ const settingsFeature = (() => {
     try {
       const task = await request(`/api/v1/research/data/jobs/${id}`);
       renderResearchJob(task);
-      if (['running', 'cancelling'].includes(task.status)) {
+      if (mounted && ['running', 'cancelling'].includes(task.status)) {
         state.researchTimer = setTimeout(() => pollResearchJob(id), 2000);
       }
     } catch (error) {
@@ -1451,7 +1457,9 @@ const settingsFeature = (() => {
       root.style.setProperty('--migration-progress', task.progress / 100);
       root.querySelector('[data-migration-phase]').textContent = task.error || task.phase;
       root.querySelector('[data-migration-percent]').textContent = `${task.progress}%`;
-      if (['pending', 'running', 'cancelling'].includes(task.status)) {
+      state.migrationId = ['pending', 'running', 'cancelling'].includes(task.status)
+        ? String(task.id || id) : '';
+      if (mounted && state.migrationId) {
         state.migrationTimer = setTimeout(() => pollMigration(id), 600);
       } else {
         document.getElementById('migration-cancel').hidden = true;
@@ -1499,11 +1507,11 @@ const settingsFeature = (() => {
   function renderContractMigration(task) {
     const empty = document.getElementById('contract-migration-empty');
     if (!task) {
+      state.contractMigrationId = '';
       empty.hidden = false;
       return;
     }
     empty.hidden = true;
-    state.contractMigrationId = task.id;
     const total = Number(task.total || 0);
     const checked = Number(task.checked || 0);
     const ratio = total > 0 ? Math.min(1, checked / total) : 0;
@@ -1526,6 +1534,7 @@ const settingsFeature = (() => {
       ? '离线停写已验证' : '未处于离线停写窗口';
     writeState.className = `state-pill ${task.write_paused ? 'sell' : ''}`;
     const active = ['queued', 'backing_up', 'running', 'pausing'].includes(task.status);
+    state.contractMigrationId = active ? String(task.id || '') : '';
     document.getElementById('contract-migration-pause').hidden = !active || task.status === 'pausing';
     document.getElementById('contract-migration-resume').hidden = true;
     document.getElementById('contract-migration-rollback').hidden = true;
@@ -1534,7 +1543,7 @@ const settingsFeature = (() => {
     const unknown = Array.isArray(task.unknown_results) ? task.unknown_results : [];
     investigation.hidden = unknown.length === 0;
     list.innerHTML = unknown.map(item => `<li><strong>${html(item.record_key)}</strong><code>${html(item.diagnostic_code || 'needs_review')}</code><span>${html((item.unknown_fields || []).join('、') || '未确认可选字段')}</span><small>${html(item.detail || '原记录证据不足，当前字段保持为空。')}</small></li>`).join('');
-    if (active) scheduleContractMigrationPoll(task.id);
+    if (mounted && active) scheduleContractMigrationPoll(task.id);
   }
 
   function scheduleContractMigrationPoll(id, delay = 800) {
@@ -1552,7 +1561,7 @@ const settingsFeature = (() => {
       if (state.contractMigrationFailures === 1) {
         document.querySelector('[data-contract-phase]').textContent = `状态暂时不可用：${error.message}`;
       }
-      if (state.contractMigrationFailures < 5) {
+      if (mounted && state.contractMigrationFailures < 5) {
         scheduleContractMigrationPoll(id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)));
       }
     }
@@ -1630,17 +1639,28 @@ const settingsFeature = (() => {
     }
   });
 
-  async function openSettings(section = 'llm') {
-    const entry = document.querySelector('[data-tab="settings"]');
-    entry?.click();
+  function resumeActiveWork() {
+    if (state.editRevision > state.savedRevision && !state.saveInFlight) {
+      state.autoSaveTimer = setTimeout(flushAutosave, 0);
+    }
+    if (state.dataRefreshId) void pollDataRefresh(state.dataRefreshId);
+    if (state.researchId) void pollResearchJob(state.researchId);
+    if (state.migrationId) void pollMigration(state.migrationId);
+    if (state.contractMigrationId) scheduleContractMigrationPoll(state.contractMigrationId, 0);
+  }
+
+  async function mountSettings() {
+    const resume = state.loaded;
+    mounted = true;
     await loadSettings();
-    switchSection(section);
+    if (resume && mounted) resumeActiveWork();
   }
 
   const management = {
-    request, ensureSettings: loadSettings, state, open: openSettings,
+    request, ensureSettings: loadSettings, state,
   };
   function unmount() {
+    mounted = false;
     [
       'migrationTimer', 'dataRefreshTimer', 'researchTimer', 'modelCheckTimer',
       'autoSaveTimer', 'retryTimer', 'weixinLoginTimer', 'contractMigrationTimer',
@@ -1652,7 +1672,7 @@ const settingsFeature = (() => {
     freeStockDbPollTimer = null;
   }
 
-  return {mount:loadSettings, unmount, refresh:() => loadSettings(true), ...management};
+  return {mount:mountSettings, unmount, refresh:() => loadSettings(true), ...management};
 })();
 
-export const {mount, unmount, refresh, request, ensureSettings, state, open} = settingsFeature;
+export const {mount, unmount, refresh, request, ensureSettings, state} = settingsFeature;

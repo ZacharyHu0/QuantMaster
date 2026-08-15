@@ -546,7 +546,13 @@ const stockAnalysisFeature = (() => {
   });
 
   async function loadStockAnalysis() {
-    if (loaded) return;
+    if (loaded) {
+      if (activeRun && !terminalStatuses.has(activeRun.status)) {
+        activeToken += 1;
+        pollRun(activeRun, activeToken);
+      }
+      return;
+    }
     loaded = true;
     resetDimensions();
     const saved = storedRun();
@@ -567,7 +573,11 @@ const stockAnalysisFeature = (() => {
     tickTimer = 0;
   }
 
-  return {mount:loadStockAnalysis, unmount, refresh:loadStockAnalysis};
+  return {
+    mount:loadStockAnalysis,
+    unmount,
+    refresh:() => activeRun ? refreshAnalysis(activeRun) : Promise.resolve(),
+  };
 })();
 
 export const {mount, unmount, refresh} = stockAnalysisFeature;

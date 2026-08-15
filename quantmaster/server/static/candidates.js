@@ -481,6 +481,7 @@ const candidatesFeature = (() => {
     if (!pending) return;
     if (pending.type === 'candidate') await selectCandidate(pending.value, {force:true});
     else if (pending.type === 'tab') document.querySelector(`header [data-tab="${CSS.escape(pending.value)}"]`)?.click();
+    else if (pending.type === 'workspace') document.querySelector(`header [data-workspace="${CSS.escape(pending.value)}"]`)?.click();
     else if (pending.type === 'action' && pending.value === 'new') startNew();
     else if (pending.type === 'action' && pending.value === 'import') await openImport();
   }
@@ -1030,12 +1031,17 @@ const candidatesFeature = (() => {
   });
 
   document.querySelector('header').addEventListener('click', event => {
-    const target = event.target.closest('[data-tab]');
+    const tab = event.target.closest('[data-tab]');
+    const workspaceTarget = event.target.closest('[data-workspace]');
     const active = document.getElementById('tab-candidates')?.classList.contains('active');
-    if (!active || !target || target.dataset.tab === 'candidates' || !state.dirty) return;
+    if (!active || !state.dirty) return;
+    if (!tab && (!workspaceTarget || workspaceTarget.dataset.workspace === 'today')) return;
+    if (tab?.dataset.tab === 'candidates') return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    showGuard({type:'tab', value:target.dataset.tab});
+    showGuard(tab
+      ? {type:'tab', value:tab.dataset.tab}
+      : {type:'workspace', value:workspaceTarget.dataset.workspace});
   }, true);
 
   window.addEventListener('beforeunload', event => {

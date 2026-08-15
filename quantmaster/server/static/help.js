@@ -690,14 +690,17 @@ const helpFeature = (() => {
       if (helpLink) root.querySelector('.help-mobile-toc')?.removeAttribute('open');
     });
 
-    if ('IntersectionObserver' in window) {
-      observer = new IntersectionObserver(entries => {
-        const visible = entries.filter(entry => entry.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (visible?.target?.dataset.helpTopic) selectTopic(visible.target.dataset.helpTopic);
-      }, {rootMargin: '-18% 0px -68% 0px', threshold: 0});
-      root.querySelectorAll('[data-help-topic]').forEach(chapter => observer.observe(chapter));
-    }
+    observeTopics();
+  }
+
+  function observeTopics() {
+    if (observer || !('IntersectionObserver' in window)) return;
+    observer = new IntersectionObserver(entries => {
+      const visible = entries.filter(entry => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (visible?.target?.dataset.helpTopic) selectTopic(visible.target.dataset.helpTopic);
+    }, {rootMargin: '-18% 0px -68% 0px', threshold: 0});
+    root.querySelectorAll('[data-help-topic]').forEach(chapter => observer.observe(chapter));
   }
 
   function setup() {
@@ -711,6 +714,7 @@ const helpFeature = (() => {
 
   function loadHelp() {
     if (ready) {
+      observeTopics();
       navigateToRoute();
       return Promise.resolve();
     }

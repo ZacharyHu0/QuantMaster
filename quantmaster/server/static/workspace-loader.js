@@ -148,11 +148,15 @@ function showError(error) {
 async function transitionTo(workspace, page, replace, token) {
   if (token !== activation) return false;
   const previous = active;
+  let previousUnmounted = false;
   let adapter = null;
   try {
     adapter = await loadWorkspace(workspace);
     if (token !== activation) return false;
-    if (previous?.adapter) await previous.adapter.unmount();
+    if (previous?.adapter) {
+      await previous.adapter.unmount();
+      previousUnmounted = true;
+    }
     if (token !== activation) return false;
     const context = {workspace, page, shell};
     await adapter.mount(context);
@@ -177,7 +181,7 @@ async function transitionTo(workspace, page, replace, token) {
       catch (_) { /* failed mounts may have nothing to dispose */ }
       if (token !== activation) return false;
     }
-    if (previous?.adapter) {
+    if (previousUnmounted) {
       await previous.adapter.mount(previous.context);
       if (token !== activation) return false;
       showRoute(previous.workspace, previous.page);
