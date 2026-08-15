@@ -1096,7 +1096,7 @@ def test_remove_task_artifacts_refuses_acl_recovery_outside_task_root(
 def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
     monkeypatch, tmp_path,
 ):
-    from scripts.dev import tasks
+    from scripts.dev import pytest_windows_acl, tasks
 
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
@@ -1109,7 +1109,9 @@ def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
             raise PermissionError(13, "denied", path)
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)
-    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
 
     def restore(command, **_kwargs):
         assert "$ErrorActionPreference='Stop'" in command[-1]
@@ -1126,7 +1128,7 @@ def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
 def test_remove_task_artifacts_targets_denied_child_without_enumerating(
     monkeypatch, tmp_path,
 ):
-    from scripts.dev import tasks
+    from scripts.dev import pytest_windows_acl, tasks
 
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
@@ -1151,7 +1153,9 @@ def test_remove_task_artifacts_targets_denied_child_without_enumerating(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)
-    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
     monkeypatch.setattr(tasks.subprocess, "run", restore)
 
     remove_task_artifacts(primary, "recovery")
@@ -1161,7 +1165,7 @@ def test_remove_task_artifacts_targets_denied_child_without_enumerating(
 
 
 def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_path):
-    from scripts.dev import tasks
+    from scripts.dev import pytest_windows_acl, tasks
 
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
@@ -1179,7 +1183,9 @@ def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_pat
         return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)
-    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
     monkeypatch.setattr(tasks.subprocess, "run", restore)
 
     with pytest.raises(SystemExit, match="TASK_ARTIFACT_ACL_UNRECOVERABLE"):
@@ -1190,7 +1196,7 @@ def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_pat
 
 
 def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_path):
-    from scripts.dev import tasks
+    from scripts.dev import pytest_windows_acl, tasks
 
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
@@ -1217,7 +1223,7 @@ def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
     monkeypatch.setattr(tasks.shutil, "rmtree", remove_once_blocked)
     monkeypatch.setattr(
-        tasks, "os", SimpleNamespace(name="nt", environ=os.environ),
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
     )
     monkeypatch.setattr(
         tasks.subprocess, "run",
