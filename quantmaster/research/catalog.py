@@ -18,10 +18,9 @@ from quantmaster.research.contracts import (
     canonical_json,
     utc_now,
 )
-from quantmaster.runtime.jobs import lease_deadline
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 
-RESEARCH_SCHEMA_VERSION = 1
+RESEARCH_SCHEMA_VERSION = 2
 
 
 class ResearchSchemaMigrationRequired(RuntimeError):
@@ -52,10 +51,10 @@ class ResearchCatalog:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            migrate_schema(connection, ((RESEARCH_SCHEMA_VERSION, self._schema_v1),))
+            migrate_schema(connection, ((RESEARCH_SCHEMA_VERSION, self._schema_v2),))
 
     @staticmethod
-    def _schema_v1(connection: sqlite3.Connection) -> None:
+    def _schema_v2(connection: sqlite3.Connection) -> None:
             execute_sql_script(
                 connection,
                 """
@@ -117,32 +116,6 @@ class ResearchCatalog:
                     detail TEXT NOT NULL,
                     checked_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS research_jobs (
-                    id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    plan_json TEXT NOT NULL,
-                    next_index INTEGER NOT NULL DEFAULT 0,
-                    total INTEGER NOT NULL,
-                    succeeded INTEGER NOT NULL DEFAULT 0,
-                    failed INTEGER NOT NULL DEFAULT 0,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    current_task TEXT NOT NULL DEFAULT '',
-                    failures_json TEXT NOT NULL DEFAULT '[]',
-                    manifest_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS research_job_events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT NOT NULL,
-                    attempt INTEGER NOT NULL,
-                    event_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(job_id) REFERENCES research_jobs(id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_research_job_events
-                    ON research_job_events(job_id,seq);
                 """
             )
             partition_columns = {
@@ -156,34 +129,6 @@ class ResearchCatalog:
                         f"ALTER TABLE research_partitions ADD COLUMN {name} "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
-            columns = {
-                row[1] for row in connection.execute(
-                    "PRAGMA table_info(research_jobs)"
-                ).fetchall()
-            }
-            additions = {
-                "owner": "TEXT NOT NULL DEFAULT ''",
-                "lease_expires": "REAL NOT NULL DEFAULT 0",
-                "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
-                "attempt": "INTEGER NOT NULL DEFAULT 1",
-                "task_indexes_json": "TEXT NOT NULL DEFAULT '[]'",
-            }
-            for name, definition in additions.items():
-                if name not in columns:
-                    connection.execute(
-                        f"ALTER TABLE research_jobs ADD COLUMN {name} {definition}"
-                    )
-            rows = connection.execute(
-                "SELECT id,total,task_indexes_json FROM research_jobs"
-            ).fetchall()
-            for row in rows:
-                if json.loads(row["task_indexes_json"] or "[]"):
-                    continue
-                connection.execute(
-                    "UPDATE research_jobs SET task_indexes_json=? WHERE id=?",
-                    (canonical_json(list(range(int(row["total"])))), row["id"]),
-                )
-
     def _require_current(self) -> None:
         with self._connect() as connection:
             tables = {str(row[0]) for row in connection.execute(
@@ -192,46 +137,20 @@ class ResearchCatalog:
             required = {
                 "research_specs", "research_partitions", "research_runs",
                 "research_leases", "research_partition_intents",
-                "research_capabilities", "research_jobs", "research_job_events",
+                "research_capabilities",
             }
             partition_columns = {str(row[1]) for row in connection.execute(
                 "PRAGMA table_info(research_partitions)"
-            )}
-            job_columns = {str(row[1]) for row in connection.execute(
-                "PRAGMA table_info(research_jobs)"
             )}
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if (
                 version != RESEARCH_SCHEMA_VERSION or required - tables
                 or {"file_size", "file_mtime_ns"} - partition_columns
-                or {"owner", "lease_expires", "heartbeat_at", "attempt", "task_indexes_json"}
-                - job_columns
+                or {"research_jobs", "research_job_events"} & tables
             ):
                 raise ResearchSchemaMigrationRequired(
-                    "research catalog 不是当前 schema，需执行 remaining-schemas 一次性迁移"
+                    "research catalog 不是当前 schema，需执行 research-jobs 一次性迁移"
                 )
-
-    @classmethod
-    def migrate_legacy_database(cls, path: str | Path) -> None:
-        with connect_sqlite(Path(path), row_factory=True) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                cls._schema_v1(connection)
-                connection.execute(f"PRAGMA user_version={RESEARCH_SCHEMA_VERSION}")
-                connection.commit()
-            except (sqlite3.Error, OSError, TypeError, ValueError):
-                connection.rollback()
-                raise
-
-    def recover_interrupted_jobs(self) -> int:
-        """Recover only abandoned leases; live workers in other processes are untouched."""
-        with self._connect() as connection:
-            return connection.execute(
-                "UPDATE research_jobs SET status='interrupted',owner='',lease_expires=0,"
-                "current_task='',updated_at=? WHERE status IN ('running','cancelling') "
-                "AND lease_expires<=?",
-                (utc_now(), time.time()),
-            ).rowcount
 
     @staticmethod
     def partition_key(
@@ -543,208 +462,3 @@ class ResearchCatalog:
                 "SELECT manifest_json FROM research_runs WHERE run_id=?", (run_id,)
             ).fetchone()
         return json.loads(row["manifest_json"]) if row else None
-
-    def create_job(self, job_id: str, mode: str, plan: dict[str, Any]) -> dict[str, Any]:
-        now = utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            active = connection.execute(
-                "SELECT id FROM research_jobs "
-                "WHERE status IN ('queued','running','cancelling') LIMIT 1"
-            ).fetchone()
-            if active:
-                raise ValueError(f"已有研究数据任务正在运行：{active['id']}")
-            task_indexes = list(range(len(plan.get("tasks") or ())))
-            connection.execute(
-                "INSERT INTO research_jobs "
-                "(id,status,mode,plan_json,total,task_indexes_json,created_at,updated_at) "
-                "VALUES (?,'queued',?,?,?,?,?,?)",
-                (
-                    job_id, mode, canonical_json(plan), len(task_indexes),
-                    canonical_json(task_indexes), now, now,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO research_job_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, 1, canonical_json({"type": "queued"}), now),
-            )
-        return self.job(job_id) or {}
-
-    def append_job_event(self, job_id: str, attempt: int, event: dict[str, Any]) -> int:
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "INSERT INTO research_job_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, attempt, canonical_json(event), utc_now()),
-            )
-        return int(cursor.lastrowid or 0)
-
-    def claim_job(self, job_id: str, owner: str, lease_seconds: float = 30.0) -> bool:
-        now = utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            changed = connection.execute(
-                "UPDATE research_jobs SET status='running',owner=?,lease_expires=?,"
-                "heartbeat_at=?,updated_at=? WHERE id=? AND status IN ('queued','interrupted') "
-                "AND cancel_requested=0",
-                (owner, lease_deadline(lease_seconds), now, now, job_id),
-            ).rowcount
-            if changed:
-                row = connection.execute(
-                    "SELECT attempt FROM research_jobs WHERE id=?", (job_id,)
-                ).fetchone()
-                connection.execute(
-                    "INSERT INTO research_job_events(job_id,attempt,event_json,created_at) "
-                    "VALUES (?,?,?,?)",
-                    (job_id, int(row["attempt"]), canonical_json({
-                        "type": "claimed", "owner": owner,
-                    }), now),
-                )
-        return bool(changed)
-
-    def heartbeat_job(self, job_id: str, owner: str, lease_seconds: float = 30.0) -> bool:
-        now = utc_now()
-        with self._connect() as connection:
-            changed = connection.execute(
-                "UPDATE research_jobs SET lease_expires=?,heartbeat_at=?,updated_at=? "
-                "WHERE id=? AND owner=? AND status IN ('running','cancelling')",
-                (lease_deadline(lease_seconds), now, now, job_id, owner),
-            ).rowcount
-        return bool(changed)
-
-    def interrupt_owned(self, owner: str) -> int:
-        now = utc_now()
-        with self._connect() as connection:
-            return connection.execute(
-                "UPDATE research_jobs SET status='interrupted',owner='',lease_expires=0,"
-                "current_task='',updated_at=? WHERE owner=? "
-                "AND status IN ('running','cancelling')",
-                (now, owner),
-            ).rowcount
-
-    def update_job(
-        self,
-        job_id: str,
-        *,
-        expected_owner: str | None = None,
-        **changes: Any,
-    ) -> dict[str, Any]:
-        allowed = {
-            "status", "next_index", "succeeded", "failed", "cancel_requested",
-            "current_task", "failures_json", "manifest_json", "owner", "lease_expires",
-            "heartbeat_at", "attempt", "task_indexes_json", "total",
-        }
-        assignments: list[str] = []
-        params: list[Any] = []
-        for key, value in changes.items():
-            if key not in allowed:
-                raise ValueError(f"不允许更新任务字段: {key}")
-            if key.endswith("_json") and not isinstance(value, str):
-                value = canonical_json(value)
-            assignments.append(f"{key}=?")
-            params.append(value)
-        assignments.append("updated_at=?")
-        params.extend((utc_now(), job_id))
-        where = "id=?"
-        if expected_owner is not None:
-            where += " AND owner=?"
-            params.append(expected_owner)
-        with self._connect() as connection:
-            changed = connection.execute(
-                f"UPDATE research_jobs SET {','.join(assignments)} WHERE {where}", params
-            ).rowcount
-        if not changed:
-            if expected_owner is not None:
-                raise RuntimeError(f"任务租约已丢失：{job_id}")
-            raise KeyError(job_id)
-        return self.job(job_id) or {}
-
-    @staticmethod
-    def _job(row: sqlite3.Row) -> dict[str, Any]:
-        value = dict(row)
-        value["plan"] = json.loads(value.pop("plan_json"))
-        value["failures"] = json.loads(value.pop("failures_json"))
-        value["manifest"] = json.loads(value.pop("manifest_json"))
-        value["task_indexes"] = json.loads(value.pop("task_indexes_json"))
-        value["cancel_requested"] = bool(value["cancel_requested"])
-        value["progress"] = round(100 * int(value["next_index"]) / max(1, int(value["total"])))
-        return value
-
-    def job(self, job_id: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM research_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-        return self._job(row) if row else None
-
-    def jobs(self, limit: int = 50) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM research_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-            ).fetchall()
-        return [self._job(row) for row in rows]
-
-    def job_events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT seq,attempt,event_json,created_at FROM research_job_events "
-                "WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?",
-                (job_id, max(0, after), max(1, min(limit, 2000))),
-            ).fetchall()
-        return [{
-            "seq": row["seq"], "attempt": row["attempt"],
-            "created_at": row["created_at"], **json.loads(row["event_json"]),
-        } for row in rows]
-
-    def resume_job(self, job_id: str) -> dict[str, Any]:
-        """Create a new immutable attempt without rewriting the original plan."""
-        now = utc_now()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            active = connection.execute(
-                "SELECT id FROM research_jobs WHERE id<>? "
-                "AND status IN ('queued','running','cancelling') LIMIT 1",
-                (job_id,),
-            ).fetchone()
-            if active:
-                raise ValueError(f"已有研究数据任务正在运行：{active['id']}")
-            row = connection.execute(
-                "SELECT status,plan_json,next_index,task_indexes_json,failures_json,attempt "
-                "FROM research_jobs WHERE id=?", (job_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            status = str(row["status"])
-            if status not in {"cancelled", "interrupted", "completed_with_errors"}:
-                raise ValueError("当前任务不能续跑")
-            task_indexes = json.loads(row["task_indexes_json"] or "[]")
-            next_index = int(row["next_index"])
-            if status == "completed_with_errors":
-                failed_indexes = [
-                    int(item["task_index"]) for item in json.loads(row["failures_json"] or "[]")
-                    if isinstance(item, dict) and isinstance(item.get("task_index"), int)
-                ]
-                if not failed_indexes:
-                    raise ValueError("没有可重试的数据任务")
-                task_indexes = failed_indexes
-                next_index = 0
-            attempt = int(row["attempt"]) + 1
-            connection.execute(
-                "UPDATE research_jobs SET status='queued',next_index=?,total=?,succeeded=0,"
-                "failed=0,cancel_requested=0,current_task='',failures_json='[]',owner='',"
-                "lease_expires=0,heartbeat_at='',attempt=?,task_indexes_json=?,updated_at=? "
-                "WHERE id=?",
-                (
-                    next_index, len(task_indexes), attempt, canonical_json(task_indexes),
-                    now, job_id,
-                ),
-            )
-            connection.execute(
-                "INSERT INTO research_job_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, attempt, canonical_json({
-                    "type": "resumed", "previous_status": status,
-                }), now),
-            )
-        return self.job(job_id) or {}

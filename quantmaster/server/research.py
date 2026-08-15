@@ -13,7 +13,15 @@ from quantmaster.config import get_config
 from quantmaster.research import AssetClass, KernelBackend
 from quantmaster.research.catalog import ResearchCatalog
 from quantmaster.research.engine import ResearchEngine
-from quantmaster.research.jobs import ResearchJobManager, get_research_job_manager
+from quantmaster.research.jobs import (
+    ResearchJobManager,
+    get_research_job_manager,
+    read_research_job,
+    research_job_events,
+)
+from quantmaster.research.jobs import (
+    list_research_jobs as read_research_jobs,
+)
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf, _require_local
@@ -185,11 +193,10 @@ def create_research_job(request: Request, value: ResearchPlanRequest) -> dict:
 def list_research_jobs(request: Request, limit: int = 50) -> dict:
     _require_local(request)
     try:
-        catalog = _read_catalog()
         return {
             "items": [
                 ResearchJobManager.public(item)
-                for item in catalog.jobs(max(1, min(limit, 200)))
+                for item in read_research_jobs(max(1, min(limit, 200)))
             ]
         }
     except sqlite3.Error as exc:
@@ -200,10 +207,7 @@ def list_research_jobs(request: Request, limit: int = 50) -> dict:
 def get_research_job(job_id: str, request: Request) -> dict:
     _require_local(request)
     try:
-        value = _read_catalog().job(job_id)
-        if value is None:
-            raise KeyError(job_id)
-        return ResearchJobManager.public(value)
+        return ResearchJobManager.public(read_research_job(job_id))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
     except sqlite3.Error as exc:
@@ -219,14 +223,11 @@ def get_research_job_events(
 ) -> dict:
     _require_local(request)
     try:
-        catalog = _read_catalog()
-        if catalog.job(job_id) is None:
-            raise KeyError(job_id)
+        return {"items": research_job_events(job_id, after, limit)}
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from None
-    except sqlite3.Error as exc:
+    except (FileNotFoundError, sqlite3.Error) as exc:
         raise HTTPException(503, "研究任务快照暂不可读") from exc
-    return {"items": catalog.job_events(job_id, after, limit)}
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -235,7 +236,7 @@ def cancel_research_job(job_id: str, request: Request) -> dict:
     try:
         manager = get_research_job_manager()
         return manager.public(manager.cancel(job_id))
-    except KeyError as exc:
+    except (FileNotFoundError, KeyError) as exc:
         raise HTTPException(404, str(exc)) from None
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
@@ -247,7 +248,7 @@ def resume_research_job(job_id: str, request: Request) -> dict:
     try:
         manager = get_research_job_manager()
         return manager.public(manager.resume(job_id))
-    except KeyError as exc:
+    except (FileNotFoundError, KeyError) as exc:
         raise HTTPException(404, str(exc)) from None
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
