@@ -414,16 +414,22 @@ def run_local_ci() -> int:
 
 def _non_main_commit(paths: set[str], branch: str) -> int:
     version_paths = sorted({RELEASE_FILE, CHANGELOG_FILE}.intersection(paths))
-    if version_paths:
-        return print_errors(
-            [
-                "任务分支不得修改版本元数据或 CHANGELOG；版本变更由 owner 要求时在单独版本 PR 完成："
-                + ", ".join(version_paths)
-            ],
-            "任务提交包含版本文件，提交已阻止",
+    if not version_paths:
+        print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过版本门禁")
+        return 0
+    if branch.startswith("codex/release-"):
+        print(
+            f"[QuantMaster] 版本 PR 分支 {branch} 提交版本文件；"
+            "一致性由 CI 的 release 契约与 scripts/release/sync.py 验证"
         )
-    print(f"[QuantMaster] 任务分支 {branch or '(detached)'} 提交：跳过版本门禁")
-    return 0
+        return 0
+    return print_errors(
+        [
+            "任务分支不得修改版本元数据或 CHANGELOG；版本变更由 owner 要求时在单独版本 PR 完成："
+            + ", ".join(version_paths)
+        ],
+        "任务提交包含版本文件，提交已阻止",
+    )
 
 
 def pre_commit() -> int:
