@@ -309,6 +309,52 @@ def test_gc_removes_legacy_invalid_root_with_only_disposable_content(monkeypatch
     assert not invalid.exists()
 
 
+def test_gc_removes_orphan_lease_marker_when_artifact_root_is_gone(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    marker = primary / ".artifacts" / "task-leases" / "old.task-running.lock"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("0", encoding="utf-8")
+
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "valid_task_completion", lambda root, slug: True)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    gc_task_artifacts(apply=True, retention_days=0, adopt_legacy_orphans=True)
+
+    assert not marker.exists()
+
+
+def test_gc_preserves_lease_marker_for_protected_task(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "active"
+    (primary / ".worktrees" / "active").mkdir(parents=True)
+    artifacts.mkdir(parents=True)
+    marker = primary / ".artifacts" / "task-leases" / "active.task-running.lock"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("0", encoding="utf-8")
+
+    class Result:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "valid_task_completion", lambda root, slug: True)
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    gc_task_artifacts(apply=True, retention_days=0, adopt_legacy_orphans=True)
+
+    assert marker.exists()
+    assert artifacts.exists()
+
+
 def test_gc_preserves_legacy_invalid_root_with_unknown_content(monkeypatch, tmp_path):
     from scripts.dev import tasks
 
@@ -982,6 +1028,9 @@ def test_remove_cleans_task_artifacts_after_checkout_and_branch(monkeypatch, tmp
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
     (artifacts / "pytest" / "cache").mkdir(parents=True)
+    marker = primary / ".artifacts" / "task-leases" / "recovery.task-running.lock"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("0", encoding="utf-8")
 
     class Result:
         returncode = 1
@@ -993,6 +1042,7 @@ def test_remove_cleans_task_artifacts_after_checkout_and_branch(monkeypatch, tmp
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
     remove("recovery")
     assert not artifacts.exists()
+    assert not marker.exists()
 
 
 def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
