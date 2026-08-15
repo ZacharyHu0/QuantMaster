@@ -42,6 +42,13 @@ def _assert_ordered(text: str, *needles: str) -> None:
     assert positions == sorted(positions)
 
 
+def _windows_cleanup_error(code: int, path: Path) -> OSError:
+    error = OSError(f"locked: {path}")
+    error.winerror = code
+    error.filename = str(path)
+    return error
+
+
 def _hold_direct_pytest_task_lease(primary: str, ready, release) -> None:
     from scripts.dev import pytest_windows_acl
 
@@ -865,7 +872,7 @@ def test_remove_cleans_ignored_task_venv_after_git_leaves_residual(
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: registered.copy())
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
     monkeypatch.setattr(tasks, "record_task_completion", lambda *args, **kwargs: None)
-    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args: None)
+    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "git", fake_git)
 
     remove("recovery")
@@ -920,7 +927,7 @@ def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_pa
             calls.append("branch")
         return Result()
 
-    def blocked_artifacts(*_args):
+    def blocked_artifacts(*_args, **_kwargs):
         calls.append("artifacts")
         raise SystemExit("Windows ACL blocked")
 
@@ -994,7 +1001,7 @@ def test_remove_explicitly_adopts_legacy_partial_checkout(monkeypatch, tmp_path)
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
     monkeypatch.setattr(tasks, "task_integrated", lambda *args: True)
-    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args: None)
+    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "record_task_completion", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
     remove("recovery", adopt_partial_removal=True)
@@ -1058,8 +1065,13 @@ def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
         tasks.shutil, "rmtree",
         lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(13, "denied", blocked)),
     )
-    with pytest.raises(SystemExit, match=r"Windows ACL.*pytest[\\/]cache"):
+    with pytest.raises(SystemExit) as captured:
         remove_task_artifacts(primary, "recovery")
+    message = str(captured.value)
+    assert "kind=deletion_denied" in message
+    assert "blocked=pytest/cache" in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
     assert artifacts.exists()
 
 
@@ -1188,10 +1200,128 @@ def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(tasks.subprocess, "run", restore)
 
-    with pytest.raises(SystemExit, match="TASK_ARTIFACT_ACL_UNRECOVERABLE"):
+    with pytest.raises(SystemExit) as captured:
         remove_task_artifacts(primary, "recovery")
 
+    message = str(captured.value)
+    assert "TASK_ARTIFACT_ACL_UNRECOVERABLE" in message
+    assert "kind=inspection_denied" in message
+    assert "blocked=." in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
     assert calls == ["remove", "inspect"]
+    assert artifacts.exists()
+
+
+def test_remove_task_artifacts_classifies_transient_acl_failure(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "runs" / "denied"
+    blocked.mkdir(parents=True)
+
+    def remove(path, **_kwargs):
+        raise PermissionError(13, "denied", blocked)
+
+    def restore(command, **_kwargs):
+        assert "GetAccessControl" in command[-1]
+        return SimpleNamespace(returncode=1, stdout="", stderr="PowerShell stopped")
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    with pytest.raises(SystemExit) as captured:
+        remove_task_artifacts(primary, "recovery")
+
+    message = str(captured.value)
+    assert "kind=transient" in message
+    assert "blocked=<local-path>" in message
+    assert "PowerShell stopped" in message
+    assert str(artifacts) not in message
+    assert artifacts.exists()
+
+
+@pytest.mark.parametrize("winerror", [32, 33, 145])
+def test_remove_task_artifacts_reports_transient_lock_without_acl_recovery(
+    monkeypatch, tmp_path, winerror,
+):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "runs" / "locked"
+    blocked.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        tasks.shutil, "rmtree",
+        lambda path, **_kwargs: (_ for _ in ()).throw(
+            _windows_cleanup_error(winerror, blocked),
+        ),
+    )
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("transient locks must not invoke PowerShell"),
+    )
+
+    with pytest.raises(SystemExit) as captured:
+        remove_task_artifacts(primary, "recovery")
+
+    message = str(captured.value)
+    assert "kind=transient_lock" in message
+    assert f"winerror={winerror}" in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
+    assert artifacts.exists()
+
+
+@pytest.mark.parametrize(
+    ("retry_winerror", "expected_kind"),
+    ((32, "transient_lock"), (None, "deletion_denied")),
+)
+def test_remove_task_artifacts_classifies_failure_after_acl_recovery(
+    monkeypatch, tmp_path, retry_winerror, expected_kind,
+):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "runs" / "denied"
+    blocked.mkdir(parents=True)
+    calls = []
+
+    def remove(path, **_kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", blocked)
+        if retry_winerror is None:
+            raise PermissionError(13, "still denied", blocked)
+        raise _windows_cleanup_error(retry_winerror, blocked)
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
+        lambda *args, **kwargs: calls.append("restore") or SimpleNamespace(
+            returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    with pytest.raises(SystemExit) as captured:
+        remove_task_artifacts(primary, "recovery")
+
+    message = str(captured.value)
+    assert f"kind={expected_kind}" in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
+    assert calls == ["remove", "restore", "remove"]
     assert artifacts.exists()
 
 
@@ -1296,15 +1426,28 @@ def test_remove_accepts_explicit_superseding_main_commit(monkeypatch, tmp_path):
         returncode = 0
         stdout = ""
 
+    artifact_calls = []
+
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {target})
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: False)
     monkeypatch.setattr(tasks, "superseding_main_commit", lambda root, commit: commit)
     monkeypatch.setattr(tasks, "remove_verified_residual", lambda *args: None)
-    monkeypatch.setattr(tasks, "remove_task_artifacts", lambda *args: None)
+    monkeypatch.setattr(
+        tasks, "remove_task_artifacts",
+        lambda *args, **kwargs: artifact_calls.append(kwargs),
+    )
     monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
 
-    remove("recovery", superseded_by="a" * 40)
+    commit = "a" * 40
+    remove("recovery", superseded_by=commit)
+
+    assert artifact_calls == [{
+        "retry_command": (
+            ".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove recovery "
+            f"--superseded-by {commit}"
+        ),
+    }]
 
 
 def test_remove_verified_residual_requires_clean_checkout(monkeypatch, tmp_path):
