@@ -392,6 +392,7 @@ def test_ready_for_review_event_escalates_the_pull_request_ci_matrix() -> None:
         "synchronize",
         "reopened",
         "ready_for_review",
+        "converted_to_draft",
     ]
     assert workflow["on"]["push"]["branches"] == ["main", "claude/**"]
     jobs = workflow["jobs"]
@@ -409,6 +410,10 @@ def test_ready_for_review_event_escalates_the_pull_request_ci_matrix() -> None:
         "quality-package-audit",
     ):
         assert jobs[job]["if"] == "github.event.pull_request.draft != true"
+    assert workflow["concurrency"] == {
+        "group": "ci-${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
 
 
 def test_documented_integration_order_has_no_ready_accept_ci_cycle() -> None:
