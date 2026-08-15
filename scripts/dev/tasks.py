@@ -24,9 +24,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from scripts.dev.pytest_windows_acl import prepare_pytest_directory
+    from scripts.dev.pytest_windows_acl import (
+        make_writable,
+        prepare_pytest_directory,
+        restore_acl_inheritance,
+    )
 except ModuleNotFoundError:
-    from pytest_windows_acl import prepare_pytest_directory
+    from pytest_windows_acl import (
+        make_writable,
+        prepare_pytest_directory,
+        restore_acl_inheritance,
+    )
 
 from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
 
@@ -704,12 +712,6 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
     expected_parent = (primary / ".worktrees").resolve()
     if resolved.parent != expected_parent:
         raise SystemExit("拒绝删除预期目录之外的残留 worktree")
-    def make_writable(function, path, error):
-        if not isinstance(error, PermissionError):
-            raise error
-        os.chmod(path, stat.S_IWRITE)
-        function(path)
-
     try:
         shutil.rmtree(resolved, onexc=make_writable)
     except PermissionError as exc:
@@ -728,58 +730,19 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
     if not artifact_root.exists():
         return
 
-    def make_writable(function, path, error):
-        if not isinstance(error, PermissionError):
-            raise error
-        os.chmod(path, stat.S_IWRITE)
-        function(path)
-
-    def restore_inheritance(blocked: Path) -> None:
-        if os.name != "nt":
-            return
-        script = (
-            "$ErrorActionPreference='Stop';"
-            "$item=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_BLOCKED -Force;"
-            "$acl=if($item.PSIsContainer){"
-            "[System.IO.Directory]::GetAccessControl($item.FullName)"
-            "}else{[System.IO.File]::GetAccessControl($item.FullName)};"
-            "if($acl.AreAccessRulesProtected){"
-            "$acl.SetAccessRuleProtection($false,$true);"
-            "if($item.PSIsContainer){"
-            "[System.IO.Directory]::SetAccessControl($item.FullName,$acl)"
-            "}else{[System.IO.File]::SetAccessControl($item.FullName,$acl)}"
-            "}"
-        )
-        environment = os.environ.copy()
-        environment["QM_TASK_ARTIFACT_BLOCKED"] = str(blocked)
-        try:
-            result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                env=environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            detail = f"{type(exc).__name__}: {exc}"
-        else:
-            detail = result.stderr.strip() or result.stdout.strip() or "unknown ACL error"
-            if result.returncode == 0:
-                return
-        raise SystemExit(
-            f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: 无法在当前身份检查或恢复任务工件 ACL："
-            f"{detail}；工件和任务分支已保留，请获得该路径权限后重新运行 tasks.py remove {slug}"
-        ) from None
-
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
     except PermissionError as exc:
         blocked = type(artifact_root)(exc.filename or artifact_root).resolve()
         if blocked != artifact_root and artifact_root not in blocked.parents:
             raise SystemExit(f"拒绝恢复任务工件之外的 ACL：{blocked}") from None
-        restore_inheritance(blocked)
+        try:
+            restore_acl_inheritance(blocked)
+        except OSError as acl_error:
+            raise SystemExit(
+                f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: 无法在当前身份检查或恢复任务工件 ACL："
+                f"{acl_error}；工件和任务分支已保留，请获得该路径权限后重新运行 tasks.py remove {slug}"
+            ) from None
         try:
             shutil.rmtree(artifact_root, onexc=make_writable)
             return
