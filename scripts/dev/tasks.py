@@ -25,12 +25,14 @@ if str(ROOT) not in sys.path:
 
 try:
     from scripts.dev.pytest_windows_acl import (
+        AclRecoveryError,
         make_writable,
         prepare_pytest_directory,
         restore_acl_inheritance,
     )
 except ModuleNotFoundError:
     from pytest_windows_acl import (
+        AclRecoveryError,
         make_writable,
         prepare_pytest_directory,
         restore_acl_inheritance,
@@ -46,6 +48,7 @@ TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
 REMOVE_INTENT_SCHEMA = 1
 TASK_ARTIFACT_ACL_UNRECOVERABLE = "TASK_ARTIFACT_ACL_UNRECOVERABLE"
+_WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 
 
 def git(args: list[str], *, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -722,13 +725,28 @@ def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
         ) from None
 
 
-def remove_task_artifacts(primary: Path, slug: str) -> None:
+def remove_task_artifacts(
+    primary: Path, slug: str, *, retry_command: str | None = None,
+) -> None:
     artifact_root = (primary / ".artifacts" / "worktrees" / slug).resolve()
     expected_parent = (primary / ".artifacts" / "worktrees").resolve()
     if artifact_root.parent != expected_parent:
         raise SystemExit("拒绝删除预期目录之外的任务工件")
     if not artifact_root.exists():
         return
+    retry = retry_command or (
+        f".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove {slug}"
+    )
+
+    def residual_message(blocked: Path, *, kind: str, reason: object) -> str:
+        relative_blocked = blocked.relative_to(artifact_root).as_posix()
+        return (
+            f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: kind={kind}; "
+            f"root={redact_sensitive_text(artifact_root)}; "
+            f"blocked={redact_sensitive_text(relative_blocked)}; "
+            f"reason={redact_sensitive_text(reason)}; "
+            f"retry={retry}；工件和任务分支已保留"
+        )
 
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
@@ -736,8 +754,20 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         blocked = type(artifact_root)(exc.filename or artifact_root).resolve()
         if blocked != artifact_root and artifact_root not in blocked.parents:
             raise SystemExit(f"拒绝恢复任务工件之外的 ACL：{blocked}") from None
+        if getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            raise SystemExit(
+                residual_message(
+                    blocked,
+                    kind="transient_lock",
+                    reason=f"winerror={exc.winerror}: {exc}",
+                )
+            ) from None
         try:
             restore_acl_inheritance(blocked)
+        except AclRecoveryError as acl_error:
+            raise SystemExit(
+                residual_message(blocked, kind=acl_error.kind, reason=acl_error)
+            ) from None
         except OSError as acl_error:
             raise SystemExit(
                 f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: 无法在当前身份检查或恢复任务工件 ACL："
@@ -754,6 +784,16 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
             ) from None
     except OSError as exc:
         blocked = type(artifact_root)(exc.filename or artifact_root)
+        if blocked != artifact_root and artifact_root not in blocked.parents:
+            raise SystemExit(f"拒绝清理任务工件之外的路径：{blocked}") from None
+        if getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            raise SystemExit(
+                residual_message(
+                    blocked.resolve(),
+                    kind="transient_lock",
+                    reason=f"winerror={exc.winerror}: {exc}",
+                )
+            ) from None
         raise SystemExit(
             "Windows ACL 阻止删除任务工件："
             f"{blocked}；{exc}"
@@ -992,6 +1032,10 @@ def _remove_locked(
     ).returncode == 0
     registered = target in registered_worktrees(primary)
     replacement = superseding_main_commit(primary, superseded_by)
+    retry_command = (
+        f".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove {slug}"
+        + (f" --superseded-by {replacement}" if replacement else "")
+    )
     if not branch_exists and not registered and not target.exists():
         artifacts = primary / ".artifacts" / "worktrees" / slug
         if replacement is not None:
@@ -1003,7 +1047,7 @@ def _remove_locked(
                 f"{branch} 仅剩孤儿工件但缺少完成凭据；"
                 "请使用 gc --adopt-legacy-orphans 做一次性所有者授权清理"
             )
-        remove_task_artifacts(primary, slug)
+        remove_task_artifacts(primary, slug, retry_command=retry_command)
         print(f"[task] {branch} 已清理")
         return
     if branch_exists and not task_integrated(primary, branch) and replacement is None:
@@ -1033,7 +1077,7 @@ def _remove_locked(
     # Artifacts may be owned by the current sandbox identity while Git metadata
     # requires a different one.  Clean them before the final Git write so the
     # documented retry can finish branch removal without stranding ACLs.
-    remove_task_artifacts(primary, slug)
+    remove_task_artifacts(primary, slug, retry_command=retry_command)
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     task_remove_intent_path(primary, slug).unlink(missing_ok=True)

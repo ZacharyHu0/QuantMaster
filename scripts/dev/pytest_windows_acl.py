@@ -12,6 +12,14 @@ from typing import Any
 from _pytest.config import hookimpl
 
 
+class AclRecoveryError(PermissionError):
+    """An ACL recovery attempt failed with a retryable diagnosis."""
+
+    def __init__(self, kind: str, detail: str) -> None:
+        self.kind = kind
+        super().__init__(detail)
+
+
 def prepare_pytest_directory(path: Path) -> Path:
     """Create a writable pytest directory without replacing inherited ACLs."""
     target = path.resolve()
@@ -60,12 +68,20 @@ def restore_acl_inheritance(path: Path) -> None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PermissionError(
-            f"无法检查或恢复 Windows ACL：{type(exc).__name__}: {exc}"
+        raise AclRecoveryError(
+            "transient", f"{type(exc).__name__}: {exc}"
         ) from exc
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown ACL error"
-        raise PermissionError(f"无法检查或恢复 Windows ACL：{detail}")
+        lowered = detail.casefold()
+        kind = (
+            "inspection_denied"
+            if "unauthorizedaccessexception" in lowered
+            or "access denied" in lowered
+            or "access is denied" in lowered
+            else "transient"
+        )
+        raise AclRecoveryError(kind, detail)
 
 
 def _install_task_artifact_lease(config: Any) -> None:
