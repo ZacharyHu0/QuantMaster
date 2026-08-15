@@ -386,10 +386,15 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
         validate_ready_state("codex/task", "", True, [])
     with pytest.raises(SystemExit, match="版本元数据"):
         validate_ready_state("codex/task", "", False, ["quantmaster/release.py"])
+    with pytest.raises(SystemExit, match="版本元数据"):
+        validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
 
 
-def test_ready_state_allows_task_changelog_updates():
-    validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+def test_ready_state_rejects_task_changelog_updates():
+    import pytest
+
+    with pytest.raises(SystemExit, match="版本元数据"):
+        validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
 
 
 def test_task_changed_paths_excludes_inherited_main_history(monkeypatch, tmp_path):

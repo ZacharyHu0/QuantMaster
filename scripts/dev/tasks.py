@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from scripts.dev.pytest_windows_acl import prepare_pytest_directory
@@ -26,7 +27,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-VERSION_PATHS = frozenset({"quantmaster/release.py"})
+VERSION_PATHS = frozenset({"quantmaster/release.py", "CHANGELOG.md"})
 VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
@@ -336,6 +337,96 @@ def has_full_validation(cwd: Path, identity: dict[str, object]) -> bool:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return False
     return recorded == identity
+
+
+def github_remote_repo(cwd: Path) -> tuple[str, str]:
+    result = git(["config", "--get", "remote.origin.url"], cwd=cwd, check=False)
+    if result.returncode:
+        raise SystemExit(
+            "缺少 origin remote，无法读取 GitHub CI 证据；"
+            "请本地运行 tasks.py ready（不带 --accept-ci）"
+        )
+    url = result.stdout.strip()
+    match = re.match(
+        r"(?:https?://(?:[^@/]+@)?github\.com/|git@github\.com:)"
+        r"([^/]+)/([^/]+?)(?:\.git)?/?$",
+        url,
+    )
+    if not match:
+        raise SystemExit(f"无法从 origin URL 解析 GitHub owner/repo：{url}")
+    return match.group(1), match.group(2)
+
+
+def ci_has_heavy_success(owner: str, repo: str, run_id: int) -> bool:
+    """A CI run counts as the full gate only when at least one heavy matrix job succeeded."""
+    result = subprocess.run(
+        [
+            "gh", "api", f"repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+            "--jq", "[.jobs[] | {name, conclusion}]",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if result.returncode:
+        return False
+    try:
+        jobs = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return False
+    heavy_prefixes = ("coverage-shard", "quality-package-audit", "windows-package")
+    return any(
+        job.get("conclusion") == "success"
+        and any(job.get("name", "").startswith(prefix) for prefix in heavy_prefixes)
+        for job in jobs
+    )
+
+
+def green_ci_runs(owner: str, repo: str, sha: str) -> list[dict[str, object]]:
+    endpoint = (
+        f"repos/{owner}/{repo}/actions/runs"
+        f"?head_sha={quote(sha)}&per_page=100"
+    )
+    result = subprocess.run(
+        [
+            "gh", "api", endpoint,
+            "--jq",
+            "[.workflow_runs[] | {id, name, status, conclusion, head_sha, html_url}]",
+        ],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if result.returncode:
+        raise SystemExit(
+            "gh api 调用失败；无法复用 CI 证据。请确认 gh 已登录且网络可用，"
+            "或本地运行 tasks.py ready（不带 --accept-ci）"
+        )
+    try:
+        runs = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"gh api 返回无法解析：{result.stdout[:200]}") from exc
+    matching = [run for run in runs if run.get("head_sha") == sha]
+    if not matching:
+        raise SystemExit(f"GitHub Actions 没有该 commit 的 run：{sha}")
+    pending = [run.get("name") for run in matching if run.get("status") != "completed"]
+    if pending:
+        raise SystemExit("CI 仍在运行，请等完成后再使用 --accept-ci：" + ", ".join(map(str, pending)))
+    failed = [
+        run.get("name") for run in matching
+        if run.get("conclusion") not in {"success", "neutral", "skipped"}
+    ]
+    if failed:
+        raise SystemExit("CI 未全绿：" + ", ".join(map(str, failed)))
+    successful = [
+        run for run in matching
+        if run.get("conclusion") == "success" and run.get("name") == "CI"
+    ]
+    if not any(
+        isinstance(run.get("id"), int) and ci_has_heavy_success(owner, repo, int(run["id"]))
+        for run in successful
+    ):
+        raise SystemExit(
+            "CI 只有 Draft 快检记录，没有完整重 job（coverage-shard / quality-package-audit / "
+            "windows-package）成功证据；请把 PR 标记为 Ready 并等待完整矩阵完成"
+        )
+    return successful
 
 
 def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impact:
@@ -754,7 +845,7 @@ def gc_task_artifacts(
         raise SystemExit("部分任务工件清理失败")
 
 
-def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
+def ready(cwd: Path, *, ui: bool, rust: bool, package: bool, accept_ci: bool = False) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
     behind_origin = bool(git(
@@ -771,6 +862,14 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool) -> None:
     if has_full_validation(cwd, identity):
         print("[task] identical clean-commit full validation already passed; reusing evidence")
         print("[task] READY: 可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
+        return
+    if accept_ci:
+        owner, repo = github_remote_repo(cwd)
+        ci_runs = green_ci_runs(owner, repo, str(identity["commit"]))
+        record_full_validation(cwd, identity)
+        for ci_run in ci_runs:
+            print(f"[task] CI full-gate evidence: {ci_run.get('html_url')}")
+        print("[task] READY（复用绿色 CI）：可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
         return
     args = [str(project_python(cwd)), "scripts/ci/run.py", "--full"]
     if ui:
@@ -910,6 +1009,10 @@ def parser() -> argparse.ArgumentParser:
     ready_parser.add_argument("--ui", action="store_true")
     ready_parser.add_argument("--rust", action="store_true")
     ready_parser.add_argument("--package", action="store_true")
+    ready_parser.add_argument(
+        "--accept-ci", action="store_true",
+        help="复用同一 commit 上绿色完整 CI 作为验证证据，不再本地重跑全套",
+    )
     remove_parser = commands.add_parser("remove")
     remove_parser.add_argument("slug")
     remove_parser.add_argument("--superseded-by")
@@ -935,7 +1038,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "check":
             check(cwd, staged=args.staged, base=args.base)
         elif args.command == "ready":
-            ready(cwd, ui=args.ui, rust=args.rust, package=args.package)
+            ready(
+                cwd, ui=args.ui, rust=args.rust, package=args.package,
+                accept_ci=args.accept_ci,
+            )
         elif args.command == "remove":
             remove(
                 args.slug, superseded_by=args.superseded_by,

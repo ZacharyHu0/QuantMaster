@@ -413,11 +413,11 @@ def run_local_ci() -> int:
 
 
 def _non_main_commit(paths: set[str], branch: str) -> int:
-    version_paths = sorted({RELEASE_FILE}.intersection(paths))
+    version_paths = sorted({RELEASE_FILE, CHANGELOG_FILE}.intersection(paths))
     if version_paths:
         return print_errors(
             [
-                "任务分支不得修改版本元数据；完成 ready 后按需在 main 更新："
+                "任务分支不得修改版本元数据或 CHANGELOG；版本变更由 owner 要求时在单独版本 PR 完成："
                 + ", ".join(version_paths)
             ],
             "任务提交包含版本文件，提交已阻止",

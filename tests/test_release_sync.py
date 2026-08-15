@@ -572,7 +572,7 @@ def test_release_ci_uses_project_interpreter_and_release_contract(monkeypatch, t
     ]
 
 
-@pytest.mark.parametrize("release_path", [RELEASE_FILE])
+@pytest.mark.parametrize("release_path", [RELEASE_FILE, CHANGELOG_FILE])
 def test_task_branch_rejects_release_metadata(monkeypatch, release_path):
     from scripts.release import sync as release_sync
 
