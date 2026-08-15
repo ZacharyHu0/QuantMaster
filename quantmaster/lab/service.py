@@ -721,24 +721,16 @@ class LabService:
             progress(52, "数据快照已冻结")
         return panel, membership, stored
 
-    def factor_correlation_matrix(
-        self,
-        *,
-        version_ids: list[str],
-        universe: str,
-        start: str,
-        end: str,
-        horizon: int,
-    ) -> dict[str, Any]:
-        """Compare expression factors on one frozen panel with the shared rank engine."""
-        from quantmaster.factors.composite import factor_correlation
-
-        unique_ids = list(dict.fromkeys(str(value).strip() for value in version_ids if value))
-        if len(unique_ids) != len(version_ids):
+    def _comparable_factor_versions(
+        self, version_ids: list[str], horizon: int,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        normalized = [str(value).strip() for value in version_ids]
+        unique_ids = list(dict.fromkeys(normalized))
+        if not all(normalized) or len(unique_ids) != len(version_ids):
             raise LabError(
                 "FACTOR_CORRELATION_SELECTION_INVALID",
-                "相关性分析不能包含重复因子版本",
-                action="取消重复选择后重试",
+                "相关性分析不能包含空白或重复的因子版本",
+                action="取消空白或重复选择后重试",
                 status_code=400,
             )
         if not 2 <= len(unique_ids) <= 30:
@@ -780,6 +772,38 @@ class LabService:
                 action="只选择支持同一周期的表达式因子",
                 context={"incompatible": incompatible},
             )
+        return unique_ids, versions
+
+    @staticmethod
+    def _high_correlation_pairs(
+        correlation: pd.DataFrame, version_ids: list[str], threshold: float,
+    ) -> list[dict[str, Any]]:
+        pairs = []
+        for index, left in enumerate(version_ids):
+            for right in version_ids[index + 1:]:
+                value = float(correlation.loc[left, right])
+                if np.isfinite(value) and abs(value) >= threshold:
+                    pairs.append({
+                        "left_version_id": left,
+                        "right_version_id": right,
+                        "rho": value,
+                        "absolute_rho": abs(value),
+                    })
+        return sorted(pairs, key=lambda item: item["absolute_rho"], reverse=True)
+
+    def factor_correlation_matrix(
+        self,
+        *,
+        version_ids: list[str],
+        universe: str,
+        start: str,
+        end: str,
+        horizon: int,
+    ) -> dict[str, Any]:
+        """Compare expression factors on one frozen panel with the shared rank engine."""
+        from quantmaster.factors.composite import factor_correlation
+
+        unique_ids, versions = self._comparable_factor_versions(version_ids, horizon)
 
         end = end or market_date().isoformat()
         panel, membership, snapshot = self._context(
@@ -799,18 +823,6 @@ class LabService:
             [float(value) if np.isfinite(value) else None for value in correlation.loc[row]]
             for row in unique_ids
         ]
-        high_pairs = []
-        for index, left in enumerate(unique_ids):
-            for right in unique_ids[index + 1:]:
-                value = float(correlation.loc[left, right])
-                if np.isfinite(value) and abs(value) >= threshold:
-                    high_pairs.append({
-                        "left_version_id": left,
-                        "right_version_id": right,
-                        "rho": value,
-                        "absolute_rho": abs(value),
-                    })
-        high_pairs.sort(key=lambda item: item["absolute_rho"], reverse=True)
         return {
             "schema_version": 1,
             "snapshot_hash": snapshot["snapshot_hash"],
@@ -831,7 +843,9 @@ class LabService:
                 "category": version["category"],
             } for version in versions],
             "matrix": matrix,
-            "high_correlations": high_pairs,
+            "high_correlations": self._high_correlation_pairs(
+                correlation, unique_ids, threshold,
+            ),
         }
 
     def prepare_data(
