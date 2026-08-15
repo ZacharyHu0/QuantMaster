@@ -59,6 +59,11 @@ def test_stable_launcher_reads_only_the_validated_active_slot(tmp_path) -> None:
     assert stable_slot_executable(tmp_path) == executable.resolve()
     script = _launcher_script()
     assert "launcher.target" in script
+    assert (
+        "for /f \"delims=\" %%A in ('%SystemRoot%\\System32\\findstr.exe /r /x "
+        "\"[0-9a-f]*\" \"%QM_APP_ROOT%launcher.target\" 2^>nul')" in script
+    )
+    assert 'in (\"%QM_APP_ROOT%launcher.target\")' not in script
     assert 'set "QM_SLOT=%QM_SLOTS%\\%QM_TARGET%"' in script
     assert 'if not "%QM_LINES%"=="1" exit /b 3' in script
     assert 'reparsepoint query "%QM_SLOT%"' in script
