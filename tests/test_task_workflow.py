@@ -1033,6 +1033,35 @@ def test_remove_task_artifacts_targets_denied_child_without_enumerating(
     assert not artifacts.exists()
 
 
+def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+    calls: list[str] = []
+
+    def remove(path, **_kwargs):
+        calls.append("remove")
+        raise PermissionError(13, "denied", path)
+
+    def restore(command, **kwargs):
+        calls.append("inspect")
+        assert "GetAccessControl" in command[-1]
+        assert kwargs["env"]["QM_TASK_ARTIFACT_BLOCKED"] == str(artifacts.resolve())
+        return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(tasks.os, "name", "nt")
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    with pytest.raises(SystemExit, match="TASK_ARTIFACT_ACL_UNRECOVERABLE"):
+        remove_task_artifacts(primary, "recovery")
+
+    assert calls == ["remove", "inspect"]
+    assert artifacts.exists()
+
+
 def test_remove_recovers_acl_artifacts_after_git_state_is_gone(monkeypatch, tmp_path):
     from scripts.dev import tasks
 
