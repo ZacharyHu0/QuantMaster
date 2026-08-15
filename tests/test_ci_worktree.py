@@ -424,14 +424,18 @@ def test_explicit_windows_onedir_lane_only_measures_and_reports(monkeypatch, tmp
         "--report",
         str(application.with_suffix(".sizes.json")),
     ]
+    measurement_root = artifacts / "packages" / "desktop" / "measurement"
     assert next(
-        call[1] for call in external_calls if call[0] == "onedir EXE help budget"
+        call[1] for call in external_calls if call[0] == "onedir startup budgets"
     ) == [
         str(run.PYTHON),
         "scripts/release/smoke_frozen_runtime.py",
         str(application / "QuantMaster.exe"),
-        "--help-layout",
-        "onedir",
+        "--onedir-smoke",
+        "--evidence",
+        str(measurement_root / "startup-budgets.json"),
+        "--instance-root",
+        str(measurement_root),
     ]
     assert all(call[0] != "EXE runtime identity smoke" for call in external_calls)
 

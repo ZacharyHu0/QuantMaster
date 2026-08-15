@@ -423,11 +423,17 @@ def main() -> int:
             if args.measure_onedir:
                 if not artifact.is_dir():
                     raise SystemExit(f"[local-ci] PyInstaller did not produce onedir: {artifact}")
+                measurement_root = PACKAGE_ROOT / "desktop" / "measurement"
+                measurement_root.mkdir(parents=True, exist_ok=True)
+                timing_evidence = measurement_root / "startup-budgets.json"
                 run_external(
-                    "onedir EXE help budget",
+                    "onedir startup budgets",
                     [
                         str(PYTHON), "scripts/release/smoke_frozen_runtime.py",
-                        str(artifact / "QuantMaster.exe"), "--help-layout", "onedir",
+                        str(artifact / "QuantMaster.exe"),
+                        "--onedir-smoke",
+                        "--evidence", str(timing_evidence),
+                        "--instance-root", str(measurement_root),
                     ],
                 )
                 archive = artifact.with_suffix(".zip")

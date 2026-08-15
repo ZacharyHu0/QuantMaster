@@ -23,6 +23,11 @@ from quantmaster.logging_config import redact_sensitive_text
 _IDENTITY_FIELDS = ("build_sha", "slot_id", "runtime_generation")
 _HELP_MAX_SECONDS = {"onefile": 20.0, "onedir": 1.5}
 _CORE_READY_MAX_SECONDS = 20.0
+_ONEDIR_CORE_READY_BUDGET_SECONDS = 5.0
+# Documented sampling: one true-cold sample (the gated value) plus a fixed
+# number of warm repeats whose median is reported for trend evidence.
+_WARM_HELP_SAMPLES = 2
+_WARM_CORE_READY_SAMPLES = 2
 
 
 def _assert_same_identity(*members: dict[str, Any]) -> None:
@@ -498,6 +503,231 @@ def smoke(executable: Path) -> dict[str, Any]:
                 launcher.kill()
                 launcher.wait(timeout=5.0)
 
+def _run_help_measure(
+    executable: Path,
+    environment: dict[str, str],
+    *,
+    layout: str,
+) -> float:
+    """Time one frozen ``--help`` run without enforcing the layout budget."""
+
+    started = time.monotonic()
+    result = subprocess.run(
+        [str(executable), "--help"],
+        cwd=executable.parent,
+        env={**environment, "PYTHONIOENCODING": "utf-8"},
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=25.0,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    if result.returncode:
+        raise RuntimeError(f"frozen help failed ({result.returncode}): {result.stderr[-2000:]}")
+    if "usage: qm" not in result.stdout:
+        raise RuntimeError("frozen help omitted the QuantMaster usage marker")
+    return elapsed
+
+
+def _median_of(values: list[float]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _sample_summary(samples: list[float]) -> dict[str, object]:
+    return {
+        "samples": [round(value, 3) for value in samples],
+        "cold_seconds": round(samples[0], 3),
+        "median_seconds": round(_median_of(samples), 3),
+    }
+
+
+def _core_ready_config(port: int, data_root: Path, stockdb_root: Path) -> str:
+    return json.dumps(
+        {
+            "server": {"host": "127.0.0.1", "port": port},
+            "data": {
+                "root": str(data_root),
+                "free_stockdb_root": str(stockdb_root),
+                "free_stockdb_managed": False,
+                "free_stockdb_auto_update": False,
+                "free_stockdb_online_enabled": False,
+                "akshare_enabled": False,
+                "tushare_enabled": False,
+                "yfinance_enabled": False,
+                "after_close_enabled": False,
+                "after_close_auto_run": False,
+                "repair_enabled": False,
+            },
+            "automation": {"enabled": False},
+            "lab": {"enabled": False},
+        }
+    )
+
+
+def _measure_core_ready_once(
+    executable: Path,
+    environment: dict[str, str],
+    instance: Path,
+    port: int,
+) -> float:
+    """Start the frozen server once and return seconds until lightweight core_ready."""
+
+    data_root = instance / "data"
+    stockdb_root = instance / "stockdb"
+    config_path = instance / "config.yaml"
+    config_path.write_text(
+        _core_ready_config(port, data_root, stockdb_root), encoding="utf-8"
+    )
+    env = dict(environment)
+    env["QM_CONFIG_PATH"] = str(config_path)
+    env["QM_DATA_ROOT"] = str(data_root)
+    env["QM_FREE_STOCKDB_ROOT"] = str(stockdb_root)
+    stdout_path = instance / "serve.stdout.log"
+    stderr_path = instance / "serve.stderr.log"
+    pid_path = instance / "serve.pid"
+    pids: dict[str, int] = {}
+    launcher: subprocess.Popen[Any] | None = None
+    try:
+        started = time.monotonic()
+        launcher, pids["bootloader"] = _start_launcher(
+            executable, env, stdout_path, stderr_path, pid_path,
+        )
+        base_url = f"http://127.0.0.1:{port}/api/v1"
+        _wait_json(
+            f"{base_url}/health",
+            lambda value: value.get("status") == "ok"
+            and value.get("core_ready") is True,
+            timeout=_ONEDIR_CORE_READY_BUDGET_SECONDS + 5.0,
+        )
+        elapsed = time.monotonic() - started
+        if launcher.stdin is not None:
+            launcher.stdin.close()
+        launcher.wait(timeout=5.0)
+        if launcher.returncode:
+            raise RuntimeError(
+                f"onedir core_ready launcher failed ({launcher.returncode})"
+            )
+        _wait_stopped(pids)
+        return elapsed
+    finally:
+        if launcher is not None and launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=5.0)
+            for pid in dict.fromkeys(reversed(tuple(pids.values()))):
+                try:
+                    _terminate_exact_process(pid, executable)
+                except RuntimeError:
+                    pass
+
+
+def smoke_onedir(
+    executable: Path,
+    *,
+    instance_root: Path | None = None,
+) -> dict[str, object]:
+    """Measure installed onedir help and lightweight core_ready startup budgets.
+
+    Sampling policy: one true-cold sample (the gated value) plus a fixed number
+    of warm repeats. The warm-sample median is reported alongside the cold value
+    for trend evidence. The hard gate is the cold sample. All writable state
+    (config, data, StockDB, logs) stays under ``instance_root`` when provided,
+    otherwise under a temporary directory.
+    """
+
+    if os.name != "nt":
+        raise RuntimeError("frozen onedir runtime smoke requires Windows")
+    executable = executable.resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(executable)
+
+    help_budget = _HELP_MAX_SECONDS["onedir"]
+    core_budget = _ONEDIR_CORE_READY_BUDGET_SECONDS
+
+    with tempfile.TemporaryDirectory(prefix="quantmaster-frozen-onedir-") as raw_root:
+        root = instance_root if instance_root is not None else Path(raw_root)
+        root.mkdir(parents=True, exist_ok=True)
+        port = _free_port()
+        environment, instance = _isolated_environment(root, port)
+        instance.mkdir(exist_ok=True)
+
+        bootstrap = _run_deep_doctor(executable, environment)
+        if bootstrap.returncode:
+            raise RuntimeError(
+                "frozen onedir schema bootstrap failed "
+                f"({bootstrap.returncode}): {bootstrap.stderr[-2000:]}"
+            )
+        identity = json.loads(bootstrap.stdout)
+        build_sha = str(
+            identity["metrics"]["application_identity_probe"]["build_sha"]
+        )
+
+        help_samples: list[float] = []
+        for _ in range(1 + _WARM_HELP_SAMPLES):
+            try:
+                help_samples.append(
+                    _run_help_measure(executable, environment, layout="onedir")
+                )
+            except RuntimeError:
+                help_samples.append(help_budget + 1.0)
+                break
+
+        core_samples: list[float] = []
+        for _ in range(1 + _WARM_CORE_READY_SAMPLES):
+            core_port = _free_port()
+            try:
+                core_samples.append(
+                    _measure_core_ready_once(
+                        executable, environment, instance, core_port,
+                    )
+                )
+            except RuntimeError:
+                core_samples.append(core_budget + 1.0)
+                break
+
+        help_summary = _sample_summary(help_samples)
+        core_summary = _sample_summary(core_samples)
+        help_within = help_summary["cold_seconds"] <= help_budget
+        core_within = core_summary["cold_seconds"] <= core_budget
+        failures: list[str] = []
+        if not help_within:
+            failures.append(
+                f"onedir help cold {help_summary['cold_seconds']:.3f}s; "
+                f"{help_budget:.1f}s budget"
+            )
+        if not core_within:
+            failures.append(
+                f"onedir core_ready cold {core_summary['cold_seconds']:.3f}s; "
+                f"{core_budget:.1f}s budget"
+            )
+
+        return {
+            "mode": "onedir-measurement",
+            "layout": "onedir",
+            "build_sha": build_sha,
+            "help": {
+                "budget_seconds": help_budget,
+                **help_summary,
+                "within_budget": bool(help_within),
+                "median_within_budget": bool(
+                    help_summary["median_seconds"] <= help_budget
+                ),
+            },
+            "core_ready": {
+                "budget_seconds": core_budget,
+                **core_summary,
+                "within_budget": bool(core_within),
+                "median_within_budget": bool(
+                    core_summary["median_seconds"] <= core_budget
+                ),
+            },
+            "within_budgets": bool(not failures),
+            "limit_failures": failures,
+            "errors": [],
+        }
 
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--internal-launcher":
@@ -507,7 +737,47 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=Path)
     parser.add_argument("--help-layout", choices=sorted(_HELP_MAX_SECONDS))
+    parser.add_argument(
+        "--onedir-smoke",
+        action="store_true",
+        help="measure installed onedir help and core_ready startup budgets",
+    )
+    parser.add_argument(
+        "--evidence", type=Path,
+        help="write onedir smoke JSON evidence to this path",
+    )
+    parser.add_argument(
+        "--instance-root", type=Path,
+        help="keep onedir writable state under this artifact root",
+    )
     args = parser.parse_args()
+    if args.onedir_smoke and args.help_layout:
+        parser.error("--onedir-smoke and --help-layout are mutually exclusive")
+    if args.evidence and not args.onedir_smoke:
+        parser.error("--evidence requires --onedir-smoke")
+    if args.instance_root and not args.onedir_smoke:
+        parser.error("--instance-root requires --onedir-smoke")
+    if args.onedir_smoke:
+        evidence = smoke_onedir(
+            args.executable, instance_root=args.instance_root,
+        )
+        if args.evidence is not None:
+            args.evidence.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        if not evidence["within_budgets"]:
+            print(
+                "Frozen Windows onedir smoke budgets exceeded: "
+                + json.dumps(evidence, sort_keys=True),
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "Frozen Windows onedir smoke passed: "
+            + json.dumps(evidence, sort_keys=True)
+        )
+        return 0
     if args.help_layout:
         evidence = measure_help(args.executable, layout=args.help_layout)
         print("Frozen Windows help passed: " + json.dumps(evidence, sort_keys=True))

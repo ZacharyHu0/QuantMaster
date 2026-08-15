@@ -1,16 +1,22 @@
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.release import smoke_frozen_runtime
 from scripts.release.smoke_frozen_runtime import (
+    _ONEDIR_CORE_READY_BUDGET_SECONDS,
     _assert_same_identity,
+    _median_of,
     _run_deep_doctor,
     _run_help,
+    _run_help_measure,
+    _sample_summary,
     _wait_stopped,
     measure_help,
+    smoke_onedir,
 )
 
 
@@ -263,3 +269,247 @@ def test_splash_window_waits_for_one_visible_handle_then_for_that_handle_to_clos
 
     assert smoke_frozen_runtime._wait_splash_window(12, timeout=1.0) == 77
     smoke_frozen_runtime._wait_splash_closed(77, timeout=1.0)
+
+
+def test_onedir_help_measure_times_one_run_without_enforcing_the_budget(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="usage: qm [-h]", stderr="",
+        ),
+    )
+    ticks = iter([0.0, 1.8])
+    monkeypatch.setattr(smoke_frozen_runtime.time, "monotonic", lambda: next(ticks))
+
+    # 1.8s exceeds the onedir 1.5s budget, but the raw measurer must not gate.
+    assert _run_help_measure(tmp_path / "QuantMaster.exe", {}, layout="onedir") == 1.8
+
+
+def test_onedir_sample_summary_reports_cold_and_median():
+    assert _median_of([4.2, 4.0, 4.1]) == 4.1
+
+    assert _sample_summary([1.6, 1.0, 1.0]) == {
+        "samples": [1.6, 1.0, 1.0],
+        "cold_seconds": 1.6,
+        "median_seconds": 1.0,
+    }
+
+
+def _fake_onedir_evidence(help_vals, core_vals):
+    return {
+        "mode": "onedir-measurement",
+        "layout": "onedir",
+        "build_sha": "a" * 40,
+        "help": {
+            "budget_seconds": 1.5,
+            **_sample_summary(help_vals),
+            "within_budget": _sample_summary(help_vals)["cold_seconds"] <= 1.5,
+            "median_within_budget": _sample_summary(help_vals)["median_seconds"] <= 1.5,
+        },
+        "core_ready": {
+            "budget_seconds": _ONEDIR_CORE_READY_BUDGET_SECONDS,
+            **_sample_summary(core_vals),
+            "within_budget": _sample_summary(core_vals)["cold_seconds"] <= _ONEDIR_CORE_READY_BUDGET_SECONDS,
+            "median_within_budget": (
+                _sample_summary(core_vals)["median_seconds"]
+                <= _ONEDIR_CORE_READY_BUDGET_SECONDS,
+            ),
+        },
+        "within_budgets": bool(
+            _sample_summary(help_vals)["cold_seconds"] <= 1.5
+            and _sample_summary(core_vals)["cold_seconds"] <= _ONEDIR_CORE_READY_BUDGET_SECONDS
+        ),
+        "limit_failures": [],
+        "errors": [],
+    }
+
+
+def _doctor_stdout():
+    return json.dumps({"metrics": {"application_identity_probe":
+        {"build_sha": "a" * 40, "slot_id": "a" * 40,
+         "runtime_generation": "b"},}})
+
+
+def test_onedir_smoke_reports_help_and_core_ready_within_budgets(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    help_vals = [1.2, 1.0, 0.95]
+    core_vals = [4.2, 4.0, 4.1]
+
+    def help_m(_exe, _env, *, layout):
+        assert layout == "onedir"
+        return help_vals.pop(0)
+
+    def core_m(_exe, _env, _inst, _port):
+        return core_vals.pop(0)
+
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_isolated_environment",
+        lambda root, _port: ({}, root / "instance"),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout=_doctor_stdout(), stderr=""),
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_help_measure", help_m)
+    monkeypatch.setattr(smoke_frozen_runtime, "_measure_core_ready_once", core_m)
+
+    evidence = smoke_onedir(executable)
+
+    assert evidence["layout"] == "onedir"
+    assert evidence["build_sha"] == "a" * 40
+    assert evidence["help"]["samples"] == [1.2, 1.0, 0.95]
+    assert evidence["help"]["cold_seconds"] == 1.2
+    assert evidence["help"]["median_seconds"] == 1.0
+    assert evidence["help"]["within_budget"] is True
+    assert evidence["help"]["median_within_budget"] is True
+    assert evidence["core_ready"]["samples"] == [4.2, 4.0, 4.1]
+    assert evidence["core_ready"]["cold_seconds"] == 4.2
+    assert evidence["core_ready"]["median_seconds"] == 4.1
+    assert evidence["core_ready"]["within_budget"] is True
+    assert evidence["core_ready"]["median_within_budget"] is True
+    assert evidence["within_budgets"] is True
+    assert evidence["limit_failures"] == []
+
+
+def test_onedir_smoke_gates_only_cold_help_and_records_partial_samples(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    help_vals = [1.6, 1.0, 1.0]
+    core_vals = [4.2, 4.0, 4.0]
+
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_isolated_environment",
+        lambda root, _port: ({}, root / "instance"),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout=_doctor_stdout(), stderr=""),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_help_measure",
+        lambda _exe, _env, *, layout: help_vals.pop(0),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_measure_core_ready_once",
+        lambda _exe, _env, _inst, _port: core_vals.pop(0),
+    )
+
+    evidence = smoke_onedir(executable)
+
+    assert evidence["help"]["cold_seconds"] == 1.6
+    assert evidence["help"]["median_seconds"] == 1.0
+    assert evidence["help"]["within_budget"] is False
+    assert evidence["help"]["median_within_budget"] is True
+    assert evidence["within_budgets"] is False
+    assert any("help cold 1.600s" in f for f in evidence["limit_failures"])
+
+
+def test_onedir_smoke_hard_fails_when_cold_core_ready_exceeds_five_seconds(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_isolated_environment",
+        lambda root, _port: ({}, root / "instance"),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout=_doctor_stdout(), stderr=""),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_help_measure",
+        lambda _exe, _env, *, layout: 1.2,
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_measure_core_ready_once",
+        lambda _exe, _env, _inst, _port: 5.3,
+    )
+
+    evidence = smoke_onedir(executable)
+
+    assert evidence["core_ready"]["cold_seconds"] == 5.3
+    assert evidence["core_ready"]["within_budget"] is False
+    assert evidence["within_budgets"] is False
+    assert any("core_ready cold 5.300s" in f for f in evidence["limit_failures"])
+
+
+def test_onedir_smoke_keeps_writable_state_under_the_given_instance_root(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    inst_root = tmp_path / "instance-root"
+
+    seen_roots: list[Path] = []
+
+    def capture_isolated(root, _port):
+        seen_roots.append(root)
+        instance = root / "instance"
+        instance.mkdir()
+        return {}, instance
+
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", capture_isolated)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout=_doctor_stdout(), stderr=""),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_help_measure",
+        lambda _exe, _env, *, layout: 1.2,
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_measure_core_ready_once",
+        lambda _exe, _env, _inst, _port: 4.0,
+    )
+
+    smoke_onedir(executable, instance_root=inst_root)
+
+    assert all(root == inst_root for root in seen_roots)
+
+
+def test_onedir_smoke_cli_writes_evidence_and_exits_one_on_budget_failure(
+    tmp_path, monkeypatch,
+):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    evidence_path = tmp_path / "startup-budgets.json"
+
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "smoke_onedir",
+        lambda exe, *, instance_root=None: _fake_onedir_evidence(
+            [1.6, 1.0, 1.0], [4.2, 4.0, 4.1],
+        ),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime.sys,
+        "argv",
+        [
+            "smoke_frozen_runtime.py", str(executable),
+            "--onedir-smoke", "--evidence", str(evidence_path),
+        ],
+    )
+
+    assert smoke_frozen_runtime.main() == 1
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert payload["within_budgets"] is False
+    assert payload["help"]["cold_seconds"] == 1.6
+    assert payload["core_ready"]["within_budget"] is True
+
