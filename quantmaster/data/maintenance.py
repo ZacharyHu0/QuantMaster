@@ -1,27 +1,32 @@
-"""行情数据库增量同步任务：持久化进度、可取消、失败时保留旧缓存。"""
+"""Incremental market-data refreshes backed by the unified job lifecycle."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
 import threading
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from quantmaster.config import get_config
 from quantmaster.data.registry import RefreshMode, refresh_history
 from quantmaster.data.storage import BarStore
-from quantmaster.runtime.jobs import WorkerIdentity, lease_deadline
-from quantmaster.runtime.sqlite import connect_sqlite
+from quantmaster.runtime.jobs import (
+    JobContext,
+    JobOutcome,
+    UnifiedJobRuntime,
+    UnifiedJobStore,
+)
 from quantmaster.trading_sessions import market_date
 
 RefreshScope = Literal["market", "universe", "all_cached"]
+DATA_REFRESH_TASK_TYPE = "data.refresh"
+REFRESH_RESULT_KIND = "data.refresh.result"
+REFRESH_CHECKPOINT = "data.refresh.progress"
 logger = logging.getLogger(__name__)
 
 
@@ -38,143 +43,50 @@ def market_symbols() -> list[str]:
 
 
 class DataRefreshManager:
-    # A single user-visible refresh still runs as one job, but independent
-    # symbols do not need to wait for one another.  Keep this deliberately
-    # small so a stalled provider cannot fan out into an unbounded request
-    # burst.
+    """Plan refresh work and project its domain result from one runtime ledger."""
+
     MAX_PARALLEL_SYMBOLS = 8
 
-    _SCHEMA = (
-        "CREATE TABLE IF NOT EXISTS refresh_jobs ("
-        "id TEXT PRIMARY KEY,status TEXT NOT NULL,scope TEXT NOT NULL,"
-        "universe_name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,"
-        "symbols_json TEXT NOT NULL,next_index INTEGER NOT NULL DEFAULT 0,"
-        "total INTEGER NOT NULL,succeeded INTEGER NOT NULL DEFAULT 0,"
-        "failed INTEGER NOT NULL DEFAULT 0,failures_json TEXT NOT NULL DEFAULT '[]',"
-        "current_symbol TEXT NOT NULL DEFAULT '',cancel_requested INTEGER NOT NULL DEFAULT 0,"
-        "created_at REAL NOT NULL,updated_at REAL NOT NULL,"
-        "owner TEXT NOT NULL DEFAULT '',lease_expires REAL NOT NULL DEFAULT 0,"
-        "heartbeat_at REAL NOT NULL DEFAULT 0,attempt INTEGER NOT NULL DEFAULT 1,"
-        "original_symbols_json TEXT NOT NULL DEFAULT '[]')"
-    )
-    _FAILURE_SCHEMA = (
-        "CREATE TABLE IF NOT EXISTS refresh_failures ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,"
-        "attempt INTEGER NOT NULL DEFAULT 1,symbol TEXT NOT NULL,error TEXT NOT NULL)"
-    )
-    _EVENT_SCHEMA = (
-        "CREATE TABLE IF NOT EXISTS refresh_events ("
-        "seq INTEGER PRIMARY KEY AUTOINCREMENT,job_id TEXT NOT NULL,"
-        "attempt INTEGER NOT NULL,event_json TEXT NOT NULL,created_at REAL NOT NULL)"
-    )
-
-    def __init__(self) -> None:
+    def __init__(self, runtime: UnifiedJobRuntime | None = None) -> None:
         self._lock = threading.RLock()
-        self._threads: dict[str, threading.Thread] = {}
-        self._dispatcher: threading.Thread | None = None
-        self._initialized_roots: set[str] = set()
-        self.identity = WorkerIdentity.create("data-refresh")
-        self._stop = threading.Event()
-        self._accepting = True
+        self._runtime = runtime
+        self._fixed_runtime = runtime is not None
 
     @staticmethod
     def _owns_runtime() -> bool:
-        """Only the supervisor/non-reload process may execute refresh jobs."""
-
         return os.environ.get("QM_WEB_PROCESS") != "1"
 
     @staticmethod
     def _path() -> Path:
-        return get_config().data_root / "data_refresh.sqlite"
+        return get_config().data_root / "jobs.sqlite"
 
-    def _conn(self) -> sqlite3.Connection:
-        """Open a worker/write connection without implicitly migrating it."""
+    def _ensure_runtime(self) -> UnifiedJobRuntime:
+        path = self._path()
+        with self._lock:
+            if self._runtime is not None:
+                same_root = self._runtime.store.path.resolve() == path.resolve()
+                if self._fixed_runtime or same_root:
+                    return self._runtime
+                if not self._runtime.idle:
+                    raise RuntimeError("行情刷新仍在旧数据目录运行，拒绝切换任务账本")
+                self._runtime.stop()
+            self._runtime = UnifiedJobRuntime(
+                UnifiedJobStore(path), max_workers=self.MAX_PARALLEL_SYMBOLS,
+                dispatch=self._owns_runtime(),
+            )
+            self._runtime.register(DATA_REFRESH_TASK_TYPE, self._handle)
+            return self._runtime
 
-        return connect_sqlite(self._path())
-
-    def _read_conn(self) -> sqlite3.Connection:
-        """Open a bounded, genuinely read-only Web/status connection."""
-
-        return connect_sqlite(
-            self._path(), timeout=0.25, row_factory=True, read_only=True,
-        )
+    def _read_store(self) -> UnifiedJobStore:
+        if self._runtime is not None:
+            if self._fixed_runtime or self._runtime.store.path.resolve() == self._path().resolve():
+                return self._runtime.store
+        return UnifiedJobStore(self._path(), read_only=True)
 
     def initialize(self) -> None:
-        """Create or migrate the refresh ledger in the runtime-worker only.
+        """Publish the shared schema only from the runtime-worker path."""
 
-        Importing this module is intentionally inert.  A reloadable Web child
-        may import the manager for status reads, but it must never create a
-        SQLite file, run DDL, or recover leases merely because a page opened.
-        """
-
-        path = self._path()
-        root_key = str(path.resolve())
-        with self._lock:
-            with self._conn() as conn:
-                conn.execute(self._SCHEMA)
-                conn.execute(self._FAILURE_SCHEMA)
-                conn.execute(self._EVENT_SCHEMA)
-                first_for_root = root_key not in self._initialized_roots
-                if not first_for_root:
-                    return
-                columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(refresh_jobs)").fetchall()
-                }
-                additions = {
-                    "owner": "TEXT NOT NULL DEFAULT ''",
-                    "lease_expires": "REAL NOT NULL DEFAULT 0",
-                    "heartbeat_at": "REAL NOT NULL DEFAULT 0",
-                    "attempt": "INTEGER NOT NULL DEFAULT 1",
-                    "original_symbols_json": "TEXT NOT NULL DEFAULT '[]'",
-                }
-                for name, definition in additions.items():
-                    if name not in columns:
-                        conn.execute(
-                            f"ALTER TABLE refresh_jobs ADD COLUMN {name} {definition}"
-                        )
-                failure_columns = {
-                    row[1] for row in conn.execute(
-                        "PRAGMA table_info(refresh_failures)"
-                    ).fetchall()
-                }
-                if "attempt" not in failure_columns:
-                    conn.execute(
-                        "ALTER TABLE refresh_failures "
-                        "ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1"
-                    )
-                conn.execute(
-                    "UPDATE refresh_jobs SET original_symbols_json=symbols_json "
-                    "WHERE original_symbols_json='[]'"
-                )
-                conn.execute(
-                    "UPDATE refresh_jobs SET status='interrupted',owner='',lease_expires=0,"
-                    "current_symbol='',updated_at=? WHERE status IN ('running','cancelling') "
-                    "AND lease_expires<=?",
-                    (time.time(), time.time()),
-                )
-                conn.commit()
-                self._initialized_roots.add(root_key)
-
-    def _migrate(self) -> None:
-        """Backward-compatible explicit migration entrypoint for workers/tests."""
-
-        self.initialize()
-
-    def _require_published_schema(self) -> None:
-        """Fail fast instead of creating a task ledger from a Web request."""
-
-        path = self._path()
-        if not path.is_file():
-            raise RuntimeError("后台刷新账本尚未初始化")
-        try:
-            with self._read_conn() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='refresh_jobs'",
-                ).fetchone()
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise RuntimeError("后台刷新账本暂不可读") from exc
-        if row is None:
-            raise RuntimeError("后台刷新账本尚未初始化")
+        self._ensure_runtime()
 
     @staticmethod
     def _resolve_symbols(scope: RefreshScope, universe: str, start: str, end: str) -> list[str]:
@@ -195,7 +107,7 @@ class DataRefreshManager:
 
     def _plan(
         self, scope: RefreshScope, universe: str = "", start: str = "",
-    ) -> tuple[dict, list[str]]:
+    ) -> tuple[dict[str, Any], list[str]]:
         end = market_date().isoformat()
         if scope == "market":
             start = str(market_date() - timedelta(days=365))
@@ -213,9 +125,10 @@ class DataRefreshManager:
         health = PROVIDER_HEALTH.status()
         unhealthy = [
             lane for lane, item in health.items()
-            if item.get("state") != "closed" and float(item.get("open_until") or 0) > time.time()
+            if item.get("state") != "closed"
+            and float(item.get("open_until") or 0) > time.time()
         ]
-        preview = {
+        return {
             "scope": scope,
             "universe": universe,
             "start": start,
@@ -226,82 +139,49 @@ class DataRefreshManager:
                 f"将增量同步 {len(symbols)} 个日线标的；"
                 "已缓存标的只请求尾部重叠区间，未缓存标的才按起始日期初始化"
             ),
-        }
-        return preview, symbols
+        }, symbols
 
     def preview(
         self, scope: RefreshScope, universe: str = "", start: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         preview, _symbols = self._plan(scope, universe, start)
         return preview
 
     def create(
         self, scope: RefreshScope, universe: str = "", start: str = "",
-    ) -> dict:
+    ) -> dict[str, Any]:
         preview, symbols = self._plan(scope, universe, start)
-        self._require_published_schema()
-        coalesced_id = ""
-        job_id = ""
-        with self._lock, self._conn() as conn:
-            if not self._accepting:
-                raise RuntimeError("行情刷新执行器正在停止，暂不接受新任务")
-            conn.execute("BEGIN IMMEDIATE")
-            active = conn.execute(
-                "SELECT id FROM refresh_jobs WHERE scope=? AND universe_name=? "
-                "AND start_date=? AND end_date=? "
-                "AND status IN ('queued','running','cancelling') LIMIT 1",
-                (scope, universe, preview["start"], preview["end"]),
-            ).fetchone()
-            if active:
-                coalesced_id = str(active[0])
-            else:
-                job_id = uuid.uuid4().hex
-                now = time.time()
-                conn.execute(
-                    "INSERT INTO refresh_jobs "
-                    "(id,status,scope,universe_name,start_date,end_date,symbols_json,"
-                    "original_symbols_json,total,created_at,updated_at) "
-                    "VALUES (?,'queued',?,?,?,?,?,?,?,?,?)",
-                    (job_id, scope, universe, preview["start"], preview["end"],
-                     json.dumps(symbols, ensure_ascii=False), json.dumps(symbols, ensure_ascii=False),
-                     len(symbols), now, now),
-                )
-                conn.execute(
-                    "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                    "VALUES (?,?,?,?)",
-                    (job_id, 1, json.dumps({"type": "queued"}), now),
-                )
-        if coalesced_id:
-            result = self.get(coalesced_id)
-            result.update(created=False, coalesced=True)
-            return result
-        if self._owns_runtime():
-            self._start(job_id)
-        result = self.get(job_id)
-        result.update(created=True, coalesced=False)
-        return result
+        runtime = self._ensure_runtime()
+        job, created = runtime.store.submit(
+            DATA_REFRESH_TASK_TYPE,
+            {
+                "scope": scope,
+                "universe": universe,
+                "start": preview["start"],
+                "end": preview["end"],
+                "symbols": symbols,
+            },
+            deadline_seconds=3600,
+            max_attempts=8,
+        )
+        if created and self._owns_runtime():
+            self._start(str(job["id"]))
+        value = self.get(str(job["id"]))
+        value.update(created=created, coalesced=not created)
+        return value
 
-    def _start(self, job_id: str) -> None:
-        if not self._owns_runtime():
-            return
-        with self._lock:
-            current = self._threads.get(job_id)
-            if current and current.is_alive():
-                return
-            thread = threading.Thread(
-                target=self._run, args=(job_id,), name=f"data-refresh-{job_id[:8]}", daemon=True)
-            self._threads[job_id] = thread
-            thread.start()
+    def _start(self, _job_id: str) -> None:
+        self._ensure_runtime().start()
+
+    def _run(self, job_id: str) -> None:
+        """Execute one queued fixture synchronously through the kernel."""
+
+        runtime = self._ensure_runtime()
+        runtime.dispatch_job(job_id)
+        runtime.wait(job_id, timeout=30.0)
 
     @staticmethod
     def _publish_market_snapshot() -> None:
-        """Advance the immutable market projection after a refresh commits.
-
-        This runs only in the runtime-worker execution path.  A publication
-        failure is deliberately non-destructive: the preceding current
-        snapshot stays readable and the completed refresh remains auditable.
-        """
-
         try:
             from quantmaster.market.overview_snapshot import publish_market_overview_snapshot
 
@@ -309,448 +189,194 @@ class DataRefreshManager:
         except (OSError, RuntimeError, ValueError, TypeError):
             logger.warning("数据刷新后发布市场快照失败", exc_info=True)
 
-    def _run(self, job_id: str) -> None:
-        now = time.time()
-        with self._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            changed = conn.execute(
-                "UPDATE refresh_jobs SET status='running',owner=?,lease_expires=?,"
-                "heartbeat_at=?,updated_at=? WHERE id=? "
-                "AND status IN ('queued','interrupted') AND cancel_requested=0",
-                (self.identity.value, lease_deadline(), now, now, job_id),
-            ).rowcount
-            if not changed:
-                return
-            attempt = int(conn.execute(
-                "SELECT attempt FROM refresh_jobs WHERE id=?", (job_id,)
-            ).fetchone()[0])
-            conn.execute(
-                "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, attempt, json.dumps({
-                    "type": "claimed", "owner": self.identity.value,
-                }), now),
-            )
+    @staticmethod
+    def _initial_state(context: JobContext, spec: dict[str, Any]) -> dict[str, Any]:
+        previous = context.store.latest_artifact(context.job_id, REFRESH_RESULT_KIND)
+        if context.attempt > 1 and previous:
+            payload = dict(previous["payload"])
+            retry_symbols = [str(item["symbol"]) for item in payload.get("failures") or ()]
+            if retry_symbols:
+                return {
+                    "schema_version": "1.0",
+                    "original_symbols": list(payload.get("original_symbols") or spec["symbols"]),
+                    "symbols": retry_symbols,
+                    "next_index": 0,
+                    "succeeded": 0,
+                    "failures": [],
+                    "current_symbol": "",
+                }
+        checkpoint = context.load_checkpoint(REFRESH_CHECKPOINT, context.spec_hash)
+        if checkpoint:
+            return dict(checkpoint)
+        return {
+            "schema_version": "1.0",
+            "original_symbols": list(spec["symbols"]),
+            "symbols": list(spec["symbols"]),
+            "next_index": 0,
+            "succeeded": 0,
+            "failures": [],
+            "current_symbol": "",
+        }
 
-        heartbeat_stop = threading.Event()
-        lease_alive = threading.Event()
-        lease_alive.set()
-
-        def heartbeat() -> None:
-            while not heartbeat_stop.wait(5.0):
-                tick = time.time()
-                with self._conn() as connection:
-                    alive = connection.execute(
-                        "UPDATE refresh_jobs SET lease_expires=?,heartbeat_at=?,updated_at=? "
-                        "WHERE id=? AND owner=? AND status IN ('running','cancelling')",
-                        (
-                            lease_deadline(), tick, tick, job_id, self.identity.value,
-                        ),
-                    ).rowcount
-                if not alive:
-                    lease_alive.clear()
-                    return
-
-        heartbeat_thread = threading.Thread(
-            target=heartbeat, name=f"data-refresh-heartbeat-{job_id[:8]}", daemon=True,
-        )
-        heartbeat_thread.start()
+    @staticmethod
+    def _refresh_one(store: BarStore, symbol: str, start: str, end: str) -> str:
         try:
-            self._execute(job_id, attempt, lease_alive)
-        except Exception:
-            logger.exception("行情刷新任务意外失败 job=%s", job_id)
-            with self._conn() as conn:
-                conn.execute(
-                    "UPDATE refresh_jobs SET status='interrupted',owner='',lease_expires=0,"
-                    "current_symbol='',updated_at=? WHERE id=? AND owner=?",
-                    (time.time(), job_id, self.identity.value),
-                )
-        finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=1.0)
+            envelope = refresh_history(
+                symbol, start, end, store=store,
+                mode=RefreshMode.INCREMENTAL, work_class="maintenance",
+            )
+            envelope.require_data()
+            if envelope.quality.status != "verified":
+                return "；".join(envelope.quality.issues) or "行情证据仍为降级状态"
+        except Exception as exc:
+            from quantmaster.logging_config import redact_sensitive_text
 
-    def _execute(
-        self,
-        job_id: str,
-        attempt: int,
-        lease_alive: threading.Event,
-    ) -> None:
+            return redact_sensitive_text(exc)[:300]
+        return ""
+
+    def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+        state = self._initial_state(context, spec)
         store = BarStore()
-        while True:
-            if self._stop.is_set():
-                with self._conn() as conn:
-                    conn.execute(
-                        "UPDATE refresh_jobs SET status='interrupted',owner='',lease_expires=0,"
-                        "current_symbol='',updated_at=? WHERE id=? AND owner=?",
-                        (time.time(), job_id, self.identity.value),
-                    )
-                    conn.execute(
-                        "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                        "VALUES (?,?,?,?)",
-                        (job_id, attempt, json.dumps({
-                            "type": "interrupted", "reason": "process_shutdown",
-                        }), time.time()),
-                    )
-                return
-            if not lease_alive.is_set():
-                return
-            with self._conn() as conn:
-                row = conn.execute(
-                    "SELECT scope,start_date,end_date,symbols_json,next_index,cancel_requested "
-                    "FROM refresh_jobs WHERE id=? AND owner=?",
-                    (job_id, self.identity.value),
-                ).fetchone()
-            if row is None:
-                return
-            scope, default_start, end, raw_symbols, index, cancelled = row
-            symbols = json.loads(raw_symbols)
-            if cancelled:
-                with self._conn() as conn:
-                    conn.execute(
-                        "UPDATE refresh_jobs SET status='cancelled',current_symbol='',owner='',"
-                        "lease_expires=0,updated_at=? WHERE id=? AND owner=?",
-                        (time.time(), job_id, self.identity.value),
-                    )
-                    conn.execute(
-                        "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                        "VALUES (?,?,?,?)",
-                        (job_id, attempt, json.dumps({"type": "cancelled"}), time.time()),
-                    )
-                return
-            if index >= len(symbols):
-                with self._conn() as conn:
-                    failed = conn.execute(
-                        "SELECT failed FROM refresh_jobs WHERE id=?", (job_id,)).fetchone()[0]
-                    conn.execute(
-                        "UPDATE refresh_jobs SET status=?,current_symbol='',owner='',lease_expires=0,"
-                        "updated_at=? WHERE id=? AND owner=?",
-                        (
-                            "completed_with_errors" if failed else "completed", time.time(),
-                            job_id, self.identity.value,
-                        ),
-                    )
-                    conn.execute(
-                        "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                        "VALUES (?,?,?,?)",
-                        (job_id, attempt, json.dumps({
-                            "type": "completed_with_errors" if failed else "completed",
-                            "failed": int(failed),
-                        }), time.time()),
-                    )
-                self._publish_market_snapshot()
-                return
-
-            batch = [str(symbol) for symbol in symbols[
-                index:index + self.MAX_PARALLEL_SYMBOLS
-            ]]
+        symbols = [str(symbol) for symbol in state["symbols"]]
+        while int(state["next_index"]) < len(symbols):
+            context.ensure_active()
+            index = int(state["next_index"])
+            batch = symbols[index:index + self.MAX_PARALLEL_SYMBOLS]
             plans: list[tuple[str, str]] = []
             for symbol in batch:
                 coverage = store.coverage(symbol)
-                start = coverage[0] if scope == "all_cached" and coverage else default_start
-                plans.append((symbol, start))
-            with self._conn() as conn:
-                changed = conn.execute(
-                    "UPDATE refresh_jobs SET current_symbol=?,updated_at=? "
-                    "WHERE id=? AND owner=?",
-                    (
-                        f"正在并行同步 {len(plans)} 个标的",
-                        time.time(), job_id, self.identity.value,
-                    ),
-                ).rowcount
-            if not changed:
-                return
-
-            def refresh_one(symbol: str, start: str, requested_end: str = end) -> str:
-                try:
-                    market_envelope = refresh_history(
-                        symbol, start, requested_end, store=store,
-                        mode=RefreshMode.INCREMENTAL,
-                        work_class="maintenance",
-                    )
-                    market_envelope.require_data()
-                    if market_envelope.quality.status != "verified":
-                        return (
-                            "；".join(market_envelope.quality.issues)
-                            or "行情证据仍为降级状态"
-                        )
-                except Exception as exc:
-                    from quantmaster.logging_config import redact_sensitive_text
-
-                    return redact_sensitive_text(exc)[:300]
-                return ""
-
+                start = coverage[0] if spec["scope"] == "all_cached" and coverage else spec["start"]
+                plans.append((symbol, str(start)))
+            state["current_symbol"] = f"正在并行同步 {len(plans)} 个标的"
+            context.progress(
+                round(100 * index / max(1, len(symbols))),
+                "同步行情",
+                str(state["current_symbol"]),
+            )
             errors = [""] * len(plans)
             with ThreadPoolExecutor(
-                max_workers=len(plans), thread_name_prefix=f"data-refresh-{job_id[:8]}",
+                max_workers=len(plans), thread_name_prefix=f"data-refresh-{context.job_id[-8:]}",
             ) as executor:
                 futures = {
-                    executor.submit(refresh_one, symbol, start): offset
+                    executor.submit(self._refresh_one, store, symbol, start, str(spec["end"])): offset
                     for offset, (symbol, start) in enumerate(plans)
                 }
                 for future in as_completed(futures):
                     errors[futures[future]] = future.result()
+            context.ensure_active()
+            for (symbol, _start), error in zip(plans, errors, strict=True):
+                if error:
+                    state["failures"].append({"symbol": symbol, "error": error})
+                else:
+                    state["succeeded"] = int(state["succeeded"]) + 1
+            state["next_index"] = index + len(plans)
+            state["current_symbol"] = ""
+            context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
+            context.completed_unit(f"已同步 {state['next_index']}/{len(symbols)} 个标的")
+        failures = list(state["failures"])
+        outcome = "completed_with_warnings" if failures else "completed"
+        result = {
+            **state,
+            "outcome": outcome,
+            "total": len(symbols),
+            "failed": len(failures),
+        }
+        artifact = context.write_artifact(
+            REFRESH_RESULT_KIND,
+            result,
+            {"schema_version": "1.0", "lineage": {"spec_hash": context.spec_hash}},
+        )
+        context.emit("data_refresh_completed", {"outcome": outcome, "failed": len(failures)})
+        self._publish_market_snapshot()
+        return JobOutcome("completed", "行情刷新已完成", str(artifact["id"]))
 
-            # Do not commit a partial batch after losing ownership.  The
-            # durable next_index remains at the batch boundary, so resume can
-            # safely retry every uncommitted symbol.
-            if not lease_alive.is_set():
-                return
-            with self._conn() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                current = conn.execute(
-                    "SELECT status,next_index,cancel_requested FROM refresh_jobs "
-                    "WHERE id=? AND owner=?",
-                    (job_id, self.identity.value),
-                ).fetchone()
-                if current is None or int(current[1]) != index:
-                    return
-                if current[0] == "cancelling" or current[2]:
-                    conn.execute(
-                        "UPDATE refresh_jobs SET status='cancelled',current_symbol='',owner='',"
-                        "lease_expires=0,updated_at=? WHERE id=? AND owner=?",
-                        (time.time(), job_id, self.identity.value),
-                    )
-                    conn.execute(
-                        "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                        "VALUES (?,?,?,?)",
-                        (job_id, attempt, json.dumps({"type": "cancelled"}), time.time()),
-                    )
-                    return
-                if current[0] != "running":
-                    return
-                for (symbol, _start), error in zip(plans, errors, strict=True):
-                    if error:
-                        conn.execute(
-                            "INSERT INTO refresh_failures (job_id,attempt,symbol,error) "
-                            "VALUES (?,?,?,?)",
-                            (job_id, attempt, symbol, error),
-                        )
-                failed = sum(bool(error) for error in errors)
-                changed = conn.execute(
-                    "UPDATE refresh_jobs SET next_index=?,succeeded=succeeded+?,failed=failed+?,"
-                    "current_symbol='',updated_at=? WHERE id=? AND owner=?",
-                    (
-                        index + len(plans), len(plans) - failed, failed, time.time(),
-                        job_id, self.identity.value,
-                    ),
-                ).rowcount
-            if not changed:
-                return
+    @staticmethod
+    def _state(store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
+        artifact = store.latest_artifact(str(job["id"]), REFRESH_RESULT_KIND)
+        if artifact:
+            return dict(artifact["payload"])
+        checkpoint = store.checkpoint(
+            str(job["id"]), REFRESH_CHECKPOINT, str(job["spec_hash"]),
+        )
+        return dict(checkpoint or {})
 
-    def get(self, job_id: str) -> dict:
+    def _project(self, store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
+        if str(job.get("type")) != DATA_REFRESH_TASK_TYPE:
+            raise KeyError(str(job.get("id") or ""))
+        spec = dict(job["spec"])
+        state = self._state(store, job)
+        symbols = list(state.get("symbols") or spec.get("symbols") or ())
+        failures = list(state.get("failures") or ())
+        value = UnifiedJobRuntime.public(job)
+        value.update({
+            "scope": spec.get("scope"),
+            "universe_name": spec.get("universe") or "",
+            "start_date": spec.get("start"),
+            "end_date": spec.get("end"),
+            "next_index": int(state.get("next_index") or 0),
+            "total": int(state.get("total") or len(symbols)),
+            "succeeded": int(state.get("succeeded") or 0),
+            "failed": int(state.get("failed") or len(failures)),
+            "failures": failures[-200:],
+            "current_symbol": str(state.get("current_symbol") or ""),
+            "outcome": str(state.get("outcome") or ""),
+        })
+        return value
+
+    def get(self, job_id: str) -> dict[str, Any]:
         try:
-            with self._read_conn() as conn:
-                row = conn.execute(
-                    "SELECT * FROM refresh_jobs WHERE id=?", (job_id,),
-                ).fetchone()
-                if row is None:
-                    raise KeyError(job_id)
-                item = dict(row)
-                item.pop("symbols_json", None)
-                item.pop("original_symbols_json", None)
-                item.pop("owner", None)
-                item.pop("lease_expires", None)
-                legacy_failures = json.loads(item.pop("failures_json", "[]"))
-                failures = conn.execute(
-                    "SELECT symbol,error FROM refresh_failures WHERE job_id=? AND attempt=? "
-                    "ORDER BY id DESC LIMIT 200", (job_id, int(item["attempt"])),
-                ).fetchall()
-        except (FileNotFoundError, sqlite3.OperationalError) as exc:
+            store = self._read_store()
+            return self._project(store, store.get(job_id))
+        except (FileNotFoundError, sqlite3.Error) as exc:
             raise KeyError(job_id) from exc
-        item["failures"] = [
-            {"symbol": row[0], "error": row[1]} for row in reversed(failures)
-        ] or legacy_failures[-200:]
-        item["progress"] = round(100 * int(item["next_index"]) / max(1, int(item["total"])))
-        item["cancel_requested"] = bool(item["cancel_requested"])
-        return item
 
-    def latest(self) -> dict | None:
-        try:
-            with self._read_conn() as conn:
-                row = conn.execute(
-                    "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT 1"
-                ).fetchone()
-        except (FileNotFoundError, sqlite3.OperationalError):
-            return None
-        return self.get(str(row[0])) if row else None
+    def latest(self) -> dict[str, Any] | None:
+        values = self.list(1)
+        return values[0] if values else None
 
-    def list(self, limit: int = 50) -> list[dict]:
+    def list(self, limit: int = 50) -> list[dict[str, Any]]:
         try:
-            with self._read_conn() as conn:
-                rows = conn.execute(
-                    "SELECT id FROM refresh_jobs ORDER BY created_at DESC LIMIT ?",
-                    (max(1, min(int(limit), 200)),),
-                ).fetchall()
-        except (FileNotFoundError, sqlite3.OperationalError):
+            store = self._read_store()
+            return [
+                self._project(store, job)
+                for job in store.list(limit, job_type=DATA_REFRESH_TASK_TYPE)
+            ]
+        except (FileNotFoundError, sqlite3.Error):
             return []
-        return [self.get(str(row[0])) for row in rows]
 
     @property
     def active(self) -> bool:
-        try:
-            with self._read_conn() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM refresh_jobs "
-                    "WHERE status IN ('queued','running','cancelling') LIMIT 1"
-                ).fetchone()
-        except (FileNotFoundError, sqlite3.OperationalError):
-            return False
-        return row is not None
+        return any(job["status"] in {"queued", "running", "cancelling", "interrupted"}
+                   for job in self.list(200))
 
-    def cancel(self, job_id: str) -> dict:
-        self._require_published_schema()
-        with self._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT status,attempt FROM refresh_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            if row[0] == "queued":
-                status = "cancelled"
-            elif row[0] in {"running", "cancelling"}:
-                status = "cancelling"
-            else:
-                raise ValueError("当前任务不能取消")
-            changed = conn.execute(
-                "UPDATE refresh_jobs SET status=?,cancel_requested=1,updated_at=? WHERE id=?",
-                (status, time.time(), job_id),
-            ).rowcount
-            conn.execute(
-                "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, int(row[1]), json.dumps({"type": "cancel_requested"}), time.time()),
-            )
-        if not changed:
-            raise KeyError(job_id)
-        return self.get(job_id)
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        runtime = self._ensure_runtime()
+        self._project(runtime.store, runtime.store.get(job_id))
+        return self._project(runtime.store, runtime.store.cancel(job_id))
 
-    def resume(self, job_id: str) -> dict:
-        self._require_published_schema()
-        with self._lock, self._conn() as conn:
-            if not self._accepting:
-                raise RuntimeError("行情刷新执行器正在停止，暂不能续跑")
-            conn.execute("BEGIN IMMEDIATE")
-            active = conn.execute(
-                "SELECT id FROM refresh_jobs WHERE id<>? "
-                "AND status IN ('queued','running','cancelling') LIMIT 1",
-                (job_id,),
-            ).fetchone()
-            if active:
-                raise ValueError(f"已有行情刷新任务正在运行：{active[0]}")
-            row = conn.execute(
-                "SELECT status,failures_json,attempt FROM refresh_jobs WHERE id=?", (job_id,)
-            ).fetchone()
-            if row is None:
-                raise KeyError(job_id)
-            if row[0] not in {"completed_with_errors", "interrupted", "cancelled"}:
-                raise ValueError("当前任务不能续跑")
-            if row[0] == "completed_with_errors":
-                retry_symbols = [item[0] for item in conn.execute(
-                    "SELECT symbol FROM refresh_failures WHERE job_id=? AND attempt=? ORDER BY id",
-                    (job_id, int(row[2])),
-                ).fetchall()]
-                if not retry_symbols:
-                    retry_symbols = [item["symbol"] for item in json.loads(row[1])]
-                if not retry_symbols:
-                    raise ValueError("没有可重试的失败标的")
-                conn.execute(
-                    "UPDATE refresh_jobs SET status='queued',symbols_json=?,next_index=0,"
-                    "total=?,succeeded=0,failed=0,failures_json='[]',cancel_requested=0,"
-                    "current_symbol='',owner='',lease_expires=0,heartbeat_at=0,attempt=attempt+1,"
-                    "updated_at=? WHERE id=?",
-                    (json.dumps(retry_symbols, ensure_ascii=False), len(retry_symbols),
-                     time.time(), job_id),
-                )
-                changed = 1
-            else:
-                changed = conn.execute(
-                    "UPDATE refresh_jobs SET status='queued',cancel_requested=0,owner='',"
-                    "lease_expires=0,heartbeat_at=0,attempt=attempt+1,updated_at=? "
-                    "WHERE id=? AND status IN ('interrupted','cancelled')",
-                    (time.time(), job_id),
-                ).rowcount
-            attempt = int(row[2]) + 1
-            conn.execute(
-                "INSERT INTO refresh_events(job_id,attempt,event_json,created_at) "
-                "VALUES (?,?,?,?)",
-                (job_id, attempt, json.dumps({
-                    "type": "resumed", "previous_status": row[0],
-                }), time.time()),
-            )
-        if not changed:
+    def resume(self, job_id: str) -> dict[str, Any]:
+        runtime = self._ensure_runtime()
+        source = self._project(runtime.store, runtime.store.get(job_id))
+        retryable = source["status"] in {"failed", "cancelled", "interrupted"}
+        retryable = retryable or source.get("outcome") == "completed_with_warnings"
+        if not retryable:
             raise ValueError("当前任务不能续跑")
-        self._start(job_id)
-        return self.get(job_id)
+        return self._project(runtime.store, runtime.retry(job_id))
 
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict]:
-        try:
-            with self._read_conn() as conn:
-                rows = conn.execute(
-                    "SELECT seq,attempt,event_json,created_at FROM refresh_events "
-                    "WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?",
-                    (job_id, max(0, after), max(1, min(limit, 2000))),
-                ).fetchall()
-        except (FileNotFoundError, sqlite3.OperationalError):
-            return []
-        return [{
-            "seq": row[0], "attempt": row[1], "created_at": row[3],
-            **json.loads(row[2]),
-        } for row in rows]
+    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        store = self._read_store()
+        self._project(store, store.get(job_id))
+        return store.events(job_id, after, limit)
 
     def start(self) -> None:
-        with self._lock:
-            self._stop.clear()
-            self._accepting = True
-            if not self._owns_runtime():
-                return
-            self.initialize()
-            if self._dispatcher is not None and self._dispatcher.is_alive():
-                return
-            self._dispatcher = threading.Thread(
-                target=self._dispatch,
-                name="data-refresh-dispatcher",
-                daemon=True,
-            )
-            self._dispatcher.start()
-
-    def _dispatch(self) -> None:
-        """Claim durable queued work from the supervisor, never from a Web child."""
-
-        while not self._stop.wait(0.35):
-            try:
-                with self._conn() as conn:
-                    rows = conn.execute(
-                        "SELECT id FROM refresh_jobs WHERE status IN ('queued','interrupted') "
-                        "AND cancel_requested=0 ORDER BY created_at LIMIT 4"
-                    ).fetchall()
-                for row in rows:
-                    if self._stop.is_set():
-                        return
-                    self._start(str(row[0]))
-            except (OSError, sqlite3.Error):
-                logger.warning("行情刷新调度器读取任务失败", exc_info=True)
+        if self._owns_runtime():
+            self._ensure_runtime().start()
 
     def shutdown(self, timeout: float = 10.0) -> None:
         with self._lock:
-            self._accepting = False
-            self._stop.set()
-            threads = list(self._threads.values())
-        per_thread = max(0.05, timeout / max(1, len(threads)))
-        for thread in threads:
-            thread.join(timeout=per_thread)
-        dispatcher = self._dispatcher
-        if dispatcher is not None:
-            dispatcher.join(timeout=min(1.0, timeout))
-        if str(self._path().resolve()) not in self._initialized_roots:
-            return
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE refresh_jobs SET status='interrupted',owner='',lease_expires=0,"
-                "current_symbol='',updated_at=? WHERE owner=? "
-                "AND status IN ('running','cancelling')",
-                (time.time(), self.identity.value),
-            )
+            runtime = self._runtime
+        if runtime is not None:
+            runtime.stop(deadline_seconds=timeout)
 
 
 data_refresh_manager = DataRefreshManager()

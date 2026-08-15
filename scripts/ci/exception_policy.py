@@ -29,7 +29,7 @@ BASELINE = {
     "quantmaster/data/fundamentals.py": 3,
     "quantmaster/data/industry.py": 3,
     "quantmaster/data/instruments.py": 3,
-    "quantmaster/data/maintenance.py": 2,
+    "quantmaster/data/maintenance.py": 1,
     "quantmaster/data/migration.py": 4,
     "quantmaster/data/names.py": 1,
     "quantmaster/data/registry.py": 7,
