@@ -590,6 +590,12 @@ class InstrumentStore:
                 f"{value.symbol} 是 provider 连续期货序列，仅用于观察/研究；"
                 "paper trading 必须选择明确月份合约"
             )
+        from quantmaster.market_capabilities import (
+            MarketCapability,
+            require_market_capability,
+        )
+
+        require_market_capability(value, MarketCapability.PAPER_ACCOUNT)
         return value
 
     def record_investigation(

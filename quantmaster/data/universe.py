@@ -310,6 +310,12 @@ def save_universe(
 ) -> None:
     safe_name = validate_universe_name(name)
     normalized = tuple(normalize_symbols(symbols))
+    from quantmaster.market_capabilities import (
+        MarketCapability,
+        require_symbols_capability,
+    )
+
+    require_symbols_capability(normalized, MarketCapability.CANDIDATE)
     observed = observed_at or datetime.now(UTC)
     if observed.tzinfo is None:
         raise ValueError("候选 observed_at 必须包含时区")

@@ -129,6 +129,12 @@ def execute_backtest(
         })
     if not symbols:
         raise ValueError("候选中没有可回测标的")
+    from quantmaster.market_capabilities import (
+        MarketCapability,
+        require_symbols_capability,
+    )
+
+    require_symbols_capability(symbols, MarketCapability.BACKTEST)
 
     checkpoint(18, "加载行情", f"读取 {len(symbols)} 只标的的历史行情")
     provided_panel = panel is not None
