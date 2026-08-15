@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +79,22 @@ _CLEANUP_INITIAL_DELAY_SECONDS = 0.1
 _CLEANUP_MAX_DELAY_SECONDS = 1.0
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 _cleanup_sleep = time.sleep
+_RUN_ID_PATTERN = re.compile(r"[0-9a-f]{12}")
+
+
+def _verified_run_root(path: Path) -> Path:
+    candidate = Path(path)
+    if candidate.is_symlink() or candidate.is_junction():
+        raise RuntimeError(
+            "[local-ci] refused cleanup outside verified pytest run root"
+        )
+    resolved = candidate.resolve()
+    pytest_root = PYTEST_ROOT.resolve()
+    if resolved.parent != pytest_root or not _RUN_ID_PATTERN.fullmatch(resolved.name):
+        raise RuntimeError(
+            "[local-ci] refused cleanup outside verified pytest run root"
+        )
+    return resolved
 
 
 def _cleanup_acl_target(root: Path, error: OSError) -> Path:
@@ -90,13 +107,35 @@ def _cleanup_acl_target(root: Path, error: OSError) -> Path:
     return blocked
 
 
+def _cleanup_onexc(root: Path):
+    def onexc(function, path, error: BaseException) -> None:
+        if isinstance(error, OSError) and getattr(error, "winerror", None) == 5:
+            blocked = _cleanup_acl_target(root, error)
+            try:
+                restore_acl_inheritance(blocked)
+            except OSError as acl_error:
+                raise RuntimeError(
+                    "[local-ci] successful run cleanup ACL recovery failed; "
+                    "retained evidence at <local-path>"
+                ) from acl_error
+            try:
+                function(path)
+            except PermissionError as retry_error:
+                make_writable(function, path, retry_error)
+            return
+        make_writable(function, path, error)
+
+    return onexc
+
+
 def cleanup_run_root(path: Path) -> None:
     """Remove one successful run despite transient locks or disappearing entries."""
 
+    path = _verified_run_root(path)
     delay = _CLEANUP_INITIAL_DELAY_SECONDS
     for attempt in range(1, _CLEANUP_ATTEMPTS + 1):
         try:
-            shutil.rmtree(path, onexc=make_writable)
+            shutil.rmtree(path, onexc=_cleanup_onexc(path))
             return
         except FileNotFoundError as exc:
             try:
