@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
+import runpy
 import struct
 import subprocess
 import sys
+import zlib
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -47,8 +51,93 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
     stdout = entry.index('sys.stdout.reconfigure(encoding="utf-8")')
     configure = entry.index("configure_installed_instance()")
     cli_import = entry.index("from quantmaster.cli import main")
+    stage = entry.index('update_splash("正在加载本地配置")')
+    close = entry.index("close_splash()")
 
-    assert freeze < stdout < configure < cli_import
+    assert freeze < stdout < stage < configure < cli_import < close
+    assert all("%" not in line for line in entry.splitlines() if "update_splash" in line)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "closed_before_handler"),
+    (
+        (("doctor",), True),
+        (("backtest",), True),
+        (("app",), False),
+        (("serve",), False),
+        (("serve", "--no-reload"), False),
+        (("serve", "--reload"), True),
+        (("serve", "--reload", "--no-reload"), False),
+        (("serve", "--no-reload", "--reload"), True),
+    ),
+)
+def test_packaged_entry_closes_cli_splash_before_long_handler(
+    monkeypatch,
+    arguments: tuple[str, ...],
+    closed_before_handler: bool,
+) -> None:
+    from pathlib import Path
+
+    calls = []
+    config = ModuleType("quantmaster.config")
+    config.configure_installed_instance = lambda: calls.append("configure")
+    cli = ModuleType("quantmaster.cli")
+    cli.main = lambda _arguments: calls.append(("main", "close" in calls)) or 0
+    windows_app = ModuleType("quantmaster.runtime.windows_app")
+    windows_app.initialize_windows_app_process = lambda **_kwargs: calls.append("initialize")
+    splash = ModuleType("quantmaster.runtime.splash")
+    splash.update_splash = lambda stage: calls.append(("stage", stage))
+    splash.close_splash = lambda: calls.append("close")
+    monkeypatch.setitem(sys.modules, "quantmaster.config", config)
+    monkeypatch.setitem(sys.modules, "quantmaster.cli", cli)
+    monkeypatch.setitem(sys.modules, "quantmaster.runtime.windows_app", windows_app)
+    monkeypatch.setitem(sys.modules, "quantmaster.runtime.splash", splash)
+    monkeypatch.setattr(multiprocessing, "freeze_support", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["QuantMaster.exe", *arguments])
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(reconfigure=lambda **_kwargs: None))
+
+    with pytest.raises(SystemExit, match="0"):
+        runpy.run_path(
+            Path(__file__).parents[1] / "packaging" / "entry.py",
+            run_name="__main__",
+        )
+
+    handler_call = next(call for call in calls if isinstance(call, tuple) and call[0] == "main")
+    assert handler_call == ("main", closed_before_handler)
+    assert calls[-1] == "close"
+
+
+def test_splash_brand_png_is_a_fixed_size_dark_panel_for_the_existing_wordmark() -> None:
+    from pathlib import Path
+
+    image = Path(__file__).parents[1] / "packaging" / "quantmaster-splash.png"
+    payload = image.read_bytes()
+
+    assert payload[:8] == b"\x89PNG\r\n\x1a\n"
+    assert struct.unpack("!II", payload[16:24]) == (760, 300)
+
+    offset = 8
+    compressed = bytearray()
+    while offset < len(payload):
+        length = struct.unpack("!I", payload[offset : offset + 4])[0]
+        kind = payload[offset + 4 : offset + 8]
+        chunk = payload[offset + 8 : offset + 8 + length]
+        offset += length + 12
+        if kind == b"IDAT":
+            compressed.extend(chunk)
+    raw = zlib.decompress(compressed)
+    stride = 760 * 4
+    assert all(raw[row * (stride + 1)] == 0 for row in range(300))
+
+    def pixel(x: int, y: int) -> tuple[int, int, int, int]:
+        start = y * (stride + 1) + 1 + x * 4
+        return tuple(raw[start : start + 4])
+
+    assert pixel(0, 0) == (255, 0, 255, 255)
+    assert pixel(380, 290) == (5, 5, 5, 255)
+    assert pixel(170, 120) == (244, 247, 251, 255)
+    assert pixel(242, 73) == (57, 135, 229, 255)
+    assert pixel(447, 98) == (57, 135, 229, 255)
 
 
 def test_project_icon_has_valid_group_and_images() -> None:
@@ -136,6 +225,102 @@ def test_pyinstaller_runtime_hook_binds_clean_full_git_sha() -> None:
     assert '"status", "--porcelain"' not in spec
     assert "bind_packaged_build" in spec
     assert "runtime_hooks=[str(runtime_identity_hook)]" in spec
+
+
+def test_pyinstaller_defaults_to_onefile_and_requires_explicit_windows_onedir(
+    monkeypatch,
+) -> None:
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+    layout_source = "package_layout =" + spec.split("package_layout =", 1)[1].split(
+        "project_root =", 1,
+    )[0]
+    tail = "pyz = PYZ" + spec.split("pyz = PYZ", 1)[1]
+    analysis = SimpleNamespace(
+        pure=object(), scripts=object(), binaries=object(), datas=object(),
+    )
+
+    def evaluate(platform: str, package_layout: str | None = None):
+        calls = []
+        monkeypatch.setattr(sys, "platform", platform)
+        if package_layout is None:
+            monkeypatch.delenv("QM_DESKTOP_LAYOUT", raising=False)
+        else:
+            monkeypatch.setenv("QM_DESKTOP_LAYOUT", package_layout)
+
+        class SplashResult:
+            def __init__(self):
+                self.binaries = object()
+
+        splash_result = SplashResult()
+
+        def record(name):
+            def invoke(*args, **kwargs):
+                calls.append((name, args, kwargs))
+                return splash_result if name == "Splash" else object()
+
+            return invoke
+
+        scope = {"os": os, "sys": sys}
+        exec(compile(layout_source, "quantmaster.spec", "exec"), scope)
+        exec(compile(tail, "quantmaster.spec", "exec"), {
+            "a": analysis,
+            "PYZ": lambda _pure: object(),
+            "Splash": record("Splash"),
+            "EXE": record("EXE"),
+            "COLLECT": record("COLLECT"),
+            "project_root": Path("project"),
+            "os": os,
+            "sys": sys,
+            "version_info": None,
+            "onedir_measurement": scope["onedir_measurement"],
+        })
+        return calls
+
+    windows = evaluate("win32")
+    windows_onedir = evaluate("win32", "onedir-measurement")
+    posix = evaluate("linux")
+
+    assert windows[1][2]["exclude_binaries"] is False
+    assert analysis.binaries in windows[1][1]
+    assert analysis.datas in windows[1][1]
+    assert windows[0][2]["full_tk"] is False
+    assert windows[0][2]["text_pos"] == (32, 270)
+    assert windows[0][2]["text_color"] == "#f4f7fb"
+    assert windows[0][2]["text_default"]
+    assert windows[0][1][0].name == "quantmaster-splash.png"
+    assert windows[0][2].get("progress_bar") is None
+    assert [call[0] for call in windows] == ["Splash", "EXE"]
+    assert windows_onedir[0][2]["exclude_binaries"] is True
+    assert analysis.binaries not in windows_onedir[0][1]
+    assert [call[0] for call in windows_onedir] == ["EXE", "COLLECT"]
+    assert analysis.binaries in windows_onedir[1][1]
+    assert analysis.datas in windows_onedir[1][1]
+    assert posix[0][2]["exclude_binaries"] is False
+    assert analysis.binaries in posix[0][1]
+    assert analysis.datas in posix[0][1]
+    assert [call[0] for call in posix] == ["EXE"]
+
+    with pytest.raises(ValueError, match="Windows-only"):
+        evaluate("linux", "onedir-measurement")
+
+
+def test_pyinstaller_rejects_non_windows_onedir_before_build_side_effects() -> None:
+    from pathlib import Path
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+
+    rejection = spec.index('package_layout = os.environ.get("QM_DESKTOP_LAYOUT"')
+    runtime_hook_write = spec.index("runtime_identity_hook.write_text")
+    analysis = spec.index("a = Analysis(")
+
+    assert rejection < runtime_hook_write < analysis
 
 
 def test_pyinstaller_spec_loads_identity_policy_outside_project_sys_path(

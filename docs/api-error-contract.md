@@ -5,10 +5,11 @@ Every API failure is a redacted envelope with `code`, `message`, `problem`,
 `retry_after`, and `suggestion`. `X-Request-ID` is the same identifier. Request
 validation never returns rejected values or Pydantic context.
 
-`GET /api/v1/health` is the only health probe. It is process-only and does not
-open a store or contact LLM, Feishu, or a provider. Optional component state is
-reported by `GET /api/v1/diagnostics`; `/health/live` and `/health/ready` were
-removed.
+`GET /api/v1/health` is the only health probe. HTTP 200 remains process
+liveness; the response also carries the lightweight, store-free `core_ready` and
+`readiness_status` projection. It does not run full diagnostics or contact
+news, rotation, LLM, Feishu, or a provider. Optional component state is reported
+by `GET /api/v1/diagnostics`; `/health/live` and `/health/ready` were removed.
 
 Evidence found in local logs (parameters are intentionally not logged):
 

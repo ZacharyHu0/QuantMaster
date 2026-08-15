@@ -384,11 +384,14 @@ Web 市场页点击标的后可在日线、60 分、15 分、5 分和 1 分之�
 
 **Q: Mac / Windows 都能用？**
 是。纯 Python + 浏览器界面，无平台绑定。桌面模式：`qm app`（启动服务并自动
-打开浏览器）。也可自行打包单文件可执行程序：
+打开浏览器）。也可自行构建桌面产物：
 
 ```bash
 pip install pyinstaller
-cd packaging && pyinstaller quantmaster.spec
-# 产物 .artifacts/packages/desktop/QuantMaster(.exe)，双击即用；仓库打 v* tag 时 CI 会自动
-# 构建 Mac/Windows/Linux 三平台版本并附到 GitHub Release
+pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
+# 三个平台默认都生成 QuantMaster 单文件（Windows 为 QuantMaster.exe）。
+python scripts/release/check_desktop_artifact.py .artifacts/packages/desktop/QuantMaster --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
+# Windows 将上一行的产物路径改为 .artifacts/packages/desktop/QuantMaster.exe。
+# Windows onedir 仍是非发布测量项：python scripts/ci/run.py --package --measure-onedir
+# 它会生成确定性 ZIP 与文件归因报告，但超预算不会替代默认发布产物。
 ```

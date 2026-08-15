@@ -270,6 +270,10 @@ class TestBasics:
             "quantmaster.server.problems.collect_health_report",
             lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe stores")),
         )
+        monkeypatch.setattr(
+            "quantmaster.runtime.worker.runtime_worker_status",
+            lambda: (_ for _ in ()).throw(AssertionError("liveness must not probe worker")),
+        )
         live = client.get("/api/v1/health")
         assert live.status_code == 200
         assert {
@@ -280,6 +284,8 @@ class TestBasics:
         }
         assert live.json()["web_threads"] >= 1
         assert live.json()["thread_status"] in {"ok", "warning"}
+        assert live.json()["core_ready"] is True
+        assert live.json()["readiness_status"] == "ready"
 
     def test_diagnostics_expose_sanitized_runtime_status_and_core_storage_problem(self, monkeypatch):
         from quantmaster.server import diagnostics as diagnostics_module

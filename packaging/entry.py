@@ -10,12 +10,36 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     sys.stdout.reconfigure(encoding="utf-8")
 
-    from quantmaster.config import configure_installed_instance
+    from quantmaster.runtime.splash import close_splash, update_splash
 
-    configure_installed_instance()
+    try:
+        update_splash("正在加载本地配置")
+        from quantmaster.config import configure_installed_instance
 
-    from quantmaster.cli import main
-    from quantmaster.runtime.windows_app import initialize_windows_app_process
+        configure_installed_instance()
+        update_splash("正在装配命令入口")
 
-    initialize_windows_app_process(root=True)
-    sys.exit(main(["app"]) if len(sys.argv) == 1 else main(sys.argv[1:]))
+        from quantmaster.cli import main
+        from quantmaster.runtime.windows_app import initialize_windows_app_process
+
+        initialize_windows_app_process(root=True)
+        arguments = ["app"] if len(sys.argv) == 1 else sys.argv[1:]
+        command = next((argument for argument in arguments if not argument.startswith("-")), "")
+        reload_requested = False
+        if command == "serve":
+            for argument in arguments:
+                if argument == "--reload":
+                    reload_requested = True
+                elif argument == "--no-reload":
+                    reload_requested = False
+        web_command = command == "app" or (command == "serve" and not reload_requested)
+        update_splash(
+            "正在启动 Web 服务"
+            if web_command
+            else "正在执行命令"
+        )
+        if not web_command:
+            close_splash()
+        sys.exit(main(arguments))
+    finally:
+        close_splash()

@@ -236,6 +236,13 @@ def _official_detail_html(source_id: str, *, published: str = "2026-08-09") -> b
     ).encode()
 
 
+def _freeze_official_provider_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.ai.news_providers.time.time",
+        lambda: pd.Timestamp("2026-08-10T12:00:00+08:00").timestamp(),
+    )
+
+
 def test_builtin_groups_have_real_enabled_definitions(tmp_path):
     store = NewsSourceStore(tmp_path / "news.sqlite")
     grouped = {
@@ -911,6 +918,7 @@ def test_sina_empty_contract_fails(monkeypatch):
 def test_official_parsers_accept_articles_and_reject_navigation(
     monkeypatch, source_id, fetcher, href,
 ):
+    _freeze_official_provider_clock(monkeypatch)
     listing_html = (
         '<nav><a href="/regulation/listing/measures/">发行上市审核监管</a></nav>'
         f'<ul><li><a href="{href}">真正的官方发布内容</a><span>2026-08-09</span></li></ul>'
@@ -985,6 +993,7 @@ def test_initial_news_freshness_rejects_evidence_beyond_declared_boundary():
 
 
 def test_official_limit_gap_does_not_advance_committed_watermark(monkeypatch):
+    _freeze_official_provider_clock(monkeypatch)
     hrefs = [
         "/disclosure/announcement/general/jjzssgg/c/c_20260809_10828295.shtml",
         "/disclosure/announcement/general/jjzssgg/c/c_20260809_10828294.shtml",
@@ -1036,6 +1045,7 @@ def test_official_parser_sorts_entire_snapshot_before_cutting_at_watermark(monke
 
 
 def test_official_detail_failure_keeps_listing_only_and_committed_watermark(monkeypatch):
+    _freeze_official_provider_clock(monkeypatch)
     href = "/disclosure/announcement/general/jjzssgg/c/c_20260809_10828292.shtml"
     listing = (
         f'<li><a href="{href}">详情暂时不可复核的官方公告</a><span>2026-08-09</span></li>'
@@ -1057,6 +1067,7 @@ def test_official_detail_failure_keeps_listing_only_and_committed_watermark(monk
 
 
 def test_official_detail_304_recovers_verified_detail_raw(monkeypatch, tmp_path):
+    _freeze_official_provider_clock(monkeypatch)
     store = NewsSourceStore(tmp_path / "news.sqlite")
     source = store.get("sse") or {}
     href = "/disclosure/announcement/general/jjzssgg/c/c_20260809_10828292.shtml"

@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from quantmaster.runtime.splash import close_splash, splash_active
+
 logger = logging.getLogger(__name__)
 _SO_EXCLUSIVEADDRUSE = getattr(socket_module, "SO_EXCLUSIVEADDRUSE", 0x4)
 
@@ -26,6 +28,43 @@ RELOAD_DRAIN_SECONDS = 10.0
 RELOAD_FORCE_KILL_SECONDS = 5.0
 WEB_GENERATION_ENV = "QM_WEB_GENERATION"
 WEB_PROCESS_ENV = "QM_WEB_PROCESS"
+
+
+def _wait_for_splash_readiness(
+    server: Any,
+    stop_event: threading.Event,
+    readiness_probe: Callable[..., dict[str, Any]],
+    close: Callable[[], None],
+) -> None:
+    """Close only after Uvicorn listens and the lightweight core is ready."""
+    while not stop_event.wait(0.05):
+        try:
+            core_ready = bool(
+                readiness_probe(include_optional_services=False).get("core_ready")
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            core_ready = False
+        if bool(getattr(server, "started", False)) and core_ready:
+            close()
+            return
+
+
+def _start_splash_readiness_watcher(
+    server: Any,
+    stop_event: threading.Event,
+) -> threading.Thread | None:
+    if not splash_active():
+        return None
+    from quantmaster.server.readiness import readiness_status
+
+    watcher = threading.Thread(
+        target=_wait_for_splash_readiness,
+        args=(server, stop_event, readiness_status, close_splash),
+        name="qm-splash-readiness",
+        daemon=True,
+    )
+    watcher.start()
+    return watcher
 
 
 @dataclass(frozen=True)
@@ -975,10 +1014,15 @@ def run_uvicorn_foreground(
         daemon=True,
     )
     watcher.start()
+    splash_stop = threading.Event()
+    splash_watcher = _start_splash_readiness_watcher(server, splash_stop)
     unregister_handler = install_windows_console_handler(request_shutdown, shutdown_complete)
     try:
         server.run()
     finally:
+        splash_stop.set()
+        if splash_watcher is not None:
+            splash_watcher.join(timeout=1.0)
         stop_watcher.set()
         shutdown_complete.set()
         unregister_handler()
