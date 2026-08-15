@@ -579,3 +579,16 @@ def test_task_branch_rejects_release_metadata(monkeypatch, release_path):
     monkeypatch.setattr(release_sync, "staged_paths", lambda: {release_path})
     monkeypatch.setattr(release_sync, "current_branch", lambda: "codex/storage-fix")
     assert pre_commit() == 1
+
+
+@pytest.mark.parametrize("release_paths", [
+    {RELEASE_FILE},
+    {CHANGELOG_FILE},
+    {RELEASE_FILE, CHANGELOG_FILE},
+])
+def test_release_pr_branch_allows_release_metadata(monkeypatch, release_paths):
+    from scripts.release import sync as release_sync
+
+    monkeypatch.setattr(release_sync, "staged_paths", lambda: release_paths)
+    monkeypatch.setattr(release_sync, "current_branch", lambda: "codex/release-v1.16.0")
+    assert pre_commit() == 0
