@@ -72,6 +72,14 @@ class FactorCreate(ContractModel):
     parent_id: str = Field(default="", max_length=64)
 
 
+class FactorCorrelationRequest(ContractModel):
+    version_ids: list[str] = Field(min_length=2, max_length=30)
+    universe: str = Field(default="csi800", min_length=1, max_length=40)
+    start: str = Field(default="2015-01-01", pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end: str = Field(default="", pattern=r"^(?:\d{4}-\d{2}-\d{2})?$")
+    horizon: Literal[1, 3, 5, 7, 10, 20, 30] = 3
+
+
 class JobCreate(ContractModel):
     kind: Literal[
         "prepare_data", "validate", "discover_genetic", "discover_llm",
@@ -226,6 +234,22 @@ def factors(
 ) -> dict:
     return _published_lab_service().store.list_factors(
         status=status, category=category, search=search, limit=limit, offset=offset)
+
+
+@router.post("/factors/correlation-matrix")
+def factor_correlation_matrix(body: FactorCorrelationRequest) -> dict:
+    try:
+        return _get_lab_service().factor_correlation_matrix(**body.model_dump())
+    except (LabError, KeyError, TypeError, ValueError) as exc:
+        return _fail(exc)  # type: ignore[return-value]
+
+
+@router.get("/factors/{version_id}/history")
+def factor_version_history(version_id: str) -> dict:
+    try:
+        return {"items": _published_lab_service().store.version_history(version_id)}
+    except (LabError, KeyError, TypeError, ValueError) as exc:
+        return _fail(exc)  # type: ignore[return-value]
 
 
 @router.get("/factors/{version_id}")
