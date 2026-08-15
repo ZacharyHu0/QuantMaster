@@ -34,6 +34,24 @@ class MigrationPreflight:
     free_bytes: int | None
 
 
+@dataclass(frozen=True)
+class BackupInventoryEntry:
+    path: str
+    kind: str
+    exists: bool
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class BackupPreflight:
+    source_root: Path
+    target_root: Path
+    entries: tuple[BackupInventoryEntry, ...]
+    total_bytes: int
+    required_bytes: int
+    free_bytes: int
+
+
 @dataclass
 class MigrationTask:
     id: str
@@ -181,24 +199,37 @@ def _backup_manifest(root: Path) -> dict:
         value = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MigrationError("备份完成标记无效") from exc
-    if value.get("schema_version") != 1 or not isinstance(value.get("entries"), list):
+    if value.get("schema_version") != 2 or not isinstance(value.get("entries"), list):
         raise MigrationError("备份完成标记无效")
     return value
 
 
 def validate_backup_tree(root: Path) -> dict:
-    """Require a finalized marker and re-check every backed-up SQLite database."""
+    """Require a finalized marker and re-check every declared backup entry."""
     value = _backup_manifest(root)
     for entry in value["entries"]:
-        if entry.get("kind") != "sqlite" or not entry.get("exists"):
+        relative = _backup_extra_path(str(entry.get("path") or ""))
+        path = root / relative
+        exists = entry.get("exists") is True
+        if not exists:
+            if path.exists():
+                raise MigrationError(f"备份出现未声明文件: {relative.as_posix()}")
             continue
-        path = root / str(entry["path"])
-        if not path.is_file():
-            raise MigrationError(f"备份文件丢失: {entry['path']}")
+        kind = str(entry.get("kind") or "")
+        if kind == "directory":
+            valid_type = path.is_dir()
+        else:
+            valid_type = kind in {"sqlite", "file"} and path.is_file()
+        if not valid_type:
+            raise MigrationError(f"备份文件丢失或类型错误: {relative.as_posix()}")
+        if _backup_path_size(path) != entry.get("size_bytes"):
+            raise MigrationError(f"备份大小校验失败: {relative.as_posix()}")
+        if kind != "sqlite":
+            continue
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()
             if not result or result[0] != "ok":
-                raise MigrationError(f"SQLite 备份校验失败: {entry['path']}")
+                raise MigrationError(f"SQLite 备份校验失败: {relative.as_posix()}")
     return value
 
 
@@ -218,8 +249,12 @@ def _backup_sqlite_entries(
         ):
             continue
         relative = source.relative_to(source_root)
-        _copy_sqlite(source, staging / relative)
-        entries.append({"path": relative.as_posix(), "kind": "sqlite", "exists": True})
+        destination = staging / relative
+        _copy_sqlite(source, destination)
+        entries.append({
+            "path": relative.as_posix(), "kind": "sqlite", "exists": True,
+            "size_bytes": destination.stat().st_size,
+        })
     return entries
 
 
@@ -232,6 +267,120 @@ def _backup_extra_path(raw: str) -> Path:
     return relative
 
 
+def _backup_path_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _backup_kind(path: Path) -> str:
+    if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+        return "sqlite"
+    if path.suffix.lower() == ".parquet":
+        return "parquet"
+    if path.suffix.lower() == ".json" and any(
+        token in path.name.casefold() for token in ("manifest", "schema", "version")
+    ):
+        return "schema_marker"
+    return "artifact"
+
+
+def _inventory_entry(
+    source_root: Path, path: Path, *, missing: bool = False,
+) -> BackupInventoryEntry:
+    return BackupInventoryEntry(
+        path.relative_to(source_root).as_posix(),
+        "missing" if missing else _backup_kind(path),
+        not missing,
+        0 if missing else path.stat().st_size,
+    )
+
+
+def _checked_tree_files(root: Path, symlink_error: str) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise MigrationError(symlink_error)
+        if path.is_file() and not _is_sqlite_sidecar(path):
+            files.append(path)
+    return tuple(files)
+
+
+def _sqlite_inventory(source_root: Path, excluded: set[str]) -> dict[str, BackupInventoryEntry]:
+    backups_root = source_root / "backups"
+    result: dict[str, BackupInventoryEntry] = {}
+    for path in _checked_tree_files(
+        source_root, "数据根目录包含符号链接，无法确认备份边界",
+    ):
+        resolved = path.resolve()
+        if backups_root == resolved or backups_root in resolved.parents:
+            continue
+        if path.name in excluded or path.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
+            continue
+        entry = _inventory_entry(source_root, path)
+        result[entry.path] = entry
+    return result
+
+
+def _extra_inventory(
+    source_root: Path, extra_paths: tuple[str, ...],
+) -> dict[str, BackupInventoryEntry]:
+    result: dict[str, BackupInventoryEntry] = {}
+    for raw in sorted(set(extra_paths)):
+        path = source_root / _backup_extra_path(raw)
+        if not path.exists():
+            entry = _inventory_entry(source_root, path, missing=True)
+            result[entry.path] = entry
+            continue
+        files = (
+            (path,) if path.is_file()
+            else _checked_tree_files(path, f"额外备份路径包含符号链接: {raw}")
+            if path.is_dir() else ()
+        )
+        if not files and not path.is_dir():
+            raise MigrationError(f"额外备份路径类型不受支持: {raw}")
+        for item in files:
+            entry = _inventory_entry(source_root, item)
+            result[entry.path] = entry
+    return result
+
+
+def _backup_free_bytes(target_root: Path) -> int:
+    capacity_root = target_root
+    while not capacity_root.exists():
+        parent = capacity_root.parent
+        if parent == capacity_root:
+            raise MigrationError("备份目录父路径不可用")
+        capacity_root = parent
+    if not capacity_root.is_dir():
+        raise MigrationError("备份目录父路径不可用")
+    return shutil.disk_usage(capacity_root).free
+
+
+def preflight_backup_tree(
+    source_root: Path,
+    target_root: Path,
+    *,
+    exclude: set[str] | None = None,
+    extra_paths: tuple[str, ...] = (),
+) -> BackupPreflight:
+    """Inventory the exact backup boundary and capacity without changing the filesystem."""
+    source_root, target_root = source_root.resolve(), target_root.resolve()
+    if not source_root.is_dir():
+        raise MigrationError("数据根目录不存在")
+    entries = _sqlite_inventory(source_root, set(exclude or ()))
+    entries.update(_extra_inventory(source_root, extra_paths))
+    ordered = tuple(entries[key] for key in sorted(entries))
+    total = sum(entry.size_bytes for entry in ordered)
+    required = total + max(16 * 1024 * 1024, total // 20)
+    free = _backup_free_bytes(target_root)
+    if free < required:
+        raise MigrationError("备份磁盘剩余空间不足")
+    return BackupPreflight(
+        source_root, target_root, ordered, total, required, free,
+    )
+
+
 def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str, object]:
     relative = _backup_extra_path(raw)
     source = source_root / relative
@@ -242,6 +391,7 @@ def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str,
     )
     entry: dict[str, object] = {
         "path": relative.as_posix(), "kind": kind, "exists": exists,
+        "size_bytes": 0,
     }
     if not exists:
         return entry
@@ -268,6 +418,7 @@ def _backup_extra_entry(source_root: Path, staging: Path, raw: str) -> dict[str,
         shutil.copy2(source, destination)
     else:
         raise MigrationError(f"额外备份路径类型不受支持: {raw}")
+    entry["size_bytes"] = _backup_path_size(destination)
     return entry
 
 
@@ -305,7 +456,7 @@ def backup_sqlite_tree(
                 continue
             entries.append(_backup_extra_entry(source_root, staging, raw))
         marker = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_root": str(source_root),
             "completed_at": datetime.now(UTC).isoformat(),
             "entries": entries,

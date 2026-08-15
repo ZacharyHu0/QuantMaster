@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from quantmaster.config import get_config
-from quantmaster.data.migration import backup_sqlite_tree, validate_backup_tree
+from quantmaster.data.migration import (
+    MigrationError,
+    backup_sqlite_tree,
+    preflight_backup_tree,
+    validate_backup_tree,
+)
 from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
 from quantmaster.runtime.sqlite import connect_sqlite
 
@@ -153,12 +158,16 @@ class LegacyMigrationManager:
         *,
         backup: Callable[[Path, Path], None] | None = None,
         backup_root: str | Path | None = None,
+        stockdb_root: str | Path | None = None,
         offline_evidence: OfflineMaintenanceEvidence | None = None,
     ) -> None:
         self.root = Path(root or get_config().data_root).resolve()
         self.state_path = self.root / "legacy_contract_migrations.sqlite"
         self.backup_root = Path(
             backup_root or self.root / "backups" / "legacy-contracts"
+        ).resolve()
+        self.stockdb_root = Path(
+            stockdb_root or get_config().free_stockdb_root
         ).resolve()
         self._backup = backup or self._backup_sqlite_files
         self._offline_evidence = offline_evidence
@@ -167,6 +176,65 @@ class LegacyMigrationManager:
         self._leases: dict[str, MaintenanceLease] = {}
         self._pause_requests: set[str] = set()
         self._initialized = False
+
+    def plan(self, domain: str) -> dict:
+        """Return the complete read-only evidence card required before apply."""
+        register_builtin_migrations()
+        migrator = _MIGRATORS.get(domain)
+        if migrator is None:
+            raise LegacyMigrationError(f"未知迁移类型：{domain}")
+        try:
+            backup = preflight_backup_tree(
+                self.root,
+                self.backup_root,
+                exclude={"legacy_contract_migrations.sqlite"},
+                extra_paths=tuple(getattr(migrator, "backup_paths", ())),
+            )
+            records = tuple(migrator.inspect(self.root))
+        except (MigrationError, OSError, sqlite3.Error, ValueError) as exc:
+            raise LegacyMigrationError(str(exc)) from exc
+        evidence = [
+            {
+                "record_key": record.record_key,
+                "outcome": record.outcome,
+                "diagnostic_code": record.diagnostic_code,
+                "unknown_fields": list(record.unknown_fields),
+                "detail": record.detail,
+            }
+            for record in records
+        ]
+        return {
+            "schema_version": 1,
+            "domain": domain,
+            "data_root": str(backup.source_root),
+            "stockdb_root": str(self.stockdb_root),
+            "stockdb_exists": self.stockdb_root.is_dir(),
+            "stockdb_action": "preserve_in_place",
+            "backup_root": str(backup.target_root),
+            "inventory": [
+                {
+                    "path": str(backup.source_root / entry.path),
+                    "kind": entry.kind,
+                    "exists": entry.exists,
+                    "size_bytes": entry.size_bytes,
+                }
+                for entry in backup.entries
+            ],
+            "inventory_bytes": backup.total_bytes,
+            "required_backup_bytes": backup.required_bytes,
+            "free_backup_bytes": backup.free_bytes,
+            "migration_evidence": evidence,
+            "conflicts": [item for item in evidence if item["outcome"] == "conflict"],
+            "rollback_limitations": [
+                item["path"] for item in (
+                    {
+                        "path": str(backup.source_root / entry.path),
+                        "exists": entry.exists,
+                    }
+                    for entry in backup.entries
+                ) if not item["exists"]
+            ],
+        }
 
     def _conn(self) -> sqlite3.Connection:
         connection = connect_sqlite(self.state_path)
@@ -239,6 +307,9 @@ class LegacyMigrationManager:
             raise LegacyMigrationError("batch_size 必须在 1..5000")
         if mode == "apply":
             self._require_offline_evidence()
+            plan = self.plan(domain)
+            if plan["conflicts"]:
+                raise LegacyMigrationError("迁移证据存在冲突，拒绝写入")
         self._initialize()
         with self._conn() as connection:
             active = connection.execute(
