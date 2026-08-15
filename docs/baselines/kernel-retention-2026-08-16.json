@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-15T18:30:49.722986+00:00",
+  "machine": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+    "logical_cpus": 32,
+    "python": "3.12.13",
+    "numpy": "2.5.1",
+    "pandas": "3.0.5",
+    "scipy": "1.18.0",
+    "rust_kernel": "0.1.0",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "thread_environment": {
+      "RAYON_NUM_THREADS": "default",
+      "OMP_NUM_THREADS": "default",
+      "OPENBLAS_NUM_THREADS": "default"
+    }
+  },
+  "dataset": {
+    "source": "local-stockdb-ingest",
+    "network": "disabled",
+    "ingest_id": "sdi_f45211392ab3079c823db962",
+    "artifact_id": "6247d9b1659559802e66db3d49d1a17b4a34b2586e70592b44969c4e1fefa81f",
+    "content_ids": {
+      "stock_daily": "f71239f519fa6b267fda0e070bf951c692b4be85b8d898d50ce74f90fb1ba2ab",
+      "boards": "7acc645e16b4ed7d79fa549357d0e27cb0c451849b399f35e309814d2b79194b"
+    },
+    "as_of_date": "2026-08-13",
+    "start_date": "2025-11-18",
+    "end_date": "2026-08-13",
+    "rows": 983296,
+    "sessions": 180,
+    "symbols": 5494,
+    "groups": 1337,
+    "memberships": 93514
+  },
+  "method": {
+    "scipy_seam": "quantmaster.rotation.analytics.analyze_group_rotation",
+    "rust_seam": "quantmaster.research.providers.compute_core_factors",
+    "cold": "first invocation in a fresh process after local input preparation",
+    "warm": "same process after one untimed invocation",
+    "timing": "time.perf_counter_ns around the application seam",
+    "memory": "absolute process Working Set sampled every 5 ms",
+    "rust_conversion": "Kernel public methods include Python-to-list and list-to-NumPy conversion",
+    "sample_distribution": "raw samples plus min/p50/mean/stdev/max"
+  },
+  "comparisons": {
+    "scipy": {
+      "parity": {
+        "exact": true,
+        "output_groups": 973
+      },
+      "backends": {
+        "scipy": {
+          "cold": {
+            "runs": 3,
+            "samples_ms": [
+              11055.282,
+              8913.993,
+              7471.248
+            ],
+            "samples_peak_memory_bytes": [
+              669519872,
+              677187584,
+              694439936
+            ],
+            "min_ms": 7471.248,
+            "p50_ms": 8913.993,
+            "mean_ms": 9146.841,
+            "stdev_ms": 1803.3270839248767,
+            "max_ms": 11055.282,
+            "peak_memory_max_bytes": 694439936
+          },
+          "warm": {
+            "runs": 3,
+            "samples_ms": [
+              7655.891,
+              7448.88,
+              7237.387
+            ],
+            "samples_peak_memory_bytes": [
+              678408192,
+              728182784,
+              723349504
+            ],
+            "min_ms": 7237.387,
+            "p50_ms": 7448.88,
+            "mean_ms": 7447.3859999999995,
+            "stdev_ms": 209.25599998805288,
+            "max_ms": 7655.891,
+            "peak_memory_max_bytes": 728182784
+          },
+          "observation": {
+            "sessions": 180,
+            "symbols": 5494,
+            "groups": 1337,
+            "output_rows": 973
+          }
+        },
+        "numpy": {
+          "cold": {
+            "runs": 3,
+            "samples_ms": [
+              13094.065,
+              16017.492,
+              15554.687
+            ],
+            "samples_peak_memory_bytes": [
+              688779264,
+              684036096,
+              690245632
+            ],
+            "min_ms": 13094.065,
+            "p50_ms": 15554.687,
+            "mean_ms": 14888.748,
+            "stdev_ms": 1571.372781956274,
+            "max_ms": 16017.492,
+            "peak_memory_max_bytes": 690245632
+          },
+          "warm": {
+            "runs": 3,
+            "samples_ms": [
+              13178.224,
+              13979.575,
+              13793.653
+            ],
+            "samples_peak_memory_bytes": [
+              689217536,
+              740319232,
+              750645248
+            ],
+            "min_ms": 13178.224,
+            "p50_ms": 13793.653,
+            "mean_ms": 13650.484,
+            "stdev_ms": 419.4208843405395,
+            "max_ms": 13979.575,
+            "peak_memory_max_bytes": 750645248
+          },
+          "observation": {
+            "sessions": 180,
+            "symbols": 5494,
+            "groups": 1337,
+            "output_rows": 973
+          }
+        }
+      }
+    },
+    "rust": {
+      "parity": {
+        "equivalent": true,
+        "keys_equal": true,
+        "nan_masks_equal": true,
+        "atol": 1e-06,
+        "rtol": 1e-06,
+        "max_abs_error": 2.531308496145357e-14,
+        "output_rows": 988920
+      },
+      "backends": {
+        "python": {
+          "cold": {
+            "runs": 3,
+            "samples_ms": [
+              126624.082,
+              133357.415,
+              109141.879
+            ],
+            "samples_peak_memory_bytes": [
+              778121216,
+              785272832,
+              786460672
+            ],
+            "min_ms": 109141.879,
+            "p50_ms": 126624.082,
+            "mean_ms": 123041.12533333333,
+            "stdev_ms": 12499.049155765106,
+            "max_ms": 133357.415,
+            "peak_memory_max_bytes": 786460672
+          },
+          "warm": {
+            "runs": 3,
+            "samples_ms": [
+              126139.238,
+              128175.511,
+              111851.146
+            ],
+            "samples_peak_memory_bytes": [
+              783679488,
+              811155456,
+              829894656
+            ],
+            "min_ms": 111851.146,
+            "p50_ms": 126139.238,
+            "mean_ms": 122055.29833333332,
+            "stdev_ms": 8895.512664486312,
+            "max_ms": 128175.511,
+            "peak_memory_max_bytes": 829894656
+          },
+          "observation": {
+            "rows": 983296,
+            "sessions": 180,
+            "symbols": 5494,
+            "native_version": "",
+            "output_rows": 988920
+          }
+        },
+        "rust": {
+          "cold": {
+            "runs": 3,
+            "samples_ms": [
+              16141.621,
+              15656.271,
+              15928.222
+            ],
+            "samples_peak_memory_bytes": [
+              786178048,
+              788602880,
+              788402176
+            ],
+            "min_ms": 15656.271,
+            "p50_ms": 15928.222,
+            "mean_ms": 15908.704666666667,
+            "stdev_ms": 243.2629243233193,
+            "max_ms": 16141.621,
+            "peak_memory_max_bytes": 788602880
+          },
+          "warm": {
+            "runs": 3,
+            "samples_ms": [
+              16928.769,
+              23317.953,
+              23344.314
+            ],
+            "samples_peak_memory_bytes": [
+              792330240,
+              824729600,
+              867930112
+            ],
+            "min_ms": 16928.769,
+            "p50_ms": 23317.953,
+            "mean_ms": 21197.012,
+            "stdev_ms": 3696.4303667006902,
+            "max_ms": 23344.314,
+            "peak_memory_max_bytes": 867930112
+          },
+          "observation": {
+            "rows": 983296,
+            "sessions": 180,
+            "symbols": 5494,
+            "native_version": "0.1.0",
+            "output_rows": 988920
+          }
+        }
+      }
+    }
+  },
+  "decisions": {
+    "scipy": {
+      "decision": "retain",
+      "maximum_time_ratio": 1.8517754346962227,
+      "peak_memory_ratio": 1.0308472879248956,
+      "thresholds": {
+        "time_ratio_max": 1.2,
+        "peak_memory_ratio_max": 1.25
+      }
+    },
+    "rust": {
+      "decision": "retain",
+      "minimum_net_speedup": 0.8151411617057651,
+      "thresholds": {
+        "net_speedup_min": 0.2
+      }
+    }
+  }
+}
