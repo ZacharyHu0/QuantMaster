@@ -28,6 +28,7 @@ let activation = 0;
 let transitions = Promise.resolve();
 
 function loadWorkspace(name) {
+  if (!Object.hasOwn(WORKSPACES, name)) throw new Error(`未知工作区：${name}`);
   if (!modulePromises.has(name)) {
     const retry = moduleRetries.get(name) || 0;
     const pending = WORKSPACES[name](retry).catch(error => {

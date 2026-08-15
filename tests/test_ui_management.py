@@ -15,6 +15,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
@@ -34,6 +35,129 @@ pytestmark = [
     pytest.mark.module_isolated_config,
 ]
 playwright_sync = pytest.importorskip("playwright.sync_api")
+STATIC_ROOT = Path(__file__).resolve().parents[1] / "quantmaster" / "server" / "static"
+
+
+def _static_request_path(request_url: str) -> tuple[str, Path] | None:
+    path = unquote(urlsplit(request_url).path)
+    if not path.startswith("/static/"):
+        return None
+    relative = path.removeprefix("/static/")
+    resource = (STATIC_ROOT / relative).resolve()
+    resource.relative_to(STATIC_ROOT.resolve())
+    assert resource.is_file(), f"Chromium requested an unattributed static resource: {path}"
+    return path, resource
+
+
+def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict[str, object]:
+    with httpx.Client(trust_env=False) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        html_bytes = len(response.content)
+        shell_paths = {
+            urlsplit(value).path
+            for value in re.findall(r'(?:src|href)="([^"?]+)', response.text)
+            if urlsplit(value).path.startswith("/static/")
+        }
+
+    with playwright_sync.sync_playwright() as manager:
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(browser_workdir)
+            browser = manager.chromium.launch()
+        finally:
+            os.chdir(previous_cwd)
+        discovery = browser.new_page(viewport={"width": 1280, "height": 900})
+        discovery.goto(url)
+        discovery.wait_for_url(re.compile(r"#today/quotes$"))
+        targets = discovery.locator(
+            "[data-workspace-pages] [data-workspace-page]"
+        ).evaluate_all(
+            """controls => controls.map(control => ({
+              workspace: control.closest('[data-workspace-pages]').dataset.workspacePages,
+              page: control.dataset.workspacePage,
+            }))"""
+        )
+        targets.extend(discovery.locator(
+            "header [data-tab]:not([data-workspace-page])"
+        ).evaluate_all(
+            "controls => controls.map(control => ({workspace:'runtime', page:control.dataset.tab}))"
+        ))
+        discovery.close()
+        targets = sorted({(target["workspace"], target["page"]) for target in targets})
+
+        views: dict[str, dict[str, object]] = {}
+        union_resources: dict[str, dict[str, int]] = {}
+        initial_static: dict[str, int] = {}
+        initial_static_bytes = 0
+        echarts_vendor_bytes = 0
+        for workspace, page_name in targets:
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            requested: list[str] = []
+            errors: list[str] = []
+            page.on("request", lambda request, items=requested: items.append(request.url))
+            page.on("pageerror", lambda error, items=errors: items.append(str(error)))
+            page.add_init_script(
+                """window.__qmBudgetMounted = [];
+                document.addEventListener('quantmaster:workspace-mounted', event => {
+                  window.__qmBudgetMounted.push(`${event.detail.workspace}/${event.detail.page}`);
+                });"""
+            )
+            route = f"{workspace}/{page_name}"
+            page.goto(f"{url}/#{route}")
+            page.wait_for_function(
+                "route => window.__qmBudgetMounted.includes(route)", arg=route,
+            )
+            assert errors == [], {route: errors}
+
+            occurrences: list[tuple[str, Path]] = []
+            for request_url in requested:
+                resource = _static_request_path(request_url)
+                if resource is not None:
+                    occurrences.append(resource)
+            sizes = {path: resource.stat().st_size for path, resource in occurrences}
+            owned = [
+                (path, resource) for path, resource in occurrences
+                if path not in shell_paths and path != "/static/echarts.min.js"
+            ]
+            owned_sizes = {path: resource.stat().st_size for path, resource in owned}
+            owned_bytes = sum(resource.stat().st_size for _, resource in owned)
+            views[f"#{route}"] = {
+                "owned_bytes": owned_bytes,
+                "request_count": len(owned),
+                "resources": owned_sizes,
+            }
+            union_resources.setdefault(workspace, {}).update(owned_sizes)
+
+            if "/static/echarts.min.js" in sizes:
+                echarts_vendor_bytes = sizes["/static/echarts.min.js"]
+            if route == "today/quotes":
+                initial_static_bytes = sum(
+                    resource.stat().st_size for path, resource in occurrences
+                    if Path(path).suffix in {".css", ".js"}
+                )
+                initial_static = {
+                    path: size for path, size in sizes.items()
+                    if Path(path).suffix in {".css", ".js"}
+                }
+            context.close()
+        browser.close()
+
+    unions = {
+        workspace: {
+            "owned_bytes": sum(resources.values()),
+            "resources": dict(sorted(resources.items())),
+        }
+        for workspace, resources in sorted(union_resources.items())
+    }
+    return {
+        "initial_raw_bytes": html_bytes + initial_static_bytes,
+        "initial_resources": dict(sorted(initial_static.items())),
+        "views": dict(sorted(views.items())),
+        "workspace_unions": unions,
+        "echarts_vendor_bytes": echarts_vendor_bytes,
+    }
 
 
 def _stop_live_server(process: subprocess.Popen, *, timeout: float = 20) -> None:
@@ -585,6 +709,18 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         assert errors == []
         browser.close()
+
+
+def test_owner_view_resource_budgets_use_browser_request_attribution(live_server):
+    report = _measure_workspace_resource_budgets(live_server[0], live_server[1])
+
+    assert report["initial_raw_bytes"] <= 1024 * 1024, report
+    assert set(report["workspace_unions"]) == {"today", "research", "account", "runtime"}
+    for route, view in report["views"].items():
+        assert view["owned_bytes"] <= 350 * 1024, {route: view}
+    assert 0 < report["echarts_vendor_bytes"] <= 1024 * 1024, report
+    assert "/static/echarts.min.js" not in report["initial_resources"]
+    print("workspace resource budgets: " + json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
 def test_workspace_activation_is_latest_wins_after_mount_wait(live_server):
@@ -1378,13 +1514,17 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         page.locator("#help-start").wait_for(state="visible")
         assert page.locator("#tab-help").evaluate("el => el.classList.contains('active')")
 
-        page.locator('[data-help-link="validation"]').click()
+        page.evaluate(
+            """() => new Promise(resolve => {
+              document.addEventListener('scrollend', resolve, {once:true});
+              document.querySelector('[data-help-link="validation"]').click();
+            })"""
+        )
         page.locator("#help-validation").wait_for(state="visible")
         playwright_sync.expect(page.locator('[data-help-link="validation"]')).to_have_attribute(
             "aria-current",
             "location",
         )
-        assert page.locator('[data-help-link="validation"]').get_attribute("aria-current") == "location"
 
         search = page.locator("#help-search-input")
         search.fill("T+1")
