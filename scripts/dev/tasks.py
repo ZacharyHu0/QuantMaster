@@ -763,6 +763,20 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         ) from None
 
 
+DISPOSABLE_ARTIFACT_NAMES = frozenset({"cache", "pytest", "uv-cache", "runtime"})
+
+
+def disposable_legacy_artifact_names(path: Path) -> list[str] | None:
+    """Return child names for a legacy artifact root that only contains throwaway state."""
+    try:
+        names = sorted(entry.name for entry in path.iterdir())
+    except OSError:
+        return None
+    if all(name in DISPOSABLE_ARTIFACT_NAMES for name in names):
+        return names
+    return None
+
+
 def gc_task_artifacts(
     *, apply: bool, retention_days: int, adopt_legacy_orphans: bool = False,
 ) -> None:
@@ -781,8 +795,28 @@ def gc_task_artifacts(
     for artifacts in sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name):
         slug = artifacts.name
         if not SLUG_PATTERN.fullmatch(slug):
-            counts["invalid"] += 1
-            print(f"[task-gc] invalid slug, skipped: {artifacts}")
+            names = disposable_legacy_artifact_names(artifacts)
+            if names is None:
+                counts["invalid"] += 1
+                print(f"[task-gc] invalid slug with unknown content, skipped: {artifacts}")
+                continue
+            contents = ", ".join(names) if names else "empty"
+            if not apply:
+                counts["eligible"] += 1
+                print(f"[task-gc] eligible legacy invalid root ({contents}): {artifacts}")
+                continue
+            try:
+                with task_artifact_lease(artifacts):
+                    if disposable_legacy_artifact_names(artifacts) is None:
+                        counts["invalid"] += 1
+                        print(f"[task-gc] state changed, invalid content skipped: {artifacts}")
+                        continue
+                    remove_task_artifacts(primary, slug)
+                counts["removed"] += 1
+                print(f"[task-gc] removed legacy invalid root: {artifacts}")
+            except (OSError, SystemExit) as exc:
+                counts["failed"] += 1
+                print(f"[task-gc] failed: {slug}: {exc}")
             continue
         target = (primary / ".worktrees" / slug).resolve()
         branch = f"codex/{slug}"

@@ -289,6 +289,44 @@ def test_gc_removes_only_orphan_artifacts_and_protects_task_state(monkeypatch, t
     assert protected.exists()
 
 
+def test_gc_removes_legacy_invalid_root_with_only_disposable_content(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    invalid = primary / ".artifacts" / "worktrees" / "Quant"
+    (invalid / "cache").mkdir(parents=True)
+    (invalid / "pytest").mkdir(parents=True)
+
+    class Result:
+        returncode = 1
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    gc_task_artifacts(apply=True, retention_days=7)
+
+    assert not invalid.exists()
+
+
+def test_gc_preserves_legacy_invalid_root_with_unknown_content(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    invalid = primary / ".artifacts" / "worktrees" / "Quant"
+    invalid.mkdir(parents=True)
+    (invalid / "notes.md").write_text("keep me", encoding="utf-8")
+
+    class Result:
+        returncode = 1
+
+    monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
+    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    gc_task_artifacts(apply=True, retention_days=7)
+
+    assert (invalid / "notes.md").is_file()
+
+
 def test_gc_requires_completion_evidence_and_honors_retention(monkeypatch, tmp_path):
     import os
     import time
