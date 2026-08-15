@@ -622,6 +622,30 @@ def test_onedir_policy_rejects_forbidden_analysis_modules(tmp_path: Path) -> Non
     assert report["errors"] == ["forbidden optional modules were bundled: torch.linalg"]
 
 
+def test_onedir_policy_rejects_unpruned_lark_and_pyarrow_modules(
+    tmp_path: Path,
+) -> None:
+    application = _fake_onedir(tmp_path)
+    analysis = tmp_path / "Analysis-00.toc"
+    analysis.write_text(
+        "  ('lark_oapi.adapter', 'lark_oapi/adapter.py', 'PYMODULE'),\n"
+        "  ('pyarrow.flight', 'pyarrow/flight.py', 'PYMODULE'),\n",
+        encoding="utf-8",
+    )
+
+    report = package_onedir(
+        application,
+        tmp_path / "QuantMaster.zip",
+        tmp_path / "sizes.json",
+        analysis=analysis,
+    )
+
+    assert report["errors"] == [
+        "forbidden optional modules were bundled: "
+        "lark_oapi.adapter, pyarrow.flight",
+    ]
+
+
 def test_experimental_onedir_cli_reports_oversize_without_failing(
     tmp_path: Path,
     monkeypatch,
