@@ -1,4 +1,4 @@
-(() => {
+const candidatesFeature = (() => {
   'use strict';
 
   const PAGE_SIZE = 100;
@@ -93,8 +93,9 @@
   async function request(path, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
     if (method === 'GET') return window.QuantMasterAPI(path, options);
-    await window.QuantMasterManagement.ensureSettings();
-    return window.QuantMasterManagement.request(path, options);
+    const management = await import('./settings.js');
+    await management.ensureSettings();
+    return management.request(path, options);
   }
 
   function catalogItem(name) {
@@ -480,6 +481,7 @@
     if (!pending) return;
     if (pending.type === 'candidate') await selectCandidate(pending.value, {force:true});
     else if (pending.type === 'tab') document.querySelector(`header [data-tab="${CSS.escape(pending.value)}"]`)?.click();
+    else if (pending.type === 'workspace') document.querySelector(`header [data-workspace="${CSS.escape(pending.value)}"]`)?.click();
     else if (pending.type === 'action' && pending.value === 'new') startNew();
     else if (pending.type === 'action' && pending.value === 'import') await openImport();
   }
@@ -752,7 +754,8 @@
         method:'POST', body:{new_name:next},
       });
       await refreshCatalog({mapping:{from:previous,to:next}, select:next, loadDetail:true});
-      await window.QuantMasterManagement.ensureSettings(true);
+      const management = await import('./settings.js');
+      await management.ensureSettings(true);
     } catch (error) {
       setNotice('error', error.message);
       button.disabled = false;
@@ -769,7 +772,8 @@
       const suffix = replacement ? `?replacement=${encodeURIComponent(replacement)}` : '';
       await request(`/api/v1/settings/universes/${encodeURIComponent(previous)}${suffix}`, {method:'DELETE'});
       await refreshCatalog({mapping:{from:previous,to:replacement || 'demo'}, select:replacement || 'demo', loadDetail:true});
-      await window.QuantMasterManagement.ensureSettings(true);
+      const management = await import('./settings.js');
+      await management.ensureSettings(true);
     } catch (error) {
       setNotice('error', error.message);
       button.disabled = false;
@@ -987,7 +991,9 @@
 
   workspace.addEventListener('click', event => {
     const settings = event.target.closest('[data-candidate-settings]');
-    if (settings) window.QuantMasterManagement.open(settings.dataset.candidateSettings);
+    if (settings) document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+      detail:{tab:'settings', section:settings.dataset.candidateSettings},
+    }));
   });
 
   workspace.addEventListener('keydown', event => {
@@ -1025,12 +1031,17 @@
   });
 
   document.querySelector('header').addEventListener('click', event => {
-    const target = event.target.closest('[data-tab]');
+    const tab = event.target.closest('[data-tab]');
+    const workspaceTarget = event.target.closest('[data-workspace]');
     const active = document.getElementById('tab-candidates')?.classList.contains('active');
-    if (!active || !target || target.dataset.tab === 'candidates' || !state.dirty) return;
+    if (!active || !state.dirty) return;
+    if (!tab && (!workspaceTarget || workspaceTarget.dataset.workspace === 'today')) return;
+    if (tab?.dataset.tab === 'candidates') return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    showGuard({type:'tab', value:target.dataset.tab});
+    showGuard(tab
+      ? {type:'tab', value:tab.dataset.tab}
+      : {type:'workspace', value:workspaceTarget.dataset.workspace});
   }, true);
 
   window.addEventListener('beforeunload', event => {
@@ -1039,12 +1050,13 @@
     event.returnValue = '';
   });
 
-  window.loadCandidates = loadCandidates;
-  window.QuantMasterCandidates = {
-    open: openCandidate,
-    refresh: refreshCatalog,
-    get catalog() { return state.catalog.slice(); },
+  return {
+    mount:loadCandidates,
+    unmount:() => closeInstrumentSearch(),
+    refresh:refreshCatalog,
+    open:openCandidate,
+    catalog:() => state.catalog.slice(),
   };
-
-  refreshCatalog();
 })();
+
+export const {mount, unmount, refresh, open, catalog} = candidatesFeature;

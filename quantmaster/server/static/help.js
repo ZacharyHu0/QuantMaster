@@ -1,4 +1,4 @@
-(() => {
+const helpFeature = (() => {
   'use strict';
 
   const root = document.getElementById('help-root');
@@ -19,25 +19,18 @@
   let loadPromise = null;
   let ready = false;
   let observer = null;
+  let currentRoute = {topic:'start', anchor:''};
 
   const escapeHTML = value => String(value)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 
   function route() {
-    const raw = location.hash.startsWith('#help') ? location.hash.slice(5).replace(/^\//, '') : '';
-    const parts = raw.split('/').filter(Boolean).map(part => {
-      try { return decodeURIComponent(part); } catch (_) { return part; }
-    });
-    return {topic: parts[0] || 'start', anchor: parts[1] || ''};
+    return currentRoute;
   }
 
-  function setRoute(topic, anchor = '', {replace = false} = {}) {
-    const suffix = [topic, anchor].filter(Boolean).map(encodeURIComponent).join('/');
-    const value = `#help/${suffix || 'start'}`;
-    if (location.hash === value) return;
-    if (replace) history.replaceState(null, '', value);
-    else location.hash = value;
+  function setRoute(topic, anchor = '') {
+    currentRoute = {topic:topic || 'start', anchor:anchor || ''};
   }
 
   function topicElement(topic) {
@@ -90,7 +83,7 @@
     root.innerHTML = `<h2>手册暂时没有载入</h2><p>${escapeHTML(error?.message || '无法读取本地帮助文件。')} 请确认 QuantMaster 服务仍在运行，然后重试。</p><button class="primary" id="help-retry" type="button">重新载入手册</button>`;
     document.getElementById('help-retry')?.addEventListener('click', () => {
       loadPromise = null;
-      window.loadHelp();
+      loadHelp();
     });
   }
 
@@ -680,30 +673,34 @@
     root.addEventListener('click', event => {
       const projectLink = event.target.closest('[data-help-tab]');
       if (projectLink) {
-        const control = Array.from(document.querySelectorAll('header [data-tab]'))
-          .find(item => item.dataset.tab === projectLink.dataset.helpTab);
-        if (control && typeof window.activateTab === 'function') {
-          window.activateTab(control);
-          control.focus();
-        }
+        document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+          detail:{tab:projectLink.dataset.helpTab},
+        }));
         return;
       }
       const helpLink = event.target.closest('a[href^="#help/"]');
-      if (helpLink && helpLink.hash === location.hash) {
+      if (helpLink) {
         event.preventDefault();
+        const [topic, anchor] = helpLink.hash.slice(6).split('/').map(part => {
+          try { return decodeURIComponent(part); } catch (_) { return part; }
+        });
+        setRoute(topic, anchor);
         navigateToRoute({behavior: 'smooth', focus: true});
       }
       if (helpLink) root.querySelector('.help-mobile-toc')?.removeAttribute('open');
     });
 
-    if ('IntersectionObserver' in window) {
-      observer = new IntersectionObserver(entries => {
-        const visible = entries.filter(entry => entry.isIntersecting)
-          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
-        if (visible?.target?.dataset.helpTopic) selectTopic(visible.target.dataset.helpTopic);
-      }, {rootMargin: '-18% 0px -68% 0px', threshold: 0});
-      root.querySelectorAll('[data-help-topic]').forEach(chapter => observer.observe(chapter));
-    }
+    observeTopics();
+  }
+
+  function observeTopics() {
+    if (observer || !('IntersectionObserver' in window)) return;
+    observer = new IntersectionObserver(entries => {
+      const visible = entries.filter(entry => entry.isIntersecting)
+        .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+      if (visible?.target?.dataset.helpTopic) selectTopic(visible.target.dataset.helpTopic);
+    }, {rootMargin: '-18% 0px -68% 0px', threshold: 0});
+    root.querySelectorAll('[data-help-topic]').forEach(chapter => observer.observe(chapter));
   }
 
   function setup() {
@@ -715,9 +712,9 @@
     setupCodeCopy();
   }
 
-  window.loadHelp = function loadHelp() {
+  function loadHelp() {
     if (ready) {
-      if (!location.hash.startsWith('#help')) setRoute('start', '', {replace: true});
+      observeTopics();
       navigateToRoute();
       return Promise.resolve();
     }
@@ -732,24 +729,21 @@
         root.innerHTML = html;
         ready = true;
         setup();
-        if (!location.hash.startsWith('#help')) setRoute('start', '', {replace: true});
         navigateToRoute();
       })
       .catch(error => {
         loadPromise = null;
         showLoadError(error);
-      });
+    });
     return loadPromise;
-  };
+  }
 
-  window.addEventListener('hashchange', () => {
-    if (!location.hash.startsWith('#help')) return;
-    const control = Array.from(document.querySelectorAll('header [data-tab]'))
-      .find(item => item.dataset.tab === 'help');
-    if (control && !control.classList.contains('active') && typeof window.activateTab === 'function') {
-      window.activateTab(control);
-    } else {
-      window.loadHelp().then(() => navigateToRoute({behavior: 'smooth', focus: true}));
-    }
-  });
+  function unmount() {
+    observer?.disconnect();
+    observer = null;
+  }
+
+  return {mount:loadHelp, unmount, refresh:loadHelp};
 })();
+
+export const {mount, unmount, refresh} = helpFeature;

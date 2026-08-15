@@ -1,4 +1,4 @@
-(() => {
+const stockAnalysisFeature = (() => {
   const form = document.getElementById('stock-analysis-form');
   if (!form) return;
 
@@ -25,6 +25,9 @@
 
   let activeRun = null;
   let activeToken = 0;
+  let submitSequence = 0;
+  let cancelSequence = 0;
+  let mounted = false;
   let activeSuggestion = -1;
   let suggestionItems = [];
   let suggestionTimer = 0;
@@ -363,8 +366,9 @@
     }
   }
 
-  async function refreshAnalysis(run) {
+  async function refreshAnalysis(run, token = activeToken) {
     const data = await window.QuantMasterAPI(`/api/v1/market/stock-analyses/${encodeURIComponent(run.analysisId)}`, {cache:'no-store'});
+    if (activeRun !== run || token !== activeToken) return null;
     const report = data.report || (data.schema_version ? data : null);
     for (const item of (data.dimensions || report?.dimensions || [])) {
       updateDimension(item.key, item.degraded_reason ? 'degraded' : 'complete',
@@ -381,12 +385,17 @@
         const events = await window.QuantMasterAPI(
           `/api/v1/jobs/${encodeURIComponent(run.jobId)}/events?after=${lastEventSeq}`, {cache:'no-store'},
         );
+        if (activeRun !== run || token !== activeToken) return;
         const items = events.items || events.events || [];
         items.forEach(applyEvent);
         if (items.some(value => ['dimension_completed', 'dimension_degraded', 'analysis_completed']
-          .includes(eventParts(value).type))) await refreshAnalysis(run);
+          .includes(eventParts(value).type))) {
+          await refreshAnalysis(run, token);
+          if (activeRun !== run || token !== activeToken) return;
+        }
 
         const payload = await window.QuantMasterAPI(`/api/v1/jobs/${encodeURIComponent(run.jobId)}`, {cache:'no-store'});
+        if (activeRun !== run || token !== activeToken) return;
         const job = payload.job || payload;
         run.status = job.status || run.status;
         run.phase = job.phase || job.current_phase || currentPhase.textContent;
@@ -398,16 +407,17 @@
         if (terminalStatuses.has(run.status)) {
           clearInterval(tickTimer);
           if (run.status === 'completed' || run.status === 'completed_with_errors') {
-            const finalAnalysis = await refreshAnalysis(run);
-            if (!finalAnalysis.report) {
-              renderFailure({message:finalAnalysis.error || '最终报告产物暂时不可用'});
+            const finalAnalysis = await refreshAnalysis(run, token);
+            if (activeRun !== run || token !== activeToken) return;
+            if (!finalAnalysis?.report) {
+              renderFailure({message:finalAnalysis?.error || '最终报告产物暂时不可用'});
             }
           }
           else renderFailure({message:job.error || job.message}, run.status);
           return;
         }
       } catch (error) {
-        if (token !== activeToken) return;
+        if (activeRun !== run || token !== activeToken) return;
         currentPhase.textContent = '连接暂时中断，后台任务仍在运行';
         reportLocalError('个股分析', '任务状态暂时无法读取', error);
       }
@@ -416,16 +426,25 @@
   }
 
   async function beginRun(query, mode) {
+    const submission = ++submitSequence;
+    cancelSequence += 1;
     activeToken += 1;
     lastEventSeq = 0;
     lastProgress = 0;
     resetDimensions();
     reportRoot.innerHTML = '';
     const idempotency = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
-    const data = await window.QuantMasterAPI('/api/v1/market/stock-analyses', {
-      method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':idempotency},
-      body:JSON.stringify({query, mode}),
-    });
+    let data;
+    try {
+      data = await window.QuantMasterAPI('/api/v1/market/stock-analyses', {
+        method:'POST', headers:{'Content-Type':'application/json', 'Idempotency-Key':idempotency},
+        body:JSON.stringify({query, mode}),
+      });
+    } catch (error) {
+      if (submission !== submitSequence || !mounted) return;
+      throw error;
+    }
+    if (submission !== submitSequence) return;
     const run = {
       analysisId:data.analysis_id, jobId:data.job_id, query, mode,
       status:data.status || 'queued', phase:'任务已提交，等待取数', startedAt:Date.now(), eta:null,
@@ -433,18 +452,33 @@
     if (!run.analysisId || !run.jobId) throw new Error('后台没有返回可跟踪的分析任务，请稍后重试。');
     activeRun = run;
     saveRun(run);
-    pollRun(run, activeToken);
+    if (!mounted) return;
+    const token = ++activeToken;
+    pollRun(run, token);
   }
 
   cancelButton.addEventListener('click', async () => {
     if (!activeRun || terminalStatuses.has(activeRun.status)) return;
+    const run = activeRun;
+    const request = ++cancelSequence;
     cancelButton.disabled = true;
     currentPhase.textContent = '正在请求安全取消';
     try {
-      await window.QuantMasterAPI(`/api/v1/jobs/${encodeURIComponent(activeRun.jobId)}/cancel`, {method:'POST'});
-      activeRun.status = 'cancelling';
-      saveRun(activeRun);
+      const payload = await window.QuantMasterAPI(
+        `/api/v1/jobs/${encodeURIComponent(run.jobId)}/cancel`, {method:'POST'},
+      );
+      if (activeRun !== run || activeRun.jobId !== run.jobId || request !== cancelSequence) return;
+      if (terminalStatuses.has(run.status)) return;
+      const job = payload.job || payload;
+      run.status = job.status || run.status;
+      run.phase = job.phase || job.current_phase || run.phase;
+      currentPhase.textContent = run.phase;
+      saveRun(run);
+      cancelButton.disabled = terminalStatuses.has(run.status) || run.status === 'cancelling';
+      if (terminalStatuses.has(run.status)) activeToken += 1;
     } catch (error) {
+      if (activeRun !== run || activeRun.jobId !== run.jobId || request !== cancelSequence) return;
+      if (terminalStatuses.has(run.status)) return;
       cancelButton.disabled = false;
       reportLocalError('个股分析', '取消请求未能送达', error);
     }
@@ -499,6 +533,7 @@
       input.setAttribute('aria-expanded', 'true');
       syncSuggestionSelection();
     } catch (error) {
+      if (requestId !== suggestionRequest) return;
       hideSuggestions();
       reportLocalError('个股分析', '标的建议未能读取', error);
     }
@@ -545,8 +580,15 @@
     } finally { busy(form, false); setMode(mode); }
   });
 
-  window.loadStockAnalysis = async () => {
-    if (loaded) return;
+  async function loadStockAnalysis() {
+    mounted = true;
+    if (loaded) {
+      if (activeRun && !terminalStatuses.has(activeRun.status)) {
+        activeToken += 1;
+        pollRun(activeRun, activeToken);
+      }
+      return;
+    }
     loaded = true;
     resetDimensions();
     const saved = storedRun();
@@ -554,9 +596,26 @@
       activeRun = saved;
       input.value = saved.query || '';
       setMode(saved.mode);
-      activeToken += 1;
-      try { await refreshAnalysis(saved); } catch (_) { /* poll supplies the diagnostic */ }
-      pollRun(saved, activeToken);
+      const token = ++activeToken;
+      try { await refreshAnalysis(saved, token); } catch (_) { /* poll supplies the diagnostic */ }
+      if (activeRun !== saved || token !== activeToken) return;
+      pollRun(saved, token);
     } else queueMicrotask(() => input.focus({preventScroll:true}));
+  }
+
+  function unmount() {
+    mounted = false;
+    activeToken += 1;
+    clearInterval(tickTimer);
+    hideSuggestions();
+    tickTimer = 0;
+  }
+
+  return {
+    mount:loadStockAnalysis,
+    unmount,
+    refresh:() => activeRun ? refreshAnalysis(activeRun) : Promise.resolve(),
   };
 })();
+
+export const {mount, unmount, refresh} = stockAnalysisFeature;

@@ -1,4 +1,4 @@
-(() => {
+const ledgerImportFeature = (() => {
   'use strict';
 
   const form = document.getElementById('csv-preview-form');
@@ -9,6 +9,10 @@
   const status = document.getElementById('csv-import-status');
   let preview = null;
   let failedRows = [];
+
+  async function management() {
+    return import('./settings.js');
+  }
 
   function html(value) {
     return String(value ?? '').replace(/[&<>"']/g, char => ({
@@ -77,11 +81,12 @@
     status.textContent = '正在识别编码并逐行校验…';
     setStep(1);
     try {
-      await window.QuantMasterManagement.ensureSettings();
+      const settings = await management();
+      await settings.ensureSettings();
       const body = new FormData();
       body.append('file', fileInput.files[0]);
       if (mapping) body.append('mapping', JSON.stringify(mapping));
-      const data = await window.QuantMasterManagement.request('/api/v1/portfolio/ledger/import/preview', {method: 'POST', body});
+      const data = await settings.request('/api/v1/portfolio/ledger/import/preview', {method: 'POST', body});
       if (resetMapping) renderMapping(data);
       renderPreview(data);
     } catch (error) {
@@ -117,13 +122,14 @@
       body.append('mapping', JSON.stringify(selectedMapping()));
       body.append('strict', document.querySelector('[name="csv-mode"]:checked').value === 'strict');
       body.append('include_duplicates', document.getElementById('csv-duplicates').checked);
-      const data = await window.QuantMasterManagement.request('/api/v1/portfolio/ledger/import/submit', {method: 'POST', body});
+      const settings = await management();
+      const data = await settings.request('/api/v1/portfolio/ledger/import/submit', {method: 'POST', body});
       failedRows = data.failed_rows || [];
       status.textContent = `已导入 ${data.imported} 笔；跳过坏行 ${data.skipped_invalid}，跳过重复 ${data.skipped_duplicates}。`;
       setStep(3);
       document.getElementById('csv-download-errors').hidden = !failedRows.length;
-      if (typeof window.loadLedger === 'function') await window.loadLedger();
-      if (typeof window.loadAssetLists === 'function') await window.loadAssetLists(false);
+      await loadLedger();
+      await loadAssetLists(false);
     } catch (error) {
       failedRows = error.detail?.failed_rows || failedRows;
       status.className = 'err';
@@ -147,4 +153,8 @@
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   });
+
+  return {mount:() => {}, unmount:() => {}, refresh:() => {}};
 })();
+
+export const {mount, unmount, refresh} = ledgerImportFeature;

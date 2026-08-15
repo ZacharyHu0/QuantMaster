@@ -356,7 +356,7 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     assert exported.status_code == 200
     assert "600001.SH" in exported.content.decode("utf-8-sig")
     assert 'id="tab-after-close"' in page.text
-    assert "/static/after-close.js?rev=" in page.text
+    assert "/static/after-close.js" not in page.text
     assert "Tushare 和其他页面的行情缓存不参与本扫描" in page.text
     assert "data-after-close-open-stockdb" in page.text
     assert 'id="after-close-update-data"' in page.text
@@ -367,7 +367,8 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     script = client.get("/static/after-close.js")
     assert script.status_code == 200
     assert "盘后扫描专用的 free-stockdb" in script.text
-    assert "QuantMasterManagement?.open('local-data')" in script.text
+    assert "quantmaster:navigate" in script.text
+    assert "section:'local-data'" in script.text
     assert "/api/v1/settings/free-stockdb/update" in script.text
     assert "/api/v1/after-close/diagnostics?limit=500" in script.text
     assert "/api/v1/after-close/health" not in script.text

@@ -1,4 +1,4 @@
-(() => {
+const rotationFeature = (() => {
   'use strict';
 
   const TODAY_ROUTE_PREFIX = '#today/';
@@ -1309,15 +1309,17 @@
     } catch (error) { target.innerHTML = errorMarkup(error); }
   }
 
-  async function loadCurrent(force = false) {
+  async function loadCurrent(force = false, hiddenOwner = '') {
     const thisRequest = ++requestVersion;
     const marketPage = activeMarketPage;
     const rotationPage = activeRotationPage;
-    const marketActive = document.getElementById('tab-market')?.classList.contains('active');
-    const rotationActive = document.getElementById('tab-rotation')?.classList.contains('active');
+    const marketActive = hiddenOwner
+      ? hiddenOwner === 'market' : document.getElementById('tab-market')?.classList.contains('active');
+    const rotationActive = hiddenOwner
+      ? hiddenOwner === 'rotation' : document.getElementById('tab-rotation')?.classList.contains('active');
     const stillCurrent = () => (
-      thisRequest === requestVersion && ((marketActive && activeMarketPage === marketPage && document.getElementById('tab-market')?.classList.contains('active'))
-      || (rotationActive && activeRotationPage === rotationPage && document.getElementById('tab-rotation')?.classList.contains('active')))
+      thisRequest === requestVersion && ((marketActive && activeMarketPage === marketPage && (hiddenOwner === 'market' || document.getElementById('tab-market')?.classList.contains('active')))
+      || (rotationActive && activeRotationPage === rotationPage && (hiddenOwner === 'rotation' || document.getElementById('tab-rotation')?.classList.contains('active'))))
     );
     try {
       let payload;
@@ -1371,7 +1373,7 @@
     }
   }
 
-  function setMarketPage(page, updateHash = true) {
+  function setMarketPage(page, updateHash = true, hiddenOwner = '') {
     if (!['quotes','temperature','style'].includes(page)) page = 'quotes';
     activeMarketPage = page;
     document.querySelectorAll('[data-market-page]').forEach(button => {
@@ -1382,11 +1384,12 @@
     document.querySelectorAll('[data-market-view]').forEach(view => { view.hidden = view.dataset.marketView !== page; });
     const route = `${TODAY_ROUTE_PREFIX}${page}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
-    if (page !== 'quotes') loadCurrent();
+    const loading = page === 'quotes' ? null : loadCurrent(false, hiddenOwner);
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
+    return loading;
   }
 
-  function setRotationPage(page, updateHash = true) {
+  function setRotationPage(page, updateHash = true, hiddenOwner = '') {
     if (page === 'radar') page = 'overview';
     if (!['overview','industry','themes','etfs'].includes(page)) page = 'overview';
     activeRotationPage = page;
@@ -1399,8 +1402,9 @@
     const routePage = {overview:'rotation',industry:'industry',themes:'themes',etfs:'etfs'}[page] || 'rotation';
     const route = `${TODAY_ROUTE_PREFIX}${routePage}`;
     if (updateHash && location.hash !== route) history.replaceState(null,'',route);
-    loadCurrent();
+    const loading = loadCurrent(false, hiddenOwner);
     requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
+    return loading;
   }
 
   function saveActiveJob(job, scope) {
@@ -1492,20 +1496,6 @@
     api(`/api/v1/jobs/${encodeURIComponent(saved.id)}`)
       .then(job => monitorRefresh(job,scope,button))
       .catch(() => clearActiveJob());
-  }
-
-  function applyHash() {
-    const match = location.hash.match(/^#today\/([a-z-]+)$/);
-    const route = match?.[1] || '';
-    const marketPages = new Set(['quotes','temperature','style']);
-    const rotationPages = {rotation:'overview',industry:'industry',themes:'themes',etfs:'etfs'};
-    const parent = marketPages.has(route) ? 'market' : rotationPages[route] ? 'rotation' : '';
-    if (!parent) return false;
-    const control = document.querySelector(`header [data-workspace-page="${route}"][data-tab="${parent}"]`);
-    if (control) activateTab(control,{persist:true,load:false,route:false});
-    if (parent === 'market') setMarketPage(route,false);
-    else setRotationPage(rotationPages[route],false);
-    return true;
   }
 
   async function jumpToGroup(kind, code) {
@@ -1813,25 +1803,31 @@
     }
   });
 
-  document.querySelector('header')?.addEventListener('click', event => {
-    const control = event.target.closest('[data-tab]');
-    if (control?.dataset.tab === 'market' && !control.dataset.marketPage) setMarketPage(activeMarketPage);
-    if (control?.dataset.tab === 'rotation' && !control.dataset.rotationPage) setRotationPage(activeRotationPage);
-  });
-  window.addEventListener('hashchange',applyHash);
-
-  window.loadRotationFeature = tab => {
-    if (tab === 'market') {
-      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
-        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeMarketPage;
-      setMarketPage(page,false);
-    } else if (tab === 'rotation') {
-      const page = location.hash.startsWith(TODAY_ROUTE_PREFIX)
-        ? location.hash.slice(TODAY_ROUTE_PREFIX.length) : activeRotationPage;
-      setRotationPage(page,false);
+  document.addEventListener('quantmaster:workspace-mounted', event => {
+    if (event.detail?.workspace === 'today') {
+      requestAnimationFrame(() => Object.values(charts).forEach(chart => chart.resize()));
     }
-  };
+  });
 
-  if (!applyHash()) setMarketPage('quotes',false);
-  recoverActiveJob();
+  async function mount(page) {
+    if (['temperature', 'style'].includes(page)) {
+      await setMarketPage(page, false, 'market');
+      recoverActiveJob();
+      return;
+    }
+    const rotationPages = {rotation:'overview', industry:'industry', themes:'themes', etfs:'etfs'};
+    await setRotationPage(rotationPages[page] || 'overview', false, 'rotation');
+    recoverActiveJob();
+  }
+
+  function unmount() {
+    clearTimeout(searchTimer);
+    searchTimer = 0;
+    activeJob = null;
+    window.QuantCharts?.activateTab('');
+  }
+
+  return {mount, unmount, refresh: () => loadCurrent(true)};
 })();
+
+export const {mount, unmount, refresh} = rotationFeature;

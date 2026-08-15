@@ -40,7 +40,7 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
 
     page = client.get("/")
     assert page.status_code == 200
-    assert 'href="/static/rotation.css?rev=' in page.text
+    assert 'href="/static/rotation.css' not in page.text
     assert "%%QM_ROTATION_CSS_REV%%" not in page.text
     rotation_css = client.get("/static/rotation.css")
     assert rotation_css.headers["cache-control"] == "no-cache, max-age=0, must-revalidate"
@@ -52,7 +52,7 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert 'id="rotation-overview-view"' in page.text
     assert 'data-rotation-page="themes"' in page.text
     assert 'id="rotation-radar-view"' not in page.text
-    assert 'src="/static/rotation.js"' in page.text
+    assert 'src="/static/rotation.js"' not in page.text
 
 
 def test_manual_rotation_refresh_does_not_reset_provider_circuit(monkeypatch):

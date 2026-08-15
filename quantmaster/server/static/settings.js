@@ -1,4 +1,4 @@
-(() => {
+const settingsFeature = (() => {
   'use strict';
 
   const state = {
@@ -6,9 +6,12 @@
     config: null,
     secretActions: { llm: 'keep', tushare: 'keep' },
     migrationTimer: null,
+    migrationId: '',
     dataRefreshTimer: null,
+    dataRefreshId: '',
     dataRefreshPreview: null,
     researchTimer: null,
+    researchId: '',
     researchPreview: null,
     researchCatalog: null,
     researchControlsLoaded: false,
@@ -23,6 +26,10 @@
     lastSavedFingerprint: '',
     fillingForm: false,
     weixinLoginTimer: null,
+    weixinLoginId: '',
+    weixinLoginQr: '',
+    weixinLoginCreateSequence: 0,
+    weixinLoginCreatePending: false,
     lastRuntime: null,
     diagnosticTasks: {},
     contractMigrationTimer: null,
@@ -36,10 +43,18 @@
   const form = document.getElementById('settings-form');
   let freeStockDbPollTimer = null;
   let freeStockDbPollFailures = 0;
+  let freeStockDbActive = false;
+  let mounted = false;
+  let lifecycleGeneration = 0;
 
-  function scheduleFreeStockDbPoll(delay = 1000) {
-    if (freeStockDbPollTimer !== null) return;
-    freeStockDbPollTimer = setTimeout(pollFreeStockDbSidecar, delay);
+  function isFreeStockDbActive(stockdb) {
+    return ['queued', 'updating', 'restarting'].includes(stockdb?.state)
+      || ['queued', 'stopping', 'syncing', 'restarting', 'validating'].includes(stockdb?.phase);
+  }
+
+  function scheduleFreeStockDbPoll(delay = 1000, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration || freeStockDbPollTimer !== null) return;
+    freeStockDbPollTimer = setTimeout(() => pollFreeStockDbSidecar(generation), delay);
   }
 
   function html(value) {
@@ -234,11 +249,11 @@
       const healthy = stockdb.state === 'running'
         && !['failed', 'manual_required', 'retry_wait'].includes(stockdb.update_result);
       stockdbStatus.className = `field-wide check-result ${failed ? 'error' : healthy ? 'success' : ''}`;
-      const active = ['queued', 'updating', 'restarting'].includes(stockdb.state)
-        || ['queued', 'stopping', 'syncing', 'restarting', 'validating'].includes(stockdb.phase);
+      const active = isFreeStockDbActive(stockdb);
+      freeStockDbActive = active;
       const updateButton = document.getElementById('free-stockdb-update-now');
       if (updateButton) updateButton.disabled = active;
-      if (active) scheduleFreeStockDbPoll();
+      if (mounted && active) scheduleFreeStockDbPoll();
     }
     const labels = {
       running: '运行中', standby: '等待调度租约', disabled: '已停用',
@@ -832,12 +847,12 @@
           document.querySelector('[data-settings-section="lab"].active')) loadAutomationOverview();
     } catch (error) {
       setSaveState('error', `自动保存失败：${error.message}`);
-      if (error.status === 423) {
+      if (mounted && error.status === 423) {
         state.retryTimer = setTimeout(flushAutosave, 1200);
       }
     } finally {
       state.saveInFlight = false;
-      if (state.saveQueued || state.editRevision > revision) {
+      if (mounted && (state.saveQueued || state.editRevision > revision)) {
         state.autoSaveTimer = setTimeout(flushAutosave, 0);
       }
     }
@@ -864,11 +879,12 @@
     el.textContent = detail || (configured ? '已配置' : '未配置');
   }
 
-  async function loadAutomationOverview() {
-    if (!state.loaded) return;
+  async function loadAutomationOverview(generation = lifecycleGeneration) {
+    if (!state.loaded || !mounted || generation !== lifecycleGeneration) return;
     const runtimeState = document.getElementById('automation-runtime-state');
     try {
       const data = await request('/api/v1/automation/overview');
+      if (!mounted || generation !== lifecycleGeneration) return;
       const runtimeLabels = {running: '运行中', standby: '等待调度租约', disabled: '已停用', degraded: '运行异常'};
       runtimeState.textContent = runtimeLabels[data.runtime] || data.runtime;
       runtimeState.className = `state-pill ${data.runtime === 'running' ? 'buy' : ''}`;
@@ -890,18 +906,33 @@
       document.getElementById('automation-enable-connect').hidden = !(feishu && !data.enabled);
       document.getElementById('feishu-remove').disabled = !feishu;
       const runtime = await request('/api/v1/settings/runtime');
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderRuntime(runtime);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       runtimeState.textContent = `状态不可用：${error.message}`;
     }
   }
 
-  function scheduleWeixinPoll(sessionId, delay = 700) {
+  function scheduleWeixinPoll(sessionId, delay = 700, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration || !sessionId) return;
     clearTimeout(state.weixinLoginTimer);
-    state.weixinLoginTimer = setTimeout(() => pollWeixinLogin(sessionId), delay);
+    state.weixinLoginId = String(sessionId);
+    state.weixinLoginTimer = setTimeout(() => pollWeixinLogin(sessionId, generation), delay);
   }
 
-  async function pollWeixinLogin(sessionId) {
+  function renderWeixinLoginSession() {
+    if (!state.weixinLoginId) return;
+    const image = document.getElementById('weixin-login-qr');
+    image.src = state.weixinLoginQr;
+    image.hidden = !image.src;
+    document.getElementById('weixin-login-panel').hidden = false;
+    document.getElementById('weixin-login-status').textContent = '请使用微信扫码并确认';
+    document.getElementById('weixin-login-start').disabled = true;
+  }
+
+  async function pollWeixinLogin(sessionId, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration || state.weixinLoginId !== String(sessionId)) return;
     const status = document.getElementById('weixin-login-status');
     const verifyCode = document.getElementById('weixin-verify-code').value.trim();
     try {
@@ -909,6 +940,7 @@
         `/api/v1/automation/channels/weixin/login/${encodeURIComponent(sessionId)}` +
         `?verify_code=${encodeURIComponent(verifyCode)}`
       );
+      if (!mounted || generation !== lifecycleGeneration || state.weixinLoginId !== String(sessionId)) return;
       const labels = {
         wait: '等待扫码确认…', scanned: '已扫码，请在微信中确认',
         confirmed: '接入成功，请先给机器人发一条消息', expired: '二维码已失效，请重新生成',
@@ -916,35 +948,56 @@
       status.textContent = labels[data.status] || `微信状态：${data.status}`;
       if (data.status === 'confirmed') {
         clearTimeout(state.weixinLoginTimer);
+        state.weixinLoginTimer = null;
+        state.weixinLoginId = '';
+        state.weixinLoginQr = '';
         document.getElementById('weixin-login-start').disabled = false;
-        await loadAutomationOverview();
+        await loadAutomationOverview(generation);
       } else if (data.status === 'expired') {
+        state.weixinLoginId = '';
+        state.weixinLoginQr = '';
         document.getElementById('weixin-login-start').disabled = false;
       } else {
-        scheduleWeixinPoll(sessionId);
+        scheduleWeixinPoll(sessionId, 700, generation);
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration || state.weixinLoginId !== String(sessionId)) return;
+      state.weixinLoginId = '';
+      state.weixinLoginQr = '';
       status.textContent = `登录状态读取失败：${error.message}`;
       document.getElementById('weixin-login-start').disabled = false;
     }
   }
 
   document.getElementById('weixin-login-start').addEventListener('click', async event => {
+    if (state.weixinLoginCreatePending) return;
     const button = event.currentTarget;
     const panel = document.getElementById('weixin-login-panel');
     const status = document.getElementById('weixin-login-status');
     clearTimeout(state.weixinLoginTimer);
+    const requestSequence = ++state.weixinLoginCreateSequence;
+    state.weixinLoginCreatePending = true;
+    state.weixinLoginId = '';
+    state.weixinLoginQr = '';
     button.disabled = true;
     status.textContent = '正在申请二维码…';
     panel.hidden = false;
     try {
       const data = await request('/api/v1/automation/channels/weixin/login', {method: 'POST'});
-      const image = document.getElementById('weixin-login-qr');
-      image.src = data.qrcode_svg || data.qrcode_url;
-      image.hidden = !image.src;
-      status.textContent = '请使用微信扫码并确认';
-      scheduleWeixinPoll(data.session_id);
+      if (requestSequence !== state.weixinLoginCreateSequence) return;
+      state.weixinLoginCreatePending = false;
+      state.weixinLoginId = String(data.session_id || '');
+      state.weixinLoginQr = data.qrcode_svg || data.qrcode_url || '';
+      if (!state.weixinLoginId) throw new Error('微信登录没有返回可跟踪的会话');
+      if (!mounted) return;
+      renderWeixinLoginSession();
+      scheduleWeixinPoll(state.weixinLoginId);
     } catch (error) {
+      if (requestSequence !== state.weixinLoginCreateSequence) return;
+      state.weixinLoginCreatePending = false;
+      state.weixinLoginId = '';
+      state.weixinLoginQr = '';
+      if (!mounted) return;
       status.textContent = `二维码生成失败：${error.message}`;
       button.disabled = false;
     }
@@ -1146,7 +1199,7 @@
       const job = latest.items?.[0];
       if (job) {
         renderDataRefresh(job);
-        if (['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
+        if (mounted && ['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
       }
     } catch (_) { /* 首次使用时没有任务是正常状态。 */ }
   }
@@ -1175,6 +1228,7 @@
     const resume = document.getElementById('data-refresh-resume');
     resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
     resume.dataset.jobId = task.id;
+    state.dataRefreshId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
     const runtimeKey = `persistent:health:refresh:${task.id}`;
     if (['running', 'cancelling'].includes(task.status)) {
       window.QuantMasterRunInfo.add('info', '数据同步', '行情尾部正在增量同步', {
@@ -1195,15 +1249,18 @@
     }
   }
 
-  async function pollDataRefresh(id) {
+  async function pollDataRefresh(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.dataRefreshTimer);
     try {
       const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderDataRefresh(task);
       if (['running', 'cancelling'].includes(task.status)) {
-        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
+        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id, generation), 800);
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('data-refresh-progress');
       root.hidden = false;
       root.querySelector('[data-refresh-phase]').textContent = error.message;
@@ -1332,7 +1389,7 @@
       const latest = (jobs.items || [])[0];
       if (latest) {
         renderResearchJob(latest);
-        if (['running', 'cancelling'].includes(latest.status)) pollResearchJob(latest.id);
+        if (mounted && ['running', 'cancelling'].includes(latest.status)) pollResearchJob(latest.id);
       }
     } catch (error) {
       document.getElementById('research-capabilities').innerHTML = `<span class="err">研究目录不可用：${html(error.message)}</span>`;
@@ -1364,17 +1421,21 @@
     const resume = document.getElementById('research-resume');
     resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
     resume.dataset.jobId = task.id;
+    state.researchId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
   }
 
-  async function pollResearchJob(id) {
+  async function pollResearchJob(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.researchTimer);
     try {
       const task = await request(`/api/v1/research/data/jobs/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderResearchJob(task);
       if (['running', 'cancelling'].includes(task.status)) {
-        state.researchTimer = setTimeout(() => pollResearchJob(id), 2000);
+        state.researchTimer = setTimeout(() => pollResearchJob(id, generation), 2000);
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('research-progress');
       root.hidden = false;
       root.querySelector('[data-research-detail]').textContent = error.message;
@@ -1442,25 +1503,31 @@
     } finally { event.target.disabled = false; }
   });
 
-  async function pollMigration(id) {
+  async function pollMigration(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.migrationTimer);
     try {
       const task = await request(`/api/v1/data/migrations/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('migration-progress');
       root.hidden = false;
       root.style.setProperty('--migration-progress', task.progress / 100);
       root.querySelector('[data-migration-phase]').textContent = task.error || task.phase;
       root.querySelector('[data-migration-percent]').textContent = `${task.progress}%`;
-      if (['pending', 'running', 'cancelling'].includes(task.status)) {
-        state.migrationTimer = setTimeout(() => pollMigration(id), 600);
+      state.migrationId = ['pending', 'running', 'cancelling'].includes(task.status)
+        ? String(task.id || id) : '';
+      if (state.migrationId) {
+        state.migrationTimer = setTimeout(() => pollMigration(id, generation), 600);
       } else {
         document.getElementById('migration-cancel').hidden = true;
         if (task.status === 'completed') {
           state.loaded = false;
           await loadSettings(true);
+          if (!mounted || generation !== lifecycleGeneration) return;
         }
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       document.querySelector('[data-migration-phase]').textContent = error.message;
     }
   }
@@ -1499,11 +1566,11 @@
   function renderContractMigration(task) {
     const empty = document.getElementById('contract-migration-empty');
     if (!task) {
+      state.contractMigrationId = '';
       empty.hidden = false;
       return;
     }
     empty.hidden = true;
-    state.contractMigrationId = task.id;
     const total = Number(task.total || 0);
     const checked = Number(task.checked || 0);
     const ratio = total > 0 ? Math.min(1, checked / total) : 0;
@@ -1526,6 +1593,7 @@
       ? '离线停写已验证' : '未处于离线停写窗口';
     writeState.className = `state-pill ${task.write_paused ? 'sell' : ''}`;
     const active = ['queued', 'backing_up', 'running', 'pausing'].includes(task.status);
+    state.contractMigrationId = active ? String(task.id || '') : '';
     document.getElementById('contract-migration-pause').hidden = !active || task.status === 'pausing';
     document.getElementById('contract-migration-resume').hidden = true;
     document.getElementById('contract-migration-rollback').hidden = true;
@@ -1534,26 +1602,32 @@
     const unknown = Array.isArray(task.unknown_results) ? task.unknown_results : [];
     investigation.hidden = unknown.length === 0;
     list.innerHTML = unknown.map(item => `<li><strong>${html(item.record_key)}</strong><code>${html(item.diagnostic_code || 'needs_review')}</code><span>${html((item.unknown_fields || []).join('、') || '未确认可选字段')}</span><small>${html(item.detail || '原记录证据不足，当前字段保持为空。')}</small></li>`).join('');
-    if (active) scheduleContractMigrationPoll(task.id);
+    if (mounted && active) scheduleContractMigrationPoll(task.id);
   }
 
-  function scheduleContractMigrationPoll(id, delay = 800) {
+  function scheduleContractMigrationPoll(id, delay = 800, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.contractMigrationTimer);
-    state.contractMigrationTimer = setTimeout(() => pollContractMigration(id), delay);
+    state.contractMigrationTimer = setTimeout(() => pollContractMigration(id, generation), delay);
   }
 
-  async function pollContractMigration(id) {
+  async function pollContractMigration(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     try {
       const task = await request(`/api/v1/data/contract-migrations/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       state.contractMigrationFailures = 0;
       renderContractMigration(task);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       state.contractMigrationFailures += 1;
       if (state.contractMigrationFailures === 1) {
         document.querySelector('[data-contract-phase]').textContent = `状态暂时不可用：${error.message}`;
       }
-      if (state.contractMigrationFailures < 5) {
-        scheduleContractMigrationPoll(id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)));
+      if (mounted && state.contractMigrationFailures < 5) {
+        scheduleContractMigrationPoll(
+          id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)), generation,
+        );
       }
     }
   }
@@ -1596,22 +1670,27 @@
     renderContractMigration(await request(`/api/v1/data/contract-migrations/${state.contractMigrationId}/rollback`, {method: 'POST'}));
   });
 
-  async function pollFreeStockDbSidecar() {
+  async function pollFreeStockDbSidecar(generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     if (freeStockDbPollTimer !== null) clearTimeout(freeStockDbPollTimer);
     freeStockDbPollTimer = null;
     try {
       const status = await request('/api/v1/settings/free-stockdb');
+      if (!mounted || generation !== lifecycleGeneration) return;
       freeStockDbPollFailures = 0;
       renderRuntime({...state.lastRuntime, free_stockdb: status});
-      const active = ['queued', 'updating', 'restarting'].includes(status.state)
-        || ['queued', 'stopping', 'syncing', 'restarting'].includes(status.phase);
+      const active = isFreeStockDbActive(status);
+      freeStockDbActive = active;
       document.getElementById('free-stockdb-update-now').disabled = active;
-      if (active) scheduleFreeStockDbPoll();
+      if (active) scheduleFreeStockDbPoll(1000, generation);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       freeStockDbPollFailures += 1;
       document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
       if (freeStockDbPollFailures < 5) {
-        scheduleFreeStockDbPoll(Math.min(8000, 500 * (2 ** freeStockDbPollFailures)));
+        scheduleFreeStockDbPoll(
+          Math.min(8000, 500 * (2 ** freeStockDbPollFailures)), generation,
+        );
       } else {
         document.getElementById('free-stockdb-update-now').disabled = false;
       }
@@ -1619,25 +1698,69 @@
   }
 
   document.getElementById('free-stockdb-update-now').addEventListener('click', async event => {
+    const generation = lifecycleGeneration;
+    freeStockDbActive = true;
     event.target.disabled = true;
     try {
       const status = await request('/api/v1/settings/free-stockdb/update', {method: 'POST'});
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderRuntime({...state.lastRuntime, free_stockdb: status});
-      scheduleFreeStockDbPoll(250);
+      scheduleFreeStockDbPoll(250, generation);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
+      freeStockDbActive = false;
       document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
       event.target.disabled = false;
     }
   });
 
-  async function openSettings(section = 'llm') {
-    const entry = document.querySelector('[data-tab="settings"]');
-    entry?.click();
-    await loadSettings();
-    switchSection(section);
+  function resumeActiveWork() {
+    document.getElementById('weixin-login-start').disabled = Boolean(
+      state.weixinLoginId || state.weixinLoginCreatePending,
+    );
+    if (state.editRevision > state.savedRevision && !state.saveInFlight) {
+      state.autoSaveTimer = setTimeout(flushAutosave, 0);
+    }
+    if (state.dataRefreshId) void pollDataRefresh(state.dataRefreshId);
+    if (state.researchId) void pollResearchJob(state.researchId);
+    if (state.migrationId) void pollMigration(state.migrationId);
+    if (state.contractMigrationId) scheduleContractMigrationPoll(state.contractMigrationId, 0);
+    if (freeStockDbActive) scheduleFreeStockDbPoll(0);
+    if (state.weixinLoginId) {
+      renderWeixinLoginSession();
+      scheduleWeixinPoll(state.weixinLoginId, 0);
+    }
   }
 
-  window.QuantMasterManagement = {
-    request, ensureSettings: loadSettings, state, open: openSettings,
+  async function mountSettings() {
+    const resume = state.loaded;
+    const generation = ++lifecycleGeneration;
+    mounted = true;
+    await loadSettings();
+    if (resume && mounted && generation === lifecycleGeneration) resumeActiveWork();
+  }
+
+  const management = {
+    request, ensureSettings: loadSettings, state,
   };
+  function unmount() {
+    mounted = false;
+    lifecycleGeneration += 1;
+    [
+      'migrationTimer', 'dataRefreshTimer', 'researchTimer', 'modelCheckTimer',
+      'autoSaveTimer', 'retryTimer', 'weixinLoginTimer', 'contractMigrationTimer',
+    ].forEach(key => {
+      clearTimeout(state[key]);
+      state[key] = null;
+    });
+    clearTimeout(freeStockDbPollTimer);
+    freeStockDbPollTimer = null;
+    document.getElementById('weixin-login-start').disabled = Boolean(
+      state.weixinLoginId || state.weixinLoginCreatePending,
+    );
+  }
+
+  return {mount:mountSettings, unmount, refresh:() => loadSettings(true), ...management};
 })();
+
+export const {mount, unmount, refresh, request, ensureSettings, state} = settingsFeature;

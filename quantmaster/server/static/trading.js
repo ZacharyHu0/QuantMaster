@@ -1,4 +1,4 @@
-(() => {
+const tradingFeature = (() => {
   'use strict';
 
   const btState = {activeId: '', runs: [], selected: new Set(), prompted: new Set(), timer: 0};
@@ -991,7 +991,6 @@
     }
   }
 
-  window.loadPaper = () => loadPaperAccounts(true);
 
   document.getElementById('paper-new-toggle')?.addEventListener('click', event => {
     const button = event.currentTarget;
@@ -1246,6 +1245,21 @@
     finally { setButtonBusy(button, false); }
   });
 
-  loadBacktests();
-  loadPaperAccounts(false);
+  async function mount(page) {
+    if (page === 'backtest') await loadBacktests();
+    else await loadPaperAccounts(false);
+  }
+
+  function unmount() {
+    window.QuantCharts?.activateTab('');
+  }
+
+  async function refresh(page) {
+    if (page === 'backtest') await loadBacktests();
+    else await loadPaperAccounts(true);
+  }
+
+  return {mount, unmount, refresh};
 })();
+
+export const {mount, unmount, refresh} = tradingFeature;

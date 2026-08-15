@@ -1593,8 +1593,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     ).status_code == 422
 
     page = client.get("/").text
-    assert 'href="/static/trading.css"' in page
-    assert 'src="/static/trading.js"' in page
+    assert 'href="/static/trading.css"' not in page
+    assert 'src="/static/trading.js"' not in page
     assert "回测工作台" in page
     assert "Hybrid v2 决策" in page
     assert 'option value="swing"' not in page
@@ -1624,7 +1624,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
         for label in ("选择", "实验名称", "候选 · 策略", "年化收益", "状态", "操作")
     )
     app_script = client.get("/static/app.js").text
-    assert "void loadDecisionHistory()" in app_script
+    today_adapter = client.get("/static/workspaces/today.js").text
+    assert "await context.shell.loadDecisionHistory()" in today_adapter
     assert "document.getElementById('decision-form').requestSubmit()" not in app_script
 
     css = client.get("/static/trading.css").text

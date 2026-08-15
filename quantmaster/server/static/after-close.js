@@ -1,4 +1,4 @@
-(() => {
+const afterCloseFeature = (() => {
   const state = {
     loaded:false, loading:null, snapshot:null, labels:[], level:'L1', sector:'',
     jobId:'', poll:null, stockdbPoll:null, stockdbActive:false,
@@ -302,13 +302,17 @@
   document.getElementById('after-close-rerun').addEventListener('click', () => void submit(true));
   document.getElementById('after-close-as-of').addEventListener('input', syncReplayAction);
   document.querySelectorAll('[data-after-close-open-stockdb]').forEach(button => {
-    button.addEventListener('click', async () => {
-      await window.QuantMasterManagement?.open('local-data');
-      const target = document.getElementById('free-stockdb-sidecar-status');
-      target?.scrollIntoView({
-        behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-        block:'center',
-      });
+    button.addEventListener('click', () => {
+      document.addEventListener('quantmaster:workspace-mounted', event => {
+        if (event.detail?.page !== 'settings') return;
+        document.getElementById('free-stockdb-sidecar-status')?.scrollIntoView({
+          behavior:window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block:'center',
+        });
+      }, {once:true});
+      document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+        detail:{tab:'settings', section:'local-data'},
+      }));
     });
   });
   document.querySelector('[data-after-close-cancel]').addEventListener('click', async () => {
@@ -336,5 +340,14 @@
     document.getElementById('after-close-candidate-summary').textContent = `已复制 ${result.count} 只到候选池 ${result.name}`;
   });
 
-  window.loadAfterClose = () => load();
+  function unmount() {
+    clearTimeout(state.poll);
+    clearTimeout(state.stockdbPoll);
+    state.poll = null;
+    state.stockdbPoll = null;
+  }
+
+  return {mount:load, unmount, refresh:load};
 })();
+
+export const {mount, unmount, refresh} = afterCloseFeature;

@@ -1,4 +1,4 @@
-(() => {
+const automationFeature = (() => {
   'use strict';
 
   const state = {
@@ -42,6 +42,12 @@
   const jobKindLabels = {
     high_frequency_poll:'高频轮询', daily:'每日业务', time_window:'时间窗摄取', manual:'手工任务',
   };
+
+  function openSettings(section) {
+    document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+      detail:{tab:'settings', section},
+    }));
+  }
 
   async function secureApi(path, options = {}) {
     return api(path, options);
@@ -689,7 +695,7 @@
     showPageFeedback('error', `自动化状态读取失败：${message}`, {sticky:true});
   }
 
-  window.loadAutomation = async function(force = false, options = {}) {
+  async function loadAutomation(force = false, options = {}) {
     if (state.loading || (state.loaded && !force)) return;
     const refresh = document.getElementById('automation-refresh');
     state.loading = true;
@@ -712,7 +718,7 @@
       refresh.disabled = false;
       refresh.textContent = '刷新状态';
     }
-  };
+  }
 
   async function updateTarget(targetId, body, successMessage = '推送设置已保存') {
     if (state.targetSaving.has(targetId)) return null;
@@ -748,7 +754,7 @@
         if (result.status === 'bound') {
           session.status = 'bound';
           state.targetFeedback.set(targetId, {kind:'success', message:'会话绑定成功，可以发送测试消息。'});
-          await window.loadAutomation(true, {silent:true});
+          await loadAutomation(true, {silent:true});
           return;
         }
         if (result.status === 'expired') {
@@ -806,13 +812,13 @@
   });
 
   document.getElementById('automation-refresh').addEventListener('click', () => {
-    void window.loadAutomation(true);
+    void loadAutomation(true);
   });
 
   document.getElementById('tab-automation').addEventListener('click', event => {
     const retry = event.target.closest('[data-automation-retry]');
     if (retry) {
-      void window.loadAutomation(true);
+      void loadAutomation(true);
       return;
     }
     const recordRetry = event.target.closest('[data-record-retry]');
@@ -823,7 +829,7 @@
     const attention = event.target.closest('[data-attention-view], [data-attention-settings]');
     if (!attention) return;
     if (attention.dataset.attentionSettings) {
-      window.QuantMasterManagement.open(attention.dataset.attentionSettings);
+      openSettings(attention.dataset.attentionSettings);
       return;
     }
     if (attention.dataset.attentionJob) state.expandedJobId = attention.dataset.attentionJob;
@@ -836,7 +842,7 @@
   document.getElementById('automation-channels').addEventListener('click', event => {
     const manage = event.target.closest('[data-manage-channel]');
     if (manage) {
-      window.QuantMasterManagement.open(manage.dataset.manageChannel || 'automation');
+      openSettings(manage.dataset.manageChannel || 'automation');
       return;
     }
     const expand = event.target.closest('[data-channel-expand]');
@@ -876,7 +882,7 @@
     const save = event.target.closest('[data-save-policy]');
     const copy = event.target.closest('[data-copy-binding]');
     if (manage) {
-      window.QuantMasterManagement.open(manage.dataset.manageChannel || 'automation');
+      openSettings(manage.dataset.manageChannel || 'automation');
       return;
     }
     if (expand) {
@@ -1035,7 +1041,7 @@
             : `任务 ${result.job_id || result.run_id || ''} 已提交，正在后台排队执行。`});
       }
       invalidateRecordCache();
-      await window.loadAutomation(true, {silent:true, invalidateRecords:false});
+      await loadAutomation(true, {silent:true, invalidateRecords:false});
     } catch (error) {
       state.jobFeedback.set(name, {kind:'error',
         message:`任务操作未完成：${error.message} 请检查运行时状态后重试。`});
@@ -1045,4 +1051,17 @@
       renderOverview();
     }
   });
+
+  function unmount() {
+    clearTimeout(state.pageFeedbackTimer);
+    state.pageFeedbackTimer = 0;
+  }
+
+  return {
+    mount: () => loadAutomation(false),
+    unmount,
+    refresh: () => loadAutomation(true),
+  };
 })();
+
+export const {mount, unmount, refresh} = automationFeature;

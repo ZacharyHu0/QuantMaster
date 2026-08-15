@@ -1972,8 +1972,8 @@ def test_automation_api_and_ui_contract():
     assert 'id="automation-view-messaging"' in page
     assert 'id="automation-view-records"' in page
     assert 'role="tabpanel" aria-labelledby="automation-view-overview"' in page
-    assert "/static/automation.css?rev=" in page
-    assert "/static/automation.js?rev=" in page
+    assert "/static/automation.css" not in page
+    assert "/static/automation.js" not in page
     assert "%%QM_AUTOMATION" not in page
     assert "腾讯微信 ClawBot" in page
     assert "飞书企业自建应用 Bot" in page
