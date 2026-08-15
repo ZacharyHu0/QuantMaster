@@ -154,7 +154,9 @@ def lifecycle_lock(app_root: Path):
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    stream.fileno(), msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
+                )
             else:
                 fcntl = cast(Any, __import__("fcntl"))
 
@@ -170,7 +172,9 @@ def lifecycle_lock(app_root: Path):
                     import msvcrt
 
                     stream.seek(0)
-                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(  # type: ignore[attr-defined]
+                        stream.fileno(), msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                    )
                 else:
                     fcntl = cast(Any, __import__("fcntl"))
 
