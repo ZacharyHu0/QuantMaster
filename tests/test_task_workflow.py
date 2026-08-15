@@ -17,6 +17,7 @@ from scripts.dev.tasks import (
     full_validation_identity,
     gc_task_artifacts,
     has_full_validation,
+    ready,
     record_full_validation,
     record_task_remove_intent,
     remove,
@@ -511,6 +512,82 @@ def test_ready_state_rejects_task_changelog_updates():
 
     with pytest.raises(SystemExit, match="版本元数据"):
         validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+
+
+def test_accept_ci_ready_uses_selected_merge_base_when_main_advances(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from scripts.dev import tasks
+
+    git_calls = []
+
+    def fake_git(args, *, cwd, check=True):
+        git_calls.append(args)
+        if args == ["branch", "--show-current"]:
+            return SimpleNamespace(stdout="codex/task\n", returncode=0)
+        if args == ["status", "--porcelain"]:
+            return SimpleNamespace(stdout="", returncode=0)
+        if args == ["merge-base", "main", "HEAD"]:
+            return SimpleNamespace(stdout="selected-base\n", returncode=0)
+        pytest.fail(f"accept-ci must not follow moving main ancestry: {args}")
+
+    observed = {}
+    monkeypatch.setattr(tasks, "git", fake_git)
+    monkeypatch.setattr(tasks, "task_changed_paths", lambda _cwd: ["scripts/dev/tasks.py"])
+    monkeypatch.setattr(
+        tasks,
+        "full_validation_identity",
+        lambda _cwd, **kwargs: observed.setdefault(
+            "identity",
+            {"commit": "exact-head", "base": kwargs["base"]},
+        ),
+    )
+    monkeypatch.setattr(tasks, "has_full_validation", lambda *_args: False)
+    monkeypatch.setattr(tasks, "github_remote_repo", lambda _cwd: ("owner", "repo"))
+
+    def green_ci_runs(owner, repo, sha):
+        observed["ci"] = (owner, repo, sha)
+        return [{"html_url": "https://example.test/full"}]
+
+    monkeypatch.setattr(tasks, "green_ci_runs", green_ci_runs)
+    monkeypatch.setattr(
+        tasks,
+        "record_full_validation",
+        lambda _cwd, identity: observed.setdefault("recorded", identity),
+    )
+
+    ready(tmp_path, ui=False, rust=False, package=False, accept_ci=True)
+
+    assert git_calls == [
+        ["branch", "--show-current"],
+        ["status", "--porcelain"],
+        ["merge-base", "main", "HEAD"],
+    ]
+    assert observed["identity"]["base"] == "selected-base"
+    assert observed["ci"] == ("owner", "repo", "exact-head")
+    assert observed["recorded"] == observed["identity"]
+
+
+def test_local_ready_still_rejects_a_branch_behind_main(monkeypatch, tmp_path) -> None:
+    from scripts.dev import tasks
+
+    def fake_git(args, *, cwd, check=True):
+        if args == ["branch", "--show-current"]:
+            return SimpleNamespace(stdout="codex/task\n", returncode=0)
+        if args == ["status", "--porcelain"]:
+            return SimpleNamespace(stdout="", returncode=0)
+        if args == ["merge-base", "main", "HEAD"]:
+            return SimpleNamespace(stdout="selected-base\n", returncode=0)
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            return SimpleNamespace(stdout="", returncode=1)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(tasks, "git", fake_git)
+    monkeypatch.setattr(tasks, "task_changed_paths", lambda _cwd: [])
+
+    with pytest.raises(SystemExit, match="落后于 origin/main"):
+        ready(tmp_path, ui=False, rust=False, package=False)
 
 
 def test_task_changed_paths_excludes_inherited_main_history(monkeypatch, tmp_path):

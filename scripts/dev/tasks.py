@@ -891,16 +891,22 @@ def gc_task_artifacts(
 def ready(cwd: Path, *, ui: bool, rust: bool, package: bool, accept_ci: bool = False) -> None:
     branch = git(["branch", "--show-current"], cwd=cwd).stdout.strip()
     status = git(["status", "--porcelain"], cwd=cwd).stdout.strip()
-    behind_origin = bool(git(
-        ["merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=cwd, check=False,
-    ).returncode)
-    behind_local = bool(git(
-        ["merge-base", "--is-ancestor", "main", "HEAD"], cwd=cwd, check=False,
-    ).returncode)
+    integration_base = git(["merge-base", "main", "HEAD"], cwd=cwd).stdout.strip()
+    behind = False
+    if not accept_ci:
+        behind_origin = bool(git(
+            ["merge-base", "--is-ancestor", "origin/main", "HEAD"],
+            cwd=cwd,
+            check=False,
+        ).returncode)
+        behind_local = bool(git(
+            ["merge-base", "--is-ancestor", "main", "HEAD"], cwd=cwd, check=False,
+        ).returncode)
+        behind = behind_origin or behind_local
     task_changes = task_changed_paths(cwd)
-    validate_ready_state(branch, status, behind_origin or behind_local, task_changes)
+    validate_ready_state(branch, status, behind, task_changes)
     identity = full_validation_identity(
-        cwd, base="main", ui=ui, rust=rust, package=package,
+        cwd, base=integration_base, ui=ui, rust=rust, package=package,
     )
     if has_full_validation(cwd, identity):
         print("[task] identical clean-commit full validation already passed; reusing evidence")
