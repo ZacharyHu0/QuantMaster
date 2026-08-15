@@ -240,7 +240,7 @@ def factors(
 def factor_correlation_matrix(body: FactorCorrelationRequest) -> dict:
     try:
         return _get_lab_service().factor_correlation_matrix(**body.model_dump())
-    except Exception as exc:
+    except (LabError, KeyError, TypeError, ValueError) as exc:
         return _fail(exc)  # type: ignore[return-value]
 
 
@@ -248,7 +248,7 @@ def factor_correlation_matrix(body: FactorCorrelationRequest) -> dict:
 def factor_version_history(version_id: str) -> dict:
     try:
         return {"items": _published_lab_service().store.version_history(version_id)}
-    except Exception as exc:
+    except (LabError, KeyError, TypeError, ValueError) as exc:
         return _fail(exc)  # type: ignore[return-value]
 
 
