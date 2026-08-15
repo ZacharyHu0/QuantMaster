@@ -688,7 +688,7 @@
           <button class="lab-button lab-button-quiet" type="button" data-lab-action="create-factor">+ 安全 DSL 因子</button>
         </div>
         <div class="lab-library-toolbar">
-          <label class="lab-search"><span>⌕</span><input id="lab-factor-search" placeholder="搜索名称、slug 或表达式"></label>
+          <label class="lab-search"><span>⌕</span><input id="lab-factor-search" placeholder="搜索名称、含义、标签或表达式"></label>
           <div class="lab-filter-row" id="lab-status-filters">
             <button type="button" class="active" data-status="">全部</button>
             <button type="button" data-status="candidate">待审</button>
@@ -697,11 +697,27 @@
             <button type="button" data-status="draft">草稿</button>
           </div>
         </div>
+        <div class="lab-factor-controls" aria-label="因子目录筛选与正交性分析">
+          <label>分类<select id="lab-factor-category"><option value="">全部</option></select></label>
+          <label>类型<select id="lab-factor-kind"><option value="">全部</option></select></label>
+          <label>验证<select id="lab-factor-validation"><option value="">全部</option><option value="passed">通过</option><option value="failed">未通过</option><option value="unvalidated">未验证</option></select></label>
+          <label>周期<select id="lab-factor-horizon"><option value="">全部</option><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label>
+          <label>标签<select id="lab-factor-tag"><option value="">全部</option></select></label>
+          <div class="lab-correlation-action"><span id="lab-correlation-count">已选 0 / 30</span><label>比较周期<select id="lab-correlation-horizon"><option value="1">1 日</option><option value="3" selected>3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label><button class="lab-button lab-button-primary" id="lab-run-correlation" type="button" disabled>生成相关性热图</button></div>
+        </div>
         <div class="lab-review-grid">
           <div class="lab-factor-pane" id="lab-factor-list"><div class="lab-empty">正在读取因子目录…</div></div>
           <article class="lab-evidence-pane" id="lab-factor-evidence"><div class="lab-empty">选择一个因子查看验证证据</div></article>
           <aside class="lab-copilot-pane" id="lab-copilot"><div class="lab-copilot-mark">AI</div><h4>研究 Copilot</h4><p>选择因子后，可基于本地指标生成最小修正建议。</p></aside>
         </div>
+      </section>
+
+      <section class="lab-view" data-lab-panel="robustness">
+        <div class="lab-view-head lab-robustness-detail-head">
+          <div><span class="lab-overline">FROZEN ROBUSTNESS EVIDENCE</span><h3 id="lab-robustness-title">鲁棒性验证详情</h3><p id="lab-robustness-subtitle">只读取已冻结验证结果；打开本页不会重算或访问远端数据。</p></div>
+          <div class="lab-robustness-detail-actions"><label>预测周期<select id="lab-robustness-horizon"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label><button class="lab-button lab-button-quiet" type="button" data-robustness-back>← 返回因子详情</button></div>
+        </div>
+        <div id="lab-robustness-detail"><div class="lab-empty">从因子详情选择预测周期以查看冻结证据。</div></div>
       </section>
 
       <section class="lab-view" data-lab-panel="automation">
@@ -758,6 +774,12 @@
       <p>仅允许字段、数字和白名单算子；不会执行任意 Python。</p>
       <div class="lab-dialog-actions"><button class="lab-button lab-button-quiet" type="button" data-lab-close-dialog>取消</button><button class="lab-button lab-button-primary" type="submit" value="default">创建草稿</button></div>
     </form>
+  </dialog>
+  <dialog class="lab-dialog lab-correlation-dialog" id="lab-correlation-dialog" aria-labelledby="lab-correlation-title">
+    <div class="lab-dialog-card">
+      <div class="lab-dialog-head"><div><span>ORTHOGONALITY REVIEW</span><h3 id="lab-correlation-title">因子相关性热图</h3></div><button type="button" data-correlation-close aria-label="关闭">×</button></div>
+      <div id="lab-correlation-body"><div class="lab-empty">选择 2–30 个可比因子后生成热图。</div></div>
+    </div>
   </dialog>
   <div class="lab-announcer" id="lab-announcer" role="status" aria-live="polite" aria-atomic="true"></div>
 </section>
@@ -1432,6 +1454,12 @@
             <label>默认研究候选<div class="candidate-field"><select name="lab.universe" data-candidate-select="all" required><option value="csi800">csi800</option><option value="demo">demo</option></select><button class="candidate-view" data-candidate-view type="button">管理</button></div><small>csi800 需要 Tushare index_weight 权限。</small></label>
             <label>研究起点<input name="lab.start" type="date" required></label>
             <fieldset class="choice-field field-wide"><legend>统一验证周期</legend><div class="choice-row"><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="1">1 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="3">3 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="5">5 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="7">7 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="10">10 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="20">20 日</label><label><input name="lab.horizons" data-list-checkbox type="checkbox" value="30">30 日</label></div><small>每个周期独立验证和授权；最长标签使用 30 日 purge。</small></fieldset>
+            <label>滚动训练期（交易日）<input name="lab.walk_forward_train_days" type="number" min="120" max="2520" step="1" required><small>默认 756，约三年。</small></label>
+            <label>样本外测试期（交易日）<input name="lab.walk_forward_test_days" type="number" min="20" max="756" step="1" required><small>默认 244，约一年。</small></label>
+            <label>向前步长（交易日）<input name="lab.walk_forward_step_days" type="number" min="1" max="756" step="1" required><small>默认 244，每年重新训练。</small></label>
+            <label>Purge 间隔（交易日）<input name="lab.walk_forward_purge_days" type="number" min="1" max="252" step="1" required><small>不得短于最长预测周期。</small></label>
+            <label>开发期 OOS 窗口数<input name="lab.walk_forward_folds" type="number" min="3" max="12" step="1" required><small>默认 3；最后另保留一个密封窗口。</small></label>
+            <label>高相关预警阈值 |ρ|<input name="lab.factor_correlation_threshold" type="number" min="0" max="1" step="0.05" required><small>默认 0.70；用于因子相关性热图预警。</small></label>
           </div>
           <details class="settings-advanced">
             <summary>调度、计算与数据共享</summary>

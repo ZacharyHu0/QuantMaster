@@ -23,6 +23,17 @@ class MigrationError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class MigrationPreflight:
+    source: Path
+    target: Path
+    mode: str
+    file_count: int
+    total_bytes: int
+    required_bytes: int
+    free_bytes: int | None
+
+
 @dataclass
 class MigrationTask:
     id: str
@@ -55,7 +66,7 @@ def _resolved(path: str | Path) -> Path:
         raise MigrationError("数据目录路径无效") from exc
     if not candidate.is_absolute():
         raise MigrationError("数据目录必须使用绝对路径")
-    # 本地 CSRF 管理操作有意允许用户选择任意绝对数据目录；_preflight 会拒绝
+    # 本地 CSRF 管理操作有意允许用户选择任意绝对数据目录；预检会拒绝
     # 嵌套、覆盖、符号链接和不可用目标。
     return candidate.resolve()
 
@@ -68,7 +79,20 @@ def _is_sqlite_sidecar(path: Path) -> bool:
     return False
 
 
-def _preflight(source: Path, target: Path, mode: str) -> tuple[int, list[Path]]:
+def _migration_files(source: Path) -> tuple[Path, ...]:
+    entries = tuple(source.rglob("*"))
+    if any(path.is_symlink() for path in entries):
+        raise MigrationError("数据目录包含符号链接，无法保证复制边界")
+    # SQLite 通过 backup API 生成自包含快照，绝不能再把源 WAL/SHM 侧车复制过去。
+    return tuple(
+        path for path in entries if path.is_file() and not _is_sqlite_sidecar(path)
+    )
+
+
+def preflight_data_root_migration(
+    source: str | Path, target: str | Path, mode: str,
+) -> MigrationPreflight:
+    source, target = _resolved(source), _resolved(target)
     if mode not in {"copy", "switch"}:
         raise MigrationError("mode 仅支持 copy/switch")
     if source == target:
@@ -81,16 +105,32 @@ def _preflight(source: Path, target: Path, mode: str) -> tuple[int, list[Path]]:
         raise MigrationError("目标目录不是空目录，拒绝覆盖")
     if mode == "switch" and (not target.exists() or not target.is_dir()):
         raise MigrationError("仅切换要求目标是已存在的数据目录")
-    # SQLite 通过 backup API 生成自包含快照，绝不能再把源 WAL/SHM 侧车复制过去。
-    files = [path for path in source.rglob("*")
-             if path.is_file() and not _is_sqlite_sidecar(path)]
-    if any(path.is_symlink() for path in source.rglob("*")):
-        raise MigrationError("数据目录包含符号链接，无法保证复制边界")
+    files = _migration_files(source)
     total = sum(path.stat().st_size for path in files)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "copy" and shutil.disk_usage(target.parent).free < total + max(16 * 1024 * 1024, total // 20):
-        raise MigrationError("目标磁盘剩余空间不足")
-    return total, files
+    required = 0
+    free: int | None = None
+    if mode == "copy":
+        required = total + max(16 * 1024 * 1024, total // 20)
+        capacity_root = target.parent
+        while not capacity_root.exists():
+            parent = capacity_root.parent
+            if parent == capacity_root:
+                raise MigrationError("目标目录父路径不可用")
+            capacity_root = parent
+        if not capacity_root.is_dir():
+            raise MigrationError("目标目录父路径不可用")
+        free = shutil.disk_usage(capacity_root).free
+        if free < required:
+            raise MigrationError("目标磁盘剩余空间不足")
+    return MigrationPreflight(
+        source=source,
+        target=target,
+        mode=mode,
+        file_count=len(files),
+        total_bytes=total,
+        required_bytes=required,
+        free_bytes=free,
+    )
 
 
 def _sha256(path: Path, cancel: threading.Event | None = None) -> str:
@@ -337,17 +377,19 @@ class DataMigrationManager:
             return bool(task and task.status in {"pending", "running", "cancelling"})
 
     def create(self, target: str | Path, mode: str = "copy") -> dict:
-        source = _resolved(get_config().data.root)
-        target_path = _resolved(target)
-        total, _ = _preflight(source, target_path, mode)
+        preflight = preflight_data_root_migration(get_config().data.root, target, mode)
         lease = maintenance_barrier.enter("data_root_migration", timeout=30.0)
         try:
             with self._lock:
                 if self.active:
                     raise MigrationError("已有数据迁移任务正在进行")
                 task = MigrationTask(
-                    id=uuid.uuid4().hex, source=str(source), target=str(target_path),
-                    mode=mode, total_bytes=total, maintenance_lease=lease,
+                    id=uuid.uuid4().hex,
+                    source=str(preflight.source),
+                    target=str(preflight.target),
+                    mode=preflight.mode,
+                    total_bytes=preflight.total_bytes,
+                    maintenance_lease=lease,
                 )
                 self._tasks[task.id] = task
                 self._active_id = task.id
@@ -423,7 +465,8 @@ class DataMigrationManager:
         temp = target.parent / f".{target.name}.qm-migration-{task.id}"
         try:
             task.status, task.phase = "running", "复制数据文件"
-            _, files = _preflight(source, target, "copy")
+            preflight_data_root_migration(source, target, "copy")
+            files = _migration_files(source)
             source_state = _source_state(source)
             temp.mkdir(parents=True, exist_ok=False)
             for directory in (path for path in source.rglob("*") if path.is_dir()):

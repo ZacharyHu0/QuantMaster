@@ -700,85 +700,74 @@ def cmd_factors(args) -> None:
 
 
 def cmd_factor_test(args) -> None:
-    from quantmaster.data.universe import load_universe_analysis
-    from quantmaster.factors import analyze_factor, compute_factor
-    from quantmaster.factors.fundamental import resolve_factor
+    from quantmaster.factors import run_factor_test
 
-    end = args.end or _close_day()
-    factor = resolve_factor(
-        args.expression, load_universe_analysis(args.universe), args.start, end,
+    result = run_factor_test(
+        expression=args.expression,
+        universe=args.universe,
+        start=args.start,
+        end=args.end,
+        quantiles=args.quantiles,
+        neutralize=args.neutralize,
+        refresh=True,
     )
-    panel = _load_panel(args.universe, args.start, end)
-    values = compute_factor(factor, panel)
+    if (result.get("universe_evidence") or {}).get("formal_eligible") is False:
+        print("⚠️ Sandbox：结果不可进入正式研究", file=sys.stderr)
+    if (result.get("data_quality") or {}).get("status") == "degraded":
+        print("⚠️ 行情数据已降级", file=sys.stderr)
     if args.neutralize:
-        from quantmaster.data.industry import load_industry_map
-        from quantmaster.factors.neutral import industry_neutralize
-
-        mapping = load_industry_map()
-        if not mapping:
-            print("⚠️ 行业映射为空（首次需联网抓取），本次未做中性化", file=sys.stderr)
-        values = industry_neutralize(values, mapping)
-    report = analyze_factor(values, panel["close"], name=factor.name, quantiles=args.quantiles)
-    _print_json(report.summary())
+        if not result.get("neutralized"):
+            print("⚠️ 行业中性化未执行", file=sys.stderr)
+        if (result.get("industry_evidence") or {}).get("status") == "degraded":
+            print("⚠️ 行业证据已降级", file=sys.stderr)
+    _print_json(result["summary"])
 
 
 def cmd_backtest(args) -> None:
-    from quantmaster.backtest import (
-        BacktestConfig,
-        FactorStrategy,
-        monthly_return_table,
-        run_backtest,
-        yearly_returns,
-    )
-    from quantmaster.data import refresh_history
-    from quantmaster.data.universe import load_universe_analysis
-    from quantmaster.factors.fundamental import resolve_factor
+    from quantmaster.backtest.application import execute_backtest
+    from quantmaster.backtest.spec import BacktestSpec, split_factor_references
 
-    end = args.end or _close_day()
-    panel = _load_panel(args.universe, args.start, end)
-    symbols = load_universe_analysis(args.universe)
-    names = [n.strip() for n in args.factor.split(",") if n.strip()]
     if args.strategy == "decision":
-        from quantmaster.decision import HybridDecisionStrategy
-
-        strategy = HybridDecisionStrategy(
-            top_n=args.top,
-            holding_days=args.holding_days,
-            profile=args.profile,
-            universe=args.universe,
-        )
-    elif len(names) > 1:
-        from quantmaster.backtest.strategy import MultiFactorStrategy
-
-        strategy = MultiFactorStrategy(
-            [resolve_factor(n, symbols, args.start, end) for n in names],
-            top_n=args.top,
-            rebalance=args.rebalance,
-            weighting=args.weighting,
-        )
+        strategy = {
+            "kind": "decision", "profile": args.profile, "top_n": args.top,
+            "holding_days": args.holding_days, "cap_weight": 0.25,
+            "policy_snapshot": {},
+        }
     else:
-        strategy = FactorStrategy(
-            resolve_factor(names[0], symbols, args.start, end), top_n=args.top, rebalance=args.rebalance
-        )
-    benchmark = None
-    try:
-        benchmark = _usable_market_data(
-            refresh_history(args.benchmark, args.start, end), label=args.benchmark,
-        )["close"]
-    except Exception as e:
-        print(f"基准 {args.benchmark} 加载失败: {e}", file=sys.stderr)
-    result = run_backtest(
-        panel,
-        strategy.target_weights(panel),
-        BacktestConfig(initial_capital=args.capital, stop_loss=args.stop_loss, take_profit=args.take_profit),
-        benchmark_close=benchmark,
-    )
-    _print_json(result.metrics)
+        factor_count = len(split_factor_references(args.factor))
+        strategy = {
+            "kind": "factor", "factor": args.factor, "top_n": args.top,
+            "rebalance": args.rebalance,
+            "weighting": args.weighting if factor_count > 1 else "equal",
+            "cap_weight": 0.35,
+        }
+    spec = BacktestSpec.model_validate({
+        "strategy": strategy,
+        "universe": args.universe,
+        "start": args.start,
+        "end": args.end,
+        "benchmark": args.benchmark,
+        "initial_capital": args.capital,
+        "stop_loss": args.stop_loss,
+        "take_profit": args.take_profit,
+    })
+    execution = execute_backtest(spec)
+    manifest, artifact = execution["manifest"], execution["artifact"]
+    _print_json({
+        **artifact["metrics"],
+        "research_tier": manifest["research_tier"],
+        "formal_eligible": manifest["formal_eligible"],
+        "warnings": manifest["warnings"],
+    })
     if args.full:
         print("\n== 年度收益 ==")
-        print(yearly_returns(result.returns).to_string())
+        yearly = pd.DataFrame(artifact["yearly"])
+        print(yearly.set_index("year").to_string() if not yearly.empty else "无")
         print("\n== 月度收益（%） ==")
-        print((monthly_return_table(result.returns) * 100).round(2).to_string())
+        monthly = pd.DataFrame(artifact["monthly"])
+        if not monthly.empty:
+            monthly = monthly.set_index("year").apply(pd.to_numeric) * 100
+        print(monthly.round(2).to_string() if not monthly.empty else "无")
 
 
 def cmd_crawl(args) -> None:

@@ -179,8 +179,8 @@ def _sealed_folds(
     index = pd.DatetimeIndex(dates).normalize().unique().sort_values()
     positions = np.flatnonzero((index >= sealed.test_start) & (index <= sealed.test_end))
     folds = []
-    for block, start_position in enumerate(positions[::spec.protocol.retrain_every], start=1):
-        end_position = min(start_position + spec.protocol.retrain_every - 1, positions[-1])
+    for block, start_position in enumerate(positions[::spec.protocol.step_days], start=1):
+        end_position = min(start_position + spec.protocol.step_days - 1, positions[-1])
         train_end = start_position - spec.protocol.purge_gap - 1
         train_start = max(0, train_end - spec.protocol.train_window + 1)
         folds.append(TimeFold(

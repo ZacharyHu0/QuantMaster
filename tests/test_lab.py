@@ -25,6 +25,7 @@ from quantmaster.factors.python_artifact import (
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     build_membership_mask,
+    clear_local_dataset_caches,
     create_snapshot,
     inspect_local_dataset,
     load_csi800_members_as_of,
@@ -61,6 +62,11 @@ def _config(tmp_path, *, enabled=False):
     cfg = Config()
     cfg.data.root = str(tmp_path)
     cfg.lab.enabled = enabled
+    cfg.lab.walk_forward_train_days = 120
+    cfg.lab.walk_forward_test_days = 84
+    cfg.lab.walk_forward_step_days = 84
+    cfg.lab.walk_forward_purge_days = 30
+    cfg.lab.walk_forward_folds = 3
     set_config(cfg)
     return cfg
 
@@ -206,6 +212,36 @@ def test_discovery_form_uses_the_queue_preflight_once():
     assert "confirmPreflight(operation, params, kindLabel[operation]" not in lab_script
 
 
+def test_factor_catalog_ui_exposes_semantic_filters_and_shared_correlation_route():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    index = (root / "quantmaster/server/static/index.html").read_text(encoding="utf-8")
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    for field in (
+        "lab-factor-category", "lab-factor-kind", "lab-factor-validation",
+        "lab-factor-horizon", "lab-factor-tag", "lab-correlation-horizon",
+    ):
+        assert field in index
+    assert "/api/v1/lab/factors/correlation-matrix" in lab_script
+    assert "因子含义" in lab_script
+    assert "VERSION HISTORY" in lab_script
+
+
+def test_robustness_detail_ui_has_independent_route_and_four_explanatory_sections():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    index = (root / "quantmaster/server/static/index.html").read_text(encoding="utf-8")
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    assert 'data-lab-panel="robustness"' in index
+    assert "lab_version" in lab_script and "lab_horizon" in lab_script
+    assert "/robustness?horizon=" in lab_script
+    for renderer in (
+        "renderMonteCarlo", "renderParameterSensitivity",
+        "renderWalkForward", "renderPenetration",
+    ):
+        assert f"function {renderer}" in lab_script
+
+
 class _SequenceLLMClient:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -228,6 +264,94 @@ def test_curated_catalog_has_48_unique_specs():
     assert len({spec.slug for spec in specs}) == 48
     assert {"expression"} <= {spec.kind for spec in specs}
     assert any(spec.slug == "news_sentiment" for spec in specs)
+
+
+def test_factor_catalog_projects_validation_and_version_history(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    first = FactorSpec(
+        slug="catalog_history", name="目录历史", expression="rank(close)",
+        description="价格截面排序", tags=("价格",), horizons=(3,),
+    )
+    _factor, first_version, _created = store.create_factor(first, source="manual")
+    store.save_validation(
+        first_version["id"], "dataset-1",
+        {"gates": {"passed": True, "hard_failures": [], "soft_failures": []}},
+    )
+    second = FactorSpec(
+        slug="catalog_history", name="目录历史", expression="rank(-close)",
+        description="反向价格截面排序", tags=("价格",), horizons=(3,),
+    )
+    _factor, second_version, _created = store.create_factor(
+        second, source="manual", parent_id=first_version["id"],
+    )
+
+    item = next(
+        value for value in store.list_factors(limit=500)["items"]
+        if value["version_id"] == second_version["id"]
+    )
+    assert item["validation_passed"] is None
+    history = store.version_history(second_version["id"])
+    assert [value["version"] for value in history] == [2, 1]
+    assert history[0]["validation_passed"] is None
+    assert history[1]["validation_passed"] is True
+
+
+def test_factor_correlation_uses_one_snapshot_and_configured_threshold(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.lab.factor_correlation_threshold = 0.65
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    versions = []
+    for slug, name in (("corr_a", "相关 A"), ("corr_b", "相关 B")):
+        _factor, version, _created = store.create_factor(FactorSpec(
+            slug=slug, name=name, expression="rank(close)", horizons=(3,),
+        ))
+        versions.append(version)
+    panel = _panel(days=12, symbols=4)
+    snapshot = store.save_snapshot({"snapshot_hash": "one-frozen-snapshot"})
+    calls = []
+    monkeypatch.setattr(
+        service, "_context",
+        lambda *args, **kwargs: (calls.append((args, kwargs)) or (panel, None, snapshot)),
+    )
+    base = panel["close"].rank(axis=1)
+    values = {"corr_a": base, "corr_b": -base}
+    monkeypatch.setattr(
+        service, "_expression_values",
+        lambda version, _panel, _start, _end: values[version["slug"]],
+    )
+
+    result = service.factor_correlation_matrix(
+        version_ids=[value["id"] for value in versions], universe="demo",
+        start="2023-01-02", end="2023-02-01", horizon=3,
+    )
+
+    assert len(calls) == 1
+    assert result["snapshot_hash"] == "one-frozen-snapshot"
+    assert result["threshold"] == 0.65
+    assert result["matrix"] == [[1.0, -1.0], [-1.0, 1.0]]
+    assert result["high_correlations"][0]["absolute_rho"] == 1.0
+
+
+def test_factor_correlation_rejects_cross_horizon_selection(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    version_ids = []
+    for slug, horizon in (("corr_3d", 3), ("corr_5d", 5)):
+        _factor, version, _created = store.create_factor(FactorSpec(
+            slug=slug, name=slug, expression="rank(close)", horizons=(horizon,),
+        ))
+        version_ids.append(version["id"])
+
+    with pytest.raises(LabError) as captured:
+        service.factor_correlation_matrix(
+            version_ids=version_ids, universe="demo",
+            start="2023-01-02", end="2023-02-01", horizon=3,
+        )
+    assert captured.value.code == "FACTOR_CORRELATION_INCOMPARABLE"
+    assert captured.value.context["incompatible"][0]["version_id"] == version_ids[1]
 
 
 def test_lab_sandbox_feature_entry_preserves_news_preview_eligibility(tmp_path, monkeypatch):
@@ -496,7 +620,7 @@ def test_lab_summary_lists_never_decode_large_job_or_study_artifacts(tmp_path, m
     })
     study = store.create_study({
         "universe": "demo", "start": "2024-01-01", "budget_hours": 1,
-        "protocol": {"fold_test_days": 63},
+        "protocol": {"test_window": 244},
     })
     store.update_study(study["id"], status="completed", result={
         "trials": [{"number": index, "artifact": marker} for index in range(2)],
@@ -973,6 +1097,13 @@ def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path,
         "csi800", "2023-01-02", "2023-12-29",
     )
     assert repeated["cache_hit"] is True
+    clear_local_dataset_caches()
+    _panel2, _membership2, persistent = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+    assert persistent["cache_hit"] is True
+    assert persistent["load_profile"]["source"] == "persistent_evidence"
+    assert persistent["snapshot_hash"] == snapshot["snapshot_hash"]
     changed = bars(dates)
     changed.iloc[-1, changed.columns.get_loc("close")] += 1
     store.put("A.SH", changed, replace=True, source="test:bars", quality=verified)
@@ -1237,11 +1368,21 @@ def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     report = validate_factor_values(values, close, name="momentum", research_quality="production")
     assert report["best_horizon"] in {1, 3, 5, 7, 10, 20, 30}
     assert len(report["horizons"]) == 7
-    assert all(len(item["folds"]) == 4 for item in report["horizons"].values())
+    assert all(len(item["folds"]) == 3 for item in report["horizons"].values())
+    assert report["protocol"] == {
+        "train_window": 120,
+        "test_window": 84,
+        "step_days": 84,
+        "purge_gap": 30,
+        "development_folds": 3,
+        "horizons": [1, 3, 5, 7, 10, 20, 30],
+        "seed": 42,
+    }
+    assert all(item["sealed"]["sealed"] for item in report["horizons"].values())
     assert set(report["robustness"]["failed_tests"]).issubset({
         "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
     })
-    assert report["robustness"]["schema_version"] == 1
+    assert report["robustness"]["schema_version"] == 2
     assert report["robustness"]["parameter_sensitivity"]["passed"]
     assert not report["robustness"]["parameter_sensitivity"]["applicable"]
     assert all(
@@ -1260,6 +1401,10 @@ def test_robustness_bootstrap_is_deterministic_and_expression_variants_are_safe(
     first = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
     second = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
     assert first == second
+    assert len(first["ic_mean_distribution"]["histogram"]) == 12
+    assert [item["probability"] for item in first["ic_mean_distribution"]["quantiles"]] == [
+        0.05, 0.25, 0.5, 0.75, 0.95,
+    ]
     assert first["method"] == "circular_moving_block_bootstrap"
     assert first["probability_positive_ic"] > 0.95
 
@@ -1269,6 +1414,77 @@ def test_robustness_bootstrap_is_deterministic_and_expression_variants_are_safe(
     assert all("0.5" in item for item in variants.values())
     assert any("pct_change(close, 4)" in item for item in variants.values())
     assert any("ts_mean(pct_change(close, 5), 24)" in item for item in variants.values())
+
+
+def test_robustness_detail_projects_only_frozen_v2_evidence(tmp_path, monkeypatch):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    _factor, version, _created = store.create_factor(FactorSpec(
+        slug="robust_detail", name="鲁棒详情", expression="rank(close)", horizons=(3,),
+    ))
+    monkeypatch.setattr(service, "_context", lambda *_args, **_kwargs: pytest.fail("不得读取行情"))
+    store.save_validation(version["id"], "frozen-dataset", {
+        "protocol": {"train_window": 756, "test_window": 244, "step_days": 244},
+        "horizons": {"3": {
+            "horizon": 3, "oos_days": 244, "oos_rank_ic": 0.031,
+            "oos_icir": 0.42, "retention": 0.71, "positive_ratio": 0.58,
+            "candidate_score": 72.0,
+            "folds": [{
+                "fold": 1, "train_start": "2018-01-01", "train_end": "2020-12-31",
+                "test_start": "2021-01-01", "test_end": "2021-12-31",
+                "train_rank_ic": 0.04, "rank_ic": 0.03, "retention": 0.75,
+                "test_days": 244,
+            }],
+            "sealed": {
+                "train_start": "2019-01-01", "train_end": "2022-12-31",
+                "test_start": "2023-01-01", "test_end": "2023-12-31",
+                "train_rank_ic": 0.035, "rank_ic": 0.028, "retention": 0.8,
+            },
+            "robustness": {
+                "schema_version": 2, "passed": True,
+                "tests_passed": 4, "tests_applicable": 4, "failed_tests": [],
+                "monte_carlo": {"available": True, "passed": True, "thresholds": {}},
+                "parameter_sensitivity": {
+                    "available": True, "applicable": True, "passed": True,
+                    "thresholds": {}, "variants": [],
+                },
+                "walk_forward": {"available": True, "passed": True, "thresholds": {}},
+                "penetration": {"available": True, "passed": True, "thresholds": {}},
+            },
+        }},
+        "gates": {"passed": True, "hard_failures": [], "soft_failures": []},
+    })
+
+    detail = service.robustness_evidence(version["id"], 3)
+
+    assert detail["status"] == "pass"
+    assert detail["validation"]["dataset_hash"] == "frozen-dataset"
+    assert [section["key"] for section in detail["sections"]] == [
+        "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
+    ]
+    walk_forward = next(item for item in detail["sections"] if item["key"] == "walk_forward")
+    assert walk_forward["evidence"]["folds"][0]["test_start"] == "2021-01-01"
+    assert walk_forward["evidence"]["sealed"]["test_start"] == "2023-01-01"
+
+
+def test_robustness_detail_rejects_legacy_plot_contract(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    _factor, version, _created = store.create_factor(FactorSpec(
+        slug="legacy_robust_detail", name="旧鲁棒详情",
+        expression="rank(close)", horizons=(3,),
+    ))
+    store.save_validation(version["id"], "legacy-dataset", {
+        "horizons": {"3": {"robustness": {"schema_version": 1, "passed": True}}},
+        "gates": {"passed": True, "hard_failures": [], "soft_failures": []},
+    })
+
+    detail = service.robustness_evidence(version["id"], 3)
+
+    assert detail["status"] == "evidence_insufficient"
+    assert "重新验证" in detail["reason"]
 
 
 def test_validation_executes_parameter_and_penetration_layers(tmp_path):
@@ -1346,6 +1562,11 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         })
         assert created.status_code == 200
         version_id = created.json()["id"]
+        robustness = client.get(
+            f"/api/v1/lab/factors/{version_id}/robustness?horizon=3",
+        )
+        assert robustness.status_code == 200
+        assert robustness.json()["status"] == "evidence_insufficient"
         duplicate = client.post("/api/v1/lab/factors", json={
             "name": "人工反转", "expression": "rank(close)",
         })
@@ -1400,6 +1621,7 @@ def test_restricted_python_policy_and_subprocess_contract():
     for unsafe in (
         "import os\ndef compute(features, params):\n    return features['close']",
         "def compute(features, params):\n    return features['close'].shift(-1)",
+        "def compute(features, params):\n    return features['close'].rolling(5, center=True).mean()",
         "def compute(features, params):\n    open('leak')\n    return features['close']",
     ):
         with pytest.raises(PythonFactorPolicyError):

@@ -43,7 +43,7 @@ def test_two_stock_t_plus_one_cost_turnover_and_return() -> None:
 
 
 def test_longest_label_and_split_are_purged_for_30_sessions() -> None:
-    dates = pd.bdate_range("2018-01-01", periods=1400)
+    dates = pd.bdate_range("2018-01-01", periods=2200)
     close = pd.DataFrame({"A": np.arange(1, len(dates) + 1, dtype=float)}, index=dates)
     label = forward_returns(close, periods=30)
     assert label.iloc[0, 0] == pytest.approx(close.iloc[30, 0] / close.iloc[0, 0] - 1)

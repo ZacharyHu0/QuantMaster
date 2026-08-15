@@ -441,6 +441,7 @@ const tradingFeature = (() => {
       <dt>策略快照</dt><dd>${escapeHtml(JSON.stringify(manifest.strategy_snapshot || {}))}</dd>
       <dt>候选质量</dt><dd>${manifest.universe_quality === 'production' ? 'PIT 历史成分' : '固定候选 / 沙盒'} · ${number(manifest.symbol_count)} 只</dd>
       <dt>研究等级</dt><dd>${manifest.research_tier === 'production' ? 'PRODUCTION · RAW EXECUTION' : 'SANDBOX · APPROXIMATION'}</dd>
+      <dt>晋升资格</dt><dd>${manifest.formal_eligible === true ? '正式结果 · 可晋升' : `不可晋升 · ${escapeHtml((manifest.eligibility_reasons || ['缺少正式资格证据']).join('、'))}`}</dd>
       <dt>实际区间</dt><dd>${escapeHtml((range.actual || []).join(' 至 ') || '—')}</dd>
       <dt>可用标的</dt><dd>${number(quality.usable_symbol_count)} / ${number(quality.requested_symbol_count)} 只</dd>
       <dt>可成交信号</dt><dd>${number(quality.executable_signals)} / ${number(quality.selected_signals)}</dd>
@@ -555,7 +556,7 @@ const tradingFeature = (() => {
       <div class="trading-result-actions">
         <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=json">导出完整 JSON</a>
         <a class="trading-secondary" href="/api/v1/backtests/${run.id}/export?format=trades_csv">导出成交 CSV</a>
-        ${run.legacy_read_only ? '<span class="trading-secondary">旧 Swing 回测仅供历史查看</span>' : run.config?.strategy?.kind === 'lab_version' ? '<span class="trading-secondary">OOF 回测不可直接提升模拟账户</span>' : '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>'}
+        ${run.legacy_read_only ? '<span class="trading-secondary">旧 Swing 回测仅供历史查看</span>' : artifact.manifest?.formal_eligible === true ? '<button class="trading-secondary" type="button" data-bt-promote-toggle>创建模拟账户</button>' : '<span class="trading-secondary">缺少正式资格证据，不可提升模拟账户</span>'}
         <form class="trading-promote" data-bt-promote hidden><input name="name" maxlength="40" required value="${escapeHtml(run.name.slice(0, 34))} 验证" aria-label="模拟账户名称"><button class="trading-primary" type="submit">确认创建</button></form>
       </div>
       <div class="trading-chart-grid"><div class="trading-chart-block"><h4>策略净值与基准</h4><div class="trading-chart" id="bt-workbench-nav"></div></div><div class="trading-chart-block"><h4>回撤路径</h4><div class="trading-chart small" id="bt-workbench-dd"></div></div></div>

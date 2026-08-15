@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
+from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import content_hash
 
 HORIZONS = SUPPORTED_HORIZONS
@@ -21,23 +22,22 @@ class WalkForwardSpec:
     """研究、选参与密封评估共用的不可变时间协议。"""
 
     train_window: int = 756
-    retrain_every: int = 20
-    sealed_holdout: int = 252
+    test_window: int = 244
+    step_days: int = 244
     purge_gap: int = MAX_HORIZON
-    development_folds: int = 4
-    fold_test_days: int = 63
+    development_folds: int = 3
     horizons: tuple[int, ...] = HORIZONS
     seed: int = 42
 
     def __post_init__(self) -> None:
         if self.train_window < 120:
             raise ValueError("train_window 至少为 120 个交易日")
-        if self.retrain_every < 1 or self.sealed_holdout < 20:
-            raise ValueError("重训间隔和密封留出期必须为正")
+        if self.test_window < 20 or self.step_days < 1:
+            raise ValueError("test_window 至少为 20，step_days 必须为正")
         if self.purge_gap < max(self.horizons, default=0):
             raise ValueError("purge_gap 不能短于最长预测周期")
-        if self.development_folds < 2 or self.fold_test_days < 10:
-            raise ValueError("开发期至少需要 2 折，每折至少 10 个交易日")
+        if self.development_folds < 3:
+            raise ValueError("开发期至少需要 3 个样本外窗口")
         if not self.horizons or any(value not in HORIZONS for value in self.horizons):
             raise ValueError("horizons 只支持 1/3/5/7/10/20/30 日")
 
@@ -52,6 +52,29 @@ class WalkForwardSpec:
         if "horizons" in payload:
             payload["horizons"] = tuple(int(item) for item in payload["horizons"])
         return cls(**payload)
+
+    @classmethod
+    def from_lab_config(
+        cls, config: Any, *, horizons: tuple[int, ...] | None = None,
+    ) -> WalkForwardSpec:
+        """把持久化 Lab 设置投影为一次运行使用的不可变协议。"""
+        selected = tuple(horizons or config.horizons)
+        return cls(
+            train_window=int(config.walk_forward_train_days),
+            test_window=int(config.walk_forward_test_days),
+            step_days=int(config.walk_forward_step_days),
+            purge_gap=int(config.walk_forward_purge_days),
+            development_folds=int(config.walk_forward_folds),
+            horizons=selected,
+        )
+
+    @property
+    def required_days(self) -> int:
+        """开发期 OOS 窗口加一个末尾密封窗口所需的最少交易日。"""
+        return (
+            self.train_window + 2 * self.purge_gap + 2 * self.test_window
+            + (self.development_folds - 1) * self.step_days
+        )
 
 
 @dataclass(frozen=True)
@@ -180,21 +203,35 @@ def sealed_three_way_split(
 
 
 def walk_forward_folds(dates: pd.DatetimeIndex, spec: WalkForwardSpec) -> tuple[list[TimeFold], TimeFold]:
-    """生成四个开发折与一个永不参与选参的末尾密封区间。"""
+    """生成可配置的滚动 OOS 窗口与一个永不参与选参的末尾密封区间。"""
     index = pd.DatetimeIndex(dates).normalize().unique().sort_values()
-    required = (
-        spec.train_window + spec.purge_gap
-        + spec.development_folds * spec.fold_test_days + spec.sealed_holdout
-    )
+    required = spec.required_days
     if len(index) < required:
-        raise ValueError(f"滚动研究至少需要 {required} 个交易日，当前只有 {len(index)}")
-    sealed_start_pos = len(index) - spec.sealed_holdout
+        raise LabError(
+            "WALK_FORWARD_EVIDENCE_INSUFFICIENT",
+            f"证据不足：滚动研究至少需要 {required} 个交易日，当前只有 {len(index)}",
+            action="在设置中缩短训练、测试或步长周期，或补充更早的本地历史数据",
+            retryable=True,
+            context={
+                "required_days": required,
+                "available_days": len(index),
+                "missing_days": required - len(index),
+                "configurable_fields": [
+                    "walk_forward_train_days", "walk_forward_test_days",
+                    "walk_forward_step_days", "walk_forward_purge_days",
+                ],
+                "protocol": spec.to_dict(),
+            },
+            status_code=422,
+        )
+    sealed_start_pos = len(index) - spec.test_window
     development_end = sealed_start_pos - spec.purge_gap
     folds: list[TimeFold] = []
-    first_test = development_end - spec.development_folds * spec.fold_test_days
+    last_test_start = development_end - spec.test_window
+    first_test = last_test_start - (spec.development_folds - 1) * spec.step_days
     for number in range(spec.development_folds):
-        test_start_pos = first_test + number * spec.fold_test_days
-        test_end_pos = test_start_pos + spec.fold_test_days - 1
+        test_start_pos = first_test + number * spec.step_days
+        test_end_pos = test_start_pos + spec.test_window - 1
         train_end_pos = test_start_pos - spec.purge_gap - 1
         train_start_pos = train_end_pos - spec.train_window + 1
         folds.append(TimeFold(
@@ -206,9 +243,9 @@ def walk_forward_folds(dates: pd.DatetimeIndex, spec: WalkForwardSpec) -> tuple[
         ))
     sealed = TimeFold(
         name="sealed-holdout",
-        train_start=index[max(0, sealed_start_pos - spec.purge_gap - spec.train_window)].strftime(
-            "%Y-%m-%d"
-        ),
+        train_start=index[
+            sealed_start_pos - spec.purge_gap - spec.train_window
+        ].strftime("%Y-%m-%d"),
         train_end=index[sealed_start_pos - spec.purge_gap - 1].strftime("%Y-%m-%d"),
         test_start=index[sealed_start_pos].strftime("%Y-%m-%d"),
         test_end=index[-1].strftime("%Y-%m-%d"),
@@ -238,13 +275,23 @@ def compare_prefixes(full: pd.DataFrame, prefix: pd.DataFrame, *, atol: float = 
     common = left.notna() & right.notna()
     difference = (left - right).abs().where(common)
     maximum = float(difference.max().max()) if difference.notna().any().any() else 0.0
-    changed = int((difference > atol).sum().sum())
+    changed_mask = difference > atol
+    changed = int(changed_mask.sum().sum())
     compared = int(common.sum().sum())
+    changed_rows, changed_columns = np.where(changed_mask.to_numpy())
+    first_changed_at = None
+    first_changed_symbol = None
+    if len(changed_rows):
+        first = int(np.argmin(changed_rows))
+        first_changed_at = pd.Timestamp(changed_mask.index[changed_rows[first]]).isoformat()
+        first_changed_symbol = str(changed_mask.columns[changed_columns[first]])
     return {
         "passed": changed == 0,
         "maximum_difference": maximum,
         "changed_values": changed,
         "compared_values": compared,
+        "first_changed_at": first_changed_at,
+        "first_changed_symbol": first_changed_symbol,
     }
 
 

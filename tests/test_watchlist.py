@@ -51,7 +51,7 @@ def test_asset_lists_api_includes_cached_quotes_and_holdings():
 
 
 def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
-    from quantmaster.server import app as app_module
+    from quantmaster.market import overview as market_overview
 
     AssetListStore().add("favorites", "600519", "贵州茅台")
     AssetListStore().add("following", "600519", "贵州茅台")
@@ -78,12 +78,12 @@ def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
     monkeypatch.setattr(
         "quantmaster.data.refresh_history", lambda *args, **kwargs: market_envelope,
     )
-    monkeypatch.setattr(app_module, "_market_groups", dict)
+    monkeypatch.setattr(market_overview, "_market_groups", dict)
 
-    result = app_module._market_overview_data("2026-07-01")
+    result = market_overview.build_market_overview_data("2026-07-01")
 
-    items = result["groups"][app_module.PERSONAL_MARKET_GROUP]
-    assert result["group_counts"][app_module.PERSONAL_MARKET_GROUP] == 1
+    items = result["groups"][market_overview.PERSONAL_MARKET_GROUP]
+    assert result["group_counts"][market_overview.PERSONAL_MARKET_GROUP] == 1
     assert len(items) == 1
     assert items[0]["symbol"] == "600519.SH"
     assert items[0]["name"] == "贵州茅台"
@@ -92,7 +92,7 @@ def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
 
 
 def test_personal_market_replaces_code_only_labels_with_security_names(monkeypatch):
-    from quantmaster.server import app as app_module
+    from quantmaster.market import overview as market_overview
 
     AssetListStore().add("favorites", "600519", "600519.SH")
     monkeypatch.setattr(
@@ -100,7 +100,7 @@ def test_personal_market_replaces_code_only_labels_with_security_names(monkeypat
         lambda symbols, **_kwargs: {"600519.SH": "贵州茅台"},
     )
 
-    symbols, memberships = app_module._personal_market_symbols()
+    symbols, memberships = market_overview._personal_market_symbols()
 
     assert symbols["600519.SH"] == "贵州茅台"
     assert memberships["600519.SH"] == ["favorites"]

@@ -30,6 +30,7 @@ from quantmaster.backtest.workbench import (
     BacktestSchemaMigrationRequired,
     BacktestService,
     BacktestStore,
+    BacktestWorker,
     get_backtest_worker,
 )
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
@@ -99,6 +100,10 @@ class _RouteBacktestStore:
                 "initial_capital": 100_000,
             },
             "artifact": _ROUTE_ARTIFACT if include_artifact and run_id != "queued" else None,
+            "manifest": (
+                {"formal_eligible": run_id == "completed"}
+                if run_id != "unclassified" else {}
+            ),
         }
 
     def events(self, run_id, after=0):
@@ -1072,6 +1077,7 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
     completed = store.get(run["id"], include_artifact=True)
     assert completed["status"] == "completed"
     assert completed["artifact"]["manifest"]["config_hash"] == spec.snapshot_hash
+    assert completed["artifact"]["manifest"]["formal_eligible"] is False
     assert store.events(run["id"])[-1]["type"] == "completed"
 
     strict_path = store.write_artifact(
@@ -1094,6 +1100,220 @@ def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, pa
     cancelled = store.cancel(queued["id"])
     assert cancelled["status"] == "cancelled"
     assert cancelled["cancel_requested"] is True
+
+
+def test_backtest_service_is_only_a_web_lifecycle_adapter(tmp_path, monkeypatch):
+    from quantmaster.backtest import application
+
+    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
+    spec = BacktestSpec.model_validate({
+        "name": "adapter",
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-02-01",
+        "benchmark": None,
+    })
+    run = store.create(spec)
+    observed = []
+
+    def execute_backtest(received, **kwargs):
+        observed.append((received, kwargs))
+        return {"manifest": {"formal_eligible": False}, "summary": {}, "artifact": {}}
+
+    monkeypatch.setattr(application, "execute_backtest", execute_backtest)
+    result = BacktestService(store).run(
+        run, progress=lambda *_args: None, cancelled=lambda: False,
+    )
+
+    assert result == ({"formal_eligible": False}, {"summary": {}, "artifact": {}})
+    received, kwargs = observed[0]
+    assert received == spec
+    assert kwargs["artifact_id"] == run["id"]
+    assert kwargs["artifact_name"] == run["name"]
+    assert store.get(run["id"])["status"] == "queued"
+
+
+def test_shared_execution_keeps_web_worker_persistence_and_cancellation(
+    tmp_path, monkeypatch,
+) -> None:
+    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
+    spec = BacktestSpec.model_validate({
+        "name": "worker adapter",
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-02-01",
+        "benchmark": None,
+    })
+    run = store.create(spec)
+    claimed = store.claim_next("worker-test")
+    service = BacktestService(store)
+    calls = []
+
+    def run_execution(received, **kwargs):
+        calls.append((received, kwargs))
+        return (
+            {"formal_eligible": False},
+            {"summary": {"formal_eligible": False}, "artifact": {"result": "complete"}},
+        )
+
+    monkeypatch.setattr(service, "run", run_execution)
+    worker = BacktestWorker(service)
+    worker.worker_id = "worker-test"
+    worker.run_one(claimed)
+
+    completed = store.get(run["id"], include_artifact=True)
+    assert completed["status"] == "completed"
+    assert completed["artifact"] == {"result": "complete"}
+    assert len(calls) == 1
+    assert callable(calls[0][1]["progress"])
+    assert callable(calls[0][1]["cancelled"])
+
+    cancelled_run = store.create(spec.model_copy(update={"name": "cancelled"}))
+    with pytest.raises(InterruptedError, match="用户取消回测"):
+        BacktestService(store).run(
+            cancelled_run,
+            progress=lambda *_args: None,
+            cancelled=lambda: True,
+        )
+
+
+def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
+    from quantmaster.backtest.application import _formal_eligibility
+
+    production = BacktestSpec.model_validate({
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "csi800",
+        "start": "2023-01-02",
+        "end": "2023-02-01",
+        "benchmark": None,
+        "research_tier": "production",
+    })
+    assert _formal_eligibility(
+        production,
+        resolved_tier="production",
+        universe_quality="production",
+        data_quality={"status": "complete"},
+        research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=False,
+        warnings=[],
+    ) == (True, [])
+    assert _formal_eligibility(
+        production,
+        resolved_tier="production",
+        universe_quality="production",
+        data_quality={
+            "status": "complete",
+            "benchmark_status": "verified",
+            "benchmark_contract": {"formal_eligible": True},
+        },
+        research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=True,
+        warnings=[],
+    ) == (True, [])
+    assert _formal_eligibility(
+        production,
+        resolved_tier="production",
+        universe_quality="production",
+        data_quality={"status": "complete"},
+        research_manifest={},
+        benchmark_required=False,
+        warnings=[],
+    ) == (False, ["missing_research_manifest"])
+    assert _formal_eligibility(
+        production.model_copy(update={"research_tier": "sandbox"}),
+        resolved_tier="sandbox",
+        universe_quality="sandbox",
+        data_quality={"status": "partial"},
+        research_manifest={},
+        benchmark_required=False,
+        warnings=[{"code": "partial_market_data"}],
+    ) == (
+        False,
+        [
+            "sandbox_research_tier", "universe_not_pit", "missing_research_manifest",
+            "incomplete_market_evidence", "data_quality_not_complete",
+        ],
+    )
+
+    lab = BacktestSpec.model_validate({
+        **production.model_dump(mode="json"),
+        "strategy": {
+            "kind": "lab_version", "version_id": "approved-oof",
+            "horizon": 3, "top_n": 20, "rebalance_days": 3, "cap_weight": 0.1,
+        },
+    })
+    assert _formal_eligibility(
+        lab,
+        resolved_tier="production",
+        universe_quality="production",
+        data_quality={"status": "complete"},
+        research_manifest={"manifest_hash": "evidence"},
+        benchmark_required=False,
+        warnings=[],
+    ) == (False, ["lab_oof_result"])
+
+
+def test_degraded_benchmark_envelope_blocks_formal_eligibility(
+    panel, monkeypatch,
+) -> None:
+    from quantmaster.backtest.application import execute_backtest
+
+    spec = BacktestSpec.model_validate({
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-08-01",
+        "benchmark": "000300.SH",
+    })
+    quality = BarDataQuality(
+        status="degraded",
+        requested_start=spec.start,
+        requested_end=spec.end or "",
+        observed_start=spec.start,
+        observed_end=spec.end or "",
+        issues=("benchmark evidence degraded",),
+    )
+    benchmark = pd.DataFrame({"close": panel["close"].mean(axis=1)})
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_history",
+        lambda *_args, **_kwargs: BarDataEnvelope(benchmark, quality),
+    )
+
+    result = execute_backtest(spec, panel=panel)
+
+    assert result["manifest"]["data_quality"]["benchmark_status"] == "degraded"
+    assert result["manifest"]["data_quality"]["benchmark_contract"][
+        "formal_eligible"
+    ] is False
+    assert "benchmark_evidence_not_verified" in result["manifest"][
+        "eligibility_reasons"
+    ]
+
+
+def test_injected_benchmark_without_provenance_blocks_formal_eligibility(panel) -> None:
+    from quantmaster.backtest.application import execute_backtest
+
+    spec = BacktestSpec.model_validate({
+        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-08-01",
+        "benchmark": None,
+    })
+
+    result = execute_backtest(
+        spec,
+        panel=panel,
+        benchmark_close=panel["close"].mean(axis=1),
+    )
+
+    assert result["manifest"]["data_quality"]["benchmark_status"] == "not_requested"
+    assert "benchmark_contract" not in result["manifest"]["data_quality"]
+    assert "benchmark_evidence_not_verified" in result["manifest"][
+        "eligibility_reasons"
+    ]
 
 
 def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_path):
@@ -1420,6 +1640,9 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "position: fixed" in css.split(".factor-completion-menu", 1)[1].split("}", 1)[0]
 
     trading_script = client.get("/static/trading.js").text
+    assert "artifact.manifest?.formal_eligible === true" in trading_script
+    assert "缺少正式资格证据" in trading_script
+    assert "正式结果 · 可晋升" in trading_script
     assert "后台撮合任务" in trading_script
     assert "订单业务状态" in trading_script
     assert "核心数量冲突" in trading_script
@@ -1627,6 +1850,15 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
         request,
     )
     assert promoted["mode"] == "auto"
+    for blocked_id in ("sandbox", "unclassified"):
+        with pytest.raises(trading.HTTPException) as blocked:
+            trading.promote_backtest(
+                blocked_id,
+                trading.PromoteRequest(name="blocked"),
+                request,
+            )
+        assert blocked.value.status_code == 409
+        assert "正式" in blocked.value.detail
     with pytest.raises(trading.HTTPException) as promote_missing:
         trading.promote_backtest(
             "missing",

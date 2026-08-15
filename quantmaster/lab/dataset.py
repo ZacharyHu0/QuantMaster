@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
@@ -1089,6 +1090,7 @@ def load_local_dataset(
     from quantmaster.data.storage import BarStore
     from quantmaster.lab.errors import LabError
 
+    started = time.perf_counter()
     request_key = (
         str(get_config().data_root.resolve()), universe, start, end, policy,
     )
@@ -1099,11 +1101,19 @@ def load_local_dataset(
     if alias and alias[1] == pool_identity and alias[2] == membership_identity:
         cached = _cache_get(alias[0])
         if cached is not None:
+            cached[2]["load_profile"] = {
+                "source": "memory",
+                "total_seconds": round(time.perf_counter() - started, 6),
+            }
             if progress:
                 progress(52, "复用本地冻结快照")
             return cached
 
+    inspection_started = time.perf_counter()
     inspection = inspect_local_dataset(universe, start, end)
+    timings = {
+        "inspection_seconds": round(time.perf_counter() - inspection_started, 6),
+    }
     if not inspection["symbols"]:
         raise LabError(
             "DATASET_MISSING", "本地研究数据为空",
@@ -1121,30 +1131,73 @@ def load_local_dataset(
     })
     cached = _cache_get(key)
     if cached is not None:
+        cached[2]["load_profile"] = {
+            **timings,
+            "source": "memory",
+            "total_seconds": round(time.perf_counter() - started, 6),
+        }
         if progress:
             progress(52, "复用本地冻结快照")
         return cached
+    persistent_root = get_config().data_root / "lab_cache" / "panels"
+    persistent_path = persistent_root / f"{key}.json"
+    if persistent_path.is_file():
+        evidence_started = time.perf_counter()
+        try:
+            snapshot = json.loads(persistent_path.read_text(encoding="utf-8"))
+            panel, membership = load_snapshot_evidence(snapshot)
+        except (json.JSONDecodeError, KeyError, OSError, TypeError, ValueError) as exc:
+            raise LabError(
+                "DATASET_EVIDENCE_MISSING",
+                "本地面板缓存指向的冻结证据不可读取",
+                action="修复或恢复对应 lab_evidence 后重试；禁止静默改用当前行情",
+                status_code=424,
+            ) from exc
+        timings["evidence_load_seconds"] = round(
+            time.perf_counter() - evidence_started, 6,
+        )
+        snapshot["cache_hit"] = True
+        snapshot["load_profile"] = {
+            **timings,
+            "source": "persistent_evidence",
+            "total_seconds": round(time.perf_counter() - started, 6),
+        }
+        _cache_put(key, panel, membership, snapshot)
+        with _PANEL_CACHE_LOCK:
+            if key in _PANEL_CACHE:
+                _PANEL_REQUEST_KEYS[request_key] = (
+                    key, _fast_pool_identity(), membership_identity,
+                )
+        if progress:
+            total = snapshot["load_profile"]["total_seconds"]
+            progress(52, f"复用冻结矩阵 · {total:.2f}s")
+        return panel, membership, snapshot
     if progress:
         progress(15, f"本地批量读取 {inspection['symbol_count']} 只标的")
+    read_started = time.perf_counter()
     batch = BarStore().read_many(
         inspection["symbols"], columns=["open", "high", "low", "close", "volume", "amount"],
         max_workers=min(16, max(1, int(get_config().lab.max_workers) * 8)),
         enqueue_repair=False,
     )
+    timings["bar_read_seconds"] = round(time.perf_counter() - read_started, 6)
     if not batch.frames:
         raise LabError(
             "DATASET_MISSING", "没有可读取的本地行情",
             action="运行数据准备或修复本地数据池", retryable=True, status_code=424,
         )
+    assembly_started = time.perf_counter()
     panel = _assemble_panel(batch.frames, inspection["symbols"])
     global_start = min(
         (value["start"] for value in inspection["required_ranges"].values()),
         default=start,
     )
     panel = {field: frame.loc[global_start:end] for field, frame in panel.items()}
+    timings["assembly_seconds"] = round(time.perf_counter() - assembly_started, 6)
     close = panel.get("close")
     if close is None or close.empty:
         raise LabError("DATASET_MISSING", "本地行情缺少 close 字段", status_code=424)
+    membership_started = time.perf_counter()
     records = inspection["membership_records"]
     if universe.lower() == "csi800":
         membership = build_membership_mask(records, close.index)
@@ -1158,6 +1211,8 @@ def load_local_dataset(
             membership.index <= pd.Timestamp(end)
         )
         membership.loc[research_dates, :] = True
+    timings["membership_seconds"] = round(time.perf_counter() - membership_started, 6)
+    coverage_started = time.perf_counter()
     missing_prices = 0
     membership_coverage = 1.0
     if membership is not None:
@@ -1168,6 +1223,7 @@ def load_local_dataset(
         observed_prices = int((aligned & np.isfinite(close.to_numpy(copy=False))).sum())
         missing_prices = max(0, expected_prices - observed_prices)
         membership_coverage = 1 - missing_prices / max(1, expected_prices)
+    timings["coverage_seconds"] = round(time.perf_counter() - coverage_started, 6)
     warnings: list[dict[str, Any]] = [dict(item) for item in inspection.get("warnings") or []]
     if inspection["state"] == "stale":
         warnings.append({
@@ -1191,7 +1247,11 @@ def load_local_dataset(
         "incomplete" if batch.failures or membership_coverage < 0.90
         else inspection["state"]
     )
+    evidence_started = time.perf_counter()
     evidence = _freeze_dataset_evidence(panel, membership)
+    timings["evidence_freeze_seconds"] = round(
+        time.perf_counter() - evidence_started, 6,
+    )
     snapshot = DatasetSnapshot(
         universe=universe,
         start=start,
@@ -1224,12 +1284,28 @@ def load_local_dataset(
                 "membership_missing_prices": missing_prices,
                 "membership_price_coverage": round(membership_coverage, 6),
             },
-            "read_seconds": round(batch.elapsed_seconds, 6),
             "cache_key": key,
             "evidence": evidence,
         },
     ).to_dict()
     snapshot["cache_hit"] = False
+    snapshot["load_profile"] = {
+        **timings,
+        "source": "local_bar_store",
+        "total_seconds": round(time.perf_counter() - started, 6),
+    }
+    persistent_root.mkdir(parents=True, exist_ok=True)
+    staged_snapshot = persistent_root / (
+        f".{key}.{os.getpid()}.{threading.get_ident()}.partial.json"
+    )
+    try:
+        staged_snapshot.write_text(
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(staged_snapshot, persistent_path)
+    finally:
+        staged_snapshot.unlink(missing_ok=True)
     _cache_put(key, panel, membership, snapshot)
     with _PANEL_CACHE_LOCK:
         if key in _PANEL_CACHE:
@@ -1237,7 +1313,8 @@ def load_local_dataset(
                 key, _fast_pool_identity(), membership_identity,
             )
     if progress:
-        progress(52, f"本地快照已冻结 · {batch.elapsed_seconds:.2f}s")
+        total = snapshot["load_profile"]["total_seconds"]
+        progress(52, f"本地快照已冻结 · {total:.2f}s")
     return panel, membership, snapshot
 
 

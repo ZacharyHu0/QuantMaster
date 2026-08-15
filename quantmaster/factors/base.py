@@ -85,6 +85,29 @@ def parse_expression(expression: str) -> ast.expression:
 
 _ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)
 _ALLOWED_UNARY = (ast.USub, ast.UAdd)
+_NON_NEGATIVE_PERIOD_ARGS = {"delay": 1, "delta": 1, "pct_change": 1}
+_POSITIVE_PERIOD_ARGS = {
+    "ts_mean": 1, "ts_std": 1, "ts_min": 1, "ts_max": 1,
+    "ts_sum": 1, "ts_rank": 1, "ts_zscore": 1, "ts_corr": 2, "ema": 1,
+}
+
+
+def _integer_literal(node: ast.AST) -> int | None:
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+    ):
+        return int(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, int)
+        and not isinstance(node.operand.value, bool)
+    ):
+        return -int(node.operand.value)
+    return None
 
 
 def _validate(node: ast.AST) -> None:
@@ -109,6 +132,18 @@ def _validate(node: ast.AST) -> None:
             raise ExpressionError(
                 f"算子 {node.func.id} 需要 {arity} 个参数，实际 {len(node.args)} 个"
             )
+        period_position = _NON_NEGATIVE_PERIOD_ARGS.get(node.func.id)
+        minimum = 0
+        if period_position is None:
+            period_position = _POSITIVE_PERIOD_ARGS.get(node.func.id)
+            minimum = 1
+        if period_position is not None:
+            period = _integer_literal(node.args[period_position])
+            if period is None or period < minimum:
+                qualifier = "非负" if minimum == 0 else "正"
+                raise ExpressionError(
+                    f"算子 {node.func.id} 的周期必须是{qualifier}整数，禁止未来数据"
+                )
         for arg in node.args:
             _validate(arg)
     elif isinstance(node, ast.Name):

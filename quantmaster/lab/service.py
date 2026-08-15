@@ -48,6 +48,29 @@ _SPACE_PARTITION_OVERHEAD = 256 * 1024
 _SPACE_SQLITE_HEADROOM = 16 * 1024 * 1024
 _SPACE_MINIMUM_RESERVE = 64 * 1024 * 1024
 
+_ROBUSTNESS_GUIDANCE = {
+    "monte_carlo": {
+        "title": "Monte Carlo 区块自助法",
+        "explanation": "保留交易日依赖结构后重复抽样，观察 IC 与扣费年化收益是否稳定为正。",
+        "action": "若失败，检查收益是否由少数时段驱动，并降低对单一历史路径的信任。",
+    },
+    "parameter_sensitivity": {
+        "title": "参数敏感性",
+        "explanation": "扰动白名单时序窗口，检验有效性是否形成平台而不是恰好命中单点参数。",
+        "action": "若失败，扩大参数邻域或删除只在单一窗口成立的因子。",
+    },
+    "walk_forward": {
+        "title": "Walk-forward 分析",
+        "explanation": "每折只用过去训练、未来测试，并以 purge 隔离标签；密封窗口不参与选择。",
+        "action": "若失败，调整设置中的训练/测试/步长，重新验证；不得回看密封窗口调参。",
+    },
+    "penetration": {
+        "title": "穿透性测试",
+        "explanation": "按年份、市场状态、流动性和个股贡献拆解，识别集中或条件依赖。",
+        "action": "若失败，检查最弱年份/状态及贡献集中标的，必要时缩小适用范围。",
+    },
+}
+
 
 def _repair_space_estimate(
     repair: dict[str, Any], *, workers: int, probe: Path,
@@ -203,6 +226,7 @@ class LabService:
                 "max_workers": cfg.max_workers,
                 "window": [cfg.window_start, cfg.window_end],
                 "weekly_days": cfg.weekly_days,
+                "factor_correlation_threshold": cfg.factor_correlation_threshold,
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
                 "allow_cloud_sample": cfg.allow_cloud_sample,
             },
@@ -648,11 +672,13 @@ class LabService:
     def create_study(self, payload: dict[str, Any]) -> dict:
         """校验配置、登记 Study，再把长任务放入统一可恢复队列。"""
 
-        from quantmaster.lab.research import OptimizationSpec
+        from quantmaster.lab.research import OptimizationSpec, WalkForwardSpec
 
         config = dict(payload)
         scheduled = bool(config.pop("_scheduled", False))
         config["end"] = config.get("end") or market_date().isoformat()
+        if not config.get("protocol"):
+            config["protocol"] = WalkForwardSpec.from_lab_config(get_config().lab).to_dict()
         spec = OptimizationSpec.from_dict(config)
         require_runnable(self.preflight("optimize", spec.to_dict()))
         study = self.store.create_study(spec.to_dict())
@@ -717,6 +743,223 @@ class LabService:
         if progress:
             progress(52, "数据快照已冻结")
         return panel, membership, stored
+
+    def _comparable_factor_versions(
+        self, version_ids: list[str], horizon: int,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        normalized = [str(value).strip() for value in version_ids]
+        unique_ids = list(dict.fromkeys(normalized))
+        if not all(normalized) or len(unique_ids) != len(version_ids):
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析不能包含空白或重复的因子版本",
+                action="取消空白或重复选择后重试",
+                status_code=400,
+            )
+        if not 2 <= len(unique_ids) <= 30:
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析需要选择 2–30 个因子",
+                action="在因子目录中调整勾选数量",
+                status_code=400,
+            )
+        if horizon not in SUPPORTED_HORIZONS:
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析周期只支持 1/3/5/7/10/20/30 日",
+                action="选择受支持的预测周期",
+                status_code=400,
+            )
+
+        versions = []
+        incompatible = []
+        for version_id in unique_ids:
+            version = self.store.version(version_id)
+            if version is None:
+                raise KeyError(f"因子版本不存在: {version_id}")
+            spec = FactorSpec.from_dict(version["spec"])
+            reasons = []
+            if spec.kind != "expression":
+                reasons.append(f"{spec.kind} 类型尚未接入统一表达式计算内核")
+            if horizon not in spec.horizons:
+                reasons.append(f"未声明支持 {horizon} 日预测周期")
+            if reasons:
+                incompatible.append({
+                    "version_id": version_id, "name": version["name"], "reasons": reasons,
+                })
+            versions.append(version)
+        if incompatible:
+            raise LabError(
+                "FACTOR_CORRELATION_INCOMPARABLE",
+                "所选因子不能在同一研究口径下比较",
+                action="只选择支持同一周期的表达式因子",
+                context={"incompatible": incompatible},
+            )
+        return unique_ids, versions
+
+    @staticmethod
+    def _high_correlation_pairs(
+        correlation: pd.DataFrame, version_ids: list[str], threshold: float,
+    ) -> list[dict[str, Any]]:
+        pairs = []
+        for index, left in enumerate(version_ids):
+            for right in version_ids[index + 1:]:
+                value = float(correlation.loc[left, right])
+                if np.isfinite(value) and abs(value) >= threshold:
+                    pairs.append({
+                        "left_version_id": left,
+                        "right_version_id": right,
+                        "rho": value,
+                        "absolute_rho": abs(value),
+                    })
+        return sorted(pairs, key=lambda item: item["absolute_rho"], reverse=True)
+
+    def factor_correlation_matrix(
+        self,
+        *,
+        version_ids: list[str],
+        universe: str,
+        start: str,
+        end: str,
+        horizon: int,
+    ) -> dict[str, Any]:
+        """Compare expression factors on one frozen panel with the shared rank engine."""
+        from quantmaster.factors.composite import factor_correlation
+
+        unique_ids, versions = self._comparable_factor_versions(version_ids, horizon)
+
+        end = end or market_date().isoformat()
+        panel, membership, snapshot = self._context(
+            universe, start, end, data_policy=DataPolicy.PREFER_LOCAL.value,
+        )
+        values: dict[str, pd.DataFrame] = {}
+        for version in versions:
+            frame = self._expression_values(version, panel, start, end)
+            if membership is not None:
+                mask = membership.reindex(index=frame.index, columns=frame.columns).fillna(False)
+                frame = frame.where(mask)
+            values[str(version["id"])] = frame
+
+        correlation = factor_correlation(values)
+        threshold = float(get_config().lab.factor_correlation_threshold)
+        matrix = [
+            [float(value) if np.isfinite(value) else None for value in correlation.loc[row]]
+            for row in unique_ids
+        ]
+        return {
+            "schema_version": 1,
+            "snapshot_hash": snapshot["snapshot_hash"],
+            "universe": universe,
+            "start": start,
+            "end": end,
+            "horizon": horizon,
+            "threshold": threshold,
+            "method": "mean_daily_cross_sectional_spearman",
+            "explanation": (
+                "先在每个交易日对股票截面排名并计算 Spearman 相关，再对日期取均值；"
+                "这衡量因子选股排序的重合度，不把时间趋势误当成正交性。"
+            ),
+            "items": [{
+                "version_id": version["id"],
+                "name": version["name"],
+                "slug": version["slug"],
+                "category": version["category"],
+            } for version in versions],
+            "matrix": matrix,
+            "high_correlations": self._high_correlation_pairs(
+                correlation, unique_ids, threshold,
+            ),
+        }
+
+    @staticmethod
+    def _robustness_section(name: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        if evidence.get("applicable") is False:
+            status = "not_applicable"
+        elif not evidence.get("available", True):
+            status = "evidence_insufficient"
+        else:
+            status = "pass" if evidence.get("passed") else "fail"
+        return {"key": name, "status": status, **_ROBUSTNESS_GUIDANCE[name], "evidence": evidence}
+
+    @staticmethod
+    def _insufficient_robustness_evidence(
+        version: dict[str, Any], horizon: int, reason: str,
+        available_horizons: list[int] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "status": "evidence_insufficient",
+            "reason": reason,
+            "action": "运行统一验证以生成当前图表证据；如数据不足，请在设置中调整 WFA 周期。",
+            "factor": {
+                "version_id": version["id"], "version": version["version"],
+                "name": version["name"], "slug": version["slug"],
+            },
+            "horizon": horizon,
+            "available_horizons": available_horizons or [],
+        }
+
+    def robustness_evidence(self, version_id: str, horizon: int) -> dict[str, Any]:
+        """Project frozen validation evidence; never calculate or refresh data here."""
+        version = self.store.version(version_id)
+        if version is None:
+            raise KeyError("因子版本不存在")
+        report = version.get("validation")
+        if not report:
+            return self._insufficient_robustness_evidence(
+                version, horizon, "该因子版本尚未完成统一验证",
+            )
+        horizons = report.get("horizons") or {}
+        horizon_report = horizons.get(str(horizon))
+        available = sorted(int(value) for value in horizons if str(value).isdigit())
+        if not horizon_report:
+            return self._insufficient_robustness_evidence(
+                version, horizon, f"冻结证据不包含 {horizon} 日预测周期", available,
+            )
+        robustness = horizon_report.get("robustness") or {}
+        if robustness.get("schema_version") != 2:
+            return self._insufficient_robustness_evidence(
+                version, horizon, "现有验证缺少可绘图的鲁棒性证据，请重新验证", available,
+            )
+        tests = {
+            "monte_carlo": dict(robustness.get("monte_carlo") or {}),
+            "parameter_sensitivity": dict(robustness.get("parameter_sensitivity") or {}),
+            "walk_forward": {
+                **dict(robustness.get("walk_forward") or {}),
+                "folds": list(horizon_report.get("folds") or []),
+                "sealed": dict(horizon_report.get("sealed") or {}),
+            },
+            "penetration": dict(robustness.get("penetration") or {}),
+        }
+        return {
+            "schema_version": 2,
+            "status": "pass" if robustness.get("passed") else "fail",
+            "factor": {
+                "version_id": version["id"], "version": version["version"],
+                "name": version["name"], "slug": version["slug"],
+                "description": version["spec"].get("description") or "",
+            },
+            "horizon": horizon,
+            "available_horizons": available,
+            "validation": {
+                "created_at": version.get("validation_created_at") or "",
+                "dataset_hash": version.get("validation_dataset_hash") or "",
+                "protocol": report.get("protocol") or {},
+            },
+            "metrics": {
+                key: horizon_report.get(key)
+                for key in (
+                    "oos_days", "oos_rank_ic", "oos_icir", "retention",
+                    "positive_ratio", "candidate_score",
+                )
+            },
+            "summary": {
+                "tests_passed": robustness.get("tests_passed"),
+                "tests_applicable": robustness.get("tests_applicable"),
+                "failed_tests": robustness.get("failed_tests") or [],
+            },
+            "sections": [self._robustness_section(name, evidence) for name, evidence in tests.items()],
+        }
 
     def prepare_data(
         self,
@@ -2066,8 +2309,15 @@ class LabService:
                 length = max(120, int(len(panel["close"]) * ratio))
                 truncated = {key: value.iloc[:length] for key, value in panel.items()}
                 prefix_checks.append(compare_prefixes(full.iloc[:length], compute_factor(factor, truncated)))
+            first_failure = next(
+                (item for item in prefix_checks if not item["passed"]), None,
+            )
             checks["lookahead"] = {
                 "passed": all(item["passed"] for item in prefix_checks), "prefixes": prefix_checks,
+                "operator": spec.expression or spec.slug,
+                "first_pollution_date": (
+                    first_failure.get("first_changed_at") if first_failure else None
+                ),
             }
             warmups = {}
             for length in (60, 120, 240, 480):
@@ -2095,7 +2345,20 @@ class LabService:
                 spec.artifact.get("source_sha256") or ""
             )
             audit = manifest.get("audit") or {}
-            checks["lookahead"] = audit.get("lookahead") or {"passed": False}
+            lookahead = dict(audit.get("lookahead") or {"passed": False})
+            first_failure = next(
+                (
+                    item for item in lookahead.get("prefixes", [])
+                    if not item.get("passed", False)
+                ),
+                None,
+            )
+            lookahead.setdefault("operator", "restricted Python factor")
+            lookahead.setdefault(
+                "first_pollution_date",
+                first_failure.get("first_changed_at") if first_failure else None,
+            )
+            checks["lookahead"] = lookahead
             checks["recursive"] = audit.get("recursive") or {"passed": False}
             checks["artifact_integrity"] = {"passed": integrity}
         else:
@@ -2109,10 +2372,12 @@ class LabService:
                 raise ValueError("学习模型 manifest 完整性校验失败")
             learned_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             folds = learned_manifest.get("fold_artifacts") or []
-            temporal = all(
-                item.get("fold", {}).get("train_end", "")
-                < item.get("fold", {}).get("test_start", "") for item in folds
-            )
+            temporal_failures = [
+                item for item in folds
+                if item.get("fold", {}).get("train_end", "")
+                >= item.get("fold", {}).get("test_start", "")
+            ]
+            temporal = not temporal_failures
             integrity = True
             for item in folds:
                 artifact = (root / str(item.get("artifact") or "")).resolve()
@@ -2122,7 +2387,15 @@ class LabService:
                 ):
                     integrity = False
                     break
-            checks["lookahead"] = {"passed": temporal, "fold_count": len(folds)}
+            checks["lookahead"] = {
+                "passed": temporal,
+                "fold_count": len(folds),
+                "operator": "train/test temporal boundary",
+                "first_pollution_date": (
+                    temporal_failures[0].get("fold", {}).get("test_start")
+                    if temporal_failures else None
+                ),
+            }
             checks["recursive"] = {"passed": True, "reason": "模型由固定长度序列清单约束"}
             checks["artifact_integrity"] = {"passed": integrity}
         protocol = learned_manifest.get("protocol") or {}
@@ -2279,8 +2552,11 @@ class LabService:
             universe, start, end, progress=progress, data_policy=DataPolicy.PREFER_LOCAL.value,
         )
         dates = pd.DatetimeIndex(panel["close"].index).normalize().unique().sort_values()
-        protocol = WalkForwardSpec(horizons=SUPPORTED_HORIZONS)
-        folds, sealed = walk_forward_folds(dates, protocol)
+        protocol = WalkForwardSpec.from_lab_config(
+            get_config().lab, horizons=SUPPORTED_HORIZONS,
+        )
+        mature_dates = dates[:-max(protocol.horizons)]
+        folds, sealed = walk_forward_folds(mature_dates, protocol)
         cycle = self.store.create_research_cycle(
             snapshot_id=str(snapshot.get("id") or ""),
             protocol={
@@ -2289,9 +2565,6 @@ class LabService:
             },
         )
         development_dates = dates[dates <= pd.Timestamp(sealed.train_end)]
-        development_panel = {
-            key: frame.reindex(index=development_dates) for key, frame in panel.items()
-        }
         development_membership = (
             membership.reindex(index=development_dates) if membership is not None else None
         )
@@ -2315,12 +2588,12 @@ class LabService:
                 values = self._expression_values(version, panel, start, end)
                 raw_values[version_id] = values
                 report = validate_factor_values(
-                    values.reindex(index=development_dates), development_panel["close"],
+                    values, panel["close"],
                     name=str(version.get("name") or version_id),
-                    horizons=SUPPORTED_HORIZONS, membership=development_membership,
+                    horizons=SUPPORTED_HORIZONS, protocol=protocol, membership=membership,
                     research_quality=str((snapshot.get("payload") or {}).get(
                         "research_quality", "production"
-                    )), panel=development_panel, open_prices=development_panel.get("open"),
+                    )), panel=panel, open_prices=panel.get("open"),
                     essential_only=True,
                 )
                 reports[version_id] = report

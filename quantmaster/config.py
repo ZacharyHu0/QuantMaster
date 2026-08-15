@@ -179,6 +179,12 @@ class LabConfig:
     universe: str = "csi800"
     start: str = "2015-01-01"
     horizons: list[int] = field(default_factory=lambda: [1, 3, 5, 7, 10, 20, 30])
+    walk_forward_train_days: int = 756
+    walk_forward_test_days: int = 244
+    walk_forward_step_days: int = 244
+    walk_forward_purge_days: int = 30
+    walk_forward_folds: int = 3
+    factor_correlation_threshold: float = 0.70
     weekly_days: list[int] = field(default_factory=lambda: [1, 3, 5])
     window_start: str = "19:00"
     window_end: str = "07:00"

@@ -1,7 +1,7 @@
 """Evidence-based A-share session resolution around long holidays."""
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -110,6 +110,26 @@ def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_c
     assert SessionExpectationResolver._research_sessions(
         naive.date(), naive.date(),
     ) == []
+
+
+def test_default_close_data_end_uses_verified_session_or_previous_market_date(monkeypatch):
+    from quantmaster import trading_sessions
+
+    monkeypatch.setattr(
+        trading_sessions,
+        "resolve_session_target",
+        lambda: SessionExpectation("2026-08-13", "fixture", True, "verified"),
+    )
+    assert trading_sessions.default_close_data_end() == "2026-08-13"
+    assert trading_sessions.default_close_data_end("2026-07-31") == "2026-07-31"
+
+    monkeypatch.setattr(
+        trading_sessions,
+        "resolve_session_target",
+        lambda: SessionExpectation(reason="calendar offline"),
+    )
+    monkeypatch.setattr(trading_sessions, "market_date", lambda: date(2026, 8, 15))
+    assert trading_sessions.default_close_data_end() == "2026-08-14"
 
 
 def test_unverified_bar_majority_cannot_invent_a_holiday_session():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -55,3 +56,109 @@ def test_supported_research_command_remains_available() -> None:
         build_parser().parse_args(["lab", "--help"])
 
     assert result.value.code == 0
+
+
+def test_factor_test_cli_only_parses_and_renders_the_shared_result(monkeypatch, capsys) -> None:
+    observed = []
+
+    def run_factor_test(**kwargs):
+        observed.append(kwargs)
+        return {
+            "summary": {"name": "mom_20d", "ic_mean": 0.0312},
+            "universe_evidence": {"formal_eligible": False},
+            "data_quality": {"status": "degraded"},
+            "neutralized": False,
+            "industry_evidence": {"status": "degraded"},
+        }
+
+    monkeypatch.setattr("quantmaster.factors.run_factor_test", run_factor_test)
+    args = build_parser().parse_args([
+        "factor-test",
+        "mom_20d",
+        "--universe", "csi800",
+        "--start", "2023-01-02",
+        "--end", "2023-07-28",
+        "--quantiles", "4",
+        "--neutralize",
+    ])
+
+    assert args.func(args) is None
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"name": "mom_20d", "ic_mean": 0.0312}
+    assert captured.err.splitlines() == [
+        "⚠️ Sandbox：结果不可进入正式研究",
+        "⚠️ 行情数据已降级",
+        "⚠️ 行业中性化未执行",
+        "⚠️ 行业证据已降级",
+    ]
+    assert observed == [{
+        "expression": "mom_20d",
+        "universe": "csi800",
+        "start": "2023-01-02",
+        "end": "2023-07-28",
+        "quantiles": 4,
+        "neutralize": True,
+        "refresh": True,
+    }]
+
+
+def test_backtest_cli_maps_to_shared_execution_without_a_job_store(
+    monkeypatch, capsys,
+) -> None:
+    observed = []
+
+    def execute_backtest(spec, **kwargs):
+        observed.append((spec, kwargs))
+        return {
+            "manifest": {
+                "research_tier": "sandbox",
+                "formal_eligible": False,
+                "warnings": [{"code": "fixed_universe"}],
+            },
+            "summary": {},
+            "artifact": {
+                "metrics": {"total_return": 0.125},
+                "yearly": {"2023": 0.125},
+                "monthly": {"2023": {"1": 0.01}},
+            },
+        }
+
+    monkeypatch.setattr(
+        "quantmaster.backtest.application.execute_backtest", execute_backtest,
+    )
+    args = build_parser().parse_args([
+        "backtest", "--factor", "ts_corr(rank(volume), rank(close), 20), mom_20d",
+        "--universe", "demo", "--start", "2023-01-02", "--end", "2023-07-28",
+        "--top", "4", "--rebalance", "M", "--weighting", "ic",
+        "--capital", "200000", "--stop-loss", "0.08", "--take-profit", "0.25",
+    ])
+
+    assert args.func(args) is None
+    spec, kwargs = observed[0]
+    assert spec.model_dump(mode="json") == {
+        "name": "",
+        "strategy": {
+            "kind": "factor",
+            "factor": "ts_corr(rank(volume), rank(close), 20), mom_20d",
+            "top_n": 4,
+            "rebalance": "M",
+            "weighting": "ic",
+            "cap_weight": 0.35,
+        },
+        "universe": "demo",
+        "start": "2023-01-02",
+        "end": "2023-07-28",
+        "benchmark": "000300.SH",
+        "initial_capital": 200000.0,
+        "stop_loss": 0.08,
+        "take_profit": 0.25,
+        "allow_partial": False,
+        "research_tier": "auto",
+    }
+    assert kwargs == {}
+    assert json.loads(capsys.readouterr().out) == {
+        "total_return": 0.125,
+        "research_tier": "sandbox",
+        "formal_eligible": False,
+        "warnings": [{"code": "fixed_universe"}],
+    }
