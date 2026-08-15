@@ -189,7 +189,9 @@ def cmd_lab(args) -> None:
         _print_json(service.store.list_factors(status=args.status, search=args.search, limit=args.limit))
         return
     if args.lab_cmd == "jobs":
-        _print_json({"items": service.store.jobs(args.limit)})
+        from quantmaster.lab.jobs import list_lab_jobs
+
+        _print_json({"items": list_lab_jobs(args.limit)})
         return
     if args.lab_cmd == "studies":
         _print_json({"items": service.store.studies(args.limit)})

@@ -573,7 +573,7 @@ def test_snapshot_membership_hash_is_stable_and_serializable(tmp_path):
     json.dumps(first.to_dict())
 
 
-def test_store_versions_validation_approval_deployment_and_jobs(tmp_path):
+def test_store_versions_validation_approval_and_deployment(tmp_path):
     _config(tmp_path)
     store = LabStore(tmp_path / "lab.sqlite")
     spec = FactorSpec(slug="manual_test", name="测试", expression="rank(close)")
@@ -594,22 +594,21 @@ def test_store_versions_validation_approval_deployment_and_jobs(tmp_path):
     deployed = store.deploy(version["id"], universe="demo", horizon=3, actor="tester")
     assert deployed["version"]["status"] == "production"
 
-    queued = store.enqueue("prepare_data", {"universe": "demo"})
-    claimed = store.claim_next("test-worker")
-    assert claimed["id"] == queued["id"] and claimed["status"] == "running"
-    store.update_job(queued["id"], 50, "处理中")
-    store.finish_job(queued["id"], result={"ok": True})
-    assert store.job(queued["id"])["status"] == "completed"
-    assert len(store.events(queued["id"])) >= 3
-
-
 def test_lab_summary_lists_never_decode_large_job_or_study_artifacts(tmp_path, monkeypatch):
     _config(tmp_path)
     store = LabStore(tmp_path / "lab.sqlite")
     marker = "x" * 200_000
-    queued = store.enqueue(
-        "prepare_data", {"universe": "demo"},
-        preflight={"resource_class": "cpu", "coverage": marker},
+    from quantmaster.lab.jobs import list_lab_jobs
+    from quantmaster.runtime.jobs import UnifiedJobStore
+
+    job_store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    queued, _created = job_store.submit(
+        "lab.prepare_data",
+        {
+            "kind": "prepare_data", "params": {"universe": "demo"},
+            "preflight": {"resource_class": "cpu", "coverage": marker},
+            "dataset_id": "", "resource_class": "cpu",
+        },
     )
     experiment = store.create_experiment("摘要实验", "ridge", {
         "universe": "demo", "start": "2024-01-01", "horizon": 3,
@@ -631,7 +630,7 @@ def test_lab_summary_lists_never_decode_large_job_or_study_artifacts(tmp_path, m
         LabStore, "_decode",
         staticmethod(lambda *_args, **_kwargs: pytest.fail("summary decoded an artifact blob")),
     )
-    jobs = store.jobs(summary=True)
+    jobs = list_lab_jobs(summary=True)
     experiments = store.list_experiments(summary=True)
     studies = store.studies(summary=True)
 
@@ -770,26 +769,44 @@ def test_llm_miner_keeps_first_round_when_later_round_exhausts_retries():
 
 def test_job_partial_completion_and_retry_are_auditable(tmp_path):
     _config(tmp_path)
-    store = LabStore(tmp_path / "lab.sqlite")
-    queued = store.enqueue("discover_llm", {"universe": "demo", "rounds": 2})
-    store.claim_next("test-worker")
-    store.update_job(queued["id"], 76, "AI 第 2/2 轮准备重试", "模型响应超时")
-    store.finish_job(queued["id"], result={
+    from quantmaster.lab.jobs import LAB_RESULT_KIND, LabJobManager
+    from quantmaster.runtime.jobs import UnifiedJobStore
+
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    result = {
         "candidates": [{"id": "candidate-v1"}],
         "warnings": [{"code": "llm_round_incomplete", "message": "第 2 轮未完成"}],
-    })
+    }
+    store.import_legacy_job({
+        "id": "lab-partial", "type": "lab.discover_llm",
+        "spec": {
+            "kind": "discover_llm", "params": {"universe": "demo", "rounds": 2},
+            "preflight": {}, "dataset_id": "", "resource_class": "external",
+        },
+        "status": "completed", "progress": 100, "phase": "部分完成",
+        "detail": "第 2 轮未完成", "attempt": 1, "max_attempts": 8,
+        "llm_scope": "global", "llm_revision": "legacy-revision",
+    }, artifacts=[{
+        "kind": LAB_RESULT_KIND, "result": True,
+        "payload": {
+            "schema_version": "1.0", "kind": "discover_llm",
+            "outcome": "completed_with_warnings", "result": result,
+            "error_info": {}, "telemetry": {},
+        },
+    }])
 
-    partial = store.job(queued["id"])
-    assert partial["status"] == "completed_with_warnings"
+    partial = LabJobManager._project(store, store.get("lab-partial"))
+    assert partial["status"] == "completed"
+    assert partial["outcome"] == "completed_with_warnings"
     assert partial["progress"] == 100
     assert partial["phase"] == "部分完成"
     assert partial["detail"] == "第 2 轮未完成"
 
-    retried = store.retry_job(queued["id"])
+    retried = store.retry("lab-partial")
     assert retried["status"] == "queued"
-    assert retried["params"] == {"universe": "demo", "rounds": 2}
-    assert any(item["type"] == "retried_as" for item in store.events(queued["id"]))
-    assert any(item["type"] == "retry_of" for item in store.events(retried["id"]))
+    assert retried["id"] == "lab-partial"
+    assert retried["spec"]["params"] == {"universe": "demo", "rounds": 2}
+    assert any(item["type"] == "job_retried" for item in store.events("lab-partial"))
 
 
 def test_prepare_data_keeps_partition_checkpoints_and_partial_result(tmp_path, monkeypatch):
@@ -951,25 +968,50 @@ def test_classify_lab_storage_failures(failure, code):
 
 def test_partition_checkpoint_is_projected_and_warnings_finish_partial(tmp_path):
     _config(tmp_path)
-    store = LabStore(tmp_path / "lab.sqlite")
-    queued = store.enqueue("prepare_data", {"universe": "demo"})
-    store.claim_next("worker")
-    store.update_job(
-        queued["id"], 40, "数据准备 · bars", "A.SH 已持久化",
-        event_type="partition_checkpoint",
-        metadata={
-            "stage": "bars", "status": "completed", "partition": "A.SH",
-            "persisted": 1, "total": 2,
-        },
+    from quantmaster.lab.jobs import (
+        LAB_PROGRESS_CHECKPOINT,
+        LAB_RESULT_KIND,
+        LabJobManager,
     )
-    store.finish_job(queued["id"], result={
+    from quantmaster.runtime.jobs import UnifiedJobStore
+
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    result = {
         "warnings": [{"code": "DATA_PARTITION_INCOMPLETE", "message": "1 个分区未完成"}],
         "partitions": {"persisted": 1, "failed": 1, "remaining": 1},
-    })
+    }
+    store.import_legacy_job({
+        "id": "lab-checkpoint", "type": "lab.prepare_data",
+        "spec": {
+            "kind": "prepare_data", "params": {"universe": "demo"},
+            "preflight": {}, "dataset_id": "", "resource_class": "io",
+        },
+        "status": "completed", "progress": 100, "phase": "部分完成",
+        "detail": "1 个分区未完成", "attempt": 1, "max_attempts": 8,
+    }, artifacts=[
+        {
+            "kind": f"checkpoint.{LAB_PROGRESS_CHECKPOINT}",
+            "checkpoint_key": LAB_PROGRESS_CHECKPOINT,
+            "payload": {
+                "schema_version": "1.0", "type": "partition_checkpoint",
+                "stage": "bars", "status": "completed", "partition": "A.SH",
+                "persisted": 1, "total": 2,
+            },
+        },
+        {
+            "kind": LAB_RESULT_KIND, "result": True,
+            "payload": {
+                "schema_version": "1.0", "kind": "prepare_data",
+                "outcome": "completed_with_warnings", "result": result,
+                "error_info": {}, "telemetry": {},
+            },
+        },
+    ])
 
-    job = store.job(queued["id"])
+    job = LabJobManager._project(store, store.get("lab-checkpoint"))
 
-    assert job["status"] == "completed_with_warnings"
+    assert job["status"] == "completed"
+    assert job["outcome"] == "completed_with_warnings"
     assert job["checkpoint"]["type"] == "partition_checkpoint"
     assert job["checkpoint"]["partition"] == "A.SH"
     assert job["checkpoint"]["persisted"] == 1
@@ -1595,16 +1637,16 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         })
         assert queued.status_code == 202
         assert queued.json()["status"] == "queued"
-        get_lab_service().store.finish_job(
-            queued.json()["id"], error="测试失败",
-        )
+        from quantmaster.lab.jobs import get_lab_job_manager
+
+        get_lab_job_manager().cancel(queued.json()["id"])
         retried = client.post(f"/api/v1/jobs/{queued.json()['id']}/retry")
         assert retried.status_code == 202
-        assert retried.json()["status"] == "queued"
+        assert retried.json()["status"] in {"queued", "running"}
         events = client.get(
             f"/api/v1/jobs/{retried.json()['id']}/events?after=0",
         ).json()["items"]
-        assert any(item["type"] == "retry_of" for item in events)
+        assert any(item["type"] == "job_retried" for item in events)
 
 
 def test_restricted_python_policy_and_subprocess_contract():

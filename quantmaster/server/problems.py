@@ -324,6 +324,7 @@ def collect_health_report() -> dict[str, Any]:
 
     try:
         from quantmaster.config import get_config
+        from quantmaster.lab.jobs import list_lab_jobs
         from quantmaster.lab.store import LabStore
         from quantmaster.lab.worker import get_worker
 
@@ -339,7 +340,7 @@ def collect_health_report() -> dict[str, Any]:
                     action="重启本地服务；如仍失败，请查看服务端日志。",
                     problem_id="lab:worker",
                 ))
-            latest_jobs = LabStore().jobs(1)
+            latest_jobs = list_lab_jobs(1)
             latest = latest_jobs[0] if latest_jobs else None
             if latest and latest.get("status") == "failed":
                 issues.append(make_problem(

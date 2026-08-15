@@ -455,7 +455,9 @@ def jobs(
     kind: str | None = None,
     summary: bool = True,
 ) -> dict:
-    items = _published_lab_service().store.jobs(
+    from quantmaster.lab.jobs import list_lab_jobs
+
+    items = list_lab_jobs(
         limit, offset=offset, cursor=cursor, status=status, kind=kind, summary=summary,
     )
     return {

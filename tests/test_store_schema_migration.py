@@ -76,7 +76,7 @@ def test_unknown_store_schema_is_conflict_and_never_guessed(tmp_path):
 def test_current_schema_damage_is_conflict_not_legacy_fallback(tmp_path):
     LabStore(tmp_path / "lab.sqlite")
     with sqlite3.connect(tmp_path / "lab.sqlite") as connection:
-        connection.execute("ALTER TABLE lab_jobs DROP COLUMN error_code")
+        connection.execute("ALTER TABLE lab_worker_results DROP COLUMN telemetry_json")
 
     with pytest.raises(LabSchemaMigrationRequired):
         LabStore(tmp_path / "lab.sqlite")
