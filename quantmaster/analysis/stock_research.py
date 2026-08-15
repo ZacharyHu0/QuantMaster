@@ -431,6 +431,42 @@ def _quote_page(symbol: str) -> str:
     return f"https://quote.eastmoney.com/{market}{code}.html" if market else ""
 
 
+def _industry_history_for_market(
+    loader: Any, industry: str, *, is_hk: bool,
+) -> tuple[pd.DataFrame, list[str]]:
+    if is_hk:
+        return pd.DataFrame(), []
+    return loader.industry_history(industry)
+
+
+def _relative_benchmark_for_market(
+    subject: _ResearchSubject,
+    history_loader: Callable[..., Any],
+    *,
+    is_hk: bool,
+) -> tuple[pd.DataFrame, list[str]]:
+    if is_hk:
+        return pd.DataFrame(), []
+    try:
+        envelope = history_loader(
+            "000300.SH",
+            str(subject.start.date()),
+            str(subject.end.date()),
+            priority="interactive",
+        )
+        benchmark = envelope.require_data()
+        subject.market_contracts["000300.SH"] = envelope.quality.to_dict()
+        warnings = (
+            ["沪深300行情证据已降级：" + "；".join(envelope.quality.issues)]
+            if envelope.quality.status == "degraded" else []
+        )
+        return benchmark, warnings
+    except RECOVERABLE_RESEARCH_ERRORS as exc:
+        return pd.DataFrame(), [
+            f"沪深300相对强弱不可用：{_public_error_text(exc, limit=160)}"
+        ]
+
+
 def _akshare_frame(endpoint: str, **kwargs: Any) -> pd.DataFrame:
     """Use QuantMaster's shared AKShare scheduler/circuit breaker for optional evidence."""
     try:
@@ -2064,32 +2100,15 @@ class _StockResearchRun:
             return panel, rows, [*warnings, *extra]
 
         def technical():
-            warnings: list[str] = []
-            if is_hk:
-                benchmark = pd.DataFrame()
-            else:
-                try:
-                    envelope = self.engine.service.history_loader(
-                        "000300.SH",
-                        str(subject.start.date()),
-                        str(subject.end.date()),
-                        priority="interactive",
-                    )
-                    benchmark = envelope.require_data()
-                    subject.market_contracts["000300.SH"] = envelope.quality.to_dict()
-                    if envelope.quality.status == "degraded":
-                        warnings.append(
-                            "沪深300行情证据已降级：" + "；".join(envelope.quality.issues),
-                        )
-                except RECOVERABLE_RESEARCH_ERRORS as exc:
-                    benchmark = pd.DataFrame()
-                    warnings.append(
-                        f"沪深300相对强弱不可用：{_public_error_text(exc, limit=160)}",
-                    )
-            industry_frame, extra = (
-                (pd.DataFrame(), [])
-                if is_hk
-                else self.engine.deep_loader.industry_history(subject.industry)
+            benchmark, warnings = _relative_benchmark_for_market(
+                subject,
+                self.engine.service.history_loader,
+                is_hk=is_hk,
+            )
+            industry_frame, extra = _industry_history_for_market(
+                self.engine.deep_loader,
+                subject.industry,
+                is_hk=is_hk,
             )
             return (
                 _relative_strength_values(subject.bars, benchmark, industry_frame),
