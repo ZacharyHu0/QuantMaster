@@ -717,9 +717,14 @@ async def liveness() -> dict:
     Optional provider/worker state is reported separately by ``/diagnostics``.
     """
     identity = get_application_identity()
+    from quantmaster.server.readiness import readiness_status
+
+    readiness = readiness_status(include_optional_services=False)
     threads = threading.active_count()
     return {
         "status": "ok",
+        "core_ready": bool(readiness["core_ready"]),
+        "readiness_status": str(readiness["status"]),
         "version": __version__,
         "release_date": RELEASE_DATE,
         "process_pid": os.getpid(),

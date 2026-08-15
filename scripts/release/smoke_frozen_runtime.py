@@ -1,4 +1,4 @@
-"""Windows smoke for one frozen QuantMaster application process tree."""
+"""Smoke the default frozen Windows onefile executable as an isolated instance."""
 
 from __future__ import annotations
 
@@ -19,17 +19,52 @@ from pathlib import Path
 from typing import Any
 
 _IDENTITY_FIELDS = ("build_sha", "slot_id", "runtime_generation")
+_HELP_MAX_SECONDS = {"onefile": 20.0, "onedir": 1.5}
+_CORE_READY_MAX_SECONDS = 20.0
 
 
 def _assert_same_identity(*members: dict[str, Any]) -> None:
     expected = {name: str(members[0].get(name) or "") for name in _IDENTITY_FIELDS}
-    for name, value in expected.items():
-        if not value:
-            raise RuntimeError(f"frozen runtime omitted {name}")
+    build_sha = expected["build_sha"]
+    if len(build_sha) != 40 or any(
+        character not in "0123456789abcdef" for character in build_sha
+    ):
+        raise RuntimeError("frozen runtime identity mismatch: build_sha")
+    if expected["slot_id"] != build_sha:
+        raise RuntimeError("frozen runtime identity mismatch: slot_id")
+    if not expected["runtime_generation"]:
+        raise RuntimeError("frozen runtime omitted runtime_generation")
     for member in members[1:]:
         for name, value in expected.items():
             if str(member.get(name) or "") != value:
                 raise RuntimeError(f"frozen runtime identity mismatch: {name}")
+
+
+def _run_help(
+    executable: Path, environment: dict[str, str], *, layout: str,
+) -> float:
+    max_seconds = _HELP_MAX_SECONDS[layout]
+    started = time.monotonic()
+    result = subprocess.run(
+        [str(executable), "--help"],
+        cwd=executable.parent,
+        env={**environment, "PYTHONIOENCODING": "utf-8"},
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=25.0,
+        check=False,
+    )
+    elapsed = time.monotonic() - started
+    if result.returncode:
+        raise RuntimeError(f"frozen help failed ({result.returncode}): {result.stderr[-2000:]}")
+    if "usage: qm" not in result.stdout:
+        raise RuntimeError("frozen help omitted the QuantMaster usage marker")
+    if elapsed > max_seconds:
+        raise RuntimeError(
+            f"frozen {layout} help took {elapsed:.3f}s; {max_seconds:.1f} second budget"
+        )
+    return elapsed
 
 
 def _free_port() -> int:
@@ -64,6 +99,63 @@ def _wait_json(
             last_error = str(exc)
         time.sleep(0.2)
     raise RuntimeError(f"frozen runtime did not become ready: {last_error}")
+
+
+def _visible_process_windows(pid: int) -> list[int]:
+    """Return visible top-level windows owned by one exact Windows process."""
+    if os.name != "nt":
+        return []
+    user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    handles: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+
+    def collect(handle, _parameter):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+        if int(owner.value) == int(pid) and user32.IsWindowVisible(handle):
+            handles.append(int(handle))
+        return True
+
+    callback = callback_type(collect)
+    if not user32.EnumWindows(callback, 0):
+        raise OSError(ctypes.get_last_error(), "EnumWindows failed")  # type: ignore[attr-defined]
+    return handles
+
+
+def _window_visible(handle: int) -> bool:
+    if os.name != "nt":
+        return False
+    user32 = ctypes.WinDLL("user32", use_last_error=True)  # type: ignore[attr-defined]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    return bool(user32.IsWindow(handle) and user32.IsWindowVisible(handle))
+
+
+def _wait_splash_window(pid: int, *, timeout: float = 10.0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        handles = _visible_process_windows(pid)
+        if handles:
+            return handles[0]
+        time.sleep(0.05)
+    raise RuntimeError(f"frozen splash was not visible for bootloader {pid}")
+
+
+def _wait_splash_closed(handle: int, *, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _window_visible(handle):
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"frozen splash window {handle} remained visible after core_ready")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -102,7 +194,10 @@ def _terminate_exact_process(pid: int, executable: Path) -> None:
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.QueryFullProcessImageNameW.argtypes = [
-        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
     ]
     kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
@@ -135,14 +230,15 @@ def _run_launcher(
     stderr_path: Path,
     pid_path: Path,
 ) -> int:
-    """Start the frozen tree and stay alive until the smoke parent closes stdin."""
+    """Start the frozen application and exit when the smoke parent closes stdin."""
     environment = os.environ.copy()
     environment["QM_LAUNCHER_PID"] = str(os.getpid())
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-        "w", encoding="utf-8",
+        "w", encoding="utf-8"
     ) as stderr:
         server = subprocess.Popen(
             [str(executable), "serve", "--no-reload"],
+            cwd=executable.parent,
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=stdout,
@@ -199,10 +295,10 @@ def _run_deep_doctor(
     executable: Path,
     environment: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    doctor_env = {**environment, "PYTHONIOENCODING": "utf-8"}
     return subprocess.run(
         [str(executable), "doctor", "--deep"],
-        env=doctor_env,
+        cwd=executable.parent,
+        env={**environment, "PYTHONIOENCODING": "utf-8"},
         capture_output=True,
         encoding="utf-8",
         errors="replace",
@@ -211,39 +307,39 @@ def _run_deep_doctor(
     )
 
 
-def smoke(executable: Path) -> None:
-    if os.name != "nt":
-        raise RuntimeError("frozen runtime smoke requires Windows")
-    executable = executable.resolve()
-    if not executable.is_file():
-        raise FileNotFoundError(executable)
-
-    with tempfile.TemporaryDirectory(prefix="quantmaster-frozen-smoke-") as raw_temp:
-        root = Path(raw_temp)
-        port = _free_port()
-        config_path = root / "config.yaml"
-        data_root = root / "data"
-        stockdb_root = root / "runtime" / "free-stockdb"
-        config_path.write_text(json.dumps({
-            "server": {"host": "127.0.0.1", "port": port},
-            "data": {
-                "root": str(data_root),
-                "free_stockdb_root": str(stockdb_root),
-                "free_stockdb_managed": False,
-                "free_stockdb_auto_update": False,
-                "free_stockdb_online_enabled": False,
-                "akshare_enabled": False,
-                "tushare_enabled": False,
-                "yfinance_enabled": False,
-                "after_close_enabled": False,
-                "after_close_auto_run": False,
-                "repair_enabled": False,
-            },
-            "automation": {"enabled": False},
-            "lab": {"enabled": False},
-        }), encoding="utf-8")
-        environment = os.environ.copy()
-        environment.update({
+def _isolated_environment(root: Path, port: int) -> tuple[dict[str, str], Path]:
+    instance = root / "instance"
+    instance.mkdir()
+    data_root = instance / "data"
+    stockdb_root = instance / "stockdb"
+    config_path = instance / "config.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "server": {"host": "127.0.0.1", "port": port},
+                "data": {
+                    "root": str(data_root),
+                    "free_stockdb_root": str(stockdb_root),
+                    "free_stockdb_managed": False,
+                    "free_stockdb_auto_update": False,
+                    "free_stockdb_online_enabled": False,
+                    "akshare_enabled": False,
+                    "tushare_enabled": False,
+                    "yfinance_enabled": False,
+                    "after_close_enabled": False,
+                    "after_close_auto_run": False,
+                    "repair_enabled": False,
+                },
+                "automation": {"enabled": False},
+                "lab": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("PYINSTALLER_SUPPRESS_SPLASH_SCREEN", None)
+    environment.update(
+        {
             "APPDATA": str(root / "appdata"),
             "LOCALAPPDATA": str(root / "localappdata"),
             "QM_CONFIG_PATH": str(config_path),
@@ -257,26 +353,73 @@ def smoke(executable: Path) -> None:
             "QM_YFINANCE_ENABLED": "false",
             "QM_AUTOMATION_ENABLED": "false",
             "QM_LAB_ENABLED": "false",
-        })
-        for name in ("QM_BUILD_SHA", "QM_SLOT_ID", "QM_RUNTIME_GENERATION"):
-            environment.pop(name, None)
+        }
+    )
+    for name in ("QM_BUILD_SHA", "QM_SLOT_ID", "QM_RUNTIME_GENERATION"):
+        environment.pop(name, None)
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    return environment, instance
 
-        stdout_path = root / "serve.stdout.log"
-        stderr_path = root / "serve.stderr.log"
-        pid_path = root / "serve.pid"
+
+def measure_help(executable: Path, *, layout: str) -> dict[str, Any]:
+    executable = executable.resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(executable)
+    with tempfile.TemporaryDirectory(prefix="quantmaster-frozen-help-") as raw_temp:
+        environment, _instance = _isolated_environment(Path(raw_temp), _free_port())
+        elapsed = _run_help(executable, environment, layout=layout)
+    return {
+        "layout": layout,
+        "help_seconds": round(elapsed, 3),
+        "help_budget_seconds": _HELP_MAX_SECONDS[layout],
+    }
+
+
+def smoke(executable: Path) -> dict[str, Any]:
+    if os.name != "nt":
+        raise RuntimeError("frozen runtime smoke requires Windows")
+    executable = executable.resolve()
+    if not executable.is_file():
+        raise FileNotFoundError(executable)
+    initial_state = (executable.stat().st_size, executable.stat().st_mtime_ns)
+
+    with tempfile.TemporaryDirectory(prefix="quantmaster-frozen-smoke-") as raw_temp:
+        root = Path(raw_temp)
+        port = _free_port()
+        environment, instance = _isolated_environment(root, port)
+        bootstrap = _run_deep_doctor(executable, environment)
+        if bootstrap.returncode:
+            raise RuntimeError(
+                f"frozen schema bootstrap failed ({bootstrap.returncode}): "
+                f"{bootstrap.stderr[-2000:]}"
+            )
+        help_seconds = _run_help(executable, environment, layout="onefile")
+        stdout_path = instance / "serve.stdout.log"
+        stderr_path = instance / "serve.stderr.log"
+        pid_path = instance / "serve.pid"
         pids: dict[str, int] = {}
         launcher: subprocess.Popen[Any] | None = None
         try:
+            server_started = time.monotonic()
             launcher, pids["bootloader"] = _start_launcher(
-                executable, environment, stdout_path, stderr_path, pid_path,
+                executable, environment, stdout_path, stderr_path, pid_path
             )
             try:
+                splash_window = _wait_splash_window(pids["bootloader"])
                 base_url = f"http://127.0.0.1:{port}/api/v1"
                 health = _wait_json(
                     f"{base_url}/health",
-                    lambda value: value.get("status") == "ok",
+                    lambda value: value.get("status") == "ok" and value.get("core_ready") is True,
                 )
                 pids["web"] = int(health["process_pid"])
+                _wait_splash_closed(splash_window)
+                core_ready_seconds = time.monotonic() - server_started
+                if core_ready_seconds > _CORE_READY_MAX_SECONDS:
+                    raise RuntimeError(
+                        f"frozen core_ready took {core_ready_seconds:.3f}s; "
+                        f"{_CORE_READY_MAX_SECONDS:.1f} second budget"
+                    )
                 runtime = _wait_json(
                     f"{base_url}/settings/runtime",
                     lambda value: bool((value.get("worker") or {}).get("available")),
@@ -292,7 +435,8 @@ def smoke(executable: Path) -> None:
                 doctor = _run_deep_doctor(executable, doctor_env)
                 if doctor.returncode:
                     raise RuntimeError(
-                        f"frozen deep doctor failed ({doctor.returncode}): {doctor.stderr[-2000:]}"
+                        f"frozen deep doctor failed ({doctor.returncode}): "
+                        f"{doctor.stderr[-2000:]}"
                     )
                 report = json.loads(doctor.stdout)
                 compute = dict(report["metrics"]["application_identity_probe"])
@@ -311,6 +455,22 @@ def smoke(executable: Path) -> None:
                     pass
                 else:
                     raise RuntimeError("frozen runtime port remained bound after shutdown")
+                if (executable.stat().st_size, executable.stat().st_mtime_ns) != initial_state:
+                    raise RuntimeError("frozen runtime modified its onefile executable")
+                return {
+                    "layout": "onefile",
+                    "build_sha": str(health["build_sha"]),
+                    "slot_id": str(health["slot_id"]),
+                    "runtime_generation": str(health["runtime_generation"]),
+                    "help_seconds": round(help_seconds, 3),
+                    "help_budget_seconds": _HELP_MAX_SECONDS["onefile"],
+                    "core_ready_seconds": round(core_ready_seconds, 3),
+                    "splash_visible_before_core_ready": True,
+                    "splash_closed_after_listener_and_core_ready": True,
+                    "processes_stopped": True,
+                    "port_released": True,
+                    "executable_unchanged": True,
+                }
             except BaseException as exc:
                 if launcher.stdin is not None and not launcher.stdin.closed:
                     launcher.stdin.close()
@@ -342,9 +502,14 @@ def main() -> int:
         return _run_launcher(*(Path(value) for value in sys.argv[2:]))
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=Path)
+    parser.add_argument("--help-layout", choices=sorted(_HELP_MAX_SECONDS))
     args = parser.parse_args()
-    smoke(args.executable)
-    print("Frozen Windows runtime identity smoke passed")
+    if args.help_layout:
+        evidence = measure_help(args.executable, layout=args.help_layout)
+        print("Frozen Windows help passed: " + json.dumps(evidence, sort_keys=True))
+        return 0
+    evidence = smoke(args.executable)
+    print("Frozen Windows onefile smoke passed: " + json.dumps(evidence, sort_keys=True))
     return 0
 
 

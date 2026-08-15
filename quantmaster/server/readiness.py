@@ -16,7 +16,7 @@ from quantmaster.config import get_config, get_config_readiness
 from quantmaster.release import RELEASE_DATE
 
 
-def readiness_status() -> dict[str, Any]:
+def readiness_status(*, include_optional_services: bool = True) -> dict[str, Any]:
     """Return the Web readiness contract without opening a database.
 
     ``core_ready`` intentionally has no dependency on LLMs, remote providers,
@@ -27,7 +27,7 @@ def readiness_status() -> dict[str, Any]:
 
     storage = get_config_readiness()
     storage_ready = storage.get("status") == "ready"
-    optional_ready = _optional_services_ready()
+    optional_ready = _optional_services_ready() if include_optional_services else False
     core_ready = storage_ready
     return {
         "status": "ready" if core_ready else "not_ready",

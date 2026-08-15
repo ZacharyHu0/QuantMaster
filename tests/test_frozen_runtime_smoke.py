@@ -1,20 +1,23 @@
 import io
-import os
-from pathlib import Path
+import json
+from types import SimpleNamespace
 
 import pytest
 
 from scripts.release import smoke_frozen_runtime
 from scripts.release.smoke_frozen_runtime import (
     _assert_same_identity,
-    _pid_alive,
+    _run_deep_doctor,
+    _run_help,
+    _wait_stopped,
+    measure_help,
 )
 
 
 def test_frozen_runtime_smoke_requires_one_exact_application_identity():
     identity = {
         "build_sha": "a" * 40,
-        "slot_id": "slot-a",
+        "slot_id": "a" * 40,
         "runtime_generation": "b" * 32,
     }
 
@@ -27,11 +30,11 @@ def test_frozen_runtime_smoke_requires_one_exact_application_identity():
             identity,
         )
 
+    with pytest.raises(RuntimeError, match="build_sha"):
+        _assert_same_identity({**identity, "build_sha": "source"}, identity)
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows process contract")
-def test_frozen_runtime_smoke_observes_windows_process_liveness():
-    assert _pid_alive(os.getpid())
-    assert not _pid_alive(0xFFFFFFFF)
+    with pytest.raises(RuntimeError, match="slot_id"):
+        _assert_same_identity({**identity, "slot_id": "slot-a"}, identity)
 
 
 def test_internal_launcher_exits_on_eof_without_signaling_child(tmp_path, monkeypatch):
@@ -46,11 +49,11 @@ def test_internal_launcher_exits_on_eof_without_signaling_child(tmp_path, monkey
         def kill(self):
             raise AssertionError("successful launcher exit must not kill the child")
 
-    def popen(command, **kwargs):
-        calls.append((command, kwargs))
-        return FrozenProcess()
-
-    monkeypatch.setattr(smoke_frozen_runtime.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess,
+        "Popen",
+        lambda command, **kwargs: calls.append((command, kwargs)) or FrozenProcess(),
+    )
     monkeypatch.setattr(smoke_frozen_runtime.sys, "stdin", io.StringIO(""))
     monkeypatch.setattr(smoke_frozen_runtime.os, "getpid", lambda: 1234)
     pid_path = tmp_path / "serve.pid"
@@ -64,22 +67,76 @@ def test_internal_launcher_exits_on_eof_without_signaling_child(tmp_path, monkey
 
     assert pid_path.read_text(encoding="ascii") == "4321"
     assert calls[0][1]["env"]["QM_LAUNCHER_PID"] == "1234"
-    assert calls[0][1]["stdin"] is smoke_frozen_runtime.subprocess.DEVNULL
 
 
-def test_frozen_teardown_rejects_web_process_that_keeps_log_open(monkeypatch):
+def test_frozen_teardown_rejects_a_surviving_process(monkeypatch):
     alive = {11: False, 22: True, 33: False}
     monkeypatch.setattr(smoke_frozen_runtime, "_pid_alive", alive.__getitem__)
 
     with pytest.raises(RuntimeError, match="web 22"):
-        smoke_frozen_runtime._wait_stopped(
-            {"bootloader": 11, "web": 22, "runtime-worker": 33}, timeout=0,
-        )
+        _wait_stopped({"bootloader": 11, "web": 22, "runtime-worker": 33}, timeout=0)
+
+
+def test_frozen_onefile_help_allows_twenty_seconds_and_reports_latency(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="usage: qm [-h]",
+            stderr="",
+        ),
+    )
+    ticks = iter([0.0, 19.2])
+    monkeypatch.setattr(smoke_frozen_runtime.time, "monotonic", lambda: next(ticks))
+
+    assert _run_help(tmp_path / "QuantMaster.exe", {}, layout="onefile") == 19.2
+
+
+@pytest.mark.parametrize(
+    ("layout", "elapsed", "budget"),
+    (("onefile", 20.1, 20.0), ("onedir", 1.6, 1.5)),
+)
+def test_frozen_help_hard_fails_above_layout_budget(
+    tmp_path, monkeypatch, layout, elapsed, budget,
+):
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="usage: qm [-h]", stderr="",
+        ),
+    )
+    ticks = iter([0.0, elapsed])
+    monkeypatch.setattr(smoke_frozen_runtime.time, "monotonic", lambda: next(ticks))
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"{layout} help took {elapsed:.3f}s; {budget:.1f} second budget",
+    ):
+        _run_help(tmp_path / "QuantMaster.exe", {}, layout=layout)
+
+
+def test_frozen_help_measurement_reports_layout_latency_and_budget(tmp_path, monkeypatch):
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_isolated_environment", lambda root, _port: ({}, root),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_help",
+        lambda _executable, _environment, *, layout: 1.2,
+    )
+
+    assert measure_help(executable, layout="onedir") == {
+        "layout": "onedir",
+        "help_seconds": 1.2,
+        "help_budget_seconds": 1.5,
+    }
 
 
 def test_frozen_doctor_uses_utf8_wire_encoding(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     calls = []
     monkeypatch.setattr(
         smoke_frozen_runtime.subprocess,
@@ -91,7 +148,7 @@ def test_frozen_doctor_uses_utf8_wire_encoding(tmp_path, monkeypatch):
     )
     environment = {"PYTHONIOENCODING": "cp1252"}
 
-    smoke_frozen_runtime._run_deep_doctor(tmp_path / "QuantMaster.exe", environment)
+    _run_deep_doctor(tmp_path / "QuantMaster.exe", environment)
 
     assert environment == {"PYTHONIOENCODING": "cp1252"}
     assert calls[0][1]["env"]["PYTHONIOENCODING"] == "utf-8"
@@ -99,12 +156,110 @@ def test_frozen_doctor_uses_utf8_wire_encoding(tmp_path, monkeypatch):
     assert calls[0][1]["errors"] == "replace"
 
 
-def test_windows_package_and_release_workflows_run_the_frozen_smoke():
-    root = Path(__file__).parents[1]
-    ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+def test_frozen_smoke_reads_core_readiness_from_health_not_diagnostics(
+    tmp_path, monkeypatch,
+):
+    identity = {
+        "build_sha": "a" * 40,
+        "slot_id": "a" * 40,
+        "runtime_generation": "b" * 32,
+    }
+    executable = tmp_path / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+    events = []
+    urls = []
 
-    assert "windows-package:" in ci
-    assert "scripts/release/smoke_frozen_runtime.py" in ci
-    assert "scripts/release/smoke_frozen_runtime.py" in release
-    assert "if: runner.os == 'Windows'" in release
+    class Launcher:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.returncode = None
+
+        def wait(self, timeout):
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -1
+
+    def isolated(root, _port):
+        instance = root / "instance"
+        instance.mkdir()
+        return {}, instance
+
+    def start(_executable, _environment, stdout_path, stderr_path, _pid_path):
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return Launcher(), 10
+
+    def wait_json(url, _ready, **_kwargs):
+        events.append(f"request:{url.rsplit('/', 1)[-1]}")
+        urls.append(url)
+        if url.endswith("/health"):
+            return {"status": "ok", "core_ready": True, "process_pid": 20, **identity}
+        if url.endswith("/settings/runtime"):
+            return {"worker": {"available": True, "pid": 30, **identity}}
+        raise AssertionError("frozen smoke must not wait for full diagnostics")
+
+    report = json.dumps({"metrics": {"application_identity_probe": identity}})
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", isolated)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=report, stderr=""),
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_help", lambda *_args, **_kwargs: 4.2,
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_start_launcher", start)
+    monkeypatch.setattr(
+        smoke_frozen_runtime,
+        "_wait_splash_window",
+        lambda pid: events.append(f"splash-visible:{pid}") or 99,
+    )
+    monkeypatch.setattr(
+        smoke_frozen_runtime,
+        "_wait_splash_closed",
+        lambda handle: events.append(f"splash-closed:{handle}"),
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_wait_json", wait_json)
+    monkeypatch.setattr(smoke_frozen_runtime, "_wait_stopped", lambda *_args: None)
+    monkeypatch.setattr(
+        smoke_frozen_runtime.socket, "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()),
+    )
+
+    evidence = smoke_frozen_runtime.smoke(executable)
+
+    assert evidence["layout"] == "onefile"
+    assert evidence["help_seconds"] == 4.2
+    assert evidence["help_budget_seconds"] == 20.0
+    assert evidence["core_ready_seconds"] <= 20.0
+    assert evidence["splash_visible_before_core_ready"] is True
+    assert evidence["splash_closed_after_listener_and_core_ready"] is True
+    assert events[:3] == [
+        "splash-visible:10",
+        "request:health",
+        "splash-closed:99",
+    ]
+    assert urls == [
+        "http://127.0.0.1:18686/api/v1/health",
+        "http://127.0.0.1:18686/api/v1/settings/runtime",
+    ]
+
+
+def test_splash_window_waits_for_one_visible_handle_then_for_that_handle_to_close(
+    monkeypatch,
+):
+    visible = iter(([], [], [77]))
+    alive = iter((True, False))
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_visible_process_windows", lambda _pid: next(visible),
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_window_visible", lambda _handle: next(alive))
+    monkeypatch.setattr(smoke_frozen_runtime.time, "sleep", lambda _seconds: None)
+
+    assert smoke_frozen_runtime._wait_splash_window(12, timeout=1.0) == 77
+    smoke_frozen_runtime._wait_splash_closed(77, timeout=1.0)

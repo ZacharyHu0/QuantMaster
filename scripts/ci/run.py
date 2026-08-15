@@ -67,6 +67,7 @@ PYTEST_DURATIONS = pytest_durations_path(primary_root(), ARTIFACTS)
 PACKAGE_ROOT = ARTIFACTS / "packages"
 RUN_ROOT = PYTEST_ROOT / uuid.uuid4().hex[:12]
 PYTEST_CACHE = ARTIFACTS / "pytest" / "cache"
+IS_WINDOWS = os.name == "nt"
 _CLEANUP_ATTEMPTS = 8
 _CLEANUP_INITIAL_DELAY_SECONDS = 0.1
 _CLEANUP_MAX_DELAY_SECONDS = 1.0
@@ -275,6 +276,11 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--full", action="store_true", help="run static checks and full Python suite")
     parser.add_argument("--ui", action="store_true", help="also run Chromium management tests")
     parser.add_argument("--package", action="store_true", help="also build and smoke-test the wheel/EXE")
+    parser.add_argument(
+        "--measure-onedir",
+        action="store_true",
+        help="experimentally measure a Windows onedir ZIP; requires --package",
+    )
     parser.add_argument("--rust", action="store_true", help="also run Rust format/check/clippy/test gates")
     parser.add_argument("--all", action="store_true", help="run UI, package and Rust gates too")
     parser.add_argument(
@@ -287,7 +293,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="sample the complete suite serially and refresh local pytest split timings",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.measure_onedir and not (args.package or args.all):
+        parser.error("--measure-onedir requires --package or --all")
+    return args
 
 
 def main() -> int:
@@ -363,14 +372,22 @@ def main() -> int:
             )
 
         if args.package or args.all:
+            if args.measure_onedir and not IS_WINDOWS:
+                raise SystemExit("[local-ci] onedir measurement is Windows-only")
             build_env = os.environ.copy()
             build_env["UV_CACHE_DIR"] = str(ARTIFACTS / "uv-cache")
+            build_env["QM_DESKTOP_LAYOUT"] = (
+                "onedir-measurement" if args.measure_onedir else "onefile"
+            )
             run_external(
                 "wheel build",
                 ["uv", "build", "--out-dir", str(PACKAGE_ROOT / "python")],
                 env=build_env,
             )
             smoke_fresh_wheel()
+            desktop_root = PACKAGE_ROOT / "desktop"
+            if desktop_root.exists():
+                shutil.rmtree(desktop_root)
             run_external(
                 "PyInstaller smoke",
                 [
@@ -381,37 +398,56 @@ def main() -> int:
                 ],
                 env=build_env,
             )
-            exe = PACKAGE_ROOT / "desktop" / "QuantMaster.exe"
-            if exe.exists():
-                run(
-                    "desktop artifact policy",
+            artifact_name = (
+                "QuantMaster.exe"
+                if IS_WINDOWS and not args.measure_onedir
+                else "QuantMaster"
+            )
+            artifact = PACKAGE_ROOT / "desktop" / artifact_name
+            analysis = ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"
+            policy = [
+                "scripts/release/check_desktop_artifact.py", str(artifact),
+                "--analysis", str(analysis),
+            ]
+            if args.measure_onedir:
+                if not artifact.is_dir():
+                    raise SystemExit(f"[local-ci] PyInstaller did not produce onedir: {artifact}")
+                run_external(
+                    "onedir EXE help budget",
                     [
-                        "scripts/release/check_desktop_artifact.py", str(exe), "--analysis",
-                        str(ARTIFACTS / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
+                        str(PYTHON), "scripts/release/smoke_frozen_runtime.py",
+                        str(artifact / "QuantMaster.exe"), "--help-layout", "onedir",
                     ],
                 )
-                with tempfile.TemporaryDirectory(prefix="quantmaster-exe-") as raw_temp:
+                archive = artifact.with_suffix(".zip")
+                size_report = artifact.with_suffix(".sizes.json")
+                run(
+                    "desktop artifact measurement",
+                    [
+                        *policy,
+                        "--experimental-onedir",
+                        "--archive", str(archive),
+                        "--report", str(size_report),
+                    ],
+                )
+            else:
+                if not artifact.is_file():
+                    raise SystemExit(f"[local-ci] PyInstaller did not produce onefile: {artifact}")
+                run("desktop artifact policy", policy)
+                if IS_WINDOWS:
+                    run_external(
+                        "EXE runtime identity smoke",
+                        [str(PYTHON), "scripts/release/smoke_frozen_runtime.py", str(artifact)],
+                    )
+                else:
+                    instance = RUN_ROOT / "package-instance"
+                    instance.mkdir(parents=True, exist_ok=True)
                     exe_env = os.environ.copy()
-                    instance = Path(raw_temp)
                     exe_env["QM_CONFIG_PATH"] = str(instance / "config.yaml")
                     exe_env["QM_DATA_ROOT"] = str(instance / "data")
-                    exe_env["QM_FREE_STOCKDB_ROOT"] = str(
-                        instance / "runtime" / "free-stockdb"
-                    )
-                    run_external("EXE help", [str(exe), "--help"], env=exe_env)
-                    run_external("EXE doctor", [str(exe), "doctor", "--deep"], env=exe_env)
-                    if os.name == "nt":
-                        run_external(
-                            "EXE runtime identity smoke",
-                            [
-                                str(PYTHON),
-                                "scripts/release/smoke_frozen_runtime.py",
-                                str(exe),
-                            ],
-                            env=exe_env,
-                        )
-            else:
-                print("[local-ci] EXE help skipped: platform output is not QuantMaster.exe")
+                    exe_env["QM_FREE_STOCKDB_ROOT"] = str(instance / "stockdb")
+                    run_external("EXE help", [str(artifact), "--help"], env=exe_env)
+                    run_external("EXE doctor", [str(artifact), "doctor", "--deep"], env=exe_env)
 
         print("\n[local-ci] ALL REQUESTED GATES PASSED")
         passed = True

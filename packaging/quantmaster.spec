@@ -1,12 +1,20 @@
 # PyInstaller 打包配置：pyinstaller packaging/quantmaster.spec
-# 产物：.artifacts/packages/desktop/QuantMaster(.exe) 单文件；双击运行 = qm app，
+# 默认产物为 QuantMaster onefile；Windows 可显式测量 onedir。
 # 命令行带参数运行则等价于 qm <参数>。
 # 显式声明静态资源（collect_data_files 对 editable 安装不可靠）
+import os
 import runpy
 import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
+
+package_layout = os.environ.get("QM_DESKTOP_LAYOUT", "onefile")
+if package_layout not in {"onefile", "onedir-measurement"}:
+    raise ValueError(f"unsupported QM_DESKTOP_LAYOUT: {package_layout}")
+if package_layout == "onedir-measurement" and sys.platform != "win32":
+    raise ValueError("QM_DESKTOP_LAYOUT=onedir-measurement is Windows-only")
+onedir_measurement = package_layout == "onedir-measurement"
 
 project_root = Path(SPECPATH).parent
 packaged_build_sha = runpy.run_path(
@@ -80,11 +88,33 @@ a = Analysis(
     ],
 )
 pyz = PYZ(a.pure)
+splash = None
+if sys.platform == "win32" and not onedir_measurement:
+    splash = Splash(
+        project_root / "packaging/quantmaster-splash.png",
+        binaries=a.binaries,
+        datas=a.datas,
+        text_pos=(32, 270),
+        text_size=11,
+        text_color="#f4f7fb",
+        text_default="正在准备 QuantMaster",
+        full_tk=False,
+        always_on_top=True,
+    )
+splash_inputs = [] if splash is None else [splash, splash.binaries]
+onefile_inputs = [] if onedir_measurement else [a.binaries, a.datas]
 exe = EXE(
-    pyz, a.scripts, a.binaries, a.datas,
+    pyz, a.scripts, *splash_inputs, *onefile_inputs,
+    exclude_binaries=onedir_measurement,
     name="QuantMaster",
     icon=str(project_root / "packaging/quantmaster.ico"),
     version=version_info,
     console=True,           # 保留控制台便于查看日志；不想要黑窗口可改 False
     upx=False,
 )
+if onedir_measurement:
+    collect = COLLECT(
+        exe, a.binaries, a.datas,
+        name="QuantMaster",
+        upx=False,
+    )

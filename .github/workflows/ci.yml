@@ -5,6 +5,13 @@ on:
     branches: ["main", "claude/**"]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  workflow_dispatch:
+    inputs:
+      measure_onedir:
+        description: Build and report the experimental Windows onedir ZIP
+        required: true
+        default: false
+        type: boolean
 
 env:
   UV_VERSION: "0.11.32"
@@ -235,8 +242,53 @@ jobs:
           uv run python scripts/release/check_desktop_artifact.py
           .artifacts/packages/desktop/QuantMaster.exe
           --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
-      - name: Smoke frozen Windows process tree
-        run: uv run python scripts/release/smoke_frozen_runtime.py .artifacts/packages/desktop/QuantMaster.exe
+      - name: Smoke frozen Windows runtime identity and teardown
+        run: >-
+          uv run python scripts/release/smoke_frozen_runtime.py
+          .artifacts/packages/desktop/QuantMaster.exe
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-desktop-package
+          path: .artifacts/packages/desktop/QuantMaster.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-onedir-measurement:
+    if: github.event_name == 'workflow_dispatch' && inputs.measure_onedir
+    timeout-minutes: 35
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12.13"
+          enable-cache: true
+      - name: Install locked desktop environment
+        run: uv sync --locked --extra data --extra tushare --extra release
+      - name: Build experimental Windows onedir
+        env:
+          QM_DESKTOP_LAYOUT: onedir-measurement
+        run: uv run pyinstaller packaging/quantmaster.spec --noconfirm --distpath .artifacts/packages/desktop --workpath .artifacts/build/pyinstaller
+      - name: Enforce onedir help budget
+        run: >-
+          uv run python scripts/release/smoke_frozen_runtime.py
+          .artifacts/packages/desktop/QuantMaster/QuantMaster.exe
+          --help-layout onedir
+      - name: Measure deterministic onedir ZIP
+        run: >-
+          uv run python scripts/release/check_desktop_artifact.py
+          .artifacts/packages/desktop/QuantMaster
+          --analysis .artifacts/build/pyinstaller/quantmaster/Analysis-00.toc
+          --experimental-onedir
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-onedir-measurement
+          path: |
+            .artifacts/packages/desktop/QuantMaster.zip
+            .artifacts/packages/desktop/QuantMaster.sizes.json
+          if-no-files-found: error
+          retention-days: 7
 
   quality-package-audit:
     if: github.event.pull_request.draft != true

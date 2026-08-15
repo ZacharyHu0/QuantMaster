@@ -113,7 +113,9 @@ HTTP/CLI 输入
 - 可选 Rust 扩展和其他随版本发布的二进制；
 - 应用版本、Git commit 与验证结果。
 
-Windows 默认以 onedir 目录运行、以 ZIP 分发：
+Windows 当前默认发布与本地 package gate 使用经过 frozen smoke 验证的 onefile。onedir
+继续作为显式、非发布的测量路径；当它满足 1.5 秒 help、包体和 frozen smoke 合同后，最终
+不可变槽再以 onedir 目录运行、以 ZIP 分发：
 
 - 槽：`%LOCALAPPDATA%\QuantMaster\app\slots\<main-sha>`；
 - 激活状态：`%LOCALAPPDATA%\QuantMaster\app\active.json`；
@@ -127,6 +129,12 @@ Service。`active.json` 只记录 schema、active/previous/pending SHA、状态�
 用户配置、行情缓存、研究湖和 SQLite 业务数据位于槽外，由版本化合同访问。候选槽不得在
 激活时临时构建，也不得来自 dirty checkout；它必须先通过相应 `tasks.py ready` 验证和启动
 探针。静态文件必须来自槽本身，不能继续指向开发源码目录。
+
+启动预算按 frozen 布局定义：当前 Windows onefile `qm --help` 与 Web `core_ready` 都不超过
+20 秒，最终安装 onedir `qm --help` 不超过 1.5 秒；所有门禁都报告实测延迟并在超限时失败。
+Windows onefile 在 bootloader 自解压前显示官方 Splash，呈现真实解压文件名与入口阶段，
+并在 Uvicorn 监听成功且 `core_ready` 后关闭；不显示伪造百分比。onedir 和 POSIX 不装配 Splash。`core_ready`
+只读取内存中的本地存储 readiness 投影，不等待完整 diagnostics、资讯、轮动或远端服务。
 
 “应用更新”表示激活一个已经验证的完整候选槽，而不是只重载 FastAPI worker。用户已接受
 5–15 秒协调重启，因此不跨版本维护蓝绿 socket 或两套并发 worker：

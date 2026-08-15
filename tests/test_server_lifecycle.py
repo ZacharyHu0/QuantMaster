@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,12 +35,69 @@ def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):
 
     async def run() -> None:
         async with server_app.create_lifespan(bootstrap_rotation=False)(server_app.app):
-            pass
+            assert "splash-close" not in calls
 
     asyncio.run(run())
 
     assert ("supervisor", False) in calls
     assert "supervisor-stop" in calls
+
+
+def test_splash_waits_for_listener_and_core_readiness_without_sleep() -> None:
+    server = SimpleNamespace(started=False)
+    readiness = {"core_ready": False}
+    transitions = iter(((False, True), (True, False), (True, True)))
+    closed = []
+
+    class ControlledEvent:
+        def wait(self, _timeout: float) -> bool:
+            server.started, readiness["core_ready"] = next(transitions)
+            return False
+
+    lifecycle._wait_for_splash_readiness(
+        server,
+        ControlledEvent(),
+        lambda **_kwargs: readiness,
+        lambda: closed.append((server.started, readiness["core_ready"])),
+    )
+
+    assert closed == [(True, True)]
+
+
+def test_inactive_splash_does_not_start_readiness_watcher(monkeypatch) -> None:
+    monkeypatch.setattr(lifecycle, "splash_active", lambda: False)
+    monkeypatch.setattr(
+        lifecycle.threading,
+        "Thread",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not start watcher")),
+    )
+
+    assert lifecycle._start_splash_readiness_watcher(
+        SimpleNamespace(started=False),
+        threading.Event(),
+    ) is None
+
+
+def test_splash_stays_open_when_startup_stops_before_listener() -> None:
+    server = SimpleNamespace(started=False)
+    closed = []
+
+    class StartupFailureEvent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def wait(self, _timeout: float) -> bool:
+            self.calls += 1
+            return self.calls > 1
+
+    lifecycle._wait_for_splash_readiness(
+        server,
+        StartupFailureEvent(),
+        lambda **_kwargs: {"core_ready": True},
+        lambda: closed.append(True),
+    )
+
+    assert closed == []
 
 
 def test_app_lifespan_forwards_rotation_bootstrap_to_disabled_fallback(monkeypatch):
@@ -253,6 +311,11 @@ def test_run_uvicorn_foreground_raises_diagnostic_port_conflict(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "uvicorn", object())
     monkeypatch.setattr(
         lifecycle, "inspect_startup_address", lambda *_args, **_kwargs: conflict,
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_start_splash_readiness_watcher",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not start before preflight")),
     )
 
     with pytest.raises(lifecycle.StartupPortConflictError, match="PID 9876"):

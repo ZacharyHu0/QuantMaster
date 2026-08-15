@@ -291,22 +291,26 @@ def test_fresh_wheel_install_uses_uv_without_project_pip(monkeypatch, tmp_path):
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
 
 
-def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
+@pytest.mark.parametrize("windows", [True, False])
+def test_default_package_lane_builds_onefile_on_every_platform(monkeypatch, tmp_path, windows):
     artifacts = tmp_path / "artifacts"
-    exe = artifacts / "packages" / "desktop" / "QuantMaster.exe"
-    exe.parent.mkdir(parents=True)
-    exe.touch()
+    artifact_name = "QuantMaster.exe" if windows else "QuantMaster"
+    application = artifacts / "packages" / "desktop" / artifact_name
+    application.parent.mkdir(parents=True)
+    application.write_bytes(b"stale")
     external_calls = []
     project_calls = []
     monkeypatch.setattr(run, "ARTIFACTS", artifacts)
     monkeypatch.setattr(run, "PACKAGE_ROOT", artifacts / "packages")
     monkeypatch.setattr(run, "RUN_ROOT", artifacts / "pytest" / "run")
     monkeypatch.setattr(run, "PYTEST_CACHE", artifacts / "pytest" / "cache")
+    monkeypatch.setattr(run, "IS_WINDOWS", windows)
+    monkeypatch.setenv("QM_DESKTOP_LAYOUT", "onedir-measurement")
     monkeypatch.setattr(
         run, "parse_args",
         lambda: run.argparse.Namespace(
             fast=False, full=False, ui=False, package=True, rust=False, all=False,
-            serial=False, refresh_durations=False,
+            serial=False, refresh_durations=False, measure_onedir=False,
         ),
     )
     monkeypatch.setattr(run, "prepare_pytest_directory", lambda path: path)
@@ -316,10 +320,14 @@ def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
         run, "run",
         lambda label, command, **kwargs: project_calls.append((label, command, kwargs)),
     )
-    monkeypatch.setattr(
-        run, "run_external",
-        lambda label, command, **kwargs: external_calls.append((label, command, kwargs)),
-    )
+    def run_external(label, command, **kwargs):
+        if label == "PyInstaller smoke":
+            assert not application.exists()
+            application.parent.mkdir(parents=True, exist_ok=True)
+            application.write_bytes(b"fresh")
+        external_calls.append((label, command, kwargs))
+
+    monkeypatch.setattr(run, "run_external", run_external)
 
     assert run.main() == 0
 
@@ -330,21 +338,181 @@ def test_package_lane_runs_pinned_pyinstaller_through_uv(monkeypatch, tmp_path):
         "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
     ]
     assert kwargs["env"]["UV_CACHE_DIR"] == str(artifacts / "uv-cache")
+    assert kwargs["env"]["QM_DESKTOP_LAYOUT"] == "onefile"
     assert all(label != "PyInstaller smoke" for label, _command, _kwargs in project_calls)
-    help_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE help")
-    doctor_env = next(call[2]["env"] for call in external_calls if call[0] == "EXE doctor")
-    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
-        assert Path(help_env[name]).is_absolute()
-        assert help_env[name] == doctor_env[name]
-    if run.os.name == "nt":
-        _label, command, _kwargs = next(
-            call for call in external_calls if call[0] == "EXE runtime identity smoke"
-        )
-        assert command == [
+    _label, command, _kwargs = next(
+        call for call in project_calls if call[0] == "desktop artifact policy"
+    )
+    analysis = str(artifacts / "build" / "pyinstaller/quantmaster/Analysis-00.toc")
+    expected = [
+        "scripts/release/check_desktop_artifact.py", str(application), "--analysis", analysis,
+    ]
+    assert command == expected
+    if windows:
+        assert next(
+            call[1] for call in external_calls
+            if call[0] == "EXE runtime identity smoke"
+        ) == [
             str(run.PYTHON),
             "scripts/release/smoke_frozen_runtime.py",
-            str(exe),
+            str(application),
         ]
+        assert all(call[0] not in {"EXE help", "EXE doctor"} for call in external_calls)
+    else:
+        assert not any(call[0] == "EXE runtime identity smoke" for call in external_calls)
+        assert next(call[1] for call in external_calls if call[0] == "EXE help") == [
+            str(application), "--help",
+        ]
+        assert next(call[1] for call in external_calls if call[0] == "EXE doctor") == [
+            str(application), "doctor", "--deep",
+        ]
+
+
+def test_explicit_windows_onedir_lane_only_measures_and_reports(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    application = artifacts / "packages" / "desktop" / "QuantMaster"
+    (application / "_internal").mkdir(parents=True)
+    (application / "QuantMaster.exe").touch()
+    external_calls = []
+    project_calls = []
+    monkeypatch.setattr(run, "ARTIFACTS", artifacts)
+    monkeypatch.setattr(run, "PACKAGE_ROOT", artifacts / "packages")
+    monkeypatch.setattr(run, "RUN_ROOT", artifacts / "pytest" / "run")
+    monkeypatch.setattr(run, "PYTEST_CACHE", artifacts / "pytest" / "cache")
+    monkeypatch.setattr(run, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        run, "parse_args",
+        lambda: run.argparse.Namespace(
+            fast=False, full=False, ui=False, package=True, rust=False, all=False,
+            serial=False, refresh_durations=False, measure_onedir=True,
+        ),
+    )
+    monkeypatch.setattr(run, "prepare_pytest_directory", lambda path: path)
+    monkeypatch.setattr(run, "cleanup_run_root", lambda path: None)
+    monkeypatch.setattr(run, "smoke_fresh_wheel", lambda: None)
+    monkeypatch.setattr(
+        run, "run",
+        lambda label, command, **kwargs: project_calls.append((label, command, kwargs)),
+    )
+    def run_external(label, command, **kwargs):
+        if label == "PyInstaller smoke":
+            assert not application.exists()
+            (application / "_internal").mkdir(parents=True)
+            (application / "QuantMaster.exe").touch()
+        external_calls.append((label, command, kwargs))
+
+    monkeypatch.setattr(run, "run_external", run_external)
+
+    assert run.main() == 0
+
+    _label, _command, build_kwargs = next(
+        call for call in external_calls if call[0] == "PyInstaller smoke"
+    )
+    assert build_kwargs["env"]["QM_DESKTOP_LAYOUT"] == "onedir-measurement"
+    _label, command, _kwargs = next(
+        call for call in project_calls if call[0] == "desktop artifact measurement"
+    )
+    assert command == [
+        "scripts/release/check_desktop_artifact.py",
+        str(application),
+        "--analysis",
+        str(artifacts / "build" / "pyinstaller/quantmaster/Analysis-00.toc"),
+        "--experimental-onedir",
+        "--archive",
+        str(application.with_suffix(".zip")),
+        "--report",
+        str(application.with_suffix(".sizes.json")),
+    ]
+    assert next(
+        call[1] for call in external_calls if call[0] == "onedir EXE help budget"
+    ) == [
+        str(run.PYTHON),
+        "scripts/release/smoke_frozen_runtime.py",
+        str(application / "QuantMaster.exe"),
+        "--help-layout",
+        "onedir",
+    ]
+    assert all(call[0] != "EXE runtime identity smoke" for call in external_calls)
+
+
+def test_onedir_measurement_requires_the_package_lane(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run.py", "--measure-onedir"])
+
+    with pytest.raises(SystemExit) as raised:
+        run.parse_args()
+
+    assert raised.value.code == 2
+
+
+def test_default_windows_package_and_release_workflows_keep_onefile():
+    root = Path(__file__).parents[1]
+    ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "windows-package:" in ci
+    assert "scripts/release/smoke_frozen_runtime.py" in ci
+    assert "scripts/release/smoke_frozen_runtime.py" in release
+    assert "QuantMaster.exe" in ci
+    assert "QuantMaster.exe" in release
+    assert "./.artifacts/packages/desktop/QuantMaster --help" in ci
+    assert '"$executable" --help' in release
+    assert "QuantMaster-windows.exe" in release
+    assert "QuantMaster-windows.zip" not in release
+    windows_job = ci.split("\n  windows-package:", 1)[1].split(
+        "\n  windows-onedir-measurement:", 1,
+    )[0]
+    assert "actions/upload-artifact@" in windows_job
+    assert "name: windows-desktop-package" in windows_job
+    assert ".artifacts/packages/desktop/QuantMaster.exe" in windows_job
+    assert ".artifacts/packages/desktop/QuantMaster.zip" not in windows_job
+    assert "retention-days: 7" in windows_job
+
+
+def test_manual_onedir_measurement_is_opt_in_and_not_a_release_asset():
+    root = Path(__file__).parents[1]
+    ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "measure_onedir:" in ci
+    measurement = ci.split("\n  windows-onedir-measurement:", 1)[1]
+    assert "github.event_name == 'workflow_dispatch' && inputs.measure_onedir" in measurement
+    assert "QM_DESKTOP_LAYOUT: onedir-measurement" in measurement
+    assert "--experimental-onedir" in measurement
+    assert "scripts/release/smoke_frozen_runtime.py" in measurement
+    assert "--help-layout onedir" in measurement
+    assert "windows-onedir-measurement" not in release
+
+
+def test_windows_frozen_readiness_decision_is_documented():
+    root = Path(__file__).parents[1]
+    decision = (
+        root / "docs/decisions/0002-windows-frozen-readiness-and-help-budgets.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Discussion #95" in decision
+    assert "onefile" in decision and "20 秒" in decision
+    assert "onedir" in decision and "1.5 秒" in decision
+    assert "PYINSTALLER_SUPPRESS_SPLASH_SCREEN=1" in decision
+    assert "不显示百分比" in decision
+    assert "监听" in decision and "`core_ready` 后" in decision
+    assert "/api/v1/health" in decision
+    assert "/api/v1/diagnostics" in decision
+
+
+def test_release_keeps_three_onefiles_and_closes_all_downloaded_checksums():
+    release = (Path(__file__).parents[1] / ".github/workflows/release.yml").read_text(
+        encoding="utf-8",
+    )
+
+    assert "asset: QuantMaster-macos\n" in release
+    assert "asset: QuantMaster-linux\n" in release
+    assert "asset: QuantMaster-windows.exe\n" in release
+    assert "report: QuantMaster-" not in release
+    assert "merge-multiple: true" in release
+    assert (
+        "sha256sum QuantMaster-linux QuantMaster-macos QuantMaster-windows.exe\n"
+        "          QuantMaster.cdx.json > SHA256SUMS"
+    ) in release
 
 
 def test_full_shards_use_three_way_parallelism(monkeypatch):
