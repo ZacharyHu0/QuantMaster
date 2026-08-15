@@ -54,7 +54,7 @@ BASELINE = {
     "quantmaster/portfolio/performance.py": 1,
     "quantmaster/research/adapters.py": 2,
     "quantmaster/research/engine.py": 1,
-    "quantmaster/research/jobs.py": 3,
+    "quantmaster/research/jobs.py": 2,
     "quantmaster/research/kernel.py": 3,
     "quantmaster/research/lake.py": 2,
     "quantmaster/rotation/provider.py": 2,

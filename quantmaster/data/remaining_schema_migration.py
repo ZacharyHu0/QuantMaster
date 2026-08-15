@@ -55,7 +55,7 @@ class RemainingSchemaMigrator:
     backup_paths = (
         "source_health.sqlite", "tushare_rate.sqlite", "bars", "fundamentals",
         "pit_execution", "ledger_default.sqlite", "ledger_paper.sqlite",
-        "paper_accounts", "research_lake/_meta/catalog.sqlite",
+        "paper_accounts",
     )
 
     @staticmethod
@@ -63,22 +63,11 @@ class RemainingSchemaMigrator:
         from quantmaster.data.resilience import ProviderHealthStore, TushareRateLimiter
         from quantmaster.data.storage import BarStore
         from quantmaster.portfolio.ledger import Ledger
-        from quantmaster.research.catalog import ResearchCatalog
 
         targets: list[tuple[str, Path, Callable[[], None], tuple]] = []
         provider_columns = {
             "failure_class", "config_revision", "probe_started", "retry_after",
             "diagnostic_code",
-        }
-        research_tables = {
-            "research_specs", "research_partitions", "research_runs", "research_leases",
-            "research_capabilities", "research_jobs",
-        }
-        research_columns = {
-            "research_partitions": {"file_size", "file_mtime_ns"},
-            "research_jobs": {
-                "owner", "lease_expires", "heartbeat_at", "attempt", "task_indexes_json",
-            },
         }
         fixed = (
             ("provider-health", root / "source_health.sqlite",
@@ -87,10 +76,6 @@ class RemainingSchemaMigrator:
             ("tushare-rate", root / "tushare_rate.sqlite",
              lambda: TushareRateLimiter.migrate_legacy_database(root / "tushare_rate.sqlite"),
              ({"rate_state"}, {"rate_state": {"name", "next_call"}}, 1)),
-            ("research", root / "research_lake" / "_meta" / "catalog.sqlite",
-             lambda: ResearchCatalog.migrate_legacy_database(
-                 root / "research_lake" / "_meta" / "catalog.sqlite"
-             ), (research_tables, research_columns, 1)),
         )
         targets.extend(fixed)
         bar_roots = [root / "bars", root / "fundamentals", root / "pit_execution"]
@@ -158,7 +143,7 @@ class RemainingSchemaMigrator:
         prefixes = ("bars/", "fundamentals/", "pit_execution/", "paper_accounts/")
         exact = {
             "source_health.sqlite", "tushare_rate.sqlite", "ledger_default.sqlite",
-            "ledger_paper.sqlite", "research_lake/_meta/catalog.sqlite",
+            "ledger_paper.sqlite",
         }
         for entry in manifest["entries"]:
             relative = str(entry["path"])
