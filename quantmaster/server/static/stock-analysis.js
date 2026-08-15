@@ -363,8 +363,9 @@ const stockAnalysisFeature = (() => {
     }
   }
 
-  async function refreshAnalysis(run) {
+  async function refreshAnalysis(run, token = activeToken) {
     const data = await window.QuantMasterAPI(`/api/v1/market/stock-analyses/${encodeURIComponent(run.analysisId)}`, {cache:'no-store'});
+    if (activeRun !== run || token !== activeToken) return null;
     const report = data.report || (data.schema_version ? data : null);
     for (const item of (data.dimensions || report?.dimensions || [])) {
       updateDimension(item.key, item.degraded_reason ? 'degraded' : 'complete',
@@ -381,12 +382,17 @@ const stockAnalysisFeature = (() => {
         const events = await window.QuantMasterAPI(
           `/api/v1/jobs/${encodeURIComponent(run.jobId)}/events?after=${lastEventSeq}`, {cache:'no-store'},
         );
+        if (activeRun !== run || token !== activeToken) return;
         const items = events.items || events.events || [];
         items.forEach(applyEvent);
         if (items.some(value => ['dimension_completed', 'dimension_degraded', 'analysis_completed']
-          .includes(eventParts(value).type))) await refreshAnalysis(run);
+          .includes(eventParts(value).type))) {
+          await refreshAnalysis(run, token);
+          if (activeRun !== run || token !== activeToken) return;
+        }
 
         const payload = await window.QuantMasterAPI(`/api/v1/jobs/${encodeURIComponent(run.jobId)}`, {cache:'no-store'});
+        if (activeRun !== run || token !== activeToken) return;
         const job = payload.job || payload;
         run.status = job.status || run.status;
         run.phase = job.phase || job.current_phase || currentPhase.textContent;
@@ -398,16 +404,17 @@ const stockAnalysisFeature = (() => {
         if (terminalStatuses.has(run.status)) {
           clearInterval(tickTimer);
           if (run.status === 'completed' || run.status === 'completed_with_errors') {
-            const finalAnalysis = await refreshAnalysis(run);
-            if (!finalAnalysis.report) {
-              renderFailure({message:finalAnalysis.error || '最终报告产物暂时不可用'});
+            const finalAnalysis = await refreshAnalysis(run, token);
+            if (activeRun !== run || token !== activeToken) return;
+            if (!finalAnalysis?.report) {
+              renderFailure({message:finalAnalysis?.error || '最终报告产物暂时不可用'});
             }
           }
           else renderFailure({message:job.error || job.message}, run.status);
           return;
         }
       } catch (error) {
-        if (token !== activeToken) return;
+        if (activeRun !== run || token !== activeToken) return;
         currentPhase.textContent = '连接暂时中断，后台任务仍在运行';
         reportLocalError('个股分析', '任务状态暂时无法读取', error);
       }
