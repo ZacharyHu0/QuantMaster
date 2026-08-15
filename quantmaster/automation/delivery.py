@@ -154,6 +154,42 @@ def _feishu_footer(kind: Any, payload: dict[str, Any] | None = None) -> str:
     return "仅作量化研究与记录，不构成投资建议。"
 
 
+def _alert_digest_lines(payload: dict[str, Any]) -> list[str]:
+    counts = _digest_counts(payload)
+    lines = [
+        f"共 {len(payload.get('items') or [])} 条 · 利好 {counts['up']} · "
+        f"利空 {counts['down']} · 中性 {counts['neutral']}",
+    ]
+    for index, child in enumerate((payload.get("items") or [])[:5], 1):
+        lines.append(
+            f"{index}. [{_news_direction(child.get('direction'))}] "
+            f"{_trim(child.get('title') or '消息', 100)}",
+        )
+        if child.get("summary"):
+            lines.append(f"   摘要：{_trim(child['summary'], 180)}")
+        if child.get("symbols"):
+            lines.append("   标的：" + "、".join(child["symbols"][:6]))
+        if child.get("sectors"):
+            lines.append("   板块：" + "、".join(child["sectors"][:5]))
+        if str(child.get("url") or "").startswith(("https://", "http://")):
+            lines.append(f"   原文：{child['url']}")
+    return lines
+
+
+def _alert_news_lines(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    sentiment = _number(payload.get("sentiment"))
+    lines = [
+        f"研判 {_news_direction(item.get('direction'))} ({sentiment:+.2f}) · "
+        f"重要度 {_number(item.get('score')):.0f}/100",
+    ]
+    if payload.get("summary"):
+        lines.append("摘要：" + _trim(payload["summary"], 200))
+    if payload.get("sectors"):
+        lines.append("相关板块：" + "、".join(payload["sectors"][:5]))
+    lines.append(f"数据截至：{item.get('data_as_of') or '未知'}")
+    return lines
+
+
 def format_alert(item: dict[str, Any], channel: str) -> str:
     labels: dict[Any, str] = {
         "market_turn": "盘中变盘", "market_close": "收盘状态变化",
@@ -167,32 +203,9 @@ def format_alert(item: dict[str, Any], channel: str) -> str:
     title = payload.get("title") or labels.get(kind, kind)
     lines = [f"【QuantMaster · {labels.get(item.get('kind'), '提醒')}】", str(title)]
     if kind == "important_news" and payload.get("digest"):
-        counts = _digest_counts(payload)
-        lines.append(
-            f"共 {len(payload.get('items') or [])} 条 · 利好 {counts['up']} · "
-            f"利空 {counts['down']} · 中性 {counts['neutral']}")
-        for index, child in enumerate((payload.get("items") or [])[:5], 1):
-            lines.append(
-                f"{index}. [{_news_direction(child.get('direction'))}] "
-                f"{_trim(child.get('title') or '消息', 100)}")
-            if child.get("summary"):
-                lines.append(f"   摘要：{_trim(child['summary'], 180)}")
-            if child.get("symbols"):
-                lines.append("   标的：" + "、".join(child["symbols"][:6]))
-            if child.get("sectors"):
-                lines.append("   板块：" + "、".join(child["sectors"][:5]))
-            if str(child.get("url") or "").startswith(("https://", "http://")):
-                lines.append(f"   原文：{child['url']}")
+        lines.extend(_alert_digest_lines(payload))
     elif kind == "important_news":
-        sentiment = _number(payload.get("sentiment"))
-        lines.append(
-            f"研判 {_news_direction(item.get('direction'))} ({sentiment:+.2f}) · "
-            f"重要度 {_number(item.get('score')):.0f}/100")
-        if payload.get("summary"):
-            lines.append("摘要：" + _trim(payload["summary"], 200))
-        if payload.get("sectors"):
-            lines.append("相关板块：" + "、".join(payload["sectors"][:5]))
-        lines.append(f"数据截至：{item.get('data_as_of') or '未知'}")
+        lines.extend(_alert_news_lines(item, payload))
     else:
         lines.append(
             f"强度 {_number(item.get('score')):.0f}/100 · {direction} · "
@@ -210,6 +223,136 @@ def format_alert(item: dict[str, Any], channel: str) -> str:
     return "\n".join(lines)
 
 
+def _feishu_digest_lines(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    counts = _digest_counts(payload)
+    lines = [
+        (f"**本期**  {len(payload.get('items') or [])} 条    **利好**  {counts['up']}    "
+         f"**利空**  {counts['down']}    **中性**  {counts['neutral']}"),
+        f"**数据截至**  {item.get('data_as_of') or '未知'}",
+    ]
+    for index, child in enumerate((payload.get("items") or [])[:5], 1):
+        child_title = _lark_md(child.get("title") or "消息")
+        url = str(child.get("url") or "")
+        if url.startswith(("https://", "http://")):
+            child_title = f"[{child_title}]({url})"
+        lines.extend(["", f"**{index} · {_news_direction(child.get('direction'))}**  {child_title}"])
+        if child.get("summary"):
+            lines.append(f"摘要：{_lark_md(child['summary'])}")
+        if child.get("symbols"):
+            lines.append("标的：" + "、".join(child["symbols"][:6]))
+        if child.get("sectors"):
+            lines.append("板块：" + "、".join(child["sectors"][:5]))
+    return lines
+
+
+def _feishu_news_lines(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    sentiment = _number(payload.get("sentiment"))
+    lines = [
+        f"**{_lark_md(payload.get('title') or '未命名资讯')}**", "",
+        (f"**研判**  {_news_direction(item.get('direction'))} ({sentiment:+.2f})    "
+         f"**重要度**  {_number(item.get('score')):.0f}/100"),
+    ]
+    if payload.get("summary"):
+        lines.extend(["", "**摘要**", _lark_md(payload["summary"])])
+    context = []
+    if payload.get("source"):
+        context.append(f"**来源**  {_lark_md(payload['source'])}")
+    if payload.get("event_type"):
+        context.append(f"**类型**  {_lark_md(payload['event_type'])}")
+    relevance = {"holding": "持仓", "watchlist": "关注", "market": "全市场"}.get(
+        str(item.get("relevance") or "market"), "全市场")
+    context.append(f"**范围**  {relevance}")
+    lines.extend(["", "    ".join(context)])
+    if payload.get("sectors"):
+        lines.append("**相关板块**  " + "、".join(payload["sectors"][:5]))
+    lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
+    return lines
+
+
+def _feishu_market_turn_lines(item: dict[str, Any], payload: dict[str, Any], direction: str) -> list[str]:
+    movement = "快速走强" if item.get("direction") == "up" else "快速转弱"
+    lines = [
+        f"**{_lark_md(payload.get('title') or f'市场{movement}')}**",
+        (f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}    "
+         f"**连续确认**  {int(_number(payload.get('confirmation_count'), 1))} 次"),
+    ]
+    if payload.get("median_return") is not None:
+        lines.append(f"**15 分钟指数收益中位数**  {_number(payload['median_return']) * 100:+.2f}%")
+    if payload.get("breadth_delta_pp") is not None:
+        lines.append(f"**上涨家数比例变化**  {_number(payload['breadth_delta_pp']):+.1f} 个百分点")
+    lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
+    return lines
+
+
+def _feishu_market_close_lines(item: dict[str, Any], payload: dict[str, Any], direction: str) -> list[str]:
+    current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+    previous = payload.get("previous") if isinstance(payload.get("previous"), dict) else {}
+    current_state = current.get("state_label") or current.get("state") or "未知"
+    previous_state = previous.get("state_label") or previous.get("state") or "未知"
+    lines = [
+        f"**状态变化**  {_lark_md(previous_state)} → {_lark_md(current_state)}",
+        (f"**牛市分数**  {_number(previous.get('bull_score')):.1f} → "
+         f"{_number(current.get('bull_score')):.1f}    **方向**  {direction}"),
+    ]
+    if current.get("return_1d") is not None:
+        lines.append(f"**当日涨跌**  {_number(current['return_1d']) * 100:+.2f}%")
+    if current.get("advance_ratio") is not None:
+        lines.append(f"**上涨比例**  {_number(current['advance_ratio']) * 100:.1f}%")
+    lines.append(f"**数据截至**  {item.get('data_as_of') or current.get('as_of') or '未知'}")
+    return lines
+
+
+def _feishu_task_failure_lines(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    task_label = payload.get("task_label")
+    lines = [f"**任务**  {_lark_md(task_label)}" if task_label else
+             f"**事项**  {_lark_md(payload.get('title') or '自动化任务未正常完成')}"]
+    phases = set(payload.get("phases") or [])
+    phase_labels = [
+        label for key, label in (("fetch", "资讯拉取"), ("analysis", "新闻分析"))
+        if key in phases
+    ]
+    if phase_labels:
+        lines.append("**异常阶段**  " + "、".join(phase_labels))
+    if not payload.get("partial"):
+        impact = "本轮任务未正常完成，系统将在后续调度中重试。"
+    elif payload.get("terminal"):
+        impact = f"{int(payload.get('dead_letter') or 0)} 条资讯已停止自动重试，请核查后恢复。"
+    else:
+        impact = "本轮部分结果可用，其余项目将在后续调度中重试。"
+    lines.extend([
+        f"**影响**  {impact}",
+        f"**发生时间**  {item.get('occurred_at') or item.get('data_as_of') or '未知'}",
+    ])
+    return lines
+
+
+def _feishu_task_report_lines(item: dict[str, Any], payload: dict[str, Any]) -> list[str]:
+    lines = [f"**{_lark_md(payload.get('title') or '自动化任务结果')}**"]
+    result_lines = _feishu_result_lines(payload.get("result"))
+    if result_lines:
+        lines.extend(["", *result_lines])
+    lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
+    return lines
+
+
+def _feishu_lines(item: dict[str, Any], kind: str, payload: dict[str, Any], direction: str) -> list[str]:
+    if kind == "important_news":
+        return (
+            _feishu_digest_lines(item, payload)
+            if payload.get("digest") else _feishu_news_lines(item, payload)
+        )
+    builders = {
+        "market_turn": lambda: _feishu_market_turn_lines(item, payload, direction),
+        "market_close": lambda: _feishu_market_close_lines(item, payload, direction),
+        "task_failure": lambda: _feishu_task_failure_lines(item, payload),
+        "task_report": lambda: _feishu_task_report_lines(item, payload),
+    }
+    return builders.get(kind, lambda: [
+        f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}",
+        f"**数据截至**  {item.get('data_as_of') or '未知'}",
+    ])()
+
+
 def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
     """飞书主通道使用结构化卡片，便于在群聊中快速核查证据。"""
     kind = str(item.get("kind") or "")
@@ -221,109 +364,7 @@ def format_feishu_card(item: dict[str, Any]) -> dict[str, Any]:
         else "green" if item.get("direction") == "down" else "blue"
     )
     category = _feishu_category(kind, payload)
-    if kind == "important_news" and payload.get("digest"):
-        counts = _digest_counts(payload)
-        lines = [
-            (f"**本期**  {len(payload.get('items') or [])} 条    **利好**  {counts['up']}    "
-             f"**利空**  {counts['down']}    **中性**  {counts['neutral']}"),
-            f"**数据截至**  {item.get('data_as_of') or '未知'}",
-        ]
-        for index, child in enumerate((payload.get("items") or [])[:5], 1):
-            child_title = _lark_md(child.get("title") or "消息")
-            url = str(child.get("url") or "")
-            if url.startswith(("https://", "http://")):
-                child_title = f"[{child_title}]({url})"
-            lines.extend([
-                "",
-                f"**{index} · {_news_direction(child.get('direction'))}**  {child_title}",
-            ])
-            if child.get("summary"):
-                lines.append(f"摘要：{_lark_md(child['summary'])}")
-            if child.get("symbols"):
-                lines.append("标的：" + "、".join(child["symbols"][:6]))
-            if child.get("sectors"):
-                lines.append("板块：" + "、".join(child["sectors"][:5]))
-    elif kind == "important_news":
-        sentiment = _number(payload.get("sentiment"))
-        lines = [
-            f"**{_lark_md(payload.get('title') or '未命名资讯')}**",
-            "",
-            (f"**研判**  {_news_direction(item.get('direction'))} ({sentiment:+.2f})    "
-             f"**重要度**  {_number(item.get('score')):.0f}/100"),
-        ]
-        if payload.get("summary"):
-            lines.extend(["", "**摘要**", _lark_md(payload["summary"])])
-        context = []
-        if payload.get("source"):
-            context.append(f"**来源**  {_lark_md(payload['source'])}")
-        if payload.get("event_type"):
-            context.append(f"**类型**  {_lark_md(payload['event_type'])}")
-        relevance = {"holding": "持仓", "watchlist": "关注", "market": "全市场"}.get(
-            str(item.get("relevance") or "market"), "全市场")
-        context.append(f"**范围**  {relevance}")
-        lines.extend(["", "    ".join(context)])
-        if payload.get("sectors"):
-            lines.append("**相关板块**  " + "、".join(payload["sectors"][:5]))
-        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
-    elif kind == "market_turn":
-        movement = "快速走强" if item.get("direction") == "up" else "快速转弱"
-        lines = [
-            f"**{_lark_md(payload.get('title') or f'市场{movement}')}**",
-            (f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}    "
-             f"**连续确认**  {int(_number(payload.get('confirmation_count'), 1))} 次"),
-        ]
-        if payload.get("median_return") is not None:
-            lines.append(f"**15 分钟指数收益中位数**  {_number(payload['median_return']) * 100:+.2f}%")
-        if payload.get("breadth_delta_pp") is not None:
-            lines.append(f"**上涨家数比例变化**  {_number(payload['breadth_delta_pp']):+.1f} 个百分点")
-        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
-    elif kind == "market_close":
-        current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
-        previous = payload.get("previous") if isinstance(payload.get("previous"), dict) else {}
-        current_state = current.get("state_label") or current.get("state") or "未知"
-        previous_state = previous.get("state_label") or previous.get("state") or "未知"
-        lines = [
-            f"**状态变化**  {_lark_md(previous_state)} → {_lark_md(current_state)}",
-            (f"**牛市分数**  {_number(previous.get('bull_score')):.1f} → "
-             f"{_number(current.get('bull_score')):.1f}    **方向**  {direction}"),
-        ]
-        if current.get("return_1d") is not None:
-            lines.append(f"**当日涨跌**  {_number(current['return_1d']) * 100:+.2f}%")
-        if current.get("advance_ratio") is not None:
-            lines.append(f"**上涨比例**  {_number(current['advance_ratio']) * 100:.1f}%")
-        lines.append(f"**数据截至**  {item.get('data_as_of') or current.get('as_of') or '未知'}")
-    elif kind == "task_failure":
-        task_label = payload.get("task_label")
-        lines = [
-            (f"**任务**  {_lark_md(task_label)}" if task_label
-             else f"**事项**  {_lark_md(payload.get('title') or '自动化任务未正常完成')}")
-        ]
-        phases = set(payload.get("phases") or [])
-        phase_labels = [label for key, label in (("fetch", "资讯拉取"), ("analysis", "新闻分析"))
-                        if key in phases]
-        if phase_labels:
-            lines.append("**异常阶段**  " + "、".join(phase_labels))
-        impact = (
-            f"{int(payload.get('dead_letter') or 0)} 条资讯已停止自动重试，请核查后恢复。"
-            if payload.get("terminal") else
-            "本轮部分结果可用，其余项目将在后续调度中重试。"
-        ) if payload.get("partial") else (
-            "本轮任务未正常完成，系统将在后续调度中重试。")
-        lines.extend([
-            f"**影响**  {impact}",
-            f"**发生时间**  {item.get('occurred_at') or item.get('data_as_of') or '未知'}",
-        ])
-    elif kind == "task_report":
-        lines = [f"**{_lark_md(payload.get('title') or '自动化任务结果')}**"]
-        result_lines = _feishu_result_lines(payload.get("result"))
-        if result_lines:
-            lines.extend(["", *result_lines])
-        lines.append(f"**数据截至**  {item.get('data_as_of') or '未知'}")
-    else:
-        lines = [
-            f"**强度**  {_number(item.get('score')):.0f}/100    **方向**  {direction}",
-            f"**数据截至**  {item.get('data_as_of') or '未知'}",
-        ]
+    lines = _feishu_lines(item, kind, payload, direction)
     evidence = item.get("evidence") or []
     if evidence and not (kind == "important_news" and payload.get("digest")) \
             and kind != "market_close":
@@ -370,27 +411,28 @@ class BotDeliveryGateway:
         self.weixin = weixin or WeixinClawBotClient(store)
         self.feishu = feishu or FeishuBotClient(store)
 
-    def send(self, delivery: dict[str, Any]) -> None:
-        if not delivery.get("target") or not delivery.get("account_id"):
-            raise DeliveryError("推送目标尚未绑定", permanent=True, needs_rebind=True)
-        message = format_alert(delivery, delivery["channel"])
-        try:
-            if delivery["channel"] == "weixin":
-                if not delivery.get("context_token"):
-                    raise DeliveryError(
-                        "微信会话尚无 context_token，请先给 ClawBot 发送一条消息",
-                        permanent=True, needs_rebind=True)
-                self.weixin.send(
-                    account_id=delivery["account_id"],
-                    to_user_id=delivery["target"],
-                    context_token=delivery["context_token"],
-                    text=message,
+    def _deliver(self, delivery: dict[str, Any], message: str) -> None:
+        if delivery["channel"] == "weixin":
+            if not delivery.get("context_token"):
+                raise DeliveryError(
+                    "微信会话尚无 context_token，请先给 ClawBot 发送一条消息",
+                    permanent=True, needs_rebind=True,
                 )
-            elif delivery["channel"] == "feishu":
-                self.feishu.send_card(
-                    chat_id=delivery["target"], card=format_feishu_card(delivery))
-            else:
-                raise DeliveryError(f"不支持的推送频道：{delivery['channel']}", permanent=True)
+            self.weixin.send(
+                account_id=delivery["account_id"], to_user_id=delivery["target"],
+                context_token=delivery["context_token"], text=message,
+            )
+            return
+        if delivery["channel"] == "feishu":
+            self.feishu.send_card(
+                chat_id=delivery["target"], card=format_feishu_card(delivery),
+            )
+            return
+        raise DeliveryError(f"不支持的推送频道：{delivery['channel']}", permanent=True)
+
+    def _deliver_with_errors(self, delivery: dict[str, Any], message: str) -> None:
+        try:
+            self._deliver(delivery, message)
         except DeliveryError:
             raise
         except CredentialError as exc:
@@ -415,29 +457,32 @@ class BotDeliveryGateway:
                 diagnostic_code="transport_error",
             ) from exc
         except RuntimeError as exc:
-            message = str(exc)
-            permanent = any(word in message for word in (
-                "尚未配置", "不存在", "未安装", "token", "App ID", "App Secret"))
-            needs_rebind = "context_token" in message or "重新扫码" in message
+            error = str(exc)
+            permanent = any(word in error for word in (
+                "尚未配置", "不存在", "未安装", "token", "App ID", "App Secret",
+            ))
+            needs_rebind = "context_token" in error or "重新扫码" in error
             code = "not_configured" if permanent else (
-                "rate_limited" if any(value in message.casefold() for value in (
+                "rate_limited" if any(value in error.casefold() for value in (
                     "429", "rate limit", "too many",
                 )) else "transport_error"
             )
             raise DeliveryError(
-                message, permanent=permanent, needs_rebind=needs_rebind,
+                error, permanent=permanent, needs_rebind=needs_rebind,
                 diagnostic_code=code,
             ) from exc
         except (OSError, ValueError, TypeError, AttributeError, ImportError) as exc:
-            # Third-party SDK versions do not share one transport exception
-            # hierarchy.  Convert their failures so one bad item cannot abort
-            # the whole claimed batch without a durable outcome.
-            message = str(exc)
-            lowered = message.casefold()
-            diagnostic = "tls_error" if any(value in lowered for value in (
+            error = str(exc)
+            diagnostic = "tls_error" if any(value in error.casefold() for value in (
                 "ssl", "tls", "certificate",
             )) else "transport_error"
-            raise DeliveryError(message, diagnostic_code=diagnostic) from exc
+            raise DeliveryError(error, diagnostic_code=diagnostic) from exc
+
+    def send(self, delivery: dict[str, Any]) -> None:
+        if not delivery.get("target") or not delivery.get("account_id"):
+            raise DeliveryError("推送目标尚未绑定", permanent=True, needs_rebind=True)
+        message = format_alert(delivery, delivery["channel"])
+        self._deliver_with_errors(delivery, message)
 
 
 class OutboxDispatcher:

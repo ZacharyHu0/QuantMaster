@@ -11,7 +11,7 @@ from sqlite3 import Connection
 from quantmaster.automation.models import utc_now
 from quantmaster.automation.store import AUTOMATION_SCHEMA_VERSION, DEFAULT_JOBS
 from quantmaster.config import get_config
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 _V6_DEFAULTS = {

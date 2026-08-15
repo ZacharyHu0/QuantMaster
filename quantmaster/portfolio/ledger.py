@@ -26,6 +26,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
+from quantmaster.schema_access import register_ledger
 
 LEDGER_SCHEMA_VERSION = 1
 
@@ -514,3 +515,6 @@ class Ledger:
                                    cost_basis_complete=unknown_cost_shares <= 1e-9,
                                    unknown_cost_shares=unknown_cost_shares))
         return result
+
+
+register_ledger(Ledger)

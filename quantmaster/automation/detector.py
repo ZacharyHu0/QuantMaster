@@ -24,6 +24,60 @@ def _closed(frame: pd.DataFrame, cutoff: pd.Timestamp | None) -> pd.DataFrame:
     return result
 
 
+def _market_turn_inputs(
+    bars: dict[str, pd.DataFrame], cutoff: pd.Timestamp | None,
+) -> tuple[dict[str, float], list[float], list[pd.Timestamp], set[pd.Timestamp]]:
+    returns: dict[str, float] = {}
+    amount_scores: list[float] = []
+    as_of: list[pd.Timestamp] = []
+    history_sessions: set[pd.Timestamp] = set()
+    for symbol, raw in bars.items():
+        frame = _closed(raw, cutoff)
+        if len(frame) < 4 or "close" not in frame:
+            continue
+        close = pd.to_numeric(frame["close"], errors="coerce").dropna()
+        if len(close) < 4:
+            continue
+        returns[symbol] = float(close.iloc[-1] / close.iloc[-4] - 1)
+        as_of.append(pd.Timestamp(close.index[-1]))
+        history_sessions.update(pd.to_datetime(close.index).normalize().unique())
+        if "amount" not in frame:
+            continue
+        amount = pd.to_numeric(frame["amount"], errors="coerce")
+        recent = float(amount.iloc[-3:].sum())
+        historical = amount.groupby(pd.to_datetime(frame.index).normalize()).apply(
+            lambda values: float(values.iloc[-3:].sum()))
+        amount_scores.append(_percentile(recent, historical.iloc[:-1]))
+    return returns, amount_scores, as_of, history_sessions
+
+
+def _breadth_inputs(
+    breadth: pd.Series | None, cutoff: pd.Timestamp | None,
+) -> tuple[float, pd.Timestamp | None, pd.Series]:
+    if breadth is None:
+        return 0.0, None, pd.Series(dtype=float)
+    series = pd.to_numeric(breadth, errors="coerce").dropna().sort_index()
+    if cutoff is not None:
+        series = series.loc[pd.to_datetime(series.index) <= cutoff]
+    if len(series) < 4:
+        return 0.0, None, pd.Series(dtype=float)
+    return (
+        float((series.iloc[-1] - series.iloc[-4]) * 100),
+        pd.Timestamp(series.index[-1]),
+        series.diff(3).abs().mul(100).iloc[:-1],
+    )
+
+
+def _return_history(bars: dict[str, pd.DataFrame]) -> list[float]:
+    values: list[float] = []
+    for raw in bars.values():
+        if "close" not in raw or len(raw) < 4:
+            continue
+        close = pd.to_numeric(raw["close"], errors="coerce")
+        values.extend(close.pct_change(3, fill_method=None).abs().dropna().iloc[:-1].tolist())
+    return values
+
+
 @dataclass
 class MarketTurnDetector:
     """把分钟行情转换为可审计的变盘候选；目标策略负责最终确认和冷却。"""
@@ -38,29 +92,7 @@ class MarketTurnDetector:
         *,
         cutoff: pd.Timestamp | None = None,
     ) -> AlertEvent | None:
-        returns: dict[str, float] = {}
-        amount_scores: list[float] = []
-        as_of: list[pd.Timestamp] = []
-        history_sessions: set[pd.Timestamp] = set()
-
-        for symbol, raw in bars.items():
-            frame = _closed(raw, cutoff)
-            if len(frame) < 4 or "close" not in frame:
-                continue
-            close = pd.to_numeric(frame["close"], errors="coerce").dropna()
-            if len(close) < 4:
-                continue
-            value = float(close.iloc[-1] / close.iloc[-4] - 1)
-            returns[symbol] = value
-            stamp = pd.Timestamp(close.index[-1])
-            as_of.append(stamp)
-            history_sessions.update(pd.to_datetime(close.index).normalize().unique())
-            if "amount" in frame:
-                amount = pd.to_numeric(frame["amount"], errors="coerce")
-                recent = float(amount.iloc[-3:].sum())
-                historical = amount.groupby(pd.to_datetime(frame.index).normalize()).apply(
-                    lambda values: float(values.iloc[-3:].sum()))
-                amount_scores.append(_percentile(recent, historical.iloc[:-1]))
+        returns, amount_scores, as_of, history_sessions = _market_turn_inputs(bars, cutoff)
 
         if len(returns) < 3 or not as_of:
             self.direction, self.consecutive = "neutral", 0
@@ -73,30 +105,13 @@ class MarketTurnDetector:
         direction = "up" if positive > negative else "down"
         median_return = float(np.median(list(returns.values())))
 
-        breadth_delta = 0.0
-        breadth_as_of = None
-        breadth_history = pd.Series(dtype=float)
-        if breadth is not None:
-            series = pd.to_numeric(breadth, errors="coerce").dropna().sort_index()
-            if cutoff is not None:
-                series = series.loc[pd.to_datetime(series.index) <= cutoff]
-            if len(series) >= 4:
-                breadth_delta = float((series.iloc[-1] - series.iloc[-4]) * 100)
-                breadth_as_of = pd.Timestamp(series.index[-1])
-                breadth_history = series.diff(3).abs().mul(100).iloc[:-1]
+        breadth_delta, breadth_as_of, breadth_history = _breadth_inputs(breadth, cutoff)
 
         if abs(median_return) < 0.004 and abs(breadth_delta) < 15:
             self.direction, self.consecutive = "neutral", 0
             return None
 
-        return_history: list[float] = []
-        for raw in bars.values():
-            if "close" not in raw or len(raw) < 4:
-                continue
-            close = pd.to_numeric(raw["close"], errors="coerce")
-            return_history.extend(
-                close.pct_change(3, fill_method=None).abs().dropna().iloc[:-1].tolist()
-            )
+        return_history = _return_history(bars)
         shock_score = _percentile(abs(median_return), pd.Series(return_history))
         breadth_score = _percentile(abs(breadth_delta), breadth_history)
         amount_score = float(np.mean(amount_scores)) if amount_scores else 0.0

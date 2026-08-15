@@ -26,6 +26,7 @@ from quantmaster.config import get_config
 from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
+from quantmaster.schema_access import register_rotation_store
 
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})
@@ -1799,3 +1800,6 @@ class RotationStore:
         if not self.etf_metadata_history_path.is_file():
             return pd.DataFrame()
         return self._read_verified_etf_metadata_history()
+
+
+register_rotation_store(RotationStore)

@@ -125,6 +125,78 @@ class ResearchJobManager:
             heartbeat_stop.set()
             heartbeat.join(timeout=1.0)
 
+    def _complete_research_job(
+        self, job_id: str, attempt: int, job: dict[str, Any], plan: ExecutionPlan,
+        kernel: Kernel, failures: list[dict[str, Any]], inputs: list[dict[str, Any]],
+        outputs: list[dict[str, Any]], started_at: str,
+    ) -> None:
+        status = "completed_with_errors" if failures else "completed"
+        diagnostics = []
+        if not failures:
+            try:
+                diagnostics = self.engine._emit_diagnostics(plan, job_id)
+            except Exception as exc:
+                failures.append({"task": "diagnostics", "error": str(exc)[:500]})
+                status = "completed_with_errors"
+        manifest = RunManifest(
+            run_id=job_id, plan_hash=plan.plan_hash, status=status,
+            backend_requested=plan.backend, backend_used=kernel.backend_used,
+            started_at=started_at, finished_at=utc_now(),
+            input_partitions=tuple(inputs), output_partitions=tuple(outputs),
+            warnings=tuple(filter(None, (*plan.warnings, kernel.fallback_reason))),
+        ).to_dict()
+        manifest["diagnostics"] = diagnostics
+        manifest["attempt"] = attempt
+        self.engine.lake.catalog.save_run(manifest)
+        self.engine.lake.write_run_files(job_id, manifest)
+        self._owned_update(
+            job_id, status=status, current_task="", failures_json=failures,
+            manifest_json=manifest, owner="", lease_expires=0,
+        )
+        self.catalog.append_job_event(job_id, attempt, {
+            "type": status, "failed": len(failures),
+        })
+
+    def _execute_research_task(
+        self, job_id: str, attempt: int, job: dict[str, Any], plan: ExecutionPlan,
+        kernel: Kernel, cursor: int, task_indexes: list[int], failures: list[dict[str, Any]],
+        inputs: list[dict[str, Any]], outputs: list[dict[str, Any]], started_at: str,
+        lease_alive: threading.Event,
+    ) -> None:
+        task_index = task_indexes[cursor]
+        if task_index < 0 or task_index >= len(plan.tasks):
+            raise RuntimeError(f"任务索引越界：{task_index}")
+        task = plan.tasks[task_index]
+        self._owned_update(job_id, current_task=task.key)
+        try:
+            records = self.engine.execute_task(plan, task, kernel=kernel, run_id=job_id)
+            if not lease_alive.is_set():
+                return
+            (inputs if task.kind == "sync" else outputs).extend(records)
+            self._owned_update(
+                job_id, next_index=cursor + 1, succeeded=int(job["succeeded"]) + 1,
+                current_task="", manifest_json={
+                    "run_id": job_id, "plan_hash": plan.plan_hash, "status": "running",
+                    "started_at": started_at, "input_partitions": inputs,
+                    "output_partitions": outputs, "attempt": attempt,
+                },
+            )
+            self.catalog.append_job_event(job_id, attempt, {
+                "type": "task_completed", "task_index": task_index, "task": task.key,
+            })
+        except Exception as exc:
+            failures.append({
+                "task_index": task_index, "task": task.to_dict(), "error": str(exc)[:500],
+            })
+            self._owned_update(
+                job_id, next_index=cursor + 1, failed=int(job["failed"]) + 1,
+                current_task="", failures_json=failures,
+            )
+            self.catalog.append_job_event(job_id, attempt, {
+                "type": "task_failed", "task_index": task_index,
+                "task": task.key, "error": str(exc)[:500],
+            })
+
     def _execute(self, job_id: str, attempt: int, lease_alive: threading.Event) -> None:
         job = self.catalog.job(job_id)
         if not job:
@@ -164,66 +236,14 @@ class ResearchJobManager:
                 self.catalog.append_job_event(job_id, attempt, {"type": "cancelled"})
                 return
             if cursor >= len(task_indexes):
-                status = "completed_with_errors" if failures else "completed"
-                diagnostics = []
-                if not failures:
-                    try:
-                        diagnostics = self.engine._emit_diagnostics(plan, job_id)
-                    except Exception as exc:
-                        failures.append({"task": "diagnostics", "error": str(exc)[:500]})
-                        status = "completed_with_errors"
-                manifest = RunManifest(
-                    run_id=job_id, plan_hash=plan.plan_hash, status=status,
-                    backend_requested=plan.backend, backend_used=kernel.backend_used,
-                    started_at=started_at, finished_at=utc_now(),
-                    input_partitions=tuple(inputs), output_partitions=tuple(outputs),
-                    warnings=tuple(filter(None, (*plan.warnings, kernel.fallback_reason))),
-                ).to_dict()
-                manifest["diagnostics"] = diagnostics
-                manifest["attempt"] = attempt
-                self.engine.lake.catalog.save_run(manifest)
-                self.engine.lake.write_run_files(job_id, manifest)
-                self._owned_update(
-                    job_id, status=status, current_task="", failures_json=failures,
-                    manifest_json=manifest, owner="", lease_expires=0,
+                self._complete_research_job(
+                    job_id, attempt, job, plan, kernel, failures, inputs, outputs, started_at,
                 )
-                self.catalog.append_job_event(job_id, attempt, {
-                    "type": status, "failed": len(failures),
-                })
                 return
-            task_index = task_indexes[cursor]
-            if task_index < 0 or task_index >= len(plan.tasks):
-                raise RuntimeError(f"任务索引越界：{task_index}")
-            task = plan.tasks[task_index]
-            self._owned_update(job_id, current_task=task.key)
-            try:
-                records = self.engine.execute_task(plan, task, kernel=kernel, run_id=job_id)
-                if not lease_alive.is_set():
-                    return
-                (inputs if task.kind == "sync" else outputs).extend(records)
-                self._owned_update(
-                    job_id, next_index=cursor + 1, succeeded=int(job["succeeded"]) + 1,
-                    current_task="", manifest_json={
-                        "run_id": job_id, "plan_hash": plan.plan_hash, "status": "running",
-                        "started_at": started_at, "input_partitions": inputs,
-                        "output_partitions": outputs, "attempt": attempt,
-                    },
-                )
-                self.catalog.append_job_event(job_id, attempt, {
-                    "type": "task_completed", "task_index": task_index, "task": task.key,
-                })
-            except Exception as exc:
-                failures.append({
-                    "task_index": task_index, "task": task.to_dict(), "error": str(exc)[:500],
-                })
-                self._owned_update(
-                    job_id, next_index=cursor + 1, failed=int(job["failed"]) + 1,
-                    current_task="", failures_json=failures,
-                )
-                self.catalog.append_job_event(job_id, attempt, {
-                    "type": "task_failed", "task_index": task_index,
-                    "task": task.key, "error": str(exc)[:500],
-                })
+            self._execute_research_task(
+                job_id, attempt, job, plan, kernel, cursor, task_indexes,
+                failures, inputs, outputs, started_at, lease_alive,
+            )
 
     def get(self, job_id: str) -> dict[str, Any]:
         value = self.catalog.job(job_id)

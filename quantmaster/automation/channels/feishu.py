@@ -8,10 +8,9 @@ import threading
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
-from quantmaster.automation.models import ActorContext
-from quantmaster.automation.store import AutomationStore
+from quantmaster.actor_context import ActorContext
 from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.logging_config import normalize_third_party_logger, redact_sensitive_text
 
@@ -299,7 +298,7 @@ def _strip_bot_mentions(channel, chat_type: str, text: str, mentions: list) -> s
 class FeishuBotClient:
     """飞书企业自建应用 Bot：长连接收消息，OpenAPI 发送消息。"""
 
-    def __init__(self, store: AutomationStore, credentials: CredentialStore | None = None):
+    def __init__(self, store: Any, credentials: CredentialStore | None = None):
         self.store = store
         self.credentials = credentials or CredentialStore()
         self._lifecycle_lock = threading.RLock()

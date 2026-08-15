@@ -30,6 +30,10 @@ from quantmaster.data.legacy_migration import (
 from quantmaster.data.migration import MigrationError, migration_manager
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
+from quantmaster.server.reload_access import (
+    manual_reload_trigger_path,
+    request_manual_reload,
+)
 from quantmaster.server.security import (
     attach_csrf_cookie,
     is_local_request,
@@ -37,6 +41,7 @@ from quantmaster.server.security import (
     require_csrf,
     require_local,
 )
+from quantmaster.server.settings_control import register_settings_control
 from quantmaster.settings import (
     SecretMutations,
     SettingsDocument,
@@ -50,6 +55,8 @@ settings_manager = migration_manager.config_manager
 _running_server: dict[str, Any] = {}
 _applied_migrations: set[str] = set()
 logger = logging.getLogger(__name__)
+
+
 
 
 def _require_runtime_worker() -> dict[str, Any]:
@@ -414,6 +421,9 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+register_settings_control(settings_manager, _apply_runtime)
+
+
 def _llm_cancellation_after_save(
     saved: dict[str, Any], *, llm_secret_changed: bool = False,
 ) -> dict[str, Any]:
@@ -513,8 +523,6 @@ def retry_settings_apply(request: Request) -> dict:
 def reload_web_worker(request: Request, background_tasks: BackgroundTasks) -> dict:
     """Manually replace the Web worker without applying automatic reload throttling."""
     _require_csrf(request)
-    from quantmaster.server.lifecycle import manual_reload_trigger_path, request_manual_reload
-
     trigger_path = manual_reload_trigger_path()
     if trigger_path is None:
         raise HTTPException(

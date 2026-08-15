@@ -16,6 +16,7 @@ from datetime import time as wall_time
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
+from quantmaster.trading_session_sources import official_calendar, research_calendar
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAILY_SIGNAL_CUTOFF = wall_time(15, 0)
@@ -108,23 +109,11 @@ class SessionExpectationResolver:
     def _official_sessions(self, start: date, end: date) -> list[str]:
         if not get_config().data.tushare_token:
             return []
-        from quantmaster.data.tushare_source import TushareSource
-
-        calendar = TushareSource().trade_calendar(start.isoformat(), end.isoformat())
-        return [str(value.date()) for value in calendar]
+        return official_calendar(start, end)
 
     @staticmethod
     def _research_sessions(start: date, end: date) -> list[str]:
-        root = get_config().data_root / "research_lake"
-        catalog_path = root / "_meta" / "catalog.sqlite"
-        if not catalog_path.is_file():
-            return []
-        from quantmaster.research.catalog import ResearchCatalog
-        from quantmaster.research.contracts import AssetClass, Frequency
-
-        return ResearchCatalog(catalog_path).trading_dates(
-            AssetClass.STOCK, Frequency.DAILY, start.isoformat(), end.isoformat(),
-        )
+        return research_calendar(get_config().data_root, start, end)
 
     @staticmethod
     def _stockdb_evidence(start: date, end: date, cutoff_at: datetime) -> tuple[str, str]:

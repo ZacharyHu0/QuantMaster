@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ import pandas as pd
 
 from quantmaster.factors.base import Factor, PanelDict
 from quantmaster.factors.engine import compute_factor
+from quantmaster.signal_contract import SignalBundle
 
 
 class Strategy(ABC):
@@ -35,20 +35,6 @@ class Strategy(ABC):
             weights = weights.where(mask, 0.0)
             weights.loc[~active] = float("nan")
         return SignalBundle(weights=weights)
-
-
-@dataclass
-class SignalBundle:
-    """兼容旧权重接口的可归因信号载体。"""
-
-    weights: pd.DataFrame
-    scores: pd.DataFrame | None = None
-    confidence: pd.DataFrame | None = None
-    degraded: pd.DataFrame | None = None
-    contributions: dict[str, pd.DataFrame] = field(default_factory=dict)
-    intentional_flat: pd.Series | None = None
-    target_exposure: pd.Series | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def rebalance_mask(dates: pd.DatetimeIndex, freq: str = "W") -> pd.Series:

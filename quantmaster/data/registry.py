@@ -42,6 +42,7 @@ from quantmaster.data.cache_freshness import (
     CachePurpose,
     assess_daily_freshness,
 )
+from quantmaster.data.frame_quality_access import register_frame_quality
 from quantmaster.data.resilience import (
     bypass_endpoint_cache,
     data_priority,
@@ -50,6 +51,8 @@ from quantmaster.data.resilience import (
 )
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.data.storage import BarStore, IntradayBarStore
+from quantmaster.market_data_access import register_history_refresh
+from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
 
 logger = logging.getLogger(__name__)
@@ -370,19 +373,20 @@ def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.Datetime
     except (ImportError, OSError, RuntimeError, TypeError, ValueError):
         logger.debug("本地 StockDB 交易日证据不可用", exc_info=True)
     try:
-        from quantmaster.research.catalog import ResearchCatalog
-        from quantmaster.research.contracts import AssetClass, Frequency
-
         path = get_config().data_root / "research_lake" / "_meta" / "catalog.sqlite"
         if path.is_file():
-            values = ResearchCatalog(
-                path, read_only=not remote_io_allowed(),
-            ).trading_dates(
-                AssetClass.STOCK,
-                Frequency.DAILY,
-                start.date().isoformat(),
-                end.date().isoformat(),
-            )
+            with connect_sqlite(path, read_only=not remote_io_allowed()) as connection:
+                values = [
+                    str(row[0]) for row in connection.execute(
+                        "SELECT DISTINCT trade_date FROM research_partitions "
+                        "WHERE kind=? AND asset_class=? AND frequency=? "
+                        "AND trade_date>=? AND trade_date<=? ORDER BY trade_date",
+                        (
+                            "raw", "stock", "1d",
+                            start.date().isoformat(), end.date().isoformat(),
+                        ),
+                    ).fetchall()
+                ]
             sessions = pd.DatetimeIndex(pd.to_datetime(values, errors="coerce")).dropna().normalize()
             if len(sessions):
                 return sessions.unique().sort_values(), "research_lake"
@@ -3162,3 +3166,7 @@ def read_panel(
         for symbol, envelope in envelopes.items()
     )
     return BarDataEnvelope(data, quality, provenance)
+
+
+register_history_refresh(refresh_history)
+register_frame_quality(_assess_daily_frame, _covers_requested_range)

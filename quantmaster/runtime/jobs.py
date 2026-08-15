@@ -34,6 +34,7 @@ from quantmaster.runtime.identity import (
     require_application_identity,
 )
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.llm import register_job_store_factory
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
@@ -948,6 +949,7 @@ class UnifiedJobStore:
             "queued_cancelled": sum(str(row["status"]) in {"queued", "interrupted"} for row in rows),
             "running_cancelling": sum(str(row["status"]) in {"running", "cancelling"} for row in rows),
         }
+
 
     def cancelled(
         self, job_id: str, owner: str = "", lease_token: str = "",
@@ -2337,3 +2339,6 @@ class UnifiedJobRuntime:
                 "retry": f"/api/v1/jobs/{job['id']}/retry",
             },
         }
+
+
+register_job_store_factory(UnifiedJobStore)

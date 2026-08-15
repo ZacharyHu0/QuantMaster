@@ -67,6 +67,12 @@ class RecoveryGuard(Protocol):
 class LocalRecoveryGuard:
     """Read-only operating-system observations; it never stops a process."""
 
+    def __init__(
+        self,
+        process_identity: Callable[[int], Mapping[str, Any] | None] | None = None,
+    ) -> None:
+        self._process_identity = process_identity
+
     def stat_identity(self, path: Path) -> FileIdentity:
         stat = path.stat()
         return FileIdentity(stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
@@ -78,9 +84,9 @@ class LocalRecoveryGuard:
         return value
 
     def process_identity(self, pid: int) -> Mapping[str, Any] | None:
-        from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
-
-        return FreeStockDBRuntime._process_identity(pid)
+        if self._process_identity is None:
+            return None
+        return self._process_identity(pid)
 
 
 def capture_file_identity(path: str | Path, guard: RecoveryGuard | None = None) -> FileIdentity:

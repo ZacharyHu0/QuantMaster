@@ -20,7 +20,7 @@ from typing import Any
 
 import pandas as pd
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 MigrationRow = dict[str, Any]

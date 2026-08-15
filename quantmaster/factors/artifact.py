@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pandas as pd
 
+from quantmaster.artifact_contract import ArtifactKind, ArtifactRef, AssetClass, Frequency
 from quantmaster.factors.base import Factor, PanelDict
-from quantmaster.research import ArtifactKind, ArtifactRef, AssetClass, Frequency
-from quantmaster.research.lake import ResearchLake
+from quantmaster.research_access import research_lake
 
 _ARTIFACT_RE = re.compile(
     r"^artifact:(?P<kind>factor|factors|label|labels|risk|model|models):"
@@ -35,13 +36,13 @@ def parse_artifact_reference(value: str) -> ArtifactRef | None:
 
 
 class ArtifactFactor(Factor):
-    def __init__(self, reference: ArtifactRef, lake: ResearchLake | None = None):
+    def __init__(self, reference: ArtifactRef, lake: Any | None = None):
         if reference.kind not in {ArtifactKind.FACTOR, ArtifactKind.RISK, ArtifactKind.MODEL}:
             raise ValueError("回测信号只能引用 factor/risk/model 产物")
         self.reference = reference
         self.name = f"artifact:{reference.id}@{reference.version}"
         self.description = "版本固定的 ResearchLake 产物"
-        self.lake = lake or ResearchLake()
+        self.lake = lake or research_lake()
 
     def compute(self, panel: PanelDict) -> pd.DataFrame:
         close = panel.get("close")

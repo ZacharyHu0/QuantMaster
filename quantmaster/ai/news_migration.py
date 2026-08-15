@@ -15,7 +15,7 @@ from quantmaster.ai.news_storage import (
     migrate_legacy_news_schema,
     require_current_news_schema,
 )
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 NEWS_ARCHIVE_TABLES = (

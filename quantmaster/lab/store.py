@@ -23,6 +23,7 @@ from quantmaster.lab.models import (
     utc_now,
 )
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.schema_access import register_lab_store
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 _GENERATED_FACTOR_NAME = re.compile(
@@ -606,6 +607,7 @@ class LabStore:
                 "source": "quant_lab",
             })
         return result
+
     @staticmethod
     def _version_from_conn(conn: sqlite3.Connection, version_id: str) -> dict | None:
         row = conn.execute(
@@ -2531,3 +2533,6 @@ def read_runtime_factors(path: str | Path | None = None) -> list[dict]:
             "source": "quant_lab",
         })
     return result
+
+
+register_lab_store(LabStore)

@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from contextlib import closing
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 
@@ -62,8 +62,7 @@ class RemainingSchemaMigrator:
     def _targets(root: Path) -> list[tuple[str, Path, Callable[[], None], tuple]]:
         from quantmaster.data.resilience import ProviderHealthStore, TushareRateLimiter
         from quantmaster.data.storage import BarStore
-        from quantmaster.portfolio.ledger import Ledger
-        from quantmaster.research.catalog import ResearchCatalog
+        from quantmaster.schema_access import schema_target
 
         targets: list[tuple[str, Path, Callable[[], None], tuple]] = []
         provider_columns = {
@@ -88,7 +87,7 @@ class RemainingSchemaMigrator:
              lambda: TushareRateLimiter.migrate_legacy_database(root / "tushare_rate.sqlite"),
              ({"rate_state"}, {"rate_state": {"name", "next_call"}}, 1)),
             ("research", root / "research_lake" / "_meta" / "catalog.sqlite",
-             lambda: ResearchCatalog.migrate_legacy_database(
+             lambda: schema_target("research_catalog").migrate_legacy_database(
                  root / "research_lake" / "_meta" / "catalog.sqlite"
              ), (research_tables, research_columns, 1)),
         )
@@ -119,7 +118,8 @@ class RemainingSchemaMigrator:
                 "cashflows": {"idempotency_key"},
             }
             targets.append((
-                key, path, lambda value=path: Ledger.migrate_legacy_database(value),
+                key, path,
+                lambda value=path: schema_target("ledger").migrate_legacy_database(value),
                 ({"trades", "cashflows"}, ledger_columns, 1),
             ))
         return sorted(targets, key=lambda item: item[0])

@@ -198,7 +198,7 @@ def _dimension_content(item: dict[str, Any], *, compact: bool = False) -> str:
     return "\n".join(rows)
 
 
-def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
+def _report_card_header(report: dict[str, Any]) -> tuple[str, str, str, str]:
     instrument = report.get("instrument") or {}
     quote = report.get("quote") or {}
     overall = report.get("overall") or {}
@@ -219,6 +219,11 @@ def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
         f"**一句话结论**\n{_text(overall.get('thesis'), 480)}\n\n"
         f"{_text(overall.get('summary'), 700)}"
     )
+    return template, name, symbol, summary
+
+
+def _report_card_elements(report: dict[str, Any], summary: str) -> list[dict[str, Any]]:
+    overall = report.get("overall") or {}
     elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
     ]
@@ -288,19 +293,12 @@ def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
             "tag": "plain_text", "content": str(report.get("disclaimer") or "仅作研究，不构成投资建议。"),
         }],
     })
-    card = {
-        "config": {"wide_screen_mode": True, "enable_forward": True},
-        "header": {
-            "template": template,
-            "title": {
-                "tag": "plain_text",
-                "content": f"QuantMaster · {name}（{symbol}）六维分析",
-            },
-        },
-        "elements": elements,
-    }
-    if card_size_bytes(card) <= FEISHU_CARD_LIMIT_BYTES:
-        return card
+    return elements
+
+
+def _compact_report_card_elements(
+    report: dict[str, Any], summary: str,
+) -> list[dict[str, Any]]:
     compact_elements: list[dict[str, Any]] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}}, {"tag": "hr"},
     ]
@@ -320,7 +318,25 @@ def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
         "tag": "plain_text",
         "content": str(report.get("disclaimer") or "仅作研究，不构成投资建议。"),
     }]})
-    card["elements"] = compact_elements
+    return compact_elements
+
+
+def stock_analysis_report_card(report: dict[str, Any]) -> dict[str, Any]:
+    template, name, symbol, summary = _report_card_header(report)
+    card = {
+        "config": {"wide_screen_mode": True, "enable_forward": True},
+        "header": {
+            "template": template,
+            "title": {
+                "tag": "plain_text",
+                "content": f"QuantMaster · {name}（{symbol}）六维分析",
+            },
+        },
+        "elements": _report_card_elements(report, summary),
+    }
+    if card_size_bytes(card) <= FEISHU_CARD_LIMIT_BYTES:
+        return card
+    card["elements"] = _compact_report_card_elements(report, summary)
     if card_size_bytes(card) > FEISHU_CARD_LIMIT_BYTES:
         raise ValueError("六维主卡超过 28 KB，无法在不丢失结论的情况下发送")
     return card

@@ -8,8 +8,8 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.data.migration import restore_backup_path
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 

@@ -545,8 +545,8 @@ class LabService:
             return self.store.publication(publication_id) or current
         try:
             from quantmaster.lab.ml import artifact_sha256
-            from quantmaster.research.contracts import AssetClass
-            from quantmaster.research.engine import ResearchEngine
+            from quantmaster.research_access import research_engine
+            from quantmaster.research_primitives import AssetClass
 
             payload = claimed["payload"]
             root = Path(get_config().data_root).resolve()
@@ -559,7 +559,7 @@ class LabService:
             required = {"trade_date", "symbol", "value"}
             if not required.issubset(rows):
                 raise ValueError(f"模型预测缺少字段: {sorted(required - set(rows))}")
-            records = ResearchEngine().publish_model_predictions(
+            records = research_engine(None).publish_model_predictions(
                 str(payload["slug"]), str(payload["version"]),
                 AssetClass(str(payload["asset_class"])), rows,
                 run_id=str(payload["run_id"]),
@@ -700,7 +700,7 @@ class LabService:
         self, universe: str, start: str, end: str,
         progress=None, data_policy: str | None = None,
     ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None, dict]:
-        from quantmaster.data import refresh_panel
+        from quantmaster import data as data_api
         from quantmaster.data.universe import load_universe
 
         policy = DataPolicy(data_policy or get_config().lab.data_policy)
@@ -729,7 +729,7 @@ class LabService:
                     f"行情 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
                 )
 
-        market_envelope = refresh_panel(symbols, start, end, progress=on_symbol)
+        market_envelope = data_api.refresh_panel(symbols, start, end, progress=on_symbol)
         panel = market_envelope.require_data()
         snapshot = create_snapshot(
             universe,
@@ -961,6 +961,159 @@ class LabService:
             "sections": [self._robustness_section(name, evidence) for name, evidence in tests.items()],
         }
 
+    @staticmethod
+    def _prepare_data_provider(before: dict[str, Any], provider: str) -> str:
+        selected = str(provider or "").strip().lower()
+        if not selected:
+            stockdb = next(item for item in before["providers"] if item["id"] == "free-stockdb")
+            selected = (
+                "free-stockdb" if stockdb["available"] and not before["membership_missing"]
+                else "tushare"
+            )
+        if selected not in {"free-stockdb", "tushare"}:
+            raise LabError(
+                "INVALID_REQUEST", f"不支持的数据补齐来源: {selected}",
+                action="选择本机 StockDB 或 Tushare",
+            )
+        return selected
+
+    @staticmethod
+    def _prepare_data_targets(
+        before: dict[str, Any], include_warmup: bool,
+    ) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        for item in before["gaps"]:
+            segments = [
+                segment for segment in item.get("segments") or []
+                if include_warmup or segment.get("kind") == "critical"
+            ]
+            if segments:
+                targets.append({
+                    **item,
+                    "repair_start": min(str(segment["start"]) for segment in segments),
+                    "repair_end": max(str(segment["end"]) for segment in segments),
+                })
+        return targets
+
+    @staticmethod
+    def _prepare_data_membership(
+        before: dict[str, Any], universe: str, selected: str, start: str, end: str,
+        progress, checkpoint, clear_caches,
+    ) -> dict[str, Any]:
+        if not before["membership_missing"]:
+            return before
+        if selected != "tushare":
+            raise LabError(
+                "DATASET_MISSING", "本机 StockDB 不能补齐 CSI800 点时成分",
+                action="改用 Tushare，或先导入 PIT 成分缓存",
+            )
+        if progress:
+            progress(3, "通过 Tushare 补齐 CSI800 点时成分")
+        load_csi800_membership(start, end)
+        clear_caches()
+        refreshed = dataset_repair_plan(universe, start, end)
+        checkpoint(
+            4, "membership", "completed", "CSI800 点时成分已持久化",
+            partition="csi800_membership", persisted=1,
+        )
+        return refreshed
+
+    @staticmethod
+    def _prepare_data_space_check(
+        stage: str, remaining: list[dict[str, Any]], value: int,
+        persisted: list[str], stages: dict[str, dict[str, Any]], checkpoint,
+    ) -> dict[str, Any]:
+        bars_root = get_config().data_root / "bars"
+        probe = bars_root if bars_root.exists() else get_config().data_root
+        estimate = _repair_space_estimate(
+            {"gaps": remaining},
+            workers=min(4, max(1, int(get_config().lab.max_workers))),
+            probe=probe,
+        )
+        if estimate["disk_bytes"] <= estimate["disk_free_bytes"]:
+            return estimate
+        context = {
+            "required_bytes": estimate["disk_bytes"],
+            "peak_bytes": estimate["required_peak_bytes"],
+            "free_bytes": estimate["disk_free_bytes"],
+            "reserve_bytes": estimate["reserve_bytes"],
+            "persisted": len(persisted),
+        }
+        stages[stage] = {"status": "blocked", "stage": stage, **context}
+        checkpoint(
+            value, stage, "blocked", "磁盘空间不足，已在安全边界停止",
+            diagnostic_code="STORAGE_SPACE_INSUFFICIENT",
+            safe_retry_point=stage, **context,
+        )
+        raise LabError(
+            "STORAGE_SPACE_INSUFFICIENT", "数据准备所需磁盘空间不足",
+            action="释放数据目录所在卷空间后，从安全重试点继续",
+            retryable=True, context=context,
+        )
+
+    def _repair_data_targets(
+        self, targets: list[dict[str, Any]], selected: str, cancelled, progress,
+        checkpoint, require_space,
+    ) -> tuple[dict[str, str], dict[str, dict[str, Any]], list[str]]:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        from quantmaster import data as data_api
+        from quantmaster.data.registry import RefreshMode
+
+        failures: dict[str, str] = {}
+        degraded: dict[str, dict[str, Any]] = {}
+        persisted: list[str] = []
+
+        def repair(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+            if cancelled and cancelled():
+                raise InterruptedError("数据补齐已取消")
+            envelope = data_api.refresh_history(
+                str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
+                mode=RefreshMode.INCREMENTAL, work_class="interactive", source_name=selected,
+            )
+            envelope.require_data()
+            return str(item["symbol"]), envelope.quality.to_dict()
+
+        workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
+        completed = 0
+        require_space("bars", targets, 5)
+        for batch_start in range(0, len(targets), workers):
+            batch = targets[batch_start:batch_start + workers]
+            require_space("bars", targets[batch_start:], 5 + int(82 * completed / max(1, len(targets))))
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
+                futures = {pool.submit(repair, item): item for item in batch}
+                for future in as_completed(futures):
+                    item = futures[future]
+                    try:
+                        repaired_symbol, quality = future.result()
+                        persisted.append(repaired_symbol)
+                        if quality.get("status") != "verified":
+                            degraded[repaired_symbol] = quality
+                        checkpoint(
+                            5 + int(82 * (completed + 1) / max(1, len(targets))),
+                            "bars", "completed", f"{repaired_symbol} 已持久化",
+                            partition=repaired_symbol, persisted=len(persisted),
+                            total=len(targets), quality_status=quality.get("status", ""),
+                        )
+                    except InterruptedError:
+                        raise
+                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                        failure = classify_lab_error(exc)
+                        failures[str(item["symbol"])] = str(exc)[:300]
+                        checkpoint(
+                            5 + int(82 * (completed + 1) / max(1, len(targets))),
+                            "bars", "failed", str(exc)[:300], partition=str(item["symbol"]),
+                            persisted=len(persisted), total=len(targets),
+                            error_type=type(exc).__name__, diagnostic_code=failure.code,
+                        )
+                    completed += 1
+                    if progress:
+                        progress(
+                            5 + int(82 * completed / max(1, len(targets))),
+                            f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
+                        )
+        return failures, degraded, persisted
+
     def prepare_data(
         self,
         *,
@@ -974,9 +1127,6 @@ class LabService:
         cancelled=None,
     ) -> dict[str, Any]:
         """Explicitly repair planned local gaps through one user-selected provider."""
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        from quantmaster.data import RefreshMode, refresh_history
         from quantmaster.lab.dataset import clear_local_dataset_caches
 
         del data_policy
@@ -1008,144 +1158,32 @@ class LabService:
                     # the durable event metadata above.
                     progress(value, f"数据准备 · {stage}", detail)
 
-        def require_space(
-            stage: str, remaining: list[dict[str, Any]], value: int,
-        ) -> dict[str, Any]:
-            bars_root = get_config().data_root / "bars"
-            probe = bars_root if bars_root.exists() else get_config().data_root
-            estimate = _repair_space_estimate(
-                {"gaps": remaining},
-                workers=min(4, max(1, int(get_config().lab.max_workers))),
-                probe=probe,
-            )
-            if estimate["disk_bytes"] <= estimate["disk_free_bytes"]:
-                return estimate
-            context = {
-                "required_bytes": estimate["disk_bytes"],
-                "peak_bytes": estimate["required_peak_bytes"],
-                "free_bytes": estimate["disk_free_bytes"],
-                "reserve_bytes": estimate["reserve_bytes"],
-                "persisted": len(persisted),
-            }
-            stages[stage] = {"status": "blocked", "stage": stage, **context}
-            checkpoint(
-                value, stage, "blocked", "磁盘空间不足，已在安全边界停止",
-                diagnostic_code="STORAGE_SPACE_INSUFFICIENT",
-                safe_retry_point=stage,
-                **context,
-            )
-            raise LabError(
-                "STORAGE_SPACE_INSUFFICIENT", "数据准备所需磁盘空间不足",
-                action="释放数据目录所在卷空间后，从安全重试点继续",
-                retryable=True, context=context,
-            )
-
         checkpoint(
             1, "universe", "completed",
             f"已规划 {before['repair_symbol_count']} 个行情分区",
             partition="universe", persisted=1,
         )
-        selected = str(provider or "").strip().lower()
-        if not selected:
-            stockdb = next(item for item in before["providers"] if item["id"] == "free-stockdb")
-            selected = (
-                "free-stockdb"
-                if stockdb["available"] and not before["membership_missing"] else "tushare"
-            )
-        if selected not in {"free-stockdb", "tushare"}:
-            raise LabError(
-                "INVALID_REQUEST", f"不支持的数据补齐来源: {selected}",
-                action="选择本机 StockDB 或 Tushare",
-            )
+        selected = self._prepare_data_provider(before, provider)
         if before["membership_missing"]:
-            if selected != "tushare":
-                raise LabError(
-                    "DATASET_MISSING", "本机 StockDB 不能补齐 CSI800 点时成分",
-                    action="改用 Tushare，或先导入 PIT 成分缓存",
-                )
-            if progress:
-                progress(3, "通过 Tushare 补齐 CSI800 点时成分")
-            load_csi800_membership(start, end)
-            clear_local_dataset_caches()
-            before = dataset_repair_plan(universe, start, end)
             stages["membership"] = {"status": "completed", "partitions": 1}
-            checkpoint(
-                4, "membership", "completed", "CSI800 点时成分已持久化",
-                partition="csi800_membership", persisted=1,
+            before = self._prepare_data_membership(
+                before, universe, selected, start, end, progress, checkpoint,
+                clear_local_dataset_caches,
             )
 
-        targets: list[dict[str, Any]] = []
-        for item in before["gaps"]:
-            segments = [
-                segment for segment in item.get("segments") or []
-                if include_warmup or segment.get("kind") == "critical"
-            ]
-            if not segments:
-                continue
-            targets.append({
-                **item,
-                "repair_start": min(str(segment["start"]) for segment in segments),
-                "repair_end": max(str(segment["end"]) for segment in segments),
-            })
+        targets = self._prepare_data_targets(before, include_warmup)
         failures: dict[str, str] = {}
         degraded: dict[str, dict[str, Any]] = {}
         persisted: list[str] = []
-        completed = 0
 
-        def repair(item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-            if cancelled and cancelled():
-                raise InterruptedError("数据补齐已取消")
-            market_envelope = refresh_history(
-                str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
-                mode=RefreshMode.INCREMENTAL, work_class="interactive",
-                source_name=selected,
+        def require_space(stage: str, remaining: list[dict[str, Any]], value: int) -> dict[str, Any]:
+            return self._prepare_data_space_check(
+                stage, remaining, value, persisted, stages, checkpoint,
             )
-            market_envelope.require_data()
-            return str(item["symbol"]), market_envelope.quality.to_dict()
 
-        workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
-        require_space("bars", targets, 5)
-        for batch_start in range(0, len(targets), workers):
-            batch = targets[batch_start:batch_start + workers]
-            require_space(
-                "bars", targets[batch_start:],
-                5 + int(82 * completed / max(1, len(targets))),
-            )
-            with ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="lab-data-repair",
-            ) as pool:
-                futures = {pool.submit(repair, item): item for item in batch}
-                for future in as_completed(futures):
-                    item = futures[future]
-                    try:
-                        repaired_symbol, quality = future.result()
-                        persisted.append(repaired_symbol)
-                        if quality.get("status") != "verified":
-                            degraded[repaired_symbol] = quality
-                        checkpoint(
-                            5 + int(82 * (completed + 1) / max(1, len(targets))),
-                            "bars", "completed", f"{repaired_symbol} 已持久化",
-                            partition=repaired_symbol, persisted=len(persisted),
-                            total=len(targets), quality_status=quality.get("status", ""),
-                        )
-                    except InterruptedError:
-                        raise
-                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                        failure = classify_lab_error(exc)
-                        failures[str(item["symbol"])] = str(exc)[:300]
-                        checkpoint(
-                            5 + int(82 * (completed + 1) / max(1, len(targets))),
-                            "bars", "failed", str(exc)[:300],
-                            partition=str(item["symbol"]), persisted=len(persisted),
-                            total=len(targets), error_type=type(exc).__name__,
-                            diagnostic_code=failure.code,
-                        )
-                    completed += 1
-                    if progress:
-                        progress(
-                            5 + int(82 * completed / max(1, len(targets))),
-                            f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
-                        )
+        failures, degraded, persisted = self._repair_data_targets(
+            targets, selected, cancelled, progress, checkpoint, require_space,
+        )
         clear_local_dataset_caches()
         stages["bars"] = {
             "status": "completed_with_warnings" if failures else "completed",
@@ -1217,6 +1255,157 @@ class LabService:
             "snapshot": snapshot,
         }
 
+    @staticmethod
+    def _ensure_news_history(spec: FactorSpec, start: str, end: str) -> None:
+        expression = spec.expression or spec.slug
+        if spec.kind != "expression" or (
+            "news_sentiment" not in spec.required_features and expression != "news_sentiment"
+        ):
+            return
+        from quantmaster.ai.sentiment import news_sentiment_readiness
+
+        readiness = news_sentiment_readiness(start, end)
+        if readiness["ready"]:
+            return
+        available = (
+            f"{readiness['available_start']} 至 {readiness['available_end']}"
+            if readiness["available_start"] else "无可用标注"
+        )
+        raise LabError(
+            "FEATURE_HISTORY_INSUFFICIENT", f"news_sentiment 本地标注历史不足：{available}",
+            action="继续积累本地新闻标注；达到完整开发期、隔离期和密封期后重试",
+            retryable=True, context=readiness, status_code=409,
+        )
+
+    def _validation_context(
+        self, spec: FactorSpec, universe: str, start: str, end: str, progress=None,
+    ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None, dict, dict[str, pd.DataFrame] | None]:
+        if spec.kind == "python":
+            python_features, _catalog, snapshot, _bundle_hash = self._python_mining_context(
+                universe, start, end, progress,
+            )
+            panel = {"close": python_features["close"]}
+            membership = (
+                python_features.get("membership", pd.DataFrame()).astype(bool)
+                if "membership" in python_features else None
+            )
+            return panel, membership, snapshot, python_features
+        panel, membership, snapshot = self._context(universe, start, end, progress)
+        return panel, membership, snapshot, None
+
+    @staticmethod
+    def _python_validation_values(
+        spec: FactorSpec, python_features: dict[str, pd.DataFrame],
+        parameter_variants: dict[str, pd.DataFrame], progress=None,
+    ) -> tuple[pd.DataFrame, dict]:
+        from quantmaster.factors.python_artifact import RestrictedPythonRunner, execute_python_factor_artifact
+
+        if progress:
+            progress(58, "校验受限 Python 工件与内容哈希")
+        values = execute_python_factor_artifact(
+            get_config().data_root, spec.artifact, python_features,
+        )
+        artifact_root = Path(get_config().data_root).resolve()
+        manifest_path = (artifact_root / str(spec.artifact.get("manifest") or "")).resolve()
+        source_path = (artifact_root / str(spec.artifact.get("source") or "")).resolve()
+        if artifact_root not in manifest_path.parents or artifact_root not in source_path.parents:
+            raise ValueError("Python 因子工件路径越界")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        source = source_path.read_text(encoding="utf-8")
+        selected_params = spec.artifact.get("parameters") or {}
+        runner = RestrictedPythonRunner()
+        for item in (manifest.get("audit", {}).get("parameter_plateau", {}).get("variants") or [])[:8]:
+            params = item.get("params") or {}
+            if params == selected_params:
+                continue
+            try:
+                parameter_variants[json.dumps(params, ensure_ascii=False, sort_keys=True)] = runner.execute(
+                    source, python_features, params,
+                )
+            except Exception:
+                continue
+        return values, manifest
+
+    @staticmethod
+    def _expression_validation_values(
+        spec: FactorSpec, panel: dict[str, pd.DataFrame], start: str, end: str,
+        parameter_variants: dict[str, pd.DataFrame], progress=None, cancelled=None,
+    ) -> pd.DataFrame:
+        from quantmaster.factors import compute_factor
+        from quantmaster.factors.fundamental import resolve_factor
+        from quantmaster.lab.robustness import expression_parameter_variants
+
+        symbols = list(panel["close"].columns)
+        expression = spec.expression or spec.slug
+        if progress:
+            progress(58, "计算因子并执行统一标准化")
+
+        def fundamental_progress(done: int, total: int, symbol: str, success: bool) -> None:
+            if progress:
+                progress(
+                    58 + int(6 * done / max(1, total)),
+                    f"基本面 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
+                )
+
+        factor = resolve_factor(
+            expression, symbols, start, end,
+            progress=fundamental_progress, cancelled=cancelled,
+        )
+        if cancelled and cancelled():
+            raise InterruptedError("因子验证已取消")
+        values = compute_factor(factor, panel)
+        try:
+            expressions = expression_parameter_variants(expression)
+        except Exception:
+            expressions = {}
+        for label, candidate_expression in expressions.items():
+            if cancelled and cancelled():
+                raise InterruptedError("因子验证已取消")
+            try:
+                candidate = resolve_factor(candidate_expression, symbols, start, end)
+                parameter_variants[label] = compute_factor(candidate, panel)
+            except Exception:
+                continue
+        return values
+
+    def _version_values(
+        self, spec: FactorSpec, panel: dict[str, pd.DataFrame],
+        python_features: dict[str, pd.DataFrame] | None,
+        start: str, end: str, parameter_variants: dict[str, pd.DataFrame], progress=None, cancelled=None,
+    ) -> tuple[pd.DataFrame, dict | None]:
+        if spec.kind == "learned":
+            from quantmaster.lab.ml import predict_panel
+
+            if progress:
+                progress(58, "加载学习模型并校验工件完整性")
+            return predict_panel(panel, spec.model), None
+        if spec.kind == "python":
+            return self._python_validation_values(spec, python_features or {}, parameter_variants, progress)
+        if spec.kind == "expression":
+            return self._expression_validation_values(
+                spec, panel, start, end, parameter_variants, progress, cancelled,
+            ), None
+        raise ValueError(f"{spec.kind} 类型尚未提供可复验的运行时")
+
+    @staticmethod
+    def _apply_python_validation_gates(report: dict[str, Any], manifest: dict | None) -> None:
+        if manifest is None:
+            return
+        blockers = []
+        if manifest.get("non_pit_features"):
+            blockers.append("使用非 PIT 特征: " + ", ".join(manifest["non_pit_features"]))
+        if manifest.get("runtime_incompatible_features"):
+            blockers.append(
+                "Champion 运行时不可复现特征: "
+                + ", ".join(manifest["runtime_incompatible_features"])
+            )
+        report["gates"]["hard_failures"].extend(blockers)
+        report["gates"]["passed"] = not (
+            report["gates"]["hard_failures"] or report["gates"]["soft_failures"]
+        )
+        report["gates"]["override_allowed"] = not report["gates"]["hard_failures"]
+        report["gates"]["bias_audit_required"] = True
+
     def validate_version(
         self, version_id: str, *, universe: str, start: str, end: str,
         progress=None, cancelled=None,
@@ -1227,127 +1416,16 @@ class LabService:
         if version is None:
             raise KeyError("因子版本不存在")
         spec = FactorSpec.from_dict(version["spec"])
-        expression = spec.expression or spec.slug
-        if spec.kind == "expression" and (
-            "news_sentiment" in spec.required_features or expression == "news_sentiment"
-        ):
-            from quantmaster.ai.sentiment import news_sentiment_readiness
-
-            feature_readiness = news_sentiment_readiness(start, end)
-            if not feature_readiness["ready"]:
-                available = (
-                    f"{feature_readiness['available_start']} 至 "
-                    f"{feature_readiness['available_end']}"
-                    if feature_readiness["available_start"] else "无可用标注"
-                )
-                raise LabError(
-                    "FEATURE_HISTORY_INSUFFICIENT",
-                    f"news_sentiment 本地标注历史不足：{available}",
-                    action=(
-                        "继续积累本地新闻标注；达到完整开发期、隔离期和密封期后重试"
-                    ),
-                    retryable=True,
-                    context=feature_readiness,
-                    status_code=409,
-                )
-        python_features: dict[str, pd.DataFrame] | None = None
+        self._ensure_news_history(spec, start, end)
         parameter_variants: dict[str, pd.DataFrame] = {}
-        python_manifest: dict | None = None
-        if spec.kind == "python":
-            python_features, _catalog, snapshot, _bundle_hash = self._python_mining_context(
-                universe, start, end, progress,
-            )
-            panel = {"close": python_features["close"]}
-            membership = (
-                python_features.get("membership", pd.DataFrame()).astype(bool)
-                if "membership" in python_features else None
-            )
-        else:
-            panel, membership, snapshot = self._context(universe, start, end, progress)
+        panel, membership, snapshot, python_features = self._validation_context(
+            spec, universe, start, end, progress,
+        )
         if cancelled and cancelled():
             raise InterruptedError("因子验证已取消")
-        if spec.kind == "learned":
-            from quantmaster.lab.ml import predict_panel
-
-            if progress:
-                progress(58, "加载学习模型并校验工件完整性")
-            values = predict_panel(panel, spec.model)
-        elif spec.kind == "python":
-            from quantmaster.factors.python_artifact import (
-                RestrictedPythonRunner,
-                execute_python_factor_artifact,
-            )
-
-            if progress:
-                progress(58, "校验受限 Python 工件与内容哈希")
-            values = execute_python_factor_artifact(
-                get_config().data_root, spec.artifact, python_features or {},
-            )
-            artifact_root = Path(get_config().data_root).resolve()
-            manifest_path = (artifact_root / str(spec.artifact.get("manifest") or "")).resolve()
-            source_path = (artifact_root / str(spec.artifact.get("source") or "")).resolve()
-            if artifact_root not in manifest_path.parents or artifact_root not in source_path.parents:
-                raise ValueError("Python 因子工件路径越界")
-            python_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            source = source_path.read_text(encoding="utf-8")
-            selected_params = spec.artifact.get("parameters") or {}
-            plateau = python_manifest.get("audit", {}).get("parameter_plateau", {})
-            runner = RestrictedPythonRunner()
-            for item in plateau.get("variants", [])[:8]:
-                params = item.get("params") or {}
-                if params == selected_params:
-                    continue
-                try:
-                    label = json.dumps(params, ensure_ascii=False, sort_keys=True)
-                    parameter_variants[label] = runner.execute(
-                        source, python_features or {}, params,
-                    )
-                except Exception:
-                    continue
-        elif spec.kind == "expression":
-            from quantmaster.factors import compute_factor
-            from quantmaster.factors.fundamental import resolve_factor
-            from quantmaster.lab.robustness import expression_parameter_variants
-
-            symbols = list(panel["close"].columns)
-            expression = spec.expression or spec.slug
-            if progress:
-                progress(58, "计算因子并执行统一标准化")
-
-            def fundamental_progress(
-                done: int, total: int, symbol: str, success: bool,
-            ) -> None:
-                if progress:
-                    progress(
-                        58 + int(6 * done / max(1, total)),
-                        f"基本面 {done}/{total} · {symbol}{'' if success else ' 跳过'}",
-                    )
-
-            factor = resolve_factor(
-                expression,
-                symbols,
-                start,
-                end,
-                progress=fundamental_progress,
-                cancelled=cancelled,
-            )
-            if cancelled and cancelled():
-                raise InterruptedError("因子验证已取消")
-            values = compute_factor(factor, panel)
-            try:
-                expressions = expression_parameter_variants(expression)
-            except Exception:
-                expressions = {}
-            for label, candidate_expression in expressions.items():
-                if cancelled and cancelled():
-                    raise InterruptedError("因子验证已取消")
-                try:
-                    candidate = resolve_factor(candidate_expression, symbols, start, end)
-                    parameter_variants[label] = compute_factor(candidate, panel)
-                except Exception:
-                    continue
-        else:
-            raise ValueError(f"{spec.kind} 类型尚未提供可复验的运行时")
+        values, python_manifest = self._version_values(
+            spec, panel, python_features, start, end, parameter_variants, progress, cancelled,
+        )
         if progress:
             progress(65, "运行 purged walk-forward 与多重检验")
         if cancelled and cancelled():
@@ -1367,28 +1445,7 @@ class LabService:
             parameter_variants=parameter_variants,
             open_prices=panel.get("open"),
         )
-        if spec.kind == "python":
-            artifact_root = Path(get_config().data_root).resolve()
-            manifest_path = (artifact_root / str(spec.artifact.get("manifest") or "")).resolve()
-            if artifact_root not in manifest_path.parents:
-                raise ValueError("Python 因子清单路径越界")
-            manifest = python_manifest or json.loads(manifest_path.read_text(encoding="utf-8"))
-            blockers = []
-            if manifest.get("non_pit_features"):
-                blockers.append(
-                    "使用非 PIT 特征: " + ", ".join(manifest["non_pit_features"])
-                )
-            if manifest.get("runtime_incompatible_features"):
-                blockers.append(
-                    "Champion 运行时不可复现特征: "
-                    + ", ".join(manifest["runtime_incompatible_features"])
-                )
-            report["gates"]["hard_failures"].extend(blockers)
-            report["gates"]["passed"] = not (
-                report["gates"]["hard_failures"] or report["gates"]["soft_failures"]
-            )
-            report["gates"]["override_allowed"] = not report["gates"]["hard_failures"]
-            report["gates"]["bias_audit_required"] = True
+        self._apply_python_validation_gates(report, python_manifest)
         report["dataset_snapshot"] = snapshot["snapshot_hash"]
         updated = self.store.save_validation(version_id, snapshot["snapshot_hash"], report)
         if progress:
@@ -1399,12 +1456,12 @@ class LabService:
         self, *, universe: str, start: str, end: str, population: int = 60,
         generations: int = 8, top_n: int = 10, horizon: int = 3, progress=None,
     ) -> dict:
-        from quantmaster.factors.mining import GeneticMiner
+        from quantmaster.factor_mining_access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         if progress:
             progress(58, f"遗传搜索 · {population} × {generations}")
-        miner = GeneticMiner(population=population, generations=generations)
+        miner = factor_miner("genetic")(population=population, generations=generations)
         mined = miner.mine(panel, top_n=top_n, periods=horizon, progress=False)
         versions = []
         for rank, item in enumerate(mined, start=1):
@@ -1428,69 +1485,67 @@ class LabService:
             "raw": [asdict(item) for item in mined], "snapshot": snapshot["snapshot_hash"],
         }
 
+    @staticmethod
+    def _relay_llm_event(event: dict[str, Any], rounds: int, progress: Any) -> None:
+        event_type = str(event.get("type") or "progress")
+        round_number = max(1, int(event.get("round") or 1))
+        total_rounds = max(1, int(event.get("rounds") or rounds))
+        span = 36.0 / total_rounds
+        value = 58.0 + span * (round_number - 1)
+        phase, detail = "AI 因子发现", ""
+        if event_type == "llm_attempt_started":
+            phase = (
+                f"AI 第 {round_number}/{total_rounds} 轮 · "
+                f"尝试 {event['attempt']}/{event['max_attempts']}"
+            )
+            provider = str(event.get("provider") or "模型服务")
+            model = str(event.get("model") or "当前模型")
+            detail = f"等待 {provider} · {model}；本次最长 {event['timeout_seconds']} 秒"
+        elif event_type == "llm_response_received":
+            value += span * 0.32
+            phase = f"AI 第 {round_number}/{total_rounds} 轮已响应"
+            detail = f"收到 {event.get('candidate_count', 0)} 个候选，开始本地校验"
+        elif event_type == "llm_candidate_checked":
+            total = max(1, int(event.get("candidate_count") or 1))
+            done = max(0, int(event.get("candidate") or 0))
+            value += span * (0.32 + 0.58 * done / total)
+            phase = f"本地校验第 {round_number}/{total_rounds} 轮候选"
+            detail = f"已校验 {done}/{total} 个安全 DSL 表达式"
+        elif event_type == "llm_round_completed":
+            value += span
+            phase = f"AI 第 {round_number}/{total_rounds} 轮完成"
+            detail = (
+                f"安全表达式 {event.get('dsl_valid', 0)} 个 · "
+                f"初筛达标 {event.get('threshold_passed', 0)} 个"
+            )
+        elif event_type == "llm_attempt_failed":
+            phase = f"AI 第 {round_number}/{total_rounds} 轮请求未完成"
+            detail = str(event.get("message") or "模型请求失败")
+        elif event_type == "llm_retry_scheduled":
+            phase = f"AI 第 {round_number}/{total_rounds} 轮准备重试"
+            detail = (
+                f"{event.get('retry_in_seconds', 0):g} 秒后进行第 "
+                f"{event.get('next_attempt')}/4 次尝试：{event.get('message', '')}"
+            )
+        progress(
+            min(94, int(value)), phase, detail, event_type=event_type,
+            metadata={key: item for key, item in event.items() if key != "type"},
+        )
+
     def discover_llm(
         self, *, universe: str, start: str, end: str, count: int = 8,
         rounds: int = 2, horizon: int = 3, progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factors.mining import LLMFactorMiner
+        from quantmaster.factor_mining_access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         rounds = max(1, int(rounds))
 
         def relay(event: dict[str, Any]) -> None:
-            if not progress:
-                return
-            event_type = str(event.get("type") or "progress")
-            round_number = max(1, int(event.get("round") or 1))
-            total_rounds = max(1, int(event.get("rounds") or rounds))
-            span = 36.0 / total_rounds
-            start_value = 58.0 + span * (round_number - 1)
-            value = start_value
-            phase, detail = "AI 因子发现", ""
-            if event_type == "llm_attempt_started":
-                phase = (
-                    f"AI 第 {round_number}/{total_rounds} 轮 · "
-                    f"尝试 {event['attempt']}/{event['max_attempts']}"
-                )
-                provider = str(event.get("provider") or "模型服务")
-                model = str(event.get("model") or "当前模型")
-                detail = (
-                    f"等待 {provider} · {model}；本次最长 "
-                    f"{event['timeout_seconds']} 秒"
-                )
-            elif event_type == "llm_response_received":
-                value += span * 0.32
-                phase = f"AI 第 {round_number}/{total_rounds} 轮已响应"
-                detail = f"收到 {event.get('candidate_count', 0)} 个候选，开始本地校验"
-            elif event_type == "llm_candidate_checked":
-                total = max(1, int(event.get("candidate_count") or 1))
-                done = max(0, int(event.get("candidate") or 0))
-                value += span * (0.32 + 0.58 * done / total)
-                phase = f"本地校验第 {round_number}/{total_rounds} 轮候选"
-                detail = f"已校验 {done}/{total} 个安全 DSL 表达式"
-            elif event_type == "llm_round_completed":
-                value += span
-                phase = f"AI 第 {round_number}/{total_rounds} 轮完成"
-                detail = (
-                    f"安全表达式 {event.get('dsl_valid', 0)} 个 · "
-                    f"初筛达标 {event.get('threshold_passed', 0)} 个"
-                )
-            elif event_type == "llm_attempt_failed":
-                phase = f"AI 第 {round_number}/{total_rounds} 轮请求未完成"
-                detail = str(event.get("message") or "模型请求失败")
-            elif event_type == "llm_retry_scheduled":
-                phase = f"AI 第 {round_number}/{total_rounds} 轮准备重试"
-                detail = (
-                    f"{event.get('retry_in_seconds', 0):g} 秒后进行第 "
-                    f"{event.get('next_attempt')}/4 次尝试：{event.get('message', '')}"
-                )
-            metadata = {key: item for key, item in event.items() if key != "type"}
-            progress(
-                min(94, int(value)), phase, detail,
-                event_type=event_type, metadata=metadata,
-            )
+            if progress:
+                self._relay_llm_event(event, rounds, progress)
 
-        report = LLMFactorMiner().mine_report(
+        report = factor_miner("llm")().mine_report(
             panel,
             n=count,
             rounds=rounds,
@@ -1532,36 +1587,34 @@ class LabService:
             "warnings": report.warnings,
         }
 
-    def _python_mining_context(
-        self, universe: str, start: str, end: str, progress=None,
-    ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]], dict, str]:
+    @staticmethod
+    def _python_bundle(
+        panel: dict[str, pd.DataFrame], membership: Any,
+        symbols: list[str], start: str, end: str, quality: str, progress=None,
+    ):
         from quantmaster.data.research import ResearchDataBundle, load_research_bundle
-        from quantmaster.data.research_features import registered_features
 
-        panel, membership, snapshot = self._context(universe, start, end, progress)
-        quality = str(snapshot["payload"].get("research_quality") or "sandbox")
-        symbols = list(panel["close"].columns)
         if quality == "production":
             def relay(
                 done: int, total: int, symbol: str, success: bool, detail: str = "",
             ) -> None:
                 if progress:
-                    detail = f"{done}/{total} · {symbol}" + (f" · {detail}" if detail else "")
-                    if not success:
-                        detail += " · 严格数据门禁失败"
-                    progress(
-                        20 + int(30 * done / max(1, total)), "PIT 研究包", detail,
+                    message = f"{done}/{total} · {symbol}" + (
+                        f" · {detail}" if detail else ""
                     )
+                    if not success:
+                        message += " · 严格数据门禁失败"
+                    progress(20 + int(30 * done / max(1, total)), "PIT 研究包", message)
 
             bundle = load_research_bundle(
                 symbols, start, end, membership=membership, progress=relay,
             )
-            bundle.fundamentals = self._pit_fundamentals(
+            bundle.fundamentals = LabService._pit_fundamentals(
                 symbols, start, end, production=True,
             )
         else:
             bundle = ResearchDataBundle.from_legacy_panel(panel, membership=membership)
-            bundle.fundamentals = self._pit_fundamentals(
+            bundle.fundamentals = LabService._pit_fundamentals(
                 symbols, start, end, production=False,
             )
         close = bundle.signal["close"]
@@ -1569,24 +1622,29 @@ class LabService:
         if "amount" in bundle.signal and "volume" in bundle.signal:
             bundle.signal.setdefault("vwap", bundle.signal["amount"].div(
                 bundle.signal["volume"].replace(0, pd.NA)))
+        return bundle
+
+    @staticmethod
+    def _attach_python_news(bundle: Any, quality: str, symbols: list[str]) -> None:
         try:
             from quantmaster.ai.sentiment import quality_sentiment_panel
 
-            news_tier: Literal["production", "sandbox"] = (
+            tier: Literal["production", "sandbox"] = (
                 "production" if quality == "production" else "sandbox"
             )
             news_panel = quality_sentiment_panel(
-                close.index, symbols, tier=news_tier,
+                bundle.signal["close"].index, symbols, tier=tier,
             )
-            news_metadata = dict(news_panel.attrs.get("news_factor") or {})
-            aligned_news = news_panel.reindex(index=close.index, columns=close.columns)
-            aligned_news.attrs["news_factor"] = news_metadata
-            bundle.signal["news_sentiment"] = aligned_news
-            bundle.manifest["news_sentiment"] = news_metadata
-            if news_tier == "sandbox" and news_metadata.get("event_count"):
+            metadata = dict(news_panel.attrs.get("news_factor") or {})
+            aligned = news_panel.reindex(
+                index=bundle.signal["close"].index, columns=bundle.signal["close"].columns,
+            )
+            aligned.attrs["news_factor"] = metadata
+            bundle.signal["news_sentiment"] = aligned
+            bundle.manifest["news_sentiment"] = metadata
+            if tier == "sandbox" and metadata.get("event_count"):
                 bundle.warnings.append({
-                    "code": "news_feature_sandbox",
-                    "level": "warning",
+                    "code": "news_feature_sandbox", "level": "warning",
                     "message": (
                         "消息面使用 sandbox 预览；短历史、快讯或未完成抓取窗口"
                         "不得晋级 production。"
@@ -1597,18 +1655,34 @@ class LabService:
                 "code": "news_feature_unavailable", "level": "warning",
                 "message": str(exc)[:300],
             })
+
+    @staticmethod
+    def _attach_industry_context(bundle: Any, symbols: list[str]) -> None:
         from quantmaster.data.industry import load_cached_industry_map
 
         industry = load_cached_industry_map()
         names = sorted({industry.get(symbol, "") for symbol in symbols} - {""})
+        close = bundle.signal["close"]
         for number, name in enumerate(names, start=1):
             key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(number)
-            industry_values = [
-                1.0 if industry.get(symbol) == name else 0.0 for symbol in symbols
-            ]
+            values = [1.0 if industry.get(symbol) == name else 0.0 for symbol in symbols]
             bundle.context[f"industry_{key[:48]}"] = pd.DataFrame(
-                [industry_values] * len(close.index), index=close.index, columns=symbols,
+                [values] * len(close.index), index=close.index, columns=symbols,
             )
+
+    def _python_mining_context(
+        self, universe: str, start: str, end: str, progress=None,
+    ) -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]], dict, str]:
+        from quantmaster.data.research_features import registered_features
+
+        panel, membership, snapshot = self._context(universe, start, end, progress)
+        quality = str(snapshot["payload"].get("research_quality") or "sandbox")
+        symbols = list(panel["close"].columns)
+        bundle = self._python_bundle(
+            panel, membership, symbols, start, end, quality, progress,
+        )
+        self._attach_python_news(bundle, quality, symbols)
+        self._attach_industry_context(bundle, symbols)
         feature_values, descriptors = registered_features(bundle)
         catalog = [item.to_dict() for item in descriptors]
         news_metadata = dict(
@@ -1624,15 +1698,142 @@ class LabService:
                 descriptor["pit_grade"] = "research_only"
         return feature_values, catalog, snapshot, bundle.manifest_hash
 
+    @staticmethod
+    def _python_gate_failures(
+        candidate: Any, quality: str, non_pit_features: list[str],
+        runtime_only_features: list[str], validation: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        hard_failures = validation["gates"]["hard_failures"]
+        if quality != "production":
+            hard_failures.append("候选不是 point-in-time 生产级快照")
+        if non_pit_features:
+            hard_failures.append(f"使用非 PIT 特征，仅限研究: {', '.join(non_pit_features)}")
+        if runtime_only_features:
+            hard_failures.append(
+                "特征仅用于研究回放，当前 Champion 运行时不可复现: "
+                + ", ".join(runtime_only_features)
+            )
+        audit = candidate.audit
+        if not audit.get("lookahead", {}).get("passed"):
+            hard_failures.append("前视审计未通过")
+        if not audit.get("recursive", {}).get("passed"):
+            hard_failures.append("递归稳定性审计未通过")
+        soft_failures = validation["gates"]["soft_failures"]
+        if abs(float(candidate.test_metrics.get("rank_ic", 0))) < 0.02:
+            soft_failures.append("密封 TEST |RankIC| 低于 0.02")
+        if float(candidate.valid_metrics.get("q_value", 1)) > 0.10:
+            soft_failures.append("候选族 BH-FDR q-value 高于 0.10")
+        return hard_failures, soft_failures
+
+    @staticmethod
+    def _python_candidate_validation(
+        candidate: Any, miner: Any, features: dict[str, pd.DataFrame],
+        quality: str, horizon: int, snapshot_hash: str,
+        non_pit_features: list[str], runtime_only_features: list[str],
+    ) -> dict[str, Any]:
+        from quantmaster.lab.validation import validate_factor_values
+
+        full_values = miner.runner.execute(candidate.code, features, candidate.selected_params)
+        variants: dict[str, pd.DataFrame] = {}
+        for item in candidate.audit.get("parameter_plateau", {}).get("variants", [])[:8]:
+            params = item.get("params") or {}
+            if params == candidate.selected_params:
+                continue
+            try:
+                variants[json.dumps(params, ensure_ascii=False, sort_keys=True)] = (
+                    miner.runner.execute(candidate.code, features, params)
+                )
+            except Exception:
+                continue
+        membership = features.get("membership")
+        validation = validate_factor_values(
+            full_values, features["close"], name=candidate.name, horizons=(horizon,),
+            membership=membership.astype(bool) if membership is not None else None,
+            research_quality=quality, panel=features, parameter_variants=variants,
+        )
+        hard_failures, soft_failures = LabService._python_gate_failures(
+            candidate, quality, non_pit_features, runtime_only_features, validation,
+        )
+        horizon_report = validation["horizons"][str(horizon)]
+        horizon_report.update({
+            "train": candidate.train_metrics, "valid": candidate.valid_metrics,
+            "sealed_test": candidate.test_metrics,
+            "q_value": candidate.valid_metrics.get("q_value", 1),
+        })
+        validation.update({
+            "dataset_snapshot": snapshot_hash, "research_quality": quality,
+            "family_fdr": True,
+        })
+        validation["gates"].update({
+            "passed": not hard_failures and not soft_failures,
+            "override_allowed": not hard_failures, "bias_audit_required": True,
+        })
+        return validation
+
+    def _save_python_candidate(
+        self, *, candidate: Any, order: int, miner: Any, features: dict[str, pd.DataFrame],
+        feature_catalog: list[dict[str, Any]], snapshot: dict[str, Any], bundle_hash: str,
+        horizon: int, quality: str, sealed_holdout: dict[str, Any], cancelled=None,
+    ) -> dict[str, Any]:
+        from quantmaster.factors.python_artifact import write_python_factor_artifact
+        if cancelled and cancelled():
+            raise InterruptedError("AutoMiner 已取消或 LLM 配置已更新")
+        grades = {item["name"]: item["pit_grade"] for item in feature_catalog}
+        runtime_compatible = {
+            item["name"]: bool(item.get("runtime_compatible", True)) for item in feature_catalog
+        }
+        non_pit_features = sorted(
+            name for name in candidate.required_features if grades.get(name) == "research_only"
+        )
+        runtime_only_features = sorted(
+            name for name in candidate.required_features
+            if not runtime_compatible.get(name, True)
+        )
+        artifact = write_python_factor_artifact(
+            get_config().data_root, source=candidate.code,
+            params=candidate.selected_params, manifest={
+                "kind": "restricted-python-factor", "name": candidate.name,
+                "hypothesis": candidate.hypothesis, "objective": candidate.objective,
+                "required_features": candidate.required_features, "warmup": candidate.warmup,
+                "horizon": horizon, "split": sealed_holdout,
+                "finalist_order": order, "dataset_snapshot": snapshot["snapshot_hash"],
+                "research_bundle_hash": bundle_hash, "research_quality": quality,
+                "non_pit_features": non_pit_features,
+                "runtime_incompatible_features": runtime_only_features,
+                "audit": candidate.audit,
+            },
+        )
+        candidate.artifact = artifact
+        spec = FactorSpec(
+            slug=_slug("python", f"{candidate.code}\n{candidate.selected_params}"),
+            name=candidate.name, kind="python",
+            description="AI 提出受限 Python，已完成本地三段验证，待人工审批。",
+            category="AI 自动挖掘", rationale=candidate.hypothesis,
+            required_features=tuple(candidate.required_features), horizons=(horizon,),
+            artifact=artifact, tags=("python", "autominer", quality),
+        )
+        _factor, version, _created = self.store.create_factor(
+            spec, source="python-autominer", actor="worker",
+        )
+        validation = self._python_candidate_validation(
+            candidate, miner, features, quality, horizon, snapshot["snapshot_hash"],
+            non_pit_features, runtime_only_features,
+        )
+        validation["sealed_holdout"] = sealed_holdout
+        version = self.store.save_validation(version["id"], snapshot["snapshot_hash"], validation)
+        self.store.save_bias_audit(version["id"], snapshot["snapshot_hash"], {
+            "passed": not validation["gates"]["hard_failures"], "checks": candidate.audit,
+            "version_id": version["id"],
+        })
+        candidate.factor_version_id = version["id"]
+        return version
+
     def discover_python(
         self, *, run_id: str, universe: str, start: str, end: str, horizon: int = 3,
         rounds: int = 3, candidate_limit: int = 24, finalists: int = 3,
         progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factors.mining import PythonFactorMiner
-        from quantmaster.factors.python_artifact import write_python_factor_artifact
-        from quantmaster.lab.validation import validate_factor_values
-
+        from quantmaster.factor_mining_access import factor_miner
         if not get_config().lab.ai_python_mining_enabled:
             raise ValueError("受限 Python AutoMiner 尚未启用")
         self.store.update_mining_run(run_id, status="running")
@@ -1646,7 +1847,7 @@ class LabService:
                     raise InterruptedError("AutoMiner 已取消或 LLM 配置已更新")
                 self.store.save_mining_candidate(run_id, candidate.to_dict())
 
-            miner = PythonFactorMiner()
+            miner = factor_miner("python")()
             report = miner.mine_report(
                 features, feature_catalog, horizon=horizon, rounds=rounds,
                 candidate_limit=candidate_limit, finalists=finalists, progress=progress,
@@ -1664,127 +1865,14 @@ class LabService:
                 )
                 return result
             quality = str(snapshot["payload"].get("research_quality") or "sandbox")
-            grades = {item["name"]: item["pit_grade"] for item in feature_catalog}
-            runtime_compatible = {
-                item["name"]: bool(item.get("runtime_compatible", True))
-                for item in feature_catalog
-            }
             versions = []
             for order, candidate in enumerate(report.finalists, start=1):
-                if cancelled and cancelled():
-                    raise InterruptedError("AutoMiner 已取消或 LLM 配置已更新")
-                non_pit_features = sorted(
-                    name for name in candidate.required_features
-                    if grades.get(name) == "research_only"
+                version = self._save_python_candidate(
+                    candidate=candidate, order=order, miner=miner, features=features,
+                    feature_catalog=feature_catalog, snapshot=snapshot,
+                    bundle_hash=bundle_hash, horizon=horizon, quality=quality,
+                    sealed_holdout=report.split["test"], cancelled=cancelled,
                 )
-                runtime_only_features = sorted(
-                    name for name in candidate.required_features
-                    if not runtime_compatible.get(name, True)
-                )
-                artifact = write_python_factor_artifact(
-                    get_config().data_root, source=candidate.code,
-                    params=candidate.selected_params, manifest={
-                        "kind": "restricted-python-factor", "name": candidate.name,
-                        "hypothesis": candidate.hypothesis, "objective": candidate.objective,
-                        "required_features": candidate.required_features,
-                        "warmup": candidate.warmup, "horizon": horizon,
-                        "split": report.split, "finalist_order": order,
-                        "dataset_snapshot": snapshot["snapshot_hash"],
-                        "research_bundle_hash": bundle_hash, "research_quality": quality,
-                        "non_pit_features": non_pit_features,
-                        "runtime_incompatible_features": runtime_only_features,
-                        "audit": candidate.audit,
-                    },
-                )
-                candidate.artifact = artifact
-                spec = FactorSpec(
-                    slug=_slug("python", f"{candidate.code}\n{candidate.selected_params}"),
-                    name=candidate.name, kind="python",
-                    description="AI 提出受限 Python，已完成本地三段验证，待人工审批。",
-                    category="AI 自动挖掘", rationale=candidate.hypothesis,
-                    required_features=tuple(candidate.required_features), horizons=(horizon,),
-                    artifact=artifact, tags=("python", "autominer", quality),
-                )
-                _factor, version, _created = self.store.create_factor(
-                    spec, source="python-autominer", actor="worker",
-                )
-                test = candidate.test_metrics
-                full_values = miner.runner.execute(
-                    candidate.code, features, candidate.selected_params,
-                )
-                sensitivity_variants = {}
-                plateau = candidate.audit.get("parameter_plateau", {})
-                for item in plateau.get("variants", [])[:8]:
-                    params = item.get("params") or {}
-                    if params == candidate.selected_params:
-                        continue
-                    try:
-                        label = json.dumps(params, ensure_ascii=False, sort_keys=True)
-                        sensitivity_variants[label] = miner.runner.execute(
-                            candidate.code, features, params,
-                        )
-                    except Exception:
-                        continue
-                membership = features.get("membership")
-                validation = validate_factor_values(
-                    full_values,
-                    features["close"],
-                    name=candidate.name,
-                    horizons=(horizon,),
-                    membership=membership.astype(bool) if membership is not None else None,
-                    research_quality=quality,
-                    panel=features,
-                    parameter_variants=sensitivity_variants,
-                )
-                hard_failures = validation["gates"]["hard_failures"]
-                if quality != "production":
-                    failure = "候选不是 point-in-time 生产级快照"
-                    if failure not in hard_failures:
-                        hard_failures.append(failure)
-                if non_pit_features:
-                    hard_failures.append(
-                        f"使用非 PIT 特征，仅限研究: {', '.join(non_pit_features)}"
-                    )
-                if runtime_only_features:
-                    hard_failures.append(
-                        "特征仅用于研究回放，当前 Champion 运行时不可复现: "
-                        + ", ".join(runtime_only_features)
-                    )
-                if not candidate.audit.get("lookahead", {}).get("passed"):
-                    hard_failures.append("前视审计未通过")
-                if not candidate.audit.get("recursive", {}).get("passed"):
-                    hard_failures.append("递归稳定性审计未通过")
-                soft_failures = validation["gates"]["soft_failures"]
-                if abs(float(test.get("rank_ic", 0))) < 0.02:
-                    soft_failures.append("密封 TEST |RankIC| 低于 0.02")
-                if float(candidate.valid_metrics.get("q_value", 1)) > 0.10:
-                    soft_failures.append("候选族 BH-FDR q-value 高于 0.10")
-                horizon_report = validation["horizons"][str(horizon)]
-                horizon_report.update({
-                    "train": candidate.train_metrics,
-                    "valid": candidate.valid_metrics,
-                    "sealed_test": test,
-                    "q_value": candidate.valid_metrics.get("q_value", 1),
-                })
-                validation.update({
-                    "sealed_holdout": report.split["test"],
-                    "dataset_snapshot": snapshot["snapshot_hash"],
-                    "research_quality": quality,
-                    "family_fdr": True,
-                })
-                validation["gates"].update({
-                    "passed": not hard_failures and not soft_failures,
-                    "override_allowed": not hard_failures,
-                    "bias_audit_required": True,
-                })
-                version = self.store.save_validation(
-                    version["id"], snapshot["snapshot_hash"], validation,
-                )
-                self.store.save_bias_audit(version["id"], snapshot["snapshot_hash"], {
-                    "passed": not hard_failures, "checks": candidate.audit,
-                    "version_id": version["id"],
-                })
-                candidate.factor_version_id = version["id"]
                 checkpoint(candidate)
                 versions.append(version)
             result = {
@@ -2002,12 +2090,165 @@ class LabService:
                 experiment["id"], status="failed", result={"error": str(exc)[:1000]})
             raise
 
+    def _optimization_inputs(
+        self, spec: Any, progress=None,
+    ) -> tuple[dict[str, pd.DataFrame], Any, dict[str, Any], dict[str, pd.DataFrame]]:
+        if spec.research_tier == "production":
+            from quantmaster.data.research import load_research_bundle
+
+            if progress:
+                progress(5, "加载 point-in-time 中证800成分")
+            membership = load_csi800_membership(spec.start, spec.end)
+            symbols = sorted(symbol for symbol in membership if membership[symbol].any())
+
+            def research_progress(
+                done: int, total: int, symbol: str, success: bool, detail: str = "",
+            ) -> None:
+                if progress:
+                    message = f"{done}/{total} · {symbol}" + (f" · {detail}" if detail else "")
+                    if not success:
+                        message += " · 数据门禁失败"
+                    progress(20 + int(30 * done / max(1, total)), "原始成交/PIT约束", message)
+
+            bundle = load_research_bundle(
+                symbols, spec.start, spec.end, membership=membership,
+                progress=research_progress,
+            )
+            panel = bundle.signal
+            payload = create_snapshot(
+                spec.universe, spec.start, spec.end, panel=panel, membership=membership,
+            ).to_dict()
+            payload.pop("snapshot_hash", None)
+            payload["research_bundle"] = {
+                **bundle.manifest, "manifest_hash": bundle.manifest_hash,
+            }
+            snapshot = self.store.save_snapshot(payload)
+        else:
+            panel, membership, snapshot = self._context(
+                spec.universe, spec.start, spec.end, progress,
+            )
+        fundamentals: dict[str, pd.DataFrame] = {}
+        if "pit_fundamental_v1" in spec.features.groups:
+            if progress:
+                progress(54, "加载 PIT 基本面")
+            fundamentals = self._pit_fundamentals(
+                list(panel["close"].columns), spec.start, spec.end,
+                production=spec.research_tier == "production", progress=progress,
+            )
+            from quantmaster.data.research import frame_fingerprint
+
+            payload = dict(snapshot["payload"])
+            payload.pop("snapshot_hash", None)
+            payload["feature_input_hashes"] = {
+                name: frame_fingerprint(frame) for name, frame in fundamentals.items()
+            }
+            snapshot = self.store.save_snapshot(payload)
+        return panel, membership, snapshot, fundamentals
+
+    @staticmethod
+    def _optimization_horizon_report(
+        result: dict[str, Any], spec: Any, snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        horizons = {
+            key: {
+                "horizon": item["horizon"], "oos_rank_ic": item["rank_ic"],
+                "oos_icir": item["icir"], "q_value": item["q_value"],
+                "net_information_ratio": item["net_information_ratio"],
+                "net_annual_return": item["net_annual_return"],
+                "max_drawdown": item["max_drawdown"], "turnover_daily": item["turnover"],
+                "folds": [],
+            }
+            for key, item in result["sealed_metrics"]["horizons"].items()
+        }
+        return {
+            "coverage": result["sealed_metrics"]["coverage"],
+            "best_horizon": max(
+                horizons.values(), key=lambda item: item["net_information_ratio"]
+            )["horizon"],
+            "candidate_score": round(50 + 10 * result["sealed_metrics"]["net_information_ratio"], 2),
+            "horizons": horizons,
+            "gates": {
+                "passed": spec.research_tier == "production",
+                "hard_failures": [] if spec.research_tier == "production" else ["sandbox_research_tier"],
+                "soft_failures": [], "override_allowed": False, "bias_audit_required": True,
+            },
+            "sealed_holdout": result["sealed_holdout"],
+            "research_protocol": spec.protocol.to_dict(), "family_fdr": True,
+            "model_metrics": result["sealed_metrics"], "calibration": result["calibration"],
+            "dataset_snapshot": snapshot["snapshot_hash"],
+        }
+
+    def _publish_optimization_candidate(
+        self, study_id: str, spec: Any, experiment: dict[str, Any],
+        snapshot: dict[str, Any], result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not result.get("candidate"):
+            return result
+        from quantmaster.lab.ml import artifact_sha256
+        from quantmaster.lab.models import utc_now
+
+        root = Path(get_config().data_root).resolve()
+
+        def relative(value: str) -> str:
+            return Path(value).resolve().relative_to(root).as_posix()
+
+        manifest_path = root / "lab_artifacts" / study_id / "manifest-v2.json"
+        manifest = {
+            "schema_version": 2, "kind": str(result["recommended"]["params"]["model"]),
+            "horizons": list(spec.protocol.horizons), "features": spec.features.to_dict(),
+            "feature_names": result.get("feature_names", []),
+            "sequence_length": spec.sequence_length, "training_universe": spec.universe,
+            "protocol": spec.protocol.to_dict(), "snapshot_hash": snapshot["snapshot_hash"],
+            "research_quality": spec.research_tier,
+            "prediction_artifact": relative(result["prediction_artifact"]),
+            "prediction_sha256": result["prediction_sha256"],
+            "fold_artifacts": [
+                {**item, "artifact": relative(item["artifact"])}
+                for item in result["fold_artifacts"]
+            ],
+            "live_artifact": {
+                **result["live_artifact"], "artifact": relative(result["live_artifact"]["artifact"]),
+            },
+            "model_config": {
+                key: value for key, value in result["recommended"]["params"].items()
+                if key != "model"
+            },
+            "calibration": result["calibration"], "calibration_models": result["calibration_models"],
+            "trained_through": result["live_artifact"]["fold"]["train_end"],
+            "maximum_age_trading_days": 25, "created_at": utc_now(),
+        }
+        manifest_path.write_text(strict_json_dumps(manifest, indent=2), encoding="utf-8")
+        learned = FactorSpec(
+            slug=f"ml_multi_{study_id[:12]}",
+            name=f"共享多周期 · {spec.universe} · {study_id[:8]}",
+            kind="learned", category="学习模型",
+            description="756/20 滚动训练并经 252 日密封留出评估的共享多周期模型。",
+            required_features=tuple(manifest.get("feature_names") or ()),
+            horizons=tuple(spec.protocol.horizons),
+            rationale="开发期 Pareto 选参、锁参后一次性密封评估；仅生成 Shadow 候选。",
+            model={
+                "manifest": relative(str(manifest_path)),
+                "manifest_sha256": artifact_sha256(manifest_path),
+                "study_id": study_id, "experiment_id": experiment["id"],
+                "training_universe": spec.universe, "research_quality": spec.research_tier,
+            },
+            tags=("ml", "multi-horizon", "rolling-oof", "shadow"),
+        )
+        _factor, version, _created = self.store.create_factor(
+            learned, source="optimization", actor="worker",
+        )
+        report = self._optimization_horizon_report(result, spec, snapshot)
+        version = self.store.save_validation(version["id"], snapshot["snapshot_hash"], report)
+        result.update({
+            "version_id": version["id"], "version_status": version["status"],
+            "manifest": relative(str(manifest_path)),
+        })
+        return result
+
     def optimize_study(
         self, study_id: str, *, progress=None, cancelled=None, resume: bool = False,
     ) -> dict:
         """执行持久化多目标研究；密封集通过后仅生成 Shadow Candidate。"""
-        from quantmaster.lab.ml import artifact_sha256
-        from quantmaster.lab.models import utc_now
         from quantmaster.lab.optimization import OptimizationRunner
         from quantmaster.lab.research import OptimizationSpec
 
@@ -2022,64 +2263,7 @@ class LabService:
         )
         self.store.update_study(study_id, experiment_id=experiment["id"])
         try:
-            if spec.research_tier == "production":
-                from quantmaster.data.research import load_research_bundle
-
-                if progress:
-                    progress(5, "加载 point-in-time 中证800成分")
-                membership = load_csi800_membership(spec.start, spec.end)
-                symbols = sorted(
-                    symbol for symbol in membership if membership[symbol].any()
-                )
-
-                def research_progress(
-                    done: int, total: int, symbol: str, success: bool, detail: str = "",
-                ) -> None:
-                    if progress:
-                        detail = f"{done}/{total} · {symbol}" + (f" · {detail}" if detail else "")
-                        if not success:
-                            detail += " · 数据门禁失败"
-                        progress(
-                            20 + int(30 * done / max(1, total)),
-                            "原始成交/PIT约束", detail,
-                        )
-
-                research_bundle = load_research_bundle(
-                    symbols, spec.start, spec.end, membership=membership,
-                    progress=research_progress,
-                )
-                panel = research_bundle.signal
-                payload = create_snapshot(
-                    spec.universe, spec.start, spec.end,
-                    panel=panel, membership=membership,
-                ).to_dict()
-                payload.pop("snapshot_hash", None)
-                payload["research_bundle"] = {
-                    **research_bundle.manifest,
-                    "manifest_hash": research_bundle.manifest_hash,
-                }
-                snapshot = self.store.save_snapshot(payload)
-            else:
-                panel, membership, snapshot = self._context(
-                    spec.universe, spec.start, spec.end, progress,
-                )
-            fundamentals: dict[str, pd.DataFrame] = {}
-            if "pit_fundamental_v1" in spec.features.groups:
-                if progress:
-                    progress(54, "加载 PIT 基本面")
-                fundamentals = self._pit_fundamentals(
-                    list(panel["close"].columns), spec.start, spec.end,
-                    production=spec.research_tier == "production",
-                    progress=progress,
-                )
-                from quantmaster.data.research import frame_fingerprint
-
-                payload = dict(snapshot["payload"])
-                payload.pop("snapshot_hash", None)
-                payload["feature_input_hashes"] = {
-                    name: frame_fingerprint(frame) for name, frame in fundamentals.items()
-                }
-                snapshot = self.store.save_snapshot(payload)
+            panel, membership, snapshot, fundamentals = self._optimization_inputs(spec, progress)
 
             def checkpoint(result: dict[str, Any]) -> None:
                 self.store.update_study(
@@ -2094,107 +2278,9 @@ class LabService:
             )
             result["dataset_snapshot"] = snapshot["snapshot_hash"]
             result["research_tier"] = spec.research_tier
-            if result.get("candidate"):
-                root = Path(get_config().data_root).resolve()
-
-                def relative(value: str) -> str:
-                    return Path(value).resolve().relative_to(root).as_posix()
-
-                manifest_path = root / "lab_artifacts" / study_id / "manifest-v2.json"
-                manifest = {
-                    "schema_version": 2,
-                    "kind": str(result["recommended"]["params"]["model"]),
-                    "horizons": list(spec.protocol.horizons),
-                    "features": spec.features.to_dict(),
-                    "feature_names": result.get("feature_names", []),
-                    "sequence_length": spec.sequence_length,
-                    "training_universe": spec.universe,
-                    "protocol": spec.protocol.to_dict(),
-                    "snapshot_hash": snapshot["snapshot_hash"],
-                    "research_quality": spec.research_tier,
-                    "prediction_artifact": relative(result["prediction_artifact"]),
-                    "prediction_sha256": result["prediction_sha256"],
-                    "fold_artifacts": [
-                        {**item, "artifact": relative(item["artifact"])}
-                        for item in result["fold_artifacts"]
-                    ],
-                    "live_artifact": {
-                        **result["live_artifact"],
-                        "artifact": relative(result["live_artifact"]["artifact"]),
-                    },
-                    "model_config": {
-                        key: value for key, value in result["recommended"]["params"].items()
-                        if key != "model"
-                    },
-                    "calibration": result["calibration"],
-                    "calibration_models": result["calibration_models"],
-                    "trained_through": result["live_artifact"]["fold"]["train_end"],
-                    "maximum_age_trading_days": 25,
-                    "created_at": utc_now(),
-                }
-                manifest_path.write_text(
-                    strict_json_dumps(manifest, indent=2), encoding="utf-8",
-                )
-                learned = FactorSpec(
-                    slug=f"ml_multi_{study_id[:12]}",
-                    name=f"共享多周期 · {spec.universe} · {study_id[:8]}",
-                    kind="learned", category="学习模型",
-                    description="756/20 滚动训练并经 252 日密封留出评估的共享多周期模型。",
-                    required_features=tuple(manifest.get("feature_names") or ()),
-                    horizons=tuple(spec.protocol.horizons),
-                    rationale="开发期 Pareto 选参、锁参后一次性密封评估；仅生成 Shadow 候选。",
-                    model={
-                        "manifest": relative(str(manifest_path)),
-                        "manifest_sha256": artifact_sha256(manifest_path),
-                        "study_id": study_id, "experiment_id": experiment["id"],
-                        "training_universe": spec.universe,
-                        "research_quality": spec.research_tier,
-                    },
-                    tags=("ml", "multi-horizon", "rolling-oof", "shadow"),
-                )
-                _factor, version, _created = self.store.create_factor(
-                    learned, source="optimization", actor="worker",
-                )
-                horizons = {}
-                for key, item in result["sealed_metrics"]["horizons"].items():
-                    horizons[key] = {
-                        "horizon": item["horizon"], "oos_rank_ic": item["rank_ic"],
-                        "oos_icir": item["icir"], "q_value": item["q_value"],
-                        "net_information_ratio": item["net_information_ratio"],
-                        "net_annual_return": item["net_annual_return"],
-                        "max_drawdown": item["max_drawdown"],
-                        "turnover_daily": item["turnover"], "folds": [],
-                    }
-                report = {
-                    "coverage": result["sealed_metrics"]["coverage"],
-                    "best_horizon": max(
-                        horizons.values(), key=lambda item: item["net_information_ratio"]
-                    )["horizon"],
-                    "candidate_score": round(
-                        50 + 10 * result["sealed_metrics"]["net_information_ratio"], 2,
-                    ),
-                    "horizons": horizons,
-                    "gates": {
-                        "passed": spec.research_tier == "production",
-                        "hard_failures": (
-                            [] if spec.research_tier == "production"
-                            else ["sandbox_research_tier"]
-                        ),
-                        "soft_failures": [],
-                        "override_allowed": False, "bias_audit_required": True,
-                    },
-                    "sealed_holdout": result["sealed_holdout"],
-                    "research_protocol": spec.protocol.to_dict(),
-                    "family_fdr": True, "model_metrics": result["sealed_metrics"],
-                    "calibration": result["calibration"],
-                    "dataset_snapshot": snapshot["snapshot_hash"],
-                }
-                version = self.store.save_validation(
-                    version["id"], snapshot["snapshot_hash"], report,
-                )
-                result["version_id"] = version["id"]
-                result["version_status"] = version["status"]
-                result["manifest"] = relative(str(manifest_path))
+            result = self._publish_optimization_candidate(
+                study_id, spec, experiment, snapshot, result,
+            )
             final_status = "paused" if result.get("paused") else "completed"
             self.store.update_study(study_id, status=final_status, result=result)
             self.store.update_experiment(
@@ -2218,6 +2304,38 @@ class LabService:
             raise
 
     @staticmethod
+    def _pit_source_rows(source: Any, symbol: str, start: str, end: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+        indicators = source.daily_indicators(symbol, start, end)
+        values = source.quarterly_roe(symbol, str(max(1990, int(start[:4]) - 1)))
+        return indicators, values
+
+    @staticmethod
+    def _pit_result(
+        daily: dict[str, pd.DataFrame], quarterly: dict[str, pd.DataFrame],
+        start: str, end: str, quarterly_to_daily: Any,
+    ) -> dict[str, pd.DataFrame]:
+        dates = pd.DatetimeIndex([])
+        for frame in daily.values():
+            dates = dates.union(pd.DatetimeIndex(frame.index))
+        dates = dates[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))].sort_values()
+        if dates.empty:
+            raise RuntimeError("production PIT 基本面缺少真实交易 session 索引")
+        roe = {symbol: quarterly_to_daily(values, dates) for symbol, values in quarterly.items()}
+        result: dict[str, pd.DataFrame] = {
+            field: pd.DataFrame({
+                symbol: frame[field].reindex(dates)
+                for symbol, frame in daily.items() if field in frame
+            })
+            for field in ("pe_ttm", "pb", "dv_ratio", "total_mv")
+        }
+        result["roe"] = pd.DataFrame({
+            symbol: frame["roe"].reindex(dates) for symbol, frame in roe.items()
+        })
+        if not result["roe"].notna().any().any():
+            raise RuntimeError("production 研究缺少按真实公告日对齐的 ROE")
+        return result
+
+    @staticmethod
     def _pit_fundamentals(
         symbols: list[str], start: str, end: str, *, production: bool, progress=None,
     ) -> dict[str, pd.DataFrame]:
@@ -2231,15 +2349,13 @@ class LabService:
         source = TushareSource()
         daily: dict[str, pd.DataFrame] = {}
         quarterly: dict[str, pd.DataFrame] = {}
-        roe: dict[str, pd.DataFrame] = {}
         missing_daily, missing_roe = [], []
         for number, symbol in enumerate(symbols, start=1):
-            indicators = source.daily_indicators(symbol, start, end)
+            indicators, values = LabService._pit_source_rows(source, symbol, start, end)
             if not indicators.empty:
                 daily[symbol] = indicators
             else:
                 missing_daily.append(symbol)
-            values = source.quarterly_roe(symbol, str(max(1990, int(start[:4]) - 1)))
             if not values.empty:
                 quarterly[symbol] = values
             else:
@@ -2260,37 +2376,120 @@ class LabService:
                     f"公告日 ROE 缺失 {len(missing_roe)} 只: {', '.join(missing_roe[:5])}"
                 )
             raise RuntimeError("production PIT 基本面门禁未通过；" + "；".join(detail))
-        # 每日指标返回的日期是本次 provider 响应实际覆盖的交易 session。
-        # date-only ann_date 必须基于这份证据选择下一 session，不能用 BDay
-        # 猜测法定节假日；没有 session 证据时 production 研究直接失败。
-        dates = pd.DatetimeIndex([])
-        for frame in daily.values():
-            dates = dates.union(pd.DatetimeIndex(frame.index))
-        dates = dates[(dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))].sort_values()
-        if dates.empty:
-            raise RuntimeError("production PIT 基本面缺少真实交易 session 索引")
-        for symbol, values in quarterly.items():
-            roe[symbol] = quarterly_to_daily(values, dates)
-        result: dict[str, pd.DataFrame] = {}
-        for field in ("pe_ttm", "pb", "dv_ratio", "total_mv"):
-            result[field] = pd.DataFrame({
-                symbol: frame[field].reindex(dates)
-                for symbol, frame in daily.items() if field in frame
-            })
-        result["roe"] = pd.DataFrame({
-            symbol: frame["roe"].reindex(dates) for symbol, frame in roe.items()
-        })
-        if not result.get("roe", pd.DataFrame()).notna().any().any():
-            raise RuntimeError("production 研究缺少按真实公告日对齐的 ROE")
-        return result
+        return LabService._pit_result(daily, quarterly, start, end, quarterly_to_daily)
+
+    @staticmethod
+    def _bias_expression_checks(
+        spec: FactorSpec, panel: dict[str, pd.DataFrame], start: str, end: str,
+    ) -> dict[str, Any]:
+        from quantmaster.factors import compute_factor
+        from quantmaster.factors.fundamental import resolve_factor
+        from quantmaster.lab.research import compare_prefixes, recursive_stability
+
+        factor = resolve_factor(spec.expression or spec.slug, list(panel["close"]), start, end)
+        full = compute_factor(factor, panel)
+        prefix_checks = []
+        for ratio in (0.55, 0.70, 0.85):
+            length = max(120, int(len(panel["close"]) * ratio))
+            truncated = {key: value.iloc[:length] for key, value in panel.items()}
+            prefix_checks.append(compare_prefixes(full.iloc[:length], compute_factor(factor, truncated)))
+        first_failure = next((item for item in prefix_checks if not item["passed"]), None)
+        checks = {
+            "lookahead": {
+                "passed": all(item["passed"] for item in prefix_checks),
+                "prefixes": prefix_checks, "operator": spec.expression or spec.slug,
+                "first_pollution_date": first_failure.get("first_changed_at") if first_failure else None,
+            },
+        }
+        warmups = {}
+        for length in (60, 120, 240, 480):
+            if len(panel["close"]) >= length:
+                computed = compute_factor(
+                    factor, {key: value.iloc[-length:] for key, value in panel.items()},
+                )
+                warmups[length] = computed.iloc[-1]
+        checks["recursive"] = (
+            recursive_stability(warmups, tolerance=1e-5) if len(warmups) >= 2 else {
+                "passed": False, "reason": "历史长度不足，无法比较至少两个 warm-up 窗口",
+            }
+        )
+        return checks
+
+    @staticmethod
+    def _bias_python_checks(spec: FactorSpec) -> dict[str, Any]:
+        root = Path(get_config().data_root).resolve()
+        manifest_path = (root / str(spec.artifact.get("manifest") or "")).resolve()
+        source_path = (root / str(spec.artifact.get("source") or "")).resolve()
+        if root not in manifest_path.parents or root not in source_path.parents:
+            raise ValueError("Python 因子工件路径越界")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        import hashlib
+
+        integrity = hashlib.sha256(source_path.read_bytes()).hexdigest() == str(
+            spec.artifact.get("source_sha256") or ""
+        )
+        audit = manifest.get("audit") or {}
+        lookahead = dict(audit.get("lookahead") or {"passed": False})
+        first_failure = next(
+            (item for item in lookahead.get("prefixes", []) if not item.get("passed", False)),
+            None,
+        )
+        lookahead.setdefault("operator", "restricted Python factor")
+        lookahead.setdefault(
+            "first_pollution_date",
+            first_failure.get("first_changed_at") if first_failure else None,
+        )
+        return {
+            "lookahead": lookahead,
+            "recursive": audit.get("recursive") or {"passed": False},
+            "artifact_integrity": {"passed": integrity},
+        }
+
+    @staticmethod
+    def _bias_learned_checks(spec: FactorSpec) -> tuple[dict[str, Any], dict[str, Any]]:
+        from quantmaster.lab.ml import artifact_sha256
+
+        manifest_relative = str((spec.model or {}).get("manifest") or "")
+        root = Path(get_config().data_root).resolve()
+        manifest_path = (root / manifest_relative).resolve()
+        if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
+            raise ValueError("学习模型 manifest 不存在或越出数据目录")
+        expected_manifest = str((spec.model or {}).get("manifest_sha256") or "")
+        if expected_manifest and artifact_sha256(manifest_path) != expected_manifest:
+            raise ValueError("学习模型 manifest 完整性校验失败")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        folds = manifest.get("fold_artifacts") or []
+        temporal_failures = [
+            item for item in folds
+            if item.get("fold", {}).get("train_end", "") >= item.get("fold", {}).get("test_start", "")
+        ]
+        integrity = True
+        for item in folds:
+            artifact = (root / str(item.get("artifact") or "")).resolve()
+            if (
+                not artifact.is_relative_to(root) or not artifact.is_file()
+                or artifact_sha256(artifact) != item.get("artifact_sha256")
+            ):
+                integrity = False
+                break
+        checks = {
+            "lookahead": {
+                "passed": not temporal_failures, "fold_count": len(folds),
+                "operator": "train/test temporal boundary",
+                "first_pollution_date": (
+                    temporal_failures[0].get("fold", {}).get("test_start")
+                    if temporal_failures else None
+                ),
+            },
+            "recursive": {"passed": True, "reason": "模型由固定长度序列清单约束"},
+            "artifact_integrity": {"passed": integrity},
+        }
+        return checks, manifest
 
     def bias_audit(
         self, version_id: str, *, universe: str, start: str, end: str, progress=None,
     ) -> dict:
         """对新研究协议运行前缀、warm-up、标签成熟度和 PIT 清单审计。"""
-        from quantmaster.lab.ml import artifact_sha256
-        from quantmaster.lab.research import compare_prefixes, recursive_stability
-
         version = self.store.version(version_id)
         if version is None:
             raise KeyError("因子版本不存在")
@@ -2299,105 +2498,11 @@ class LabService:
         checks: dict[str, Any] = {}
         learned_manifest: dict[str, Any] = {}
         if spec.kind == "expression":
-            from quantmaster.factors import compute_factor
-            from quantmaster.factors.fundamental import resolve_factor
-
-            factor = resolve_factor(spec.expression or spec.slug, list(panel["close"]), start, end)
-            full = compute_factor(factor, panel)
-            prefix_checks = []
-            for ratio in (0.55, 0.70, 0.85):
-                length = max(120, int(len(panel["close"]) * ratio))
-                truncated = {key: value.iloc[:length] for key, value in panel.items()}
-                prefix_checks.append(compare_prefixes(full.iloc[:length], compute_factor(factor, truncated)))
-            first_failure = next(
-                (item for item in prefix_checks if not item["passed"]), None,
-            )
-            checks["lookahead"] = {
-                "passed": all(item["passed"] for item in prefix_checks), "prefixes": prefix_checks,
-                "operator": spec.expression or spec.slug,
-                "first_pollution_date": (
-                    first_failure.get("first_changed_at") if first_failure else None
-                ),
-            }
-            warmups = {}
-            for length in (60, 120, 240, 480):
-                if len(panel["close"]) >= length:
-                    computed = compute_factor(
-                        factor, {key: value.iloc[-length:] for key, value in panel.items()},
-                    )
-                    warmups[length] = computed.iloc[-1]
-            checks["recursive"] = (
-                recursive_stability(warmups, tolerance=1e-5)
-                if len(warmups) >= 2 else {
-                    "passed": False,
-                    "reason": "历史长度不足，无法比较至少两个 warm-up 窗口",
-                }
-            )
+            checks = self._bias_expression_checks(spec, panel, start, end)
         elif spec.kind == "python":
-            root = Path(get_config().data_root).resolve()
-            manifest_path = (root / str(spec.artifact.get("manifest") or "")).resolve()
-            source_path = (root / str(spec.artifact.get("source") or "")).resolve()
-            if root not in manifest_path.parents or root not in source_path.parents:
-                raise ValueError("Python 因子工件路径越界")
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            import hashlib
-            integrity = hashlib.sha256(source_path.read_bytes()).hexdigest() == str(
-                spec.artifact.get("source_sha256") or ""
-            )
-            audit = manifest.get("audit") or {}
-            lookahead = dict(audit.get("lookahead") or {"passed": False})
-            first_failure = next(
-                (
-                    item for item in lookahead.get("prefixes", [])
-                    if not item.get("passed", False)
-                ),
-                None,
-            )
-            lookahead.setdefault("operator", "restricted Python factor")
-            lookahead.setdefault(
-                "first_pollution_date",
-                first_failure.get("first_changed_at") if first_failure else None,
-            )
-            checks["lookahead"] = lookahead
-            checks["recursive"] = audit.get("recursive") or {"passed": False}
-            checks["artifact_integrity"] = {"passed": integrity}
+            checks = self._bias_python_checks(spec)
         else:
-            manifest_relative = str((spec.model or {}).get("manifest") or "")
-            root = Path(get_config().data_root).resolve()
-            manifest_path = (root / manifest_relative).resolve()
-            if not manifest_path.is_relative_to(root) or not manifest_path.is_file():
-                raise ValueError("学习模型 manifest 不存在或越出数据目录")
-            expected_manifest = str((spec.model or {}).get("manifest_sha256") or "")
-            if expected_manifest and artifact_sha256(manifest_path) != expected_manifest:
-                raise ValueError("学习模型 manifest 完整性校验失败")
-            learned_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            folds = learned_manifest.get("fold_artifacts") or []
-            temporal_failures = [
-                item for item in folds
-                if item.get("fold", {}).get("train_end", "")
-                >= item.get("fold", {}).get("test_start", "")
-            ]
-            temporal = not temporal_failures
-            integrity = True
-            for item in folds:
-                artifact = (root / str(item.get("artifact") or "")).resolve()
-                if (
-                    not artifact.is_relative_to(root) or not artifact.is_file()
-                    or artifact_sha256(artifact) != item.get("artifact_sha256")
-                ):
-                    integrity = False
-                    break
-            checks["lookahead"] = {
-                "passed": temporal,
-                "fold_count": len(folds),
-                "operator": "train/test temporal boundary",
-                "first_pollution_date": (
-                    temporal_failures[0].get("fold", {}).get("test_start")
-                    if temporal_failures else None
-                ),
-            }
-            checks["recursive"] = {"passed": True, "reason": "模型由固定长度序列清单约束"}
-            checks["artifact_integrity"] = {"passed": integrity}
+            checks, learned_manifest = self._bias_learned_checks(spec)
         protocol = learned_manifest.get("protocol") or {}
         maximum_horizon = max(spec.horizons)
         checks["target_maturity"] = {
@@ -2535,17 +2640,168 @@ class LabService:
         )
         return compute_factor(factor, panel)
 
+    def _research_cycle_reports(
+        self, records: dict[str, dict[str, Any]], panel: dict[str, pd.DataFrame],
+        membership: Any, snapshot: dict[str, Any], protocol: Any,
+        start: str, end: str, progress=None, cancelled=None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, pd.DataFrame], list[dict[str, str]]]:
+        from quantmaster.lab.validation import validate_factor_values
+
+        reports: dict[str, dict[str, Any]] = {}
+        raw_values: dict[str, pd.DataFrame] = {}
+        skipped: list[dict[str, str]] = []
+        for number, (version_id, version) in enumerate(records.items(), start=1):
+            if cancelled and cancelled():
+                raise InterruptedError("研究周期已取消")
+            if progress:
+                progress(
+                    8 + int(42 * number / max(1, len(records))),
+                    f"开发区复验 {number}/{len(records)} · {version.get('name', '')}",
+                )
+            try:
+                values = self._expression_values(version, panel, start, end)
+                raw_values[version_id] = values
+                reports[version_id] = validate_factor_values(
+                    values, panel["close"], name=str(version.get("name") or version_id),
+                    horizons=SUPPORTED_HORIZONS, protocol=protocol, membership=membership,
+                    research_quality=str(
+                        (snapshot.get("payload") or {}).get("research_quality", "production")
+                    ),
+                    panel=panel, open_prices=panel.get("open"), essential_only=True,
+                )
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                skipped.append({"version_id": version_id, "reason": str(exc)})
+        return reports, raw_values, skipped
+
+    def _apply_research_cycle_fdr(
+        self, reports: dict[str, dict[str, Any]], snapshot: dict[str, Any],
+    ) -> int:
+        from quantmaster.lab.research import benjamini_hochberg_family
+
+        family: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        p_values: list[float] = []
+        for report in reports.values():
+            for evidence in report["horizons"].values():
+                family.append((report, evidence))
+                p_values.append(float(evidence.get("p_value", 1.0)))
+        quality = str((snapshot.get("payload") or {}).get("research_quality", "production"))
+        for (report, evidence), q_value in zip(
+            family, benjamini_hochberg_family(p_values), strict=True,
+        ):
+            evidence["q_value"] = float(q_value)
+            evidence["gates"] = atomic_horizon_gate(
+                evidence, coverage=float(report.get("coverage") or 0),
+                research_quality=quality,
+            )
+        snapshot_hash = str((snapshot.get("payload") or {}).get("snapshot_hash") or "")
+        for version_id, report in reports.items():
+            eligible = [
+                int(value["horizon"]) for value in report["horizons"].values()
+                if (value.get("gates") or {}).get("passed")
+            ]
+            report["eligible_horizons"] = eligible
+            report["gates"] = {
+                "passed": bool(eligible), "hard_failures": [],
+                "soft_failures": [] if eligible else ["没有周期通过本轮统一 FDR 门槛"],
+                "override_allowed": True,
+            }
+            self.store.save_validation(version_id, snapshot_hash, report)
+        return len(family)
+
+    def _save_research_cycle_horizon(
+        self, *, cycle_id: str, horizon: int, position: int, reports: dict[str, dict[str, Any]],
+        raw_values: dict[str, pd.DataFrame], development_dates: Any,
+        development_membership: Any, membership: Any, sealed: Any, sealed_dates: Any,
+        sealed_panel: dict[str, pd.DataFrame], sealed_benchmark: Any, industry_map: Any,
+        panel: dict[str, pd.DataFrame], snapshot: dict[str, Any], protocol: Any, progress=None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        candidates = []
+        directions: dict[str, int] = {}
+        for version_id, report in reports.items():
+            evidence = report["horizons"].get(str(horizon)) or {}
+            if not (evidence.get("gates") or {}).get("passed"):
+                continue
+            directions[version_id] = int(evidence.get("direction") or 1)
+            execution = evidence.get("execution") or {}
+            candidates.append({
+                "version_id": version_id,
+                "development_score": max(
+                    1e-6, float(execution.get("net_information_ratio") or 0)
+                    + abs(float(evidence.get("oos_icir") or 0)),
+                ),
+            })
+        development_values = {
+            version_id: (raw_values[version_id].reindex(index=development_dates) * direction).where(
+                development_membership
+            )
+            for version_id, direction in directions.items()
+        }
+        components = ensemble_weights(candidates, development_values, horizon=horizon)
+        if not components:
+            return None, {
+                "qualified_factors": len(candidates), "status": "no_strategy",
+                "reason": "合格因子不足 3 个" if len(candidates) < 3 else "合格因子高度相关，去重后不足 3 个",
+            }
+        for component in components:
+            component["direction"] = directions[component["version_id"]]
+        full_oriented = {
+            component["version_id"]: (
+                raw_values[component["version_id"]] * int(component["direction"])
+            ).where(membership)
+            for component in components
+        }
+        combined = combine_scores(components, full_oriented)
+        execution = execute_daily_targets(
+            combined.reindex(index=sealed_dates), sealed_panel, horizon=horizon,
+            top_n=12, cap_weight=0.10, industry_map=industry_map,
+            benchmark_returns=sealed_benchmark,
+        )
+        bootstrap = moving_block_return_interval(
+            execution["daily_excess"], block_days=max(20, 2 * horizon), seed=protocol.seed + horizon,
+        )
+        baseline_calmar = 0.0
+        try:
+            from quantmaster.decision.hybrid import rule_signal_bundle
+
+            rule_score, _weights, _features = rule_signal_bundle(panel, horizon)
+            baseline_result = execute_daily_targets(
+                rule_score.where(membership).reindex(index=sealed_dates), sealed_panel,
+                horizon=horizon, top_n=12, cap_weight=0.10, industry_map=industry_map,
+                benchmark_returns=sealed_benchmark,
+            )
+            baseline_calmar = float(baseline_result["metrics"].get("calmar") or 0)
+            baseline_annual = float(baseline_result["metrics"].get("net_annual_excess_return") or 0)
+        except (KeyError, TypeError, ValueError):
+            baseline_annual = 0.0
+        evidence = {
+            "horizon": horizon, "opened_once": True,
+            "period": {"start": sealed.test_start, "end": sealed.test_end},
+            "dataset_id": snapshot.get("id", ""), "metrics": execution["metrics"],
+            "bootstrap": bootstrap,
+            "gates": strategy_sealed_gate(execution["metrics"], bootstrap, baseline_calmar=baseline_calmar),
+        }
+        candidate = self.store.save_strategy_candidate(
+            cycle_id=cycle_id, horizon=horizon, name=f"CSI800 {horizon}日多因子组合",
+            components=components,
+            development={
+                "period_end": sealed.train_end, "candidate_count": len(candidates),
+                "selection": "median_fold_net_ir_drawdown_turnover", "max_component_correlation": 0.70,
+            }, sealed_evidence=evidence,
+            return_curve={"baseline_annual_net_excess_return": baseline_annual},
+        )
+        if progress:
+            progress(55 + int(40 * position / len(SUPPORTED_HORIZONS)), f"{horizon} 日组合密封评估完成")
+        return candidate, {
+            "qualified_factors": len(candidates), "selected_factors": len(components),
+            "status": candidate["status"], "strategy_id": candidate["id"],
+        }
+
     def research_cycle(
         self, *, universe: str = "csi800", start: str = "2015-01-01",
         end: str = "", progress=None, cancelled=None,
     ) -> dict[str, Any]:
         """Build horizon-specific ensembles without exposing sealed data to selection."""
-        from quantmaster.lab.research import (
-            WalkForwardSpec,
-            benjamini_hochberg_family,
-            walk_forward_folds,
-        )
-        from quantmaster.lab.validation import validate_factor_values
+        from quantmaster.lab.research import WalkForwardSpec, walk_forward_folds
 
         end = end or market_date().isoformat()
         panel, membership, snapshot = self._context(
@@ -2575,62 +2831,10 @@ class LabService:
                 version = self.store.version(version_id)
                 if version is not None:
                     records[version_id] = version
-        reports: dict[str, dict[str, Any]] = {}
-        raw_values: dict[str, pd.DataFrame] = {}
-        skipped: list[dict[str, str]] = []
-        for number, (version_id, version) in enumerate(records.items(), start=1):
-            if cancelled and cancelled():
-                raise InterruptedError("研究周期已取消")
-            if progress:
-                progress(8 + int(42 * number / max(1, len(records))),
-                         f"开发区复验 {number}/{len(records)} · {version.get('name', '')}")
-            try:
-                values = self._expression_values(version, panel, start, end)
-                raw_values[version_id] = values
-                report = validate_factor_values(
-                    values, panel["close"],
-                    name=str(version.get("name") or version_id),
-                    horizons=SUPPORTED_HORIZONS, protocol=protocol, membership=membership,
-                    research_quality=str((snapshot.get("payload") or {}).get(
-                        "research_quality", "production"
-                    )), panel=panel, open_prices=panel.get("open"),
-                    essential_only=True,
-                )
-                reports[version_id] = report
-            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-                skipped.append({"version_id": version_id, "reason": str(exc)})
-
-        family: list[tuple[dict[str, Any], dict[str, Any]]] = []
-        p_values: list[float] = []
-        for report in reports.values():
-            for evidence in report["horizons"].values():
-                family.append((report, evidence))
-                p_values.append(float(evidence.get("p_value", 1.0)))
-        for (report, evidence), q_value in zip(
-            family, benjamini_hochberg_family(p_values), strict=True,
-        ):
-            evidence["q_value"] = float(q_value)
-            evidence["gates"] = atomic_horizon_gate(
-                evidence, coverage=float(report.get("coverage") or 0),
-                research_quality=str((snapshot.get("payload") or {}).get(
-                    "research_quality", "production"
-                )),
-            )
-        for version_id, report in reports.items():
-            eligible = [
-                int(value["horizon"]) for value in report["horizons"].values()
-                if (value.get("gates") or {}).get("passed")
-            ]
-            report["eligible_horizons"] = eligible
-            report["gates"] = {
-                "passed": bool(eligible), "hard_failures": [],
-                "soft_failures": [] if eligible else ["没有周期通过本轮统一 FDR 门槛"],
-                "override_allowed": True,
-            }
-            self.store.save_validation(
-                version_id, str((snapshot.get("payload") or {}).get("snapshot_hash") or ""),
-                report,
-            )
+        reports, raw_values, skipped = self._research_cycle_reports(
+            records, panel, membership, snapshot, protocol, start, end, progress, cancelled,
+        )
+        family_count = self._apply_research_cycle_fdr(reports, snapshot)
 
         sealed_dates = dates[dates >= pd.Timestamp(sealed.test_start)]
         sealed_panel = {key: frame.reindex(index=sealed_dates) for key, frame in panel.items()}
@@ -2648,120 +2852,25 @@ class LabService:
             if sealed_membership is not None else None
         )
         from quantmaster.data.industry import load_industry_map
-
         industry_map = load_industry_map(as_of=str(pd.Timestamp(dates[-1]).date()))
         strategies: list[dict[str, Any]] = []
         horizon_outcomes: dict[str, dict[str, Any]] = {}
         for position, horizon in enumerate(SUPPORTED_HORIZONS, start=1):
-            candidates = []
-            directions: dict[str, int] = {}
-            for version_id, report in reports.items():
-                evidence = report["horizons"].get(str(horizon)) or {}
-                if not (evidence.get("gates") or {}).get("passed"):
-                    continue
-                directions[version_id] = int(evidence.get("direction") or 1)
-                execution = evidence.get("execution") or {}
-                candidates.append({
-                    "version_id": version_id,
-                    "development_score": max(
-                        1e-6,
-                        float(execution.get("net_information_ratio") or 0)
-                        + abs(float(evidence.get("oos_icir") or 0)),
-                    ),
-                })
-            development_values = {
-                version_id: (
-                    raw_values[version_id].reindex(index=development_dates)
-                    * directions[version_id]
-                ).where(development_membership)
-                for version_id in directions
-            }
-            components = ensemble_weights(
-                candidates, development_values, horizon=horizon,
+            candidate, outcome = self._save_research_cycle_horizon(
+                cycle_id=cycle["id"], horizon=horizon, position=position,
+                reports=reports, raw_values=raw_values, development_dates=development_dates,
+                development_membership=development_membership, membership=membership,
+                sealed=sealed, sealed_dates=sealed_dates, sealed_panel=sealed_panel,
+                sealed_benchmark=sealed_benchmark, industry_map=industry_map, panel=panel,
+                snapshot=snapshot, protocol=protocol, progress=progress,
             )
-            if not components:
-                horizon_outcomes[str(horizon)] = {
-                    "qualified_factors": len(candidates),
-                    "status": "no_strategy",
-                    "reason": (
-                        "合格因子不足 3 个" if len(candidates) < 3
-                        else "合格因子高度相关，去重后不足 3 个"
-                    ),
-                }
-                continue
-            for component in components:
-                component["direction"] = directions[component["version_id"]]
-            full_oriented = {
-                component["version_id"]: (
-                    raw_values[component["version_id"]]
-                    * int(component["direction"])
-                ).where(membership)
-                for component in components
-            }
-            combined = combine_scores(components, full_oriented)
-            execution = execute_daily_targets(
-                combined.reindex(index=sealed_dates), sealed_panel,
-                horizon=horizon, top_n=12, cap_weight=0.10,
-                industry_map=industry_map,
-                benchmark_returns=sealed_benchmark,
-            )
-            bootstrap = moving_block_return_interval(
-                execution["daily_excess"], block_days=max(20, 2 * horizon),
-                seed=protocol.seed + horizon,
-            )
-            baseline_calmar = 0.0
-            try:
-                from quantmaster.decision.hybrid import rule_signal_bundle
-
-                rule_score, _weights, _features = rule_signal_bundle(panel, horizon)
-                baseline_result = execute_daily_targets(
-                    rule_score.where(membership).reindex(index=sealed_dates), sealed_panel,
-                    horizon=horizon, top_n=12, cap_weight=0.10,
-                    industry_map=industry_map,
-                    benchmark_returns=sealed_benchmark,
-                )
-                baseline_calmar = float(baseline_result["metrics"].get("calmar") or 0)
-                baseline_annual = float(
-                    baseline_result["metrics"].get("net_annual_excess_return") or 0
-                )
-            except (KeyError, TypeError, ValueError):
-                baseline_annual = 0.0
-            gate = strategy_sealed_gate(
-                execution["metrics"], bootstrap, baseline_calmar=baseline_calmar,
-            )
-            evidence = {
-                "horizon": horizon, "opened_once": True,
-                "period": {"start": sealed.test_start, "end": sealed.test_end},
-                "dataset_id": snapshot.get("id", ""), "metrics": execution["metrics"],
-                "bootstrap": bootstrap, "gates": gate,
-            }
-            candidate = self.store.save_strategy_candidate(
-                cycle_id=cycle["id"], horizon=horizon,
-                name=f"CSI800 {horizon}日多因子组合",
-                components=components,
-                development={
-                    "period_end": sealed.train_end,
-                    "candidate_count": len(candidates),
-                    "selection": "median_fold_net_ir_drawdown_turnover",
-                    "max_component_correlation": 0.70,
-                },
-                sealed_evidence=evidence,
-                return_curve={"baseline_annual_net_excess_return": baseline_annual},
-            )
-            strategies.append(candidate)
-            horizon_outcomes[str(horizon)] = {
-                "qualified_factors": len(candidates),
-                "selected_factors": len(components),
-                "status": candidate["status"],
-                "strategy_id": candidate["id"],
-            }
-            if progress:
-                progress(55 + int(40 * position / len(SUPPORTED_HORIZONS)),
-                         f"{horizon} 日组合密封评估完成")
+            horizon_outcomes[str(horizon)] = outcome
+            if candidate:
+                strategies.append(candidate)
         result = {
             "cycle_id": cycle["id"], "snapshot_id": snapshot.get("id", ""),
             "protocol": protocol.to_dict(), "sealed": sealed.to_dict(),
-            "factor_reports": len(reports), "family_tests": len(family),
+            "factor_reports": len(reports), "family_tests": family_count,
             "strategies": [item["id"] for item in strategies], "skipped": skipped,
             "horizon_outcomes": horizon_outcomes,
             "network_calls": 0,
@@ -2769,17 +2878,157 @@ class LabService:
         self.store.complete_research_cycle(cycle["id"], result)
         return result
 
+    @staticmethod
+    def _shadow_candidates(store: Any, strategy_id: str) -> list[dict[str, Any]]:
+        candidates = [store.strategy(strategy_id)] if strategy_id else [
+            *store.strategies(status="shadow_challenger", limit=30),
+            *store.strategies(status="paper", limit=30),
+            *store.strategies(status="champion", limit=30),
+        ]
+        return [item for item in candidates if item]
+
+    def _shadow_raw_values(
+        self, candidates: list[dict[str, Any]], panel: dict[str, pd.DataFrame], start: str, end: str,
+    ) -> dict[str, pd.DataFrame]:
+        raw: dict[str, pd.DataFrame] = {}
+        for candidate in candidates:
+            for component in candidate.get("components") or []:
+                version_id = str(component["version_id"])
+                if version_id in raw:
+                    continue
+                version = self.store.version(version_id)
+                if version is not None:
+                    raw[version_id] = self._expression_values(version, panel, start, end)
+        return raw
+
+    @staticmethod
+    def _shadow_signal_inputs(
+        candidate: dict[str, Any], raw: dict[str, pd.DataFrame], panel: dict[str, pd.DataFrame],
+        reference_symbols: list[str], ledger: Any, missing_holding_bars: list[str], industry_map: Any,
+    ) -> tuple[dict[str, float], dict[str, float], dict[str, Any], dict[str, float], int, str, Any]:
+        components = candidate.get("components") or []
+        values = {
+            str(item["version_id"]): raw[str(item["version_id"])] * int(item.get("direction") or 1)
+            for item in components if str(item["version_id"]) in raw
+        }
+        score = combine_scores(components, values, reference_columns=reference_symbols)
+        latest = score.dropna(how="all").index[-1]
+        weights = target_weights(score, top_n=12, cap_weight=0.10, industry_map=industry_map).loc[latest]
+        target = {str(symbol): float(value) for symbol, value in weights.items() if value > 0}
+        current, portfolio, _priced_holdings = _ledger_weight_context(
+            ledger, panel, pd.Timestamp(latest),
+        )
+        portfolio["unscored_holdings"] = list(missing_holding_bars)
+        score_row = score.loc[latest]
+        latest_prices = panel["close"].loc[:latest].ffill().iloc[-1]
+        confidence: dict[str, float] = {}
+        for symbol in set(target) | set(current):
+            score_ready = symbol in score_row.index and pd.notna(score_row.get(symbol))
+            price = latest_prices.get(symbol)
+            price_ready = pd.notna(price) and np.isfinite(float(price)) and float(price) > 0
+            confidence[symbol] = (
+                (1.0 if symbol in reference_symbols else 0.75)
+                if score_ready and price_ready else 0.0
+            )
+        horizon = int(candidate["horizon"])
+        mature_date = (
+            pd.Timestamp(latest) + pd.offsets.BDay(horizon + 1)
+        ).strftime("%Y-%m-%d")
+        return target, current, portfolio, confidence, horizon, mature_date, latest
+
+    def _mature_shadow_signals(
+        self, candidate: dict[str, Any], dates: Any, open_prices: pd.DataFrame,
+        horizon: int,
+    ) -> None:
+        for pending in self.store.shadow_signals(candidate["id"], limit=500):
+            if pending.get("status") != "pending":
+                continue
+            signal_date = pd.Timestamp(pending["signal_date"])
+            positions = np.flatnonzero(dates > signal_date)
+            if len(positions) <= horizon:
+                continue
+            execution_pos, mature_pos = int(positions[0]), int(positions[horizon])
+            held = pending["payload_json"].get("target_weights") or {}
+            realized = []
+            for symbol, weight in held.items():
+                if symbol not in open_prices.columns:
+                    continue
+                first = open_prices.iloc[execution_pos][symbol]
+                last = open_prices.iloc[mature_pos][symbol]
+                if pd.notna(first) and pd.notna(last) and first > 0:
+                    realized.append(float(weight) * (float(last) / float(first) - 1.0))
+            gross = float(sum(realized))
+            trade = get_config().trade
+            cost = float(
+                2 * trade.commission_rate + trade.stamp_tax_rate
+                + 2 * trade.transfer_fee_rate + 2 * trade.slippage
+            )
+            benchmark = float(
+                (open_prices.iloc[mature_pos] / open_prices.iloc[execution_pos] - 1.0).mean()
+            )
+            self.store.save_shadow_signal(
+                candidate["id"], signal_date=pending["signal_date"],
+                mature_date=pd.Timestamp(dates[mature_pos]).strftime("%Y-%m-%d"),
+                payload=pending["payload_json"],
+                realized={
+                    "gross_return": gross, "net_return": gross - cost,
+                    "net_excess_return": gross - cost - benchmark,
+                },
+            )
+
+    def _score_shadow_candidate(
+        self, candidate: dict[str, Any], raw: dict[str, pd.DataFrame], panel: dict[str, pd.DataFrame],
+        reference_symbols: list[str], ledger: Any, missing_holding_bars: list[str], industry_map: Any,
+        open_prices: pd.DataFrame, dates: Any,
+    ) -> dict[str, Any]:
+        target, current, portfolio, confidence, horizon, mature_date, latest = self._shadow_signal_inputs(
+            candidate, raw, panel, reference_symbols, ledger, missing_holding_bars, industry_map,
+        )
+        actions = holding_actions(
+            target, current, evidence_valid=bool(portfolio["reliable"]), confidence=confidence,
+        )
+        signal = self.store.save_shadow_signal(
+            candidate["id"], signal_date=pd.Timestamp(latest).strftime("%Y-%m-%d"),
+            mature_date=mature_date,
+            payload={
+                "target_weights": target, "current_weights": current, "actions": actions,
+                "portfolio": portfolio, "confidence": confidence,
+                "reference_distribution": "csi800",
+                "strategy_evidence": {
+                    "strategy_id": candidate["id"], "status": candidate["status"],
+                    "sealed_gates": (candidate.get("sealed_evidence") or {}).get("gates") or {},
+                }, "horizon": horizon,
+            },
+        )
+        self._mature_shadow_signals(candidate, dates, open_prices, horizon)
+        matured = [
+            item for item in self.store.shadow_signals(candidate["id"], limit=500)
+            if item.get("status") == "matured"
+        ]
+        returns = pd.Series(
+            [float(item["realized_json"].get("net_excess_return") or 0) for item in matured],
+            dtype=float,
+        )
+        nav = (1 + returns.clip(lower=-0.999)).cumprod()
+        max_dd = float((1 - nav / nav.cummax()).max()) if len(nav) else 0.0
+        sealed_dd = float(
+            ((candidate.get("sealed_evidence") or {}).get("metrics") or {}).get("max_drawdown", 0.25)
+        )
+        summary = {
+            "matured_signal_days": len(matured),
+            "net_excess_return": float(nav.iloc[-1] - 1) if len(nav) else 0.0,
+            "max_drawdown": max_dd, "drawdown_within_stress": max_dd <= max(0.01, sealed_dd),
+            "coverage_degraded": False,
+        }
+        self.store.update_strategy_tracking(candidate["id"], shadow=summary)
+        return {**signal, "actions": actions, "shadow_summary": summary}
+
     def shadow_score(
         self, *, strategy_id: str = "", universe: str = "csi800",
         start: str = "2015-01-01", end: str = "", progress=None,
     ) -> dict[str, Any]:
         end = end or market_date().isoformat()
-        candidates = [self.store.strategy(strategy_id)] if strategy_id else [
-            *self.store.strategies(status="shadow_challenger", limit=30),
-            *self.store.strategies(status="paper", limit=30),
-            *self.store.strategies(status="champion", limit=30),
-        ]
-        candidates = [item for item in candidates if item]
+        candidates = self._shadow_candidates(self.store, strategy_id)
         if not candidates:
             return {"scored": 0, "signals": [], "network_calls": 0}
         panel, _membership, _snapshot = self._context(
@@ -2795,136 +3044,18 @@ class LabService:
         panel, missing_holding_bars = _extend_panel_with_local_symbols(
             panel, ledger_symbols,
         )
-        versions: dict[str, dict[str, Any]] = {}
-        raw: dict[str, pd.DataFrame] = {}
-        for candidate in candidates:
-            for component in candidate.get("components") or []:
-                version_id = str(component["version_id"])
-                if version_id in raw:
-                    continue
-                version = self.store.version(version_id)
-                if version is None:
-                    continue
-                versions[version_id] = version
-                raw[version_id] = self._expression_values(version, panel, start, end)
-        signals = []
+        raw = self._shadow_raw_values(candidates, panel, start, end)
+        signals: list[dict[str, Any]] = []
         open_prices = panel["open"].sort_index()
         dates = open_prices.index
         from quantmaster.data.industry import load_industry_map
 
         industry_map = load_industry_map(as_of=end)
         for candidate in candidates:
-            components = candidate.get("components") or []
-            values = {
-                str(item["version_id"]): raw[str(item["version_id"])]
-                * int(item.get("direction") or 1)
-                for item in components if str(item["version_id"]) in raw
-            }
-            score = combine_scores(
-                components, values, reference_columns=reference_symbols,
-            )
-            latest = score.dropna(how="all").index[-1]
-            weights = target_weights(
-                score, top_n=12, cap_weight=0.10, industry_map=industry_map,
-            ).loc[latest]
-            target = {str(symbol): float(value) for symbol, value in weights.items() if value > 0}
-            current, portfolio, _priced_holdings = _ledger_weight_context(
-                ledger, panel, pd.Timestamp(latest),
-            )
-            portfolio["unscored_holdings"] = list(missing_holding_bars)
-            score_row = score.loc[latest]
-            latest_prices = panel["close"].loc[:latest].ffill().iloc[-1]
-            confidence: dict[str, float] = {}
-            for symbol in set(target) | set(current):
-                score_ready = symbol in score_row.index and pd.notna(score_row.get(symbol))
-                price = latest_prices.get(symbol)
-                price_ready = pd.notna(price) and np.isfinite(float(price)) and float(price) > 0
-                confidence[symbol] = (
-                    (1.0 if symbol in reference_symbols else 0.75)
-                    if score_ready and price_ready else 0.0
-                )
-            horizon = int(candidate["horizon"])
-            mature_date = (pd.Timestamp(latest) + pd.offsets.BDay(horizon + 1)).strftime("%Y-%m-%d")
-            actions = holding_actions(
-                target, current, evidence_valid=bool(portfolio["reliable"]),
-                confidence=confidence,
-            )
-            signal = self.store.save_shadow_signal(
-                candidate["id"], signal_date=pd.Timestamp(latest).strftime("%Y-%m-%d"),
-                mature_date=mature_date,
-                payload={
-                    "target_weights": target,
-                    "current_weights": current,
-                    "actions": actions,
-                    "portfolio": portfolio,
-                    "confidence": confidence,
-                    "reference_distribution": "csi800",
-                    "strategy_evidence": {
-                        "strategy_id": candidate["id"],
-                        "status": candidate["status"],
-                        "sealed_gates": (
-                            (candidate.get("sealed_evidence") or {}).get("gates") or {}
-                        ),
-                    },
-                    "horizon": horizon,
-                },
-            )
-            for pending in self.store.shadow_signals(candidate["id"], limit=500):
-                if pending.get("status") != "pending":
-                    continue
-                signal_date = pd.Timestamp(pending["signal_date"])
-                positions = np.flatnonzero(dates > signal_date)
-                if len(positions) <= horizon:
-                    continue
-                execution_pos, mature_pos = int(positions[0]), int(positions[horizon])
-                held = pending["payload_json"].get("target_weights") or {}
-                realized = []
-                for symbol, weight in held.items():
-                    if symbol not in open_prices.columns:
-                        continue
-                    first = open_prices.iloc[execution_pos][symbol]
-                    last = open_prices.iloc[mature_pos][symbol]
-                    if pd.notna(first) and pd.notna(last) and first > 0:
-                        realized.append(float(weight) * (float(last) / float(first) - 1.0))
-                gross = float(sum(realized))
-                trade = get_config().trade
-                cost = float(
-                    2 * trade.commission_rate + trade.stamp_tax_rate
-                    + 2 * trade.transfer_fee_rate + 2 * trade.slippage
-                )
-                benchmark = float(
-                    (open_prices.iloc[mature_pos] / open_prices.iloc[execution_pos] - 1.0).mean()
-                )
-                self.store.save_shadow_signal(
-                    candidate["id"], signal_date=pending["signal_date"],
-                    mature_date=pd.Timestamp(dates[mature_pos]).strftime("%Y-%m-%d"),
-                    payload=pending["payload_json"],
-                    realized={"gross_return": gross, "net_return": gross - cost,
-                              "net_excess_return": gross - cost - benchmark},
-                )
-            matured = [
-                item for item in self.store.shadow_signals(candidate["id"], limit=500)
-                if item.get("status") == "matured"
-            ]
-            returns = pd.Series([
-                float(item["realized_json"].get("net_excess_return") or 0) for item in matured
-            ], dtype=float)
-            nav = (1 + returns.clip(lower=-0.999)).cumprod()
-            max_dd = float((1 - nav / nav.cummax()).max()) if len(nav) else 0.0
-            sealed_dd = float(
-                ((candidate.get("sealed_evidence") or {}).get("metrics") or {}).get(
-                    "max_drawdown", 0.25
-                )
-            )
-            summary = {
-                "matured_signal_days": len(matured),
-                "net_excess_return": float(nav.iloc[-1] - 1) if len(nav) else 0.0,
-                "max_drawdown": max_dd,
-                "drawdown_within_stress": max_dd <= max(0.01, sealed_dd),
-                "coverage_degraded": False,
-            }
-            self.store.update_strategy_tracking(candidate["id"], shadow=summary)
-            signals.append({**signal, "actions": actions, "shadow_summary": summary})
+            signals.append(self._score_shadow_candidate(
+                candidate, raw, panel, reference_symbols, ledger, missing_holding_bars,
+                industry_map, open_prices, dates,
+            ))
         return {"scored": len(signals), "signals": signals, "network_calls": 0}
 
     def workbench(self, horizon: int | None = None) -> dict[str, Any]:

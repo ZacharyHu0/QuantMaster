@@ -30,6 +30,7 @@ from quantmaster.research.contracts import (
     content_hash,
     utc_now,
 )
+from quantmaster.research_access import register_research_lake
 from quantmaster.runtime.json import strict_json_dumps
 
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -167,7 +168,7 @@ class ResearchLake:
             reason,
         )
         try:
-            from quantmaster.data.repair import enqueue_repair
+            from quantmaster.repair_access import enqueue_repair
 
             source = str(metadata.get("dataset_id") or "research")
             enqueue_repair(
@@ -813,3 +814,7 @@ class FeatureBatchProvider:
             "keys": keys,
             "features": features,
         }
+
+
+register_research_lake(ResearchLake)
+from quantmaster.research import repair as _repair_registration  # noqa: E402,F401

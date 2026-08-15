@@ -9,7 +9,6 @@ import pandas as pd
 
 from quantmaster.ai.crawler import NewsStore
 from quantmaster.config import get_config
-from quantmaster.factors.base import Factor, PanelDict
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 _MINIMUM_RESEARCH_SESSIONS = 756 + 30 + 252
@@ -372,7 +371,7 @@ def quality_sentiment_panel(
     return result
 
 
-class NewsSentimentFactor(Factor):
+class NewsSentimentFactor:
     """本地资讯库驱动的一等因子，不会在计算或回测时触网。"""
 
     name = "news_sentiment"
@@ -389,7 +388,7 @@ class NewsSentimentFactor(Factor):
         self.store = store
         self.tier = _factor_tier(tier)
 
-    def compute(self, panel: PanelDict) -> pd.DataFrame:
+    def compute(self, panel: dict[str, pd.DataFrame]) -> pd.DataFrame:
         reference = panel["close"]
         return quality_sentiment_panel(
             reference.index, list(reference.columns), store=self.store, tier=self.tier,

@@ -57,7 +57,7 @@ def _fetch_prices(
     symbols: list[str], lookback_days: int = 10,
 ) -> tuple[dict[str, float], dict[str, dict[str, Any]]]:
     """取最新收盘价，同时保留每个价格的质量、来源与实际观测日。"""
-    from quantmaster.data import refresh_history
+    from quantmaster.data.registry import refresh_history
 
     end = pd.Timestamp(market_date())
     start = end - pd.Timedelta(days=lookback_days)

@@ -1,4 +1,4 @@
-"""Executable module-boundary rules that prevent dependency drift."""
+"""Executable architecture and policy contracts."""
 
 from __future__ import annotations
 
@@ -7,199 +7,84 @@ import re
 import sys
 from pathlib import Path
 
+from scripts.ci.architecture import (
+    build_graph,
+    cycles,
+    import_targets,
+    layer_violations,
+    resolve_source_imports,
+)
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "quantmaster"
 STATIC_ROOT = PACKAGE_ROOT / "server" / "static"
 sys.path.insert(0, str(PACKAGE_ROOT.parent))
 
 
-def _module(path: Path) -> str:
-    return ".".join(path.relative_to(PACKAGE_ROOT.parent).with_suffix("").parts)
-
-
-def _top_level_imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    imports: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module)
-        elif isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-    return imports
-
-
-def _resolved_import_from(path: Path, node: ast.ImportFrom) -> set[str]:
-    parts: list[str] = []
-    if node.level:
-        package = list(path.relative_to(PACKAGE_ROOT.parent).with_suffix("").parts[:-1])
-        parents = node.level - 1
-        if parents >= len(package):
-            return set()
-        parts.extend(package[:len(package) - parents])
-    if node.module:
-        parts.extend(node.module.split("."))
-    base = ".".join(parts)
-    imports = {base} if base else set()
-    imports.update(
-        f"{base}.{alias.name}" if base else alias.name
-        for alias in node.names
-        if alias.name != "*"
-    )
-    return imports
-
-
 def _all_imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            imports.update(_resolved_import_from(path, node))
-        elif isinstance(node, ast.Import):
-            imports.update(alias.name for alias in node.names)
-    return imports
+    return {ref.target for ref in import_targets(path, PACKAGE_ROOT)}
 
 
-def test_domain_and_runtime_modules_do_not_depend_on_server_transport():
-    violations = []
-    for path in PACKAGE_ROOT.rglob("*.py"):
-        relative = path.relative_to(PACKAGE_ROOT)
-        if relative.parts[0] == "server" or relative.as_posix() == "cli.py":
-            continue
-        for imported in _top_level_imports(path):
-            if imported == "quantmaster.server" or imported.startswith("quantmaster.server."):
-                violations.append(f"{relative.as_posix()} -> {imported}")
-    assert not violations, "transport dependency leaked into domain:\n" + "\n".join(violations)
-
-
-def test_lab_modules_do_not_hide_server_dependencies_inside_functions():
-    violations = []
-    for path in (PACKAGE_ROOT / "lab").rglob("*.py"):
-        for imported in _all_imports(path):
-            if imported == "quantmaster.server" or imported.startswith("quantmaster.server."):
-                violations.append(
-                    f"{path.relative_to(PACKAGE_ROOT).as_posix()} -> {imported}"
-                )
-    assert not violations, "Lab domain depends on server transport:\n" + "\n".join(violations)
-
-
-def test_market_capability_has_no_deep_transport_dependency():
-    violations = []
-    for path in (PACKAGE_ROOT / "market").rglob("*.py"):
-        for imported in _all_imports(path):
-            if imported == "quantmaster.cli" or imported.startswith("quantmaster.server"):
-                violations.append(
-                    f"{path.relative_to(PACKAGE_ROOT).as_posix()} -> {imported}",
-                )
-    assert not violations, "market capability depends on transport:\n" + "\n".join(violations)
-
-
-def test_import_resolver_canonicalizes_market_transport_import_forms():
-    fixture = PACKAGE_ROOT / "market" / "fixture.py"
-    specimens = {
-        "from quantmaster import server": "quantmaster.server",
-        "from quantmaster import cli": "quantmaster.cli",
-        "from .. import server": "quantmaster.server",
-        "from ..server import app": "quantmaster.server.app",
-    }
-    for source, expected in specimens.items():
-        node = next(
-            item for item in ast.walk(ast.parse(source)) if isinstance(item, ast.ImportFrom)
-        )
-        assert expected in _resolved_import_from(fixture, node)
-
-    invalid = next(
-        item
-        for item in ast.walk(ast.parse("from ...server import app"))
-        if isinstance(item, ast.ImportFrom)
+def test_in_memory_resolver_finds_lazy_relative_and_barrel_imports():
+    refs = resolve_source_imports(
+        """
+from quantmaster import server
+from .. import cli
+from ..server import app
+def load():
+    from ..runtime import jobs
+""",
+        module="quantmaster.market.fixture",
     )
-    assert _resolved_import_from(fixture, invalid) == set()
+    targets = {ref.target for ref in refs}
+    assert {
+        "quantmaster",
+        "quantmaster.server",
+        "quantmaster.cli",
+        "quantmaster.server.app",
+        "quantmaster.runtime",
+        "quantmaster.runtime.jobs",
+    } <= targets
 
 
-def test_factor_modules_do_not_hide_transport_dependencies_inside_functions():
-    violations = []
-    for path in (PACKAGE_ROOT / "factors").rglob("*.py"):
-        for imported in _all_imports(path):
-            if imported == "quantmaster.cli" or imported.startswith("quantmaster.server"):
-                violations.append(
-                    f"{path.relative_to(PACKAGE_ROOT).as_posix()} -> {imported}"
-                )
-    assert not violations, "Factors domain depends on transport:\n" + "\n".join(violations)
+def test_in_memory_resolver_finds_literal_dynamic_imports():
+    refs = resolve_source_imports(
+        """
+import importlib
+from importlib import import_module
+__import__("quantmaster.server.app")
+importlib.import_module("quantmaster.cli")
+import_module("quantmaster.runtime.jobs")
+""",
+        module="quantmaster.market.fixture",
+    )
+    targets = {ref.target for ref in refs}
+    assert {
+        "quantmaster.server.app",
+        "quantmaster.cli",
+        "quantmaster.runtime.jobs",
+    } <= targets
 
 
-def test_runtime_imports_do_not_hide_new_domain_wiring_inside_functions():
-    existing_runtime_adapters = {
-        ("llm.py", "quantmaster.ai.llm"),
-        ("sqlite_recovery.py", "quantmaster.data.free_stockdb_runtime"),
-    }
-    foundation = {
-        "quantmaster.config",
-        "quantmaster.logging_config",
-        "quantmaster.release",
-    }
-    violations = []
-    runtime_root = PACKAGE_ROOT / "runtime"
-    for path in runtime_root.glob("*.py"):
-        for imported in _all_imports(path):
-            if not imported.startswith("quantmaster."):
-                continue
-            if imported.startswith("quantmaster.runtime.") or any(
-                imported == item or imported.startswith(f"{item}.") for item in foundation
-            ):
-                continue
-            if any(
-                path.name == filename
-                and (imported == adapter or imported.startswith(f"{adapter}."))
-                for filename, adapter in existing_runtime_adapters
-            ):
-                continue
-            violations.append(f"runtime/{path.name} -> {imported}")
-    assert not violations, "runtime wiring must live in bootstrap:\n" + "\n".join(violations)
+def test_tarjan_reports_module_and_package_cycles():
+    graph = {"a": {"b"}, "b": {"a", "c"}, "c": set()}
+    assert cycles(graph) == (frozenset({"a", "b"}),)
+    assert cycles({"pkg": {"pkg"}}) == (frozenset({"pkg"}),)
 
 
-def test_stockdb_data_runtime_does_not_dispatch_domain_events():
-    path = PACKAGE_ROOT / "data" / "free_stockdb_runtime.py"
-    domain_roots = {
-        "after_close", "ai", "analysis", "automation", "backtest", "decision",
-        "factors", "lab", "market", "portfolio", "research", "rotation",
-    }
-    violations = []
-    for imported in _all_imports(path):
-        parts = imported.split(".")
-        if len(parts) >= 3 and parts[:2] == ["quantmaster", "data"]:
-            continue
-        if len(parts) >= 2 and parts[0] == "quantmaster" and parts[1] in domain_roots:
-            violations.append(imported)
-    assert not violations, "StockDB delivery leaked into data:\n" + "\n".join(violations)
+def test_production_tree_has_no_forbidden_edges_or_module_package_cycles():
+    graph = build_graph(PACKAGE_ROOT)
+    assert not layer_violations(graph)
+    assert not cycles(graph.imports)
+    assert not cycles(graph.package_imports)
 
 
-def test_quantmaster_has_no_top_level_import_cycles():
-    paths = [path for path in PACKAGE_ROOT.rglob("*.py") if path.name != "__init__.py"]
-    modules = {_module(path): path for path in paths}
-    graph = {
-        module: {name for name in _top_level_imports(path) if name in modules}
-        for module, path in modules.items()
-    }
-    visited: set[str] = set()
-    active: set[str] = set()
-    stack: list[str] = []
-    cycles: list[list[str]] = []
-
-    def visit(module: str) -> None:
-        visited.add(module)
-        active.add(module)
-        stack.append(module)
-        for dependency in graph[module]:
-            if dependency not in visited:
-                visit(dependency)
-            elif dependency in active:
-                cycles.append([*stack[stack.index(dependency):], dependency])
-        stack.pop()
-        active.remove(module)
-
-    for module in graph:
-        if module not in visited:
-            visit(module)
-    assert not cycles, "top-level import cycle:\n" + "\n".join(
-        " -> ".join(cycle) for cycle in cycles
+def test_composition_root_is_transport_only():
+    lines = (PACKAGE_ROOT / "server" / "app.py").read_text(encoding="utf-8").splitlines()
+    assert len(lines) < 500
+    assert not any(
+        line.startswith("@app.")
+        and any(line.startswith(f"@app.{method}") for method in ("get", "post", "put", "patch", "delete"))
+        for line in lines
     )
 
 

@@ -160,6 +160,63 @@ class LabWorker:
                 self._active_job_ids.discard(job_id)
                 self._task_threads.pop(job_id, None)
 
+    def _run_claimed_job(self, job: dict, progress, cancelled, lease_alive) -> dict:
+        job_id = job["id"]
+        preflight = getattr(self.service, "preflight", None)
+        if callable(preflight):
+            admission = preflight(str(job["kind"]), dict(job.get("params") or {}))
+            require_runnable(admission)
+        scope = str(job.get("llm_scope") or "")
+        revision = str(job.get("llm_revision") or "")
+        if scope:
+            if not revision:
+                raise InterruptedError("旧 AI 发现任务缺少执行版本")
+            from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+            with get_llm_execution_coordinator().lease(
+                SimpleNamespace(job_id=job_id, cancelled=cancelled), scope, revision,
+            ):
+                result = self.service.run_job(job, progress=progress, cancelled=cancelled)
+            if not self._llm_revision_current(job):
+                raise InterruptedError("LLM 配置版本已更新")
+        else:
+            result = self.service.run_job(job, progress=progress, cancelled=cancelled)
+        if lease_alive.is_set():
+            self.service.store.finish_job(
+                job_id, result=result,
+                telemetry=(result.get("telemetry") if isinstance(result, dict) else None),
+                expected_worker=self.worker_id,
+            )
+        return result
+
+    def _llm_revision_current(self, job: dict) -> bool:
+        scope = str(job.get("llm_scope") or "")
+        if not scope:
+            return True
+        from quantmaster.runtime.llm import get_llm_execution_coordinator
+
+        return get_llm_execution_coordinator().current(
+            scope, str(job.get("llm_revision") or ""),
+        )
+
+    def _handle_interrupted_job(self, job_id: str, lease_alive) -> None:
+        if not lease_alive.is_set():
+            return
+        if self._stop.is_set() and not self.service.store.is_cancel_requested(job_id):
+            self.service.store.interrupt_stale(self.worker_id)
+            return
+        self.service.store.request_cancel(job_id)
+        self.service.store.finish_job(job_id, expected_worker=self.worker_id)
+
+    def _handle_failed_job(self, job: dict, exc: Exception) -> None:
+        job_id = job["id"]
+        logger.exception("Quant Lab 任务失败 job=%s kind=%s", job_id, job["kind"])
+        failure = classify_lab_error(exc)
+        self.service.store.finish_job(
+            job_id, error=failure.message, error_info=failure.to_dict(),
+            expected_worker=self.worker_id,
+        )
+
     def run_one(self, job: dict) -> None:
         job_id = job["id"]
 
@@ -180,21 +237,11 @@ class LabWorker:
         lease_alive = threading.Event()
         lease_alive.set()
 
-        def _llm_current() -> bool:
-            scope = str(job.get("llm_scope") or "")
-            if not scope:
-                return True
-            from quantmaster.runtime.llm import get_llm_execution_coordinator
-
-            return get_llm_execution_coordinator().current(
-                scope, str(job.get("llm_revision") or ""),
-            )
-
         def cancelled() -> bool:
             return (
                 self._stop.is_set() or not lease_alive.is_set()
                 or self.service.store.is_cancel_requested(job_id)
-                or not _llm_current()
+                or not self._llm_revision_current(job)
             )
 
         heartbeat_stop = threading.Event()
@@ -214,46 +261,11 @@ class LabWorker:
         )
         heartbeat_thread.start()
         try:
-            preflight = getattr(self.service, "preflight", None)
-            if callable(preflight):
-                admission = preflight(str(job["kind"]), dict(job.get("params") or {}))
-                require_runnable(admission)
-            scope = str(job.get("llm_scope") or "")
-            revision = str(job.get("llm_revision") or "")
-            if scope:
-                if not revision:
-                    raise InterruptedError("旧 AI 发现任务缺少执行版本")
-                from quantmaster.runtime.llm import get_llm_execution_coordinator
-
-                with get_llm_execution_coordinator().lease(
-                    SimpleNamespace(job_id=job_id, cancelled=cancelled), scope, revision,
-                ):
-                    result = self.service.run_job(job, progress=progress, cancelled=cancelled)
-                if not _llm_current():
-                    raise InterruptedError("LLM 配置版本已更新")
-            else:
-                result = self.service.run_job(job, progress=progress, cancelled=cancelled)
-            if lease_alive.is_set():
-                self.service.store.finish_job(
-                    job_id, result=result,
-                    telemetry=(result.get("telemetry") if isinstance(result, dict) else None),
-                    expected_worker=self.worker_id,
-                )
+            self._run_claimed_job(job, progress, cancelled, lease_alive)
         except InterruptedError:
-            if not lease_alive.is_set():
-                return
-            if self._stop.is_set() and not self.service.store.is_cancel_requested(job_id):
-                self.service.store.interrupt_stale(self.worker_id)
-                return
-            self.service.store.request_cancel(job_id)
-            self.service.store.finish_job(job_id, expected_worker=self.worker_id)
+            self._handle_interrupted_job(job_id, lease_alive)
         except Exception as exc:
-            logger.exception("Quant Lab 任务失败 job=%s kind=%s", job_id, job["kind"])
-            failure = classify_lab_error(exc)
-            self.service.store.finish_job(
-                job_id, error=failure.message, error_info=failure.to_dict(),
-                expected_worker=self.worker_id,
-            )
+            self._handle_failed_job(job, exc)
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=0.5)

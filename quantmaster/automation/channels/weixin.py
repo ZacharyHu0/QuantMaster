@@ -8,12 +8,12 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from io import BytesIO
+from typing import Any
 
 import httpx
 
 from quantmaster import __version__
-from quantmaster.automation.models import ActorContext
-from quantmaster.automation.store import AutomationStore
+from quantmaster.actor_context import ActorContext
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialStore
 
@@ -38,7 +38,7 @@ class WeixinLoginSession:
 class WeixinClawBotClient:
     """腾讯微信 ClawBot 的 iLink HTTP/JSON 直连客户端。"""
 
-    def __init__(self, store: AutomationStore, credentials: CredentialStore | None = None,
+    def __init__(self, store: Any, credentials: CredentialStore | None = None,
                  base_url: str = ""):
         self.store = store
         self.credentials = credentials or CredentialStore()
@@ -194,6 +194,50 @@ class WeixinClawBotClient:
         if data.get("ret") not in (None, 0):
             raise RuntimeError(f"微信发送失败 ret={data.get('ret')}: {data.get('errmsg', '')}")
 
+    def _handle_inbound_message(
+        self, message: dict[str, Any], account: dict[str, Any], account_id: str,
+        on_message: Callable[[ActorContext, str], None],
+    ) -> None:
+        if message.get("message_type") != 1:
+            return
+        message_id = str(message.get("message_id") or message.get("seq") or uuid.uuid4().hex)
+        if not self.store.claim_inbound("weixin", message_id):
+            return
+        user_id = str(message.get("from_user_id") or account.get("user_id") or "")
+        context_token = str(message.get("context_token") or "")
+        target = self.store.target("weixin_owner")
+        if target and user_id == target["target"] and context_token:
+            self.store.update_context_token("weixin_owner", context_token)
+        text = "\n".join(
+            str(item.get("text_item", {}).get("text", ""))
+            for item in message.get("item_list") or [] if item.get("type") == 1
+        ).strip()
+        if text:
+            on_message(ActorContext(
+                channel="weixin", target=user_id, account_id=account_id,
+                chat_type="direct", sender_id=user_id,
+            ), text)
+
+    def _poll_once(
+        self, account: dict[str, Any], account_id: str,
+        on_message: Callable[[ActorContext, str], None],
+    ) -> None:
+        account = self.store.bot_account("weixin", account_id) or account
+        response = httpx.post(
+            f"{account['base_url'].rstrip('/')}/ilink/bot/getupdates",
+            headers=self._headers(self._token(account)), timeout=40,
+            json={"get_updates_buf": account.get("cursor", ""), "base_info": _base_info()},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("ret") not in (None, 0):
+            raise RuntimeError(f"getupdates ret={data.get('ret')}: {data.get('errmsg', '')}")
+        if data.get("get_updates_buf") is not None:
+            self.store.update_bot_cursor("weixin", account_id, data["get_updates_buf"])
+        for message in data.get("msgs") or []:
+            self._handle_inbound_message(message, account, account_id, on_message)
+        self.store.set_bot_status("weixin", account_id, "healthy")
+
     def poll_forever(self, on_message: Callable[[ActorContext, str], None],
                      stop_event: threading.Event) -> None:
         account = self.store.bot_account("weixin")
@@ -202,41 +246,7 @@ class WeixinClawBotClient:
         account_id = account["account_id"]
         while not stop_event.is_set():
             try:
-                account = self.store.bot_account("weixin", account_id) or account
-                response = httpx.post(
-                    f"{account['base_url'].rstrip('/')}/ilink/bot/getupdates",
-                    headers=self._headers(self._token(account)), timeout=40,
-                    json={"get_updates_buf": account.get("cursor", ""), "base_info": _base_info()},
-                )
-                response.raise_for_status()
-                data = response.json()
-                if data.get("ret") not in (None, 0):
-                    raise RuntimeError(f"getupdates ret={data.get('ret')}: {data.get('errmsg', '')}")
-                if data.get("get_updates_buf") is not None:
-                    self.store.update_bot_cursor("weixin", account_id, data["get_updates_buf"])
-                for message in data.get("msgs") or []:
-                    if message.get("message_type") != 1:
-                        continue
-                    message_id = str(message.get("message_id") or message.get("seq") or uuid.uuid4().hex)
-                    if not self.store.claim_inbound("weixin", message_id):
-                        continue
-                    user_id = str(message.get("from_user_id") or account.get("user_id") or "")
-                    context_token = str(message.get("context_token") or "")
-                    target = self.store.target("weixin_owner")
-                    if target and user_id == target["target"] and context_token:
-                        self.store.update_context_token("weixin_owner", context_token)
-                    text = "\n".join(
-                        str(item.get("text_item", {}).get("text", ""))
-                        for item in message.get("item_list") or [] if item.get("type") == 1
-                    ).strip()
-                    if not text:
-                        continue
-                    actor = ActorContext(
-                        channel="weixin", target=user_id, account_id=account_id,
-                        chat_type="direct", sender_id=user_id,
-                    )
-                    on_message(actor, text)
-                self.store.set_bot_status("weixin", account_id, "healthy")
+                self._poll_once(account, account_id, on_message)
             except httpx.TimeoutException:
                 continue
             except Exception as exc:

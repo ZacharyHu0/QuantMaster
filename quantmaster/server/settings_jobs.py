@@ -14,6 +14,7 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
+from quantmaster.server.settings_control import apply_runtime, settings_manager
 from quantmaster.settings import SettingsDocument
 
 APPLY_TASK_TYPE = "settings.apply"
@@ -93,12 +94,12 @@ class SettingsJobs:
         context.ensure_active()
         # Import lazily to avoid server module construction in Web request
         # paths.  This code runs in runtime-worker only.
-        from quantmaster.server.management import _apply_runtime, settings_manager
         from quantmaster.settings_runtime import persisted_revision
 
         saved = dict(spec.get("saved") or {})
         revision = int(saved.get("config_revision") or 0)
-        latest = persisted_revision(settings_manager.path)
+        manager = settings_manager()
+        latest = persisted_revision(manager.path)
         if revision < latest:
             applied = {
                 **saved,
@@ -106,7 +107,7 @@ class SettingsJobs:
                 "superseded_by": latest,
             }
         else:
-            applied = _apply_runtime(saved)
+            applied = apply_runtime(saved)
         context.ensure_active()
         context.progress(96, "记录运行时应用", "保存后台应用结果")
         artifact = context.write_artifact(
@@ -127,7 +128,6 @@ class SettingsJobs:
                 raise ValueError("设置检测临时凭据已失效，请重新检测")
             document, api_key = secret_payload
             kind = str(spec.get("kind") or "")
-            from quantmaster.server.management import settings_manager
             from quantmaster.settings_checks import check_llm_web_search, list_llm_models
 
             if kind == "llm-models":
@@ -139,7 +139,7 @@ class SettingsJobs:
             # This fences a successful in-flight HTTP response before the
             # result can enter the persistent settings check projection.
             context.ensure_active()
-            public = settings_manager.record_check_result(
+            public = settings_manager().record_check_result(
                 kind, document, {"llm": api_key, "tushare": ""}, result,
             )
             context.ensure_active()

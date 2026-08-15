@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantmaster.analysis.stock_protocol import run_stock_analysis_v2
 from quantmaster.data.base import BarDataEnvelope
 from quantmaster.trading_sessions import market_date
 
@@ -742,7 +743,7 @@ class StockAnalysisService:
 
             resolver = resolve_instrument
         if history_loader is None:
-            from quantmaster.data import refresh_history
+            from quantmaster.data.registry import refresh_history
 
             history_loader = refresh_history
         if llm_factory is _DEFAULT_LLM:
@@ -914,11 +915,7 @@ class StockAnalysisService:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Run the durable-job friendly v2 research protocol."""
-        from quantmaster.analysis.stock_research import (
-            StockAnalysisSpec,
-            StockResearchEngine,
+        return run_stock_analysis_v2(
+            self, query, mode=mode, emit=emit, deep_loader=self.deep_loader,
+            llm_factory=self.llm_factory, **kwargs,
         )
-
-        return StockResearchEngine(
-            self, deep_loader=self.deep_loader, llm_factory=self.llm_factory,
-        ).run(StockAnalysisSpec(query=query, mode=mode), emit=emit, **kwargs)

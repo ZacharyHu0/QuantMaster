@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.runtime.splash import close_splash, splash_active
+from quantmaster.server.reload_access import register_reload_controller
 
 logger = logging.getLogger(__name__)
 _SO_EXCLUSIVEADDRUSE = getattr(socket_module, "SO_EXCLUSIVEADDRUSE", 0x4)
@@ -503,49 +504,18 @@ def _reload_lifecycle_seconds() -> tuple[float, float, float]:
     return tuple(values)  # type: ignore[return-value]
 
 
-def _stop_reload_process(
-    process: Any,
-    *,
-    drain_seconds: float,
-    force_seconds: float,
-    job: _WindowsGenerationJob | None = None,
-    drain_event: Any | None = None,
+def _close_reload_resources(process: Any, job: _WindowsGenerationJob | None) -> None:
+    if job is not None:
+        job.close()
+
+
+def _force_stop_reload_process(
+    process: Any, *, force_seconds: float, drain_seconds: float,
+    job: _WindowsGenerationJob | None,
 ) -> bool:
-    """Stop one Web generation without ever blocking the supervisor forever.
-
-    A private drain event gives ASGI lifespan cleanup a chance to finish.  A
-    provider call or a wedged thread may prevent that cleanup from completing,
-    in which case the process is force-stopped after the explicit drain budget.
-    """
-
-    if not process.is_alive():
-        process.join(timeout=0)
-        if job is not None:
-            job.close()
-        return True
-    if drain_event is not None:
-        try:
-            drain_event.set()
-        except (OSError, RuntimeError, ValueError):
-            # A broken control primitive must not revive the historical
-            # unbounded join black hole.  Fall through to bounded termination.
-            logger.warning("无法向 Web 子进程发送私有排空信号", exc_info=True)
-            drain_event = None
-    if drain_event is None:
-        # Never use CTRL_C_EVENT here.  On Windows it can broadcast to the
-        # shared console and kill the independent runtime-worker; on every
-        # platform ``terminate`` is the safe bounded fallback when a private
-        # drain channel was unavailable during a failed early spawn.
-        process.terminate()
-    process.join(timeout=max(0.0, drain_seconds))
-    if not process.is_alive():
-        if job is not None:
-            job.close()
-        return True
     logger.warning(
         "Web 子进程 %s 在 %.1fs 排空预算内未退出，正在强制停止",
-        getattr(process, "pid", "?"),
-        drain_seconds,
+        getattr(process, "pid", "?"), drain_seconds,
     )
     try:
         if job is not None:
@@ -564,12 +534,50 @@ def _stop_reload_process(
                 logger.warning("无法杀死卡住的 Web 子进程", exc_info=True)
             process.join(timeout=max(0.0, force_seconds))
     stopped = not process.is_alive()
-    if job is not None:
-        # On a last-resort failure, closing a KILL_ON_JOB_CLOSE handle still
-        # tears down descendants rather than leaking them into the next Web
-        # generation.
-        job.close()
+    _close_reload_resources(process, job)
     return stopped
+
+
+def _stop_reload_process(
+    process: Any,
+    *,
+    drain_seconds: float,
+    force_seconds: float,
+    job: _WindowsGenerationJob | None = None,
+    drain_event: Any | None = None,
+) -> bool:
+    """Stop one Web generation without ever blocking the supervisor forever.
+
+    A private drain event gives ASGI lifespan cleanup a chance to finish.  A
+    provider call or a wedged thread may prevent that cleanup from completing,
+    in which case the process is force-stopped after the explicit drain budget.
+    """
+
+    if not process.is_alive():
+        process.join(timeout=0)
+        _close_reload_resources(process, job)
+        return True
+    if drain_event is not None:
+        try:
+            drain_event.set()
+        except (OSError, RuntimeError, ValueError):
+            # A broken control primitive must not revive the historical
+            # unbounded join black hole.  Fall through to bounded termination.
+            logger.warning("无法向 Web 子进程发送私有排空信号", exc_info=True)
+            drain_event = None
+    if drain_event is None:
+        # Never use CTRL_C_EVENT here.  On Windows it can broadcast to the
+        # shared console and kill the independent runtime-worker; on every
+        # platform ``terminate`` is the safe bounded fallback when a private
+        # drain channel was unavailable during a failed early spawn.
+        process.terminate()
+    process.join(timeout=max(0.0, drain_seconds))
+    if not process.is_alive():
+        _close_reload_resources(process, job)
+        return True
+    return _force_stop_reload_process(
+        process, force_seconds=force_seconds, drain_seconds=drain_seconds, job=job,
+    )
 
 
 def _reload_probe_host(host: str) -> str:
@@ -655,6 +663,140 @@ def _manual_reload_changes(
     return [trigger] if trigger in {path.resolve() for path in changes} else None
 
 
+class _ManualReloadMixin:
+    """Bounded generation management shared by the manual Uvicorn supervisor."""
+
+    def __init__(
+        self, config: Any, target: Any, sockets: list[Any], *, trigger_path: Path,
+        host: str, port: int, ready_seconds: float, drain_seconds: float,
+        force_seconds: float, worker_supervisor: Any | None,
+    ) -> None:
+        super().__init__(config, target, sockets)
+        self.reloader_name = "QuantMaster manual reload"
+        self._trigger_path = trigger_path
+        self._host = host
+        self._port = port
+        self._ready_seconds = ready_seconds
+        self._drain_seconds = drain_seconds
+        self._force_seconds = force_seconds
+        self._worker_supervisor = worker_supervisor
+        self._generation_jobs: dict[int, _WindowsGenerationJob] = {}
+        self._generation_drains: dict[int, Any] = {}
+        from watchfiles import watch
+
+        self.watcher = watch(
+            trigger_path.parent, watch_filter=None, stop_event=self.should_exit,
+            debounce=500, step=250, yield_on_timeout=True, ignore_permission_denied=True,
+        )
+
+    def _spawn_generation(self, generation: int):
+        from uvicorn._subprocess import get_subprocess, spawn
+
+        previous = os.environ.get(WEB_GENERATION_ENV)
+        previous_web_process = os.environ.get(WEB_PROCESS_ENV)
+        os.environ[WEB_GENERATION_ENV] = str(generation)
+        os.environ[WEB_PROCESS_ENV] = "1"
+        try:
+            drain_event = spawn.Event()
+            process = get_subprocess(
+                config=self.config,
+                target=functools.partial(
+                    _run_web_generation, config=self.config, drain_event=drain_event,
+                ),
+                sockets=self.sockets,
+            )
+            from quantmaster.runtime.windows_app import start_windows_role_process
+
+            start_windows_role_process(process, "Web Worker")
+            self._generation_drains[id(process)] = drain_event
+            job = _attach_generation_job(process)
+            if job is not None:
+                self._generation_jobs[id(process)] = job
+            return process
+        finally:
+            if previous is None:
+                os.environ.pop(WEB_GENERATION_ENV, None)
+            else:
+                os.environ[WEB_GENERATION_ENV] = previous
+            if previous_web_process is None:
+                os.environ.pop(WEB_PROCESS_ENV, None)
+            else:
+                os.environ[WEB_PROCESS_ENV] = previous_web_process
+
+    def _stop_generation(self, process: Any, *, drain_seconds: float) -> bool:
+        job = self._generation_jobs.pop(id(process), None)
+        drain_event = self._generation_drains.pop(id(process), None)
+        return _stop_reload_process(
+            process, drain_seconds=drain_seconds, force_seconds=self._force_seconds,
+            job=job, drain_event=drain_event,
+        )
+
+    def _wait_for_generation(self, process: Any, generation: int) -> bool:
+        deadline = time.monotonic() + self._ready_seconds
+        while time.monotonic() < deadline:
+            if not process.is_alive():
+                logger.error("Web 代次 %s 在就绪前退出", generation)
+                return False
+            if _generation_is_ready(self._host, self._port, generation):
+                return True
+            if self.should_exit.wait(0.1):
+                return False
+        logger.error("Web 代次 %s 在 %.1fs 内未就绪", generation, self._ready_seconds)
+        return False
+
+    def startup(self) -> None:
+        from uvicorn.supervisors.basereload import HANDLED_SIGNALS
+
+        self.reloader_name = self.reloader_name or "QuantMaster manual reload"
+        logger.info("Started reloader process [%s] using %s", self.pid, self.reloader_name)
+        for handled in HANDLED_SIGNALS:
+            signal.signal(handled, self.signal_handler)
+        self.generation = 1
+        self.process = self._spawn_generation(self.generation)
+        if not self._wait_for_generation(self.process, self.generation):
+            self._stop_generation(self.process, drain_seconds=0)
+            raise RuntimeError("QuantMaster Web 初始代次未能就绪")
+
+    def restart(self) -> None:
+        old = self.process
+        next_generation = int(getattr(self, "generation", 0)) + 1
+        self.is_restarting = True
+        replacement = self._spawn_generation(next_generation)
+        try:
+            if not self._wait_for_generation(replacement, next_generation):
+                self._stop_generation(replacement, drain_seconds=0)
+                logger.error(
+                    "热重载回滚：代次 %s 保持服务，代次 %s 未上线",
+                    getattr(self, "generation", 0), next_generation,
+                )
+                return
+            self.process = replacement
+            self.generation = next_generation
+            if not self._stop_generation(old, drain_seconds=self._drain_seconds):
+                logger.error("旧 Web 代次 %s 未能在强制停止后退出", getattr(old, "pid", "?"))
+        finally:
+            self.is_restarting = False
+
+    def _maintain_runtime_worker(self) -> None:
+        if self._worker_supervisor is not None:
+            worker_state = self._worker_supervisor.ensure_running(bootstrap_rotation=True)
+            if worker_state == "restarted":
+                logger.warning("runtime-worker 异常退出，已请求替代进程")
+
+    def shutdown(self) -> None:
+        self.should_exit.set()
+        self._stop_generation(self.process, drain_seconds=self._drain_seconds)
+        for sock in self.sockets:
+            sock.close()
+        logger.info("Stopping reloader process [%s]", self.pid)
+
+    def should_restart(self) -> list[Path] | None:
+        changes = next(self.watcher)
+        self._maintain_runtime_worker()
+        changed_paths = {Path(changed_path).resolve() for _change, changed_path in changes}
+        return _manual_reload_changes(changed_paths, self._trigger_path)
+
+
 def _run_manual_uvicorn_reload(
     uvicorn: Any,
     *,
@@ -673,156 +815,9 @@ def _run_manual_uvicorn_reload(
     the historical failure mode where ``BaseReload.restart()`` joined a wedged
     worker forever while the TCP port still accepted connections.
     """
-    from uvicorn._subprocess import get_subprocess, spawn
     from uvicorn.supervisors.basereload import BaseReload
-    from watchfiles import watch
 
     ready_seconds, drain_seconds, force_seconds = _reload_lifecycle_seconds()
-
-    class QuietReload(BaseReload):
-        def __init__(self, config, target, sockets):
-            super().__init__(config, target, sockets)
-            self.reloader_name = "QuantMaster manual reload"
-            self._generation_jobs: dict[int, _WindowsGenerationJob] = {}
-            self._generation_drains: dict[int, Any] = {}
-            self.watcher = watch(
-                trigger_path.parent,
-                watch_filter=None,
-                stop_event=self.should_exit,
-                debounce=500,
-                step=250,
-                yield_on_timeout=True,
-                ignore_permission_denied=True,
-            )
-
-        def _spawn_generation(self, generation: int):
-            """Spawn a child with an immutable, observable generation ID."""
-
-            previous = os.environ.get(WEB_GENERATION_ENV)
-            previous_web_process = os.environ.get(WEB_PROCESS_ENV)
-            os.environ[WEB_GENERATION_ENV] = str(generation)
-            os.environ[WEB_PROCESS_ENV] = "1"
-            try:
-                drain_event = spawn.Event()
-                process = get_subprocess(
-                    config=self.config,
-                    target=functools.partial(
-                        _run_web_generation,
-                        config=self.config,
-                        drain_event=drain_event,
-                    ),
-                    sockets=self.sockets,
-                )
-                from quantmaster.runtime.windows_app import start_windows_role_process
-
-                start_windows_role_process(process, "Web Worker")
-                self._generation_drains[id(process)] = drain_event
-                job = _attach_generation_job(process)
-                if job is not None:
-                    self._generation_jobs[id(process)] = job
-                return process
-            finally:
-                if previous is None:
-                    os.environ.pop(WEB_GENERATION_ENV, None)
-                else:
-                    os.environ[WEB_GENERATION_ENV] = previous
-                if previous_web_process is None:
-                    os.environ.pop(WEB_PROCESS_ENV, None)
-                else:
-                    os.environ[WEB_PROCESS_ENV] = previous_web_process
-
-        def _stop_generation(self, process: Any, *, drain_seconds: float) -> bool:
-            job = self._generation_jobs.pop(id(process), None)
-            drain_event = self._generation_drains.pop(id(process), None)
-            return _stop_reload_process(
-                process,
-                drain_seconds=drain_seconds,
-                force_seconds=force_seconds,
-                job=job,
-                drain_event=drain_event,
-            )
-
-        def _wait_for_generation(self, process: Any, generation: int) -> bool:
-            deadline = time.monotonic() + ready_seconds
-            while time.monotonic() < deadline:
-                if not process.is_alive():
-                    logger.error("Web 代次 %s 在就绪前退出", generation)
-                    return False
-                if _generation_is_ready(host, port, generation):
-                    return True
-                if self.should_exit.wait(0.1):
-                    return False
-            logger.error("Web 代次 %s 在 %.1fs 内未就绪", generation, ready_seconds)
-            return False
-
-        def startup(self) -> None:
-            # This is BaseReload.startup with one important difference: the
-            # child is given a generation identity before it is spawned.
-            from uvicorn.supervisors.basereload import HANDLED_SIGNALS
-            self.reloader_name = self.reloader_name or "QuantMaster manual reload"
-            logger.info("Started reloader process [%s] using %s", self.pid, self.reloader_name)
-            for handled in HANDLED_SIGNALS:
-                signal.signal(handled, self.signal_handler)
-            self.generation = 1
-            self.process = self._spawn_generation(self.generation)
-            if not self._wait_for_generation(self.process, self.generation):
-                # Initial startup must fail explicitly rather than leave a
-                # parent owning an apparently healthy but handler-less port.
-                self._stop_generation(
-                    self.process,
-                    drain_seconds=0,
-                )
-                raise RuntimeError("QuantMaster Web 初始代次未能就绪")
-
-        def restart(self) -> None:
-            old = self.process
-            next_generation = int(getattr(self, "generation", 0)) + 1
-            self.is_restarting = True
-            replacement = self._spawn_generation(next_generation)
-            try:
-                if not self._wait_for_generation(replacement, next_generation):
-                    self._stop_generation(
-                        replacement,
-                        drain_seconds=0,
-                    )
-                    logger.error(
-                        "热重载回滚：代次 %s 保持服务，代次 %s 未上线",
-                        getattr(self, "generation", 0),
-                        next_generation,
-                    )
-                    return
-                self.process = replacement
-                self.generation = next_generation
-                if not self._stop_generation(
-                    old,
-                    drain_seconds=drain_seconds,
-                ):
-                    logger.error("旧 Web 代次 %s 未能在强制停止后退出", getattr(old, "pid", "?"))
-            finally:
-                self.is_restarting = False
-
-        def _maintain_runtime_worker(self) -> None:
-            """Keep the independent runtime worker alive without replacing Web."""
-            if worker_supervisor is not None:
-                worker_state = worker_supervisor.ensure_running(bootstrap_rotation=True)
-                if worker_state == "restarted":
-                    logger.warning("runtime-worker 异常退出，已请求替代进程")
-
-        def shutdown(self) -> None:
-            self.should_exit.set()
-            self._stop_generation(
-                self.process,
-                drain_seconds=drain_seconds,
-            )
-            for sock in self.sockets:
-                sock.close()
-            logger.info("Stopping reloader process [%s]", self.pid)
-
-        def should_restart(self) -> list[Path] | None:
-            changes = next(self.watcher)
-            self._maintain_runtime_worker()
-            changed_paths = {Path(changed_path).resolve() for _change, changed_path in changes}
-            return _manual_reload_changes(changed_paths, trigger_path)
 
     config = uvicorn.Config(
         "quantmaster.server.app:app",
@@ -836,7 +831,12 @@ def _run_manual_uvicorn_reload(
         reload_includes=[trigger_path.name],
     )
     socket = _bind_reload_socket(config, host, port)
-    reloader = QuietReload(config, target=_run_web_generation, sockets=[socket])
+    reloader_class = type("QuantMasterManualReload", (_ManualReloadMixin, BaseReload), {})
+    reloader = reloader_class(
+        config, target=_run_web_generation, sockets=[socket], trigger_path=trigger_path,
+        host=host, port=port, ready_seconds=ready_seconds, drain_seconds=drain_seconds,
+        force_seconds=force_seconds, worker_supervisor=worker_supervisor,
+    )
     stop_watcher: threading.Thread | None = None
     watcher_stop = threading.Event()
     if shutdown_requested is not None:
@@ -862,13 +862,44 @@ def _run_manual_uvicorn_reload(
             stop_watcher.join(timeout=1.0)
 
 
+class _ReloadSidecar:
+    def __init__(self) -> None:
+        from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
+        from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+        from quantmaster.data.maintenance import data_refresh_manager
+        from quantmaster.server.worker_components import register_worker_components
+
+        register_worker_components()
+        self.runtime_worker = get_runtime_worker()
+        self.worker_supervisor = get_worker_supervisor()
+        self.free_stockdb_runtime = free_stockdb_runtime
+        self.data_refresh_manager = data_refresh_manager
+        self.free_stockdb_runtime.start()
+        self.supervisor_state = self.worker_supervisor.start(bootstrap_rotation=True)
+        if self.supervisor_state == "disabled":
+            self.data_refresh_manager.start()
+            self.runtime_worker.start(bootstrap_rotation=True)
+
+    def stop(self) -> None:
+        if self.supervisor_state == "disabled":
+            self.runtime_worker.stop()
+        else:
+            self.worker_supervisor.stop()
+        self.free_stockdb_runtime.stop()
+        if self.supervisor_state == "disabled":
+            self.data_refresh_manager.shutdown(timeout=10.0)
+
+
+def _restore_environment(name: str, previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
+
+
 def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     """在独立监督进程中热重载主站，同时保持 free-stockdb 持续运行。"""
     import uvicorn
-
-    from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
-    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-    from quantmaster.data.maintenance import data_refresh_manager
 
     worker_flag = "QM_SERVER_RELOAD_WORKER"
     verbose_flag = "QM_SERVER_RELOAD_VERBOSE"
@@ -881,18 +912,9 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
     previous_trigger = os.environ.get(trigger_flag)
     previous_web = os.environ.get(web_flag)
 
-    # Uvicorn 的 reload 监督进程不会加载 ASGI lifespan，正适合持有数据库
-    # sidecar；每次替换的 Web worker 只连接它，不取得进程所有权。
-    free_stockdb_runtime.start()
-    # The durable refresh dispatcher belongs to a process separate from both
-    # the reload parent and disposable ASGI children.  Jobs survive Web
-    # generation changes and CPU work cannot stall request handling.
-    worker_supervisor = get_worker_supervisor()
-    supervisor_state = worker_supervisor.start(bootstrap_rotation=True)
-    if supervisor_state == "disabled":
-        data_refresh_manager.start()
-        get_runtime_worker().start(bootstrap_rotation=True)
-    control_path = free_stockdb_runtime._control_path()
+    sidecar = _ReloadSidecar()
+    worker_supervisor = sidecar.worker_supervisor
+    control_path = sidecar.free_stockdb_runtime._control_path()
     os.environ[control_flag] = str(control_path)
     trigger_path = control_path.with_name(".quantmaster-reload-trigger")
     os.environ[trigger_flag] = str(trigger_path)
@@ -905,14 +927,8 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
             if cleanup_complete.is_set():
                 return
             try:
-                if supervisor_state == "disabled":
-                    get_runtime_worker().stop()
-                else:
-                    worker_supervisor.stop()
-                free_stockdb_runtime.stop()
+                sidecar.stop()
             finally:
-                if supervisor_state == "disabled":
-                    data_refresh_manager.shutdown(timeout=10.0)
                 cleanup_complete.set()
 
     parent_stop = threading.Event()
@@ -948,26 +964,12 @@ def _run_uvicorn_reload(host: str, port: int, log_level: str) -> None:
         cleanup_sidecar()
         unregister_handler()
         parent_watcher.join(timeout=1)
-        if previous_flag is None:
-            os.environ.pop(worker_flag, None)
-        else:
-            os.environ[worker_flag] = previous_flag
-        if previous_verbose is None:
-            os.environ.pop(verbose_flag, None)
-        else:
-            os.environ[verbose_flag] = previous_verbose
-        if previous_control is None:
-            os.environ.pop(control_flag, None)
-        else:
-            os.environ[control_flag] = previous_control
-        if previous_trigger is None:
-            os.environ.pop(trigger_flag, None)
-        else:
-            os.environ[trigger_flag] = previous_trigger
-        if previous_web is None:
-            os.environ.pop(web_flag, None)
-        else:
-            os.environ[web_flag] = previous_web
+        for name, previous in (
+            (worker_flag, previous_flag), (verbose_flag, previous_verbose),
+            (control_flag, previous_control), (trigger_flag, previous_trigger),
+            (web_flag, previous_web),
+        ):
+            _restore_environment(name, previous)
 
 
 def run_uvicorn_foreground(
@@ -1027,3 +1029,6 @@ def run_uvicorn_foreground(
         shutdown_complete.set()
         unregister_handler()
         watcher.join(timeout=1.0)
+
+
+register_reload_controller(manual_reload_trigger_path, request_manual_reload)

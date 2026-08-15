@@ -20,6 +20,7 @@ from quantmaster.research.contracts import (
 )
 from quantmaster.runtime.jobs import lease_deadline
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.schema_access import register_research_catalog
 
 RESEARCH_SCHEMA_VERSION = 1
 
@@ -473,6 +474,7 @@ class ResearchCatalog:
             ).fetchall()
         return [str(row[0]) for row in rows]
 
+
     def claim(self, partition_key: str, owner: str, ttl_seconds: int = 300) -> bool:
         now = time.time()
         with self._connect() as connection:
@@ -748,3 +750,6 @@ class ResearchCatalog:
                 }), now),
             )
         return self.job(job_id) or {}
+
+
+register_research_catalog(ResearchCatalog)

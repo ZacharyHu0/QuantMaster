@@ -47,6 +47,7 @@ from quantmaster.analysis.stock_evidence import (
     content_hash,
 )
 from quantmaster.analysis.stock_evidence import validate_evidence as validate_evidence
+from quantmaster.analysis.stock_protocol import register_stock_analysis_v2
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
@@ -2767,3 +2768,22 @@ class _StockResearchRun:
         _emit(self.options.emit, "final_review_completed", progress=98, overall=strict["overall"])
         _emit(self.options.emit, "analysis_completed", progress=100, report=strict)
         return strict
+
+
+def _run_stock_analysis_v2(
+    service: Any,
+    query: str,
+    *,
+    mode: str = "deep",
+    emit: ResearchEmitter | None = None,
+    deep_loader: Any | None = None,
+    llm_factory: Callable[[], Any] | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    engine = StockResearchEngine(
+        service, deep_loader=deep_loader, llm_factory=llm_factory,
+    )
+    return engine.run(StockAnalysisSpec(query=query, mode=mode), emit=emit, **kwargs)
+
+
+register_stock_analysis_v2(_run_stock_analysis_v2)

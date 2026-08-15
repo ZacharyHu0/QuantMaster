@@ -12,37 +12,28 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.data.migration import backup_sqlite_tree, validate_backup_tree
+from quantmaster.data.migration_contracts import (
+    _MIGRATORS,
+    DomainMigrator,
+    MigrationRecord,
+    register_builtin_migrations,
+    registered_migrators,
+)
+from quantmaster.data.migration_contracts import (
+    register_migrator as _register_migrator,
+)
 from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
 from quantmaster.runtime.sqlite import connect_sqlite
+
+register_migrator = _register_migrator
 
 
 class LegacyMigrationError(RuntimeError):
     """A migration cannot proceed without weakening its evidence boundary."""
-
-
-@dataclass(frozen=True)
-class MigrationRecord:
-    record_key: str
-    outcome: str
-    diagnostic_code: str = ""
-    unknown_fields: tuple[str, ...] = ()
-    detail: str = ""
-
-
-class DomainMigrator(Protocol):
-    name: str
-
-    def inspect(self, root: Path) -> Iterable[MigrationRecord]: ...
-
-    def migrate_batch(
-        self, root: Path, *, after_key: str, limit: int,
-    ) -> Iterable[MigrationRecord]: ...
-
-    def rollback(self, root: Path, backup_root: Path) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -91,50 +82,9 @@ class _ProcessLease:
         self._handle.close()
 
 
-_MIGRATORS: dict[str, DomainMigrator] = {}
-
-
-def register_migrator(migrator: DomainMigrator) -> None:
-    if not migrator.name or migrator.name in _MIGRATORS:
-        raise ValueError(f"重复或无效的迁移类型：{migrator.name!r}")
-    _MIGRATORS[migrator.name] = migrator
-
-
 def registered_migrations() -> tuple[str, ...]:
     register_builtin_migrations()
-    return tuple(sorted(_MIGRATORS))
-
-
-def register_builtin_migrations() -> None:
-    """Load domain adapters only when migration management is explicitly used."""
-    from quantmaster.after_close.migration import after_close_legacy_migrator
-    from quantmaster.ai.news_migration import news_contract_migrator
-    from quantmaster.automation.migration import automation_contract_migrator
-    from quantmaster.backtest.paper_legacy_migration import PaperLegacyMigrator
-    from quantmaster.data.legacy_migrations import market_data_legacy_migrator
-    from quantmaster.data.remaining_schema_migration import remaining_schema_migrator
-    from quantmaster.data.startup_schema_migration import startup_schema_migrator
-    from quantmaster.data.store_schema_migration import store_schema_migrator
-    from quantmaster.decision.migration import decision_legacy_migrator
-    from quantmaster.lab.model_migration import lab_model_artifact_migrator
-
-    for migrator in (
-        market_data_legacy_migrator,
-        decision_legacy_migrator,
-        after_close_legacy_migrator,
-        news_contract_migrator,
-        automation_contract_migrator,
-        PaperLegacyMigrator(),
-        startup_schema_migrator,
-        store_schema_migrator,
-        remaining_schema_migrator,
-        lab_model_artifact_migrator,
-    ):
-        existing = _MIGRATORS.get(migrator.name)
-        if existing is None:
-            register_migrator(migrator)
-        elif type(existing) is not type(migrator):
-            raise ValueError(f"迁移类型冲突：{migrator.name}")
+    return registered_migrators()
 
 
 def utc_now() -> str:
