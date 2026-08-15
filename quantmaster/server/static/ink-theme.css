@@ -3561,7 +3561,7 @@ html[data-qm-theme="ink"] #tab-backtest .trading-workspace {
 html[data-qm-theme="ink"] #tab-backtest .trading-history-section {
   grid-area: history;
   align-self: start;
-  margin-block-start: 0;
+  margin-block-start: 1px;
   /* The layout box must sit exactly on its grid row. Transforms / negative
      margins on this box produced the subpixel overlap; any decorative ink
      stacking must live on a pseudo-element, never on this box. */
