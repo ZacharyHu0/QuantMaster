@@ -2167,7 +2167,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
     const generation = todayRenderGeneration;
-    queueMarketSpark(entry.element,() => {
+    const renderSpark = () => {
       if (generation !== todayRenderGeneration) return;
       const root = document.getElementById(entry.sparkId);
       if (!root) return;
@@ -2176,7 +2176,12 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
           module.renderMarketSpark(root,item,changeSeries);
         }
       }, () => {});
-    });
+    };
+    if (entry.group === 'A股指数' && document.documentElement.dataset.qmTheme === 'ink') {
+      renderSpark();
+    } else {
+      queueMarketSpark(entry.element,renderSpark);
+    }
   }
   return {
     add(group, item) {
@@ -2203,7 +2208,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       groupEntry.count.textContent = `${groupEntry.size} 只`;
       groupEntry.empty.hidden = true;
       count += 1;
-      const entry = {element, sparkId, item}; entries.set(key, entry); draw(entry, item);
+      const entry = {element, sparkId, item, group}; entries.set(key, entry); draw(entry, item);
       return true;
     },
     addAll(data) {

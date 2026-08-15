@@ -80,7 +80,8 @@ class TestBasics:
         }
 
         assert initial_names == {
-            "brand-intro.css", "brand-intro.js", "app.css", "app.js", "workspace-loader.js",
+            "brand-intro.css", "brand-intro.js", "app.css", "app.js", "ink-theme.css",
+            "theme.js", "workspace-loader.js",
         }
         assert '<script type="module" src="/static/workspace-loader.js"></script>' in page
         assert all(

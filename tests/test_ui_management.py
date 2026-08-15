@@ -484,6 +484,15 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script(
+            """window.__marketIntersections = [];
+            window.IntersectionObserver = class {
+              constructor(callback) { this.callback = callback; this.targets = new Set(); }
+              observe(target) { this.targets.add(target); window.__marketIntersections.push(this); }
+              unobserve(target) { this.targets.delete(target); }
+              disconnect() { this.targets.clear(); }
+            };"""
+        )
         requested = []
         errors = []
         page.on("request", lambda request: requested.append(request.url))
@@ -512,6 +521,30 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         _wait_for_document_fit(page)
         assert spark.bounding_box()["width"] <= 390
         assert errors == []
+
+        classic = browser.new_page(viewport={"width": 1280, "height": 900})
+        classic.add_init_script(
+            """localStorage.setItem('qm-theme', 'classic');
+            window.__marketIntersections = [];
+            window.IntersectionObserver = class {
+              constructor(callback) { this.callback = callback; this.targets = new Set(); }
+              observe(target) { this.targets.add(target); window.__marketIntersections.push(this); }
+              unobserve(target) { this.targets.delete(target); }
+              disconnect() { this.targets.clear(); }
+            };
+            window.__showMarketSparks = () => window.__marketIntersections.forEach(observer => {
+              const entries = [...observer.targets].map(target => ({target, isIntersecting:true}));
+              if (entries.length) observer.callback(entries);
+            });"""
+        )
+        classic.route("**/api/v1/market/overview", lambda route: route.fulfill(json=market))
+        classic.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json=fear_greed))
+        classic.goto(url)
+        classic.wait_for_url(re.compile(r"#today/quotes$"))
+        classic.locator('[data-market-group="A股指数"] .spark').wait_for(state="visible")
+        assert classic.locator('[data-market-group="A股指数"] .spark canvas').count() == 0
+        classic.evaluate("window.__showMarketSparks()")
+        classic.locator('[data-market-group="A股指数"] .spark canvas').wait_for(state="visible")
         browser.close()
 
 
@@ -571,6 +604,7 @@ def test_today_unmount_cancels_native_chart_work_and_delayed_renders(live_server
         "history": [{"date": "2026-07-20", "score": 22.0}],
     }
     lifecycle_script = """
+      localStorage.setItem('qm-theme', 'classic');
       window.__qmChartLifecycle = {idle:new Map(), canceled:new Map(), next:1, disconnects:0};
       window.requestIdleCallback = callback => {
         const id = window.__qmChartLifecycle.next++;
@@ -2445,7 +2479,18 @@ def test_backtest_workspace_and_history_keep_a_clear_responsive_order(live_serve
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(url)
         page.get_by_role("button", name="研究", exact=True).click()
+        page.evaluate(
+            """() => { window.__backtestMounted = new Promise(resolve => {
+              document.addEventListener('quantmaster:workspace-mounted', event => {
+                if (event.detail?.workspace === 'research' && event.detail?.page === 'backtest') resolve();
+              });
+            }); }"""
+        )
         page.get_by_role("tab", name="回测", exact=True).click()
+        page.evaluate("window.__backtestMounted")
+        page.locator("#tab-backtest").evaluate(
+            "element => Promise.all(element.getAnimations().map(animation => animation.finished))"
+        )
 
         config = page.locator("#tab-backtest .trading-config")
         workspace = page.locator("#tab-backtest .trading-workspace")
@@ -4944,8 +4989,11 @@ def test_settings_remount_resumes_weixin_login_without_old_poll_rearm(live_serve
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(f"{url}/#runtime/settings")
-        page.locator("#settings-config-path").wait_for(state="visible")
+        config_path = page.locator("#settings-config-path")
+        config_path.wait_for(state="visible")
+        playwright_sync.expect(config_path).not_to_have_text("正在读取配置…")
         page.locator('[data-settings-section="automation"]').click()
+        playwright_sync.expect(page.locator("#weixin-login-start")).to_be_enabled()
         page.evaluate(
             """() => {
               const nativeApi = window.QuantMasterAPI;
@@ -4998,8 +5046,11 @@ def test_settings_weixin_create_response_survives_navigation_before_session_id(l
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(f"{url}/#runtime/settings")
-        page.locator("#settings-config-path").wait_for(state="visible")
+        config_path = page.locator("#settings-config-path")
+        config_path.wait_for(state="visible")
+        playwright_sync.expect(config_path).not_to_have_text("正在读取配置…")
         page.locator('[data-settings-section="automation"]').click()
+        playwright_sync.expect(page.locator("#weixin-login-start")).to_be_enabled()
         page.evaluate(
             """() => {
               const nativeApi = window.QuantMasterAPI;
@@ -5057,8 +5108,11 @@ def test_settings_weixin_create_rejection_off_workspace_allows_remount_retry(liv
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(f"{url}/#runtime/settings")
-        page.locator("#settings-config-path").wait_for(state="visible")
+        config_path = page.locator("#settings-config-path")
+        config_path.wait_for(state="visible")
+        playwright_sync.expect(config_path).not_to_have_text("正在读取配置…")
         page.locator('[data-settings-section="automation"]').click()
+        playwright_sync.expect(page.locator("#weixin-login-start")).to_be_enabled()
         page.evaluate(
             """() => {
               const nativeApi = window.QuantMasterAPI;
