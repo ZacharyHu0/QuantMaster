@@ -727,6 +727,14 @@
         </div>
       </section>
 
+      <section class="lab-view" data-lab-panel="robustness">
+        <div class="lab-view-head lab-robustness-detail-head">
+          <div><span class="lab-overline">FROZEN ROBUSTNESS EVIDENCE</span><h3 id="lab-robustness-title">鲁棒性验证详情</h3><p id="lab-robustness-subtitle">只读取已冻结验证结果；打开本页不会重算或访问远端数据。</p></div>
+          <div class="lab-robustness-detail-actions"><label>预测周期<select id="lab-robustness-horizon"><option value="1">1 日</option><option value="3">3 日</option><option value="5">5 日</option><option value="7">7 日</option><option value="10">10 日</option><option value="20">20 日</option><option value="30">30 日</option></select></label><button class="lab-button lab-button-quiet" type="button" data-robustness-back>← 返回因子详情</button></div>
+        </div>
+        <div id="lab-robustness-detail"><div class="lab-empty">从因子详情选择预测周期以查看冻结证据。</div></div>
+      </section>
+
       <section class="lab-view" data-lab-panel="automation">
         <div class="lab-view-head">
           <div><span class="lab-overline">AUTONOMOUS RESEARCH</span><h3>研究自动化与资源预算</h3><p>Worker 可独立运行并在中断后恢复；每个关键晋级动作仍保留人工门控。</p></div>

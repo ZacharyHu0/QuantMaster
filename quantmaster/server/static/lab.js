@@ -26,6 +26,9 @@
     factorTag: '',
     correlationHorizon: 3,
     correlationSelection: new Set(),
+    robustnessVersion: '',
+    robustnessHorizon: 3,
+    robustnessEvidence: null,
     selectedModel: 'ridge',
     suggestion: null,
     suggestionTask: null,
@@ -1184,22 +1187,13 @@
     const gates = report?.gates;
     const gateText = !report ? '尚未运行统一验证' : gates?.passed ? '全部晋级门槛通过' :
       [...(gates?.hard_failures || []), ...(gates?.soft_failures || [])].join('；') || '待人工复核';
-    const horizonCards = Object.values(horizons).map(item => `<div class="lab-horizon"><span>${item.horizon}D · OOS RANK IC</span>
-      <b>${number(item.oos_rank_ic, 4)}</b><small>ICIR ${number(item.oos_icir, 3)} · Q ${number(item.q_value, 3)}</small></div>`).join('');
+    const horizonCards = Object.values(horizons).map(item => {
+      const horizon = Number(item.horizon);
+      return `<div class="lab-horizon"><span>${horizon}D · OOS RANK IC</span>
+        <b>${number(item.oos_rank_ic, 4)}</b><small>ICIR ${number(item.oos_icir, 3)} · Q ${number(item.q_value, 3)}</small>
+        <button type="button" data-robustness-version="${h(detail.id)}" data-robustness-horizon="${horizon}">图表与解释 →</button></div>`;
+    }).join('');
     const robustness = report?.robustness;
-    const robustnessTests = robustness ? [
-      ['MONTE CARLO', robustness.monte_carlo,
-        `${number((robustness.monte_carlo?.probability_positive_ic || 0) * 100, 0)}% 正向 IC`],
-      ['参数敏感性', robustness.parameter_sensitivity,
-        robustness.parameter_sensitivity?.applicable === false ? '无显式窗口参数' : `${number((robustness.parameter_sensitivity?.same_sign_ratio || 0) * 100, 0)}% 邻域同号`],
-      ['WFA', robustness.walk_forward,
-        `${number((robustness.walk_forward?.sign_consistency || 0) * 100, 0)}% 折叠同号`],
-      ['穿透测试', robustness.penetration,
-        `${number(robustness.penetration?.concentration?.effective_names, 1)} 有效个股`],
-    ] : [];
-    const robustnessCards = robustnessTests.map(([label, item, detailText]) =>
-      `<div class="lab-robustness-item ${item?.passed ? 'pass' : 'fail'}"><i></i><span>${h(label)}</span><b>${item?.passed ? 'PASS' : 'FAIL'}</b><small>${h(detailText)}</small></div>`
-    ).join('');
     const canApprove = detail.status === 'candidate';
     const canDeploy = ['approved', 'degraded', 'production'].includes(detail.status);
     const researchHorizons = (state.overview?.research?.horizons || [3]).map(Number);
@@ -1207,14 +1201,14 @@
     const deployHorizons = validatedHorizons.length ? validatedHorizons : researchHorizons;
     const preferredHorizon = deployHorizons.includes(3) ? 3 : deployHorizons[0];
     const tags = detail.spec?.tags || [];
-    const versionHistory = history.map(item => `<li class="${item.id === detail.id ? 'active' : ''}"><button type="button" data-factor-version="${h(item.id)}">V${item.version}</button><span>${h(statusLabel[item.status] || item.status)} · ${item.validation_passed === true ? '验证通过' : item.validation_passed === false ? '验证未通过' : '未验证'} · ${h(formatDate(item.updated_at))}</span></li>`).join('');
+    const versionHistory = history.map(item => `<li class="${item.id === detail.id ? 'active' : ''}"><button type="button" data-factor-version="${h(item.id)}">V${Number(item.version)}</button><span>${h(statusLabel[item.status] || item.status)} · ${item.validation_passed === true ? '验证通过' : item.validation_passed === false ? '验证未通过' : '未验证'} · ${h(formatDate(item.updated_at))}</span></li>`).join('');
     document.getElementById('lab-factor-evidence').innerHTML = `
       <div class="lab-evidence-title"><div><h4>${h(detail.name)}</h4><span>${h(statusLabel[detail.status] || detail.status)}</span></div><code>${h(detail.spec?.expression || detail.slug)}</code></div>
       <div class="lab-factor-meaning"><span>因子含义</span><p>${h(detail.spec?.description || '尚未填写说明')}</p><span>研究逻辑</span><p>${h(detail.spec?.rationale || '尚未填写研究逻辑')}</p><small>${tags.length ? tags.map(tag => `#${h(tag)}`).join(' · ') : '无标签'} · 支持 ${(detail.spec?.horizons || []).map(value => `${value}D`).join(' / ') || '未声明周期'}</small></div>
       <div class="lab-evidence-meta"><div><span>CANDIDATE SCORE</span><b>${number(report?.candidate_score, 1)}</b></div><div><span>COVERAGE</span><b>${report ? number(report.coverage * 100, 1) + '%' : '—'}</b></div><div><span>MAX CORR</span><b>${number(report?.max_existing_correlation, 2)}</b></div></div>
       <div class="lab-gate ${gates?.passed ? 'pass' : ''}"><i></i><span>${h(gateText)}</span></div>
       <div class="lab-horizon-grid">${horizonCards || '<div class="lab-empty">验证后显示 1 / 3 / 5 / 7 日证据</div>'}</div>
-      ${robustness ? `<div class="lab-robustness"><div class="lab-robustness-head"><span>ROBUSTNESS GATE</span><b>${robustness.tests_passed}/${robustness.tests_applicable}</b></div><div class="lab-robustness-grid">${robustnessCards}</div></div>` : ''}
+      ${robustness ? `<div class="lab-robustness lab-robustness-summary"><div class="lab-robustness-head"><span>ROBUSTNESS SUMMARY · BEST HORIZON</span><b>${Number(robustness.tests_passed || 0)}/${Number(robustness.tests_applicable || 0)}</b></div><p>这里仅保留门控摘要；分布、阈值、窗口、分层表和失败解释请进入对应周期详情。</p><button type="button" data-robustness-version="${h(detail.id)}" data-robustness-horizon="${Number(report?.best_horizon || preferredHorizon)}">打开完整鲁棒性证据</button></div>` : ''}
       <div class="lab-version-history"><span>VERSION HISTORY</span><ol>${versionHistory || '<li><span>暂无版本记录</span></li>'}</ol></div>
       <div class="lab-evidence-actions">
         <button class="primary" type="button" data-validate-version="${h(detail.id)}">运行统一验证</button>
@@ -1227,6 +1221,161 @@
           <button type="button" data-deploy-version="${h(detail.id)}">设为 Champion</button>
         </div>` : ''}
       </div>`;
+  }
+
+  const robustnessStatusLabel = {
+    pass: 'PASS', fail: 'FAIL', evidence_insufficient: '证据不足', not_applicable: '不适用',
+  };
+
+  const robustnessThresholdLabel = {
+    probability_positive_ic: '正向 IC 概率', probability_positive_net: '扣费后正年化概率',
+    sign_consistency: '折叠同号率', median_retention: '中位 IC 保留率',
+    worst_fold_rank_ic: '最差折 RankIC', same_sign_ratio: '邻域同号率',
+    worst_retention: '最差 IC 保留率', median_factor_rank_correlation: '中位排序相关',
+    positive_year_ratio: '正向年份占比', worst_year_rank_ic: '最差年度 RankIC',
+    regime_same_sign_ratio: '市场状态同号率', liquidity_same_sign_ratio: '流动性同号率',
+    top1_absolute_contribution_share: 'Top 1 贡献上限', top5_absolute_contribution_share: 'Top 5 贡献上限',
+    effective_names: '最低有效个股数',
+  };
+
+  function robustnessRoute() {
+    const params = new URLSearchParams(location.search);
+    const versionId = params.get('lab_version') || '';
+    const horizon = Number(params.get('lab_horizon'));
+    return versionId && [1,3,5,7,10,20,30].includes(horizon) ? {versionId, horizon} : null;
+  }
+
+  function writeRobustnessRoute(versionId, horizon) {
+    const url = new URL(location.href);
+    url.searchParams.set('lab_version', versionId);
+    url.searchParams.set('lab_horizon', String(horizon));
+    url.hash = 'research/lab';
+    history.pushState(null, '', url);
+  }
+
+  function clearRobustnessRoute() {
+    const url = new URL(location.href);
+    url.searchParams.delete('lab_version');
+    url.searchParams.delete('lab_horizon');
+    history.pushState(null, '', url);
+  }
+
+  function renderThresholdTable(thresholds = {}) {
+    const rows = Object.entries(thresholds);
+    if (!rows.length) return '<div class="lab-empty">该测试没有额外阈值。</div>';
+    return `<table class="lab-robust-table"><thead><tr><th>门槛</th><th>值</th></tr></thead><tbody>${rows.map(([key, value]) => `<tr><td>${h(robustnessThresholdLabel[key] || key)}</td><td>${number(value, 4)}</td></tr>`).join('')}</tbody></table>`;
+  }
+
+  function renderHistogram(distribution, title) {
+    const bins = distribution?.histogram || [];
+    if (!bins.length) return '<div class="lab-empty">缺少可绘制分布。</div>';
+    const maximum = Math.max(1, ...bins.map(item => Number(item.count || 0)));
+    return `<div class="lab-distribution"><div class="lab-chart-title"><b>${h(title)}</b><span>${bins.length} 个区间</span></div><div class="lab-histogram" role="img" aria-label="${h(title)}">${bins.map(item => {
+      const height = Math.max(3, Math.round(100 * Number(item.count || 0) / maximum));
+      return `<i style="height:${height}%" title="${number(item.start, 4)} → ${number(item.end, 4)} · ${Number(item.count || 0)} 次"></i>`;
+    }).join('')}</div></div>`;
+  }
+
+  function renderQuantiles(distribution) {
+    const rows = distribution?.quantiles || [];
+    return rows.length ? `<table class="lab-robust-table"><thead><tr><th>分位</th><th>值</th></tr></thead><tbody>${rows.map(item => `<tr><td>P${Math.round(Number(item.probability) * 100)}</td><td>${number(item.value, 6)}</td></tr>`).join('')}</tbody></table>` : '<div class="lab-empty">缺少分位数。</div>';
+  }
+
+  function renderEvidenceBars(rows, labelKey, valueKey) {
+    if (!rows.length) return '<div class="lab-empty">没有可用分层。</div>';
+    const maximum = Math.max(.000001, ...rows.map(item => Math.abs(Number(item[valueKey] || 0))));
+    return `<div class="lab-evidence-bars">${rows.map(item => {
+      const value = Number(item[valueKey] || 0);
+      const width = Math.max(2, Math.round(100 * Math.abs(value) / maximum));
+      return `<div><span>${h(item[labelKey])}</span><i class="${value < 0 ? 'negative' : ''}" style="width:${width}%"></i><b>${number(value, 4)}</b></div>`;
+    }).join('')}</div>`;
+  }
+
+  function renderMonteCarlo(evidence) {
+    const probabilities = [
+      ['正向 IC 概率', evidence.probability_positive_ic],
+      ['扣费后正年化概率', evidence.probability_positive_net],
+    ].filter(item => item[1] != null);
+    return `<div class="lab-robust-chart-grid">${renderHistogram(evidence.ic_mean_distribution, 'Bootstrap IC 均值分布')}${renderHistogram(evidence.net_annual_distribution, '扣费年化收益分布')}</div>
+      <div class="lab-robust-table-grid">${renderQuantiles(evidence.ic_mean_distribution)}${renderThresholdTable(evidence.thresholds)}</div>
+      <table class="lab-robust-table"><thead><tr><th>指标</th><th>结果</th></tr></thead><tbody>${probabilities.map(item => `<tr><td>${h(item[0])}</td><td>${percent(item[1], 1)}</td></tr>`).join('')}<tr><td>IC 95% 区间</td><td>${number(evidence.ic_mean_ci_95?.[0], 6)} → ${number(evidence.ic_mean_ci_95?.[1], 6)}</td></tr><tr><td>区块 / 路径</td><td>${Number(evidence.block_days || 0)} 日 / ${Number(evidence.paths || 0)}</td></tr></tbody></table>`;
+  }
+
+  function renderParameterSensitivity(evidence) {
+    const rows = evidence.variants || [];
+    return `${renderEvidenceBars(rows, 'variant', 'rank_ic')}<div class="table-scroll"><table class="lab-robust-table"><thead><tr><th>参数变体</th><th>RankIC</th><th>保留率</th><th>同号</th><th>排序相关</th></tr></thead><tbody>${rows.map(item => `<tr><td>${h(item.variant)}</td><td>${number(item.rank_ic, 6)}</td><td>${percent(item.retention, 1)}</td><td>${item.same_sign ? '是' : '否'}</td><td>${number(item.factor_rank_correlation, 4)}</td></tr>`).join('')}</tbody></table></div>${renderThresholdTable(evidence.thresholds)}`;
+  }
+
+  function renderWalkForward(evidence) {
+    const folds = evidence.folds || [];
+    const sealed = evidence.sealed || {};
+    const rows = [...folds, ...(sealed.test_start ? [{...sealed, name:'sealed', sealed:true}] : [])];
+    return `<div class="lab-wfa-timeline">${rows.map((item, index) => `<div class="${item.sealed ? 'sealed' : ''}"><span>${item.sealed ? 'SEALED' : `DEV ${index + 1}`}</span><b>${number(item.rank_ic, 5)}</b><small>训练 ${h(item.train_start || '—')} → ${h(item.train_end || '—')}<br>测试 ${h(item.test_start || '—')} → ${h(item.test_end || '—')}</small></div>`).join('')}</div>
+      <div class="table-scroll"><table class="lab-robust-table"><thead><tr><th>窗口</th><th>训练区间</th><th>测试区间</th><th>训练 IC</th><th>测试 IC</th><th>保留率</th></tr></thead><tbody>${rows.map((item, index) => `<tr><td>${item.sealed ? '密封测试' : `DEV ${index + 1}`}</td><td>${h(item.train_start || '—')} → ${h(item.train_end || '—')}</td><td>${h(item.test_start || '—')} → ${h(item.test_end || '—')}</td><td>${number(item.train_rank_ic, 5)}</td><td>${number(item.rank_ic, 5)}</td><td>${percent(item.retention, 1)}</td></tr>`).join('')}</tbody></table></div>${renderThresholdTable(evidence.thresholds)}`;
+  }
+
+  function renderPenetration(evidence) {
+    const years = evidence.time?.years || [];
+    const regimes = evidence.regimes?.buckets || [];
+    const liquidity = evidence.liquidity?.buckets || [];
+    const contributors = evidence.concentration?.top_contributors || [];
+    return `<div class="lab-penetration-grid"><div><div class="lab-chart-title"><b>年度 RankIC</b><span>${years.length} 年</span></div>${renderEvidenceBars(years.map(item => ({...item, label:String(Number(item.year))})), 'label', 'rank_ic')}</div><div><div class="lab-chart-title"><b>市场状态 RankIC</b><span>${regimes.length} 层</span></div>${renderEvidenceBars(regimes, 'regime', 'rank_ic')}</div><div><div class="lab-chart-title"><b>流动性分层</b><span>${liquidity.length} 层</span></div>${renderEvidenceBars(liquidity, 'bucket', 'rank_ic')}</div><div><div class="lab-chart-title"><b>Top 贡献集中度</b><span>绝对贡献份额</span></div>${renderEvidenceBars(contributors, 'symbol', 'share')}</div></div>
+      <div class="lab-robust-table-grid">${renderThresholdTable(evidence.thresholds)}<table class="lab-robust-table"><thead><tr><th>集中度指标</th><th>结果</th></tr></thead><tbody><tr><td>Top 1 贡献</td><td>${percent(evidence.concentration?.top1_absolute_contribution_share, 1)}</td></tr><tr><td>Top 5 贡献</td><td>${percent(evidence.concentration?.top5_absolute_contribution_share, 1)}</td></tr><tr><td>有效个股数</td><td>${number(evidence.concentration?.effective_names, 1)}</td></tr><tr><td>覆盖个股</td><td>${Number(evidence.concentration?.symbols || 0)}</td></tr></tbody></table></div>`;
+  }
+
+  function renderRobustnessSection(section) {
+    const status = Object.hasOwn(robustnessStatusLabel, section.status) ? section.status : 'evidence_insufficient';
+    const evidence = section.evidence || {};
+    const body = section.key === 'monte_carlo' ? renderMonteCarlo(evidence)
+      : section.key === 'parameter_sensitivity' ? renderParameterSensitivity(evidence)
+      : section.key === 'walk_forward' ? renderWalkForward(evidence)
+      : renderPenetration(evidence);
+    const reasons = evidence.reasons || (evidence.reason ? [evidence.reason] : []);
+    return `<section class="lab-robust-section ${status}"><div class="lab-robust-section-head"><div><span>${h(section.key)}</span><h4>${h(section.title)}</h4></div><b>${h(robustnessStatusLabel[status])}</b></div><p>${h(section.explanation)}</p>${reasons.length ? `<ul>${reasons.map(reason => `<li>${h(reason)}</li>`).join('')}</ul>` : ''}<div class="lab-robust-section-body">${body}</div><aside><b>下一步</b><span>${h(section.action)}</span></aside></section>`;
+  }
+
+  function renderRobustnessDetail(result) {
+    const target = document.getElementById('lab-robustness-detail');
+    const title = document.getElementById('lab-robustness-title');
+    const subtitle = document.getElementById('lab-robustness-subtitle');
+    title.textContent = `${result.factor?.name || '因子'} · ${Number(result.horizon)} 日鲁棒性`;
+    subtitle.textContent = result.factor?.description || '只读取已冻结验证结果；打开本页不会重算或访问远端数据。';
+    const horizonSelect = document.getElementById('lab-robustness-horizon');
+    horizonSelect.value = String(Number(result.horizon));
+    const available = new Set((result.available_horizons || []).map(Number));
+    [...horizonSelect.options].forEach(option => { option.disabled = available.size > 0 && !available.has(Number(option.value)); });
+    if (result.status === 'evidence_insufficient') {
+      target.innerHTML = `<div class="lab-evidence-insufficient"><span>证据不足</span><h4>${h(result.reason)}</h4><p>${h(result.action)}</p><button class="lab-button lab-button-primary" type="button" data-validate-version="${h(result.factor?.version_id)}">运行统一验证</button></div>`;
+      return;
+    }
+    const metrics = result.metrics || {};
+    target.innerHTML = `<div class="lab-robust-hero ${result.status === 'pass' ? 'pass' : 'fail'}"><div><span>OVERALL ROBUSTNESS</span><h4>${result.status === 'pass' ? '冻结证据通过' : '冻结证据未通过'}</h4><p>V${Number(result.factor?.version)} · 数据快照 ${h(String(result.validation?.dataset_hash || '').slice(0, 12) || '未记录')} · ${h(formatDate(result.validation?.created_at))}</p></div><b>${Number(result.summary?.tests_passed || 0)}/${Number(result.summary?.tests_applicable || 0)}</b></div>
+      <div class="lab-robust-metrics"><div><span>OOS RankIC</span><b>${number(metrics.oos_rank_ic, 5)}</b></div><div><span>ICIR</span><b>${number(metrics.oos_icir, 3)}</b></div><div><span>保留率</span><b>${percent(metrics.retention, 1)}</b></div><div><span>正向日占比</span><b>${percent(metrics.positive_ratio, 1)}</b></div><div><span>OOS 日数</span><b>${Number(metrics.oos_days || 0)}</b></div></div>
+      <div class="lab-robust-sections">${(result.sections || []).map(renderRobustnessSection).join('')}</div>`;
+  }
+
+  async function openRobustness(versionId, horizon, updateRoute = true) {
+    const normalizedHorizon = Number(horizon);
+    state.robustnessVersion = versionId;
+    state.robustnessHorizon = normalizedHorizon;
+    state.selectedVersion = versionId;
+    setView('robustness');
+    if (updateRoute) writeRobustnessRoute(versionId, normalizedHorizon);
+    document.getElementById('lab-robustness-detail').innerHTML = '<div class="lab-job-loading"><i></i><span>正在读取冻结鲁棒性证据…</span></div>';
+    try {
+      const result = await request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}/robustness?horizon=${normalizedHorizon}`, {requestKey:'robustness-detail'});
+      state.robustnessEvidence = result;
+      renderRobustnessDetail(result);
+    } catch (error) {
+      document.getElementById('lab-robustness-detail').innerHTML = `<div class="lab-empty">${h(error.message)}</div>`;
+    }
+  }
+
+  function closeRobustness() {
+    clearRobustnessRoute();
+    state.robustnessEvidence = null;
+    setView('library');
+    if (state.selectedVersion) selectFactor(state.selectedVersion);
   }
 
   function correlationCell(value) {
@@ -1650,7 +1799,11 @@
         return;
       }
       const viewButton = event.target.closest('[data-lab-view],[data-lab-go]');
-      if (viewButton) setView(viewButton.dataset.labView || viewButton.dataset.labGo);
+      if (viewButton) {
+        const nextView = viewButton.dataset.labView || viewButton.dataset.labGo;
+        if (nextView !== 'robustness' && robustnessRoute()) clearRobustnessRoute();
+        setView(nextView);
+      }
       const horizonButton = event.target.closest('[data-strategy-horizon]');
       if (horizonButton) {
         state.selectedHorizon = Number(horizonButton.dataset.strategyHorizon);
@@ -1729,6 +1882,14 @@
         if (!factor.closest('#lab-factor-list')) setView('library');
         selectFactor(factor.dataset.factorVersion);
       }
+      const robustness = event.target.closest('[data-robustness-version]');
+      if (robustness) {
+        void openRobustness(
+          robustness.dataset.robustnessVersion,
+          Number(robustness.dataset.robustnessHorizon),
+        );
+      }
+      if (event.target.closest('[data-robustness-back]')) closeRobustness();
       const studyButton = event.target.closest('[data-study-id]');
       if (studyButton) {
         const studyId = studyButton.dataset.studyId;
@@ -1906,6 +2067,11 @@
       syncCorrelationControls();
     });
     document.getElementById('lab-run-correlation')?.addEventListener('click', runCorrelation);
+    document.getElementById('lab-robustness-horizon')?.addEventListener('change', event => {
+      if (state.robustnessVersion) void openRobustness(
+        state.robustnessVersion, Number(event.target.value), true,
+      );
+    });
 
     document.querySelectorAll('#lab-discovery-form [name=method]').forEach(input => input.addEventListener('change', event => {
       const llm = event.target.value === 'llm';
@@ -2042,12 +2208,21 @@
       const refresh = state.dashboard ? refreshJobs() : refreshOverview();
       refresh.finally(() => schedulePolling());
     });
+    window.addEventListener('popstate', () => {
+      const route = robustnessRoute();
+      if (route) void openRobustness(route.versionId, route.horizon, false);
+      else if (document.querySelector('[data-lab-panel="robustness"]')?.classList.contains('active')) {
+        setView('library');
+      }
+    });
   }
 
   async function loadQuantLab() {
     if (!state.initialized) {
       state.initialized = true;
       bindEvents();
+      const route = robustnessRoute();
+      if (route) await openRobustness(route.versionId, route.horizon, false);
       try {
         await refreshOverview();
       } catch (error) {
@@ -2055,7 +2230,9 @@
       }
       schedulePolling();
     } else {
-      refreshJobs().finally(() => schedulePolling());
+      const route = robustnessRoute();
+      if (route) void openRobustness(route.versionId, route.horizon, false);
+      else refreshJobs().finally(() => schedulePolling());
     }
   }
 

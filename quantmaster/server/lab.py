@@ -252,6 +252,19 @@ def factor_version_history(version_id: str) -> dict:
         return _fail(exc)  # type: ignore[return-value]
 
 
+@router.get("/factors/{version_id}/robustness")
+def factor_robustness(
+    version_id: str,
+    horizon: int = Query(...),
+) -> dict:
+    if horizon not in SUPPORTED_HORIZONS:
+        raise HTTPException(422, detail="horizon 只支持 1/3/5/7/10/20/30")
+    try:
+        return _published_lab_service().robustness_evidence(version_id, horizon)
+    except (LabError, KeyError, TypeError, ValueError) as exc:
+        return _fail(exc)  # type: ignore[return-value]
+
+
 @router.get("/factors/{version_id}")
 def factor_version(version_id: str) -> dict:
     value = _published_lab_service().store.version(version_id)
