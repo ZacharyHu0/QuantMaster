@@ -143,6 +143,34 @@ def initialize_windows_app_process(*, root: bool = False) -> bool:
     return True
 
 
+def terminate_root_job(root_pid: int) -> None:
+    """Terminate one QuantMaster root Job Object from the activation helper."""
+
+    if os.name != "nt":
+        return
+    try:
+        pid = int(root_pid)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("root Job Object PID 无效") from exc
+    if pid <= 0:
+        raise ValueError("root Job Object PID 无效")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.OpenJobObjectW.restype = wintypes.HANDLE
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenJobObjectW(0x0008 | 0x0004, False, f"Local\\QuantMaster.App.{pid}")
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "OpenJobObjectW failed")  # type: ignore[attr-defined]
+    try:
+        if not kernel32.TerminateJobObject(handle, 1):
+            raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")  # type: ignore[attr-defined]
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _safe_role(role: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(role))
     safe = "".join(

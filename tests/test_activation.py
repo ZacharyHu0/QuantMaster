@@ -1,0 +1,206 @@
+"""Atomic immutable-slot activation contracts."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from quantmaster.runtime.activation import (
+    ActivationBlocked,
+    ActivationCoordinator,
+    SlotRegistry,
+)
+from quantmaster.runtime.identity import ApplicationIdentity
+
+SHA_A = "a" * 40
+SHA_B = "b" * 40
+SHA_C = "c" * 40
+
+
+def _candidate(root: Path, sha: str, *, reversible: bool = True) -> Path:
+    slot = root / "slots" / sha
+    slot.mkdir(parents=True)
+    (slot / "QuantMaster.exe").write_bytes(b"candidate")
+    marker = {
+        "schema": 1,
+        "status": "staged",
+        "build_sha": sha,
+        "slot_id": sha,
+        "size": {"within_hard_limits": True},
+        "smoke": {"build_sha": sha, "slot_id": sha},
+    }
+    if not reversible:
+        marker["migration"] = {"reversible": False}
+    (slot / ".quantmaster-stage.json").write_text(
+        json.dumps(marker), encoding="utf-8",
+    )
+    return slot
+
+
+def _write_state(
+    root: Path, *, active: str, previous: str = "", pending: str = "",
+    status: str = "stable",
+) -> None:
+    app = root
+    app.mkdir(parents=True, exist_ok=True)
+    (app / "active.json").write_text(json.dumps({
+        "schema": 1,
+        "active": active,
+        "previous": previous,
+        "pending": pending,
+        "status": status,
+        "last_error": "",
+    }), encoding="utf-8")
+
+
+class _Generation:
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+        self.stopped = False
+
+    def poll(self):
+        return 0 if self.stopped else None
+
+
+class FakeController:
+    def __init__(self, current: str = "", *, fail: str = "") -> None:
+        self.current = current
+        self.fail = fail
+        self.calls: list[tuple[str, str]] = []
+
+    def current_identity(self):
+        if not self.current:
+            return None
+        return {"build_sha": self.current, "slot_id": self.current}
+
+    def drain_current(self, _timeout: float) -> None:
+        self.calls.append(("drain", self.current))
+
+    def stop_current(self, _timeout: float) -> None:
+        self.calls.append(("stop-current", self.current))
+        self.current = ""
+
+    def start_generation(self, _slot: Path, identity: ApplicationIdentity):
+        self.calls.append(("start", identity.build_sha))
+        if identity.build_sha == self.fail:
+            raise ActivationBlocked("candidate_start_failed", "fixture failure")
+        self.current = identity.build_sha
+        return _Generation(identity.build_sha)
+
+    def wait_ready(self, generation: _Generation, identity: ApplicationIdentity, _timeout: float):
+        self.calls.append(("ready", identity.build_sha))
+        if identity.build_sha == self.fail:
+            raise ActivationBlocked("candidate_not_ready", "fixture failure")
+        return {
+            "status": "ok",
+            "core_ready": True,
+            "build_sha": identity.build_sha,
+            "slot_id": identity.slot_id,
+            "runtime_generation": identity.runtime_generation,
+        }
+
+    def stop_generation(self, generation: _Generation, _timeout: float) -> None:
+        self.calls.append(("stop-generation", generation.sha))
+        generation.stopped = True
+        if self.current == generation.sha:
+            self.current = ""
+
+
+def test_activation_commits_a_new_generation_and_preserves_previous(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController(SHA_A)
+
+    result = ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert result["status"] == "activated"
+    assert registry.read() == {
+        "schema": 1,
+        "active": SHA_B,
+        "previous": SHA_A,
+        "pending": "",
+        "status": "stable",
+        "last_error": "",
+    }
+    assert (tmp_path / "launcher.target").read_text(encoding="ascii") == f"{SHA_B}\n"
+    assert controller.calls == [
+        ("drain", SHA_A), ("stop-current", SHA_A),
+        ("start", SHA_B), ("ready", SHA_B),
+    ]
+
+
+def test_candidate_failure_rolls_back_previous_slot(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController(SHA_A, fail=SHA_B)
+
+    result = ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert result["status"] == "rolled_back"
+    assert registry.read()["active"] == SHA_A
+    assert registry.read()["pending"] == ""
+    assert (tmp_path / "launcher.target").read_text(encoding="ascii") == f"{SHA_A}\n"
+    assert ("start", SHA_A) in controller.calls
+
+
+def test_interrupted_pending_is_recovered_before_retry(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _candidate(tmp_path, SHA_C)
+    _write_state(tmp_path, active=SHA_A, pending=SHA_B, status="pending")
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController()
+
+    result = ActivationCoordinator(registry, controller).activate(SHA_C)
+
+    assert result["status"] == "activated"
+    assert registry.read()["active"] == SHA_C
+    assert controller.calls[:2] == [("start", SHA_A), ("ready", SHA_A)]
+    assert ("start", SHA_C) in controller.calls
+
+
+def test_unknown_or_irreversible_candidate_is_rejected_before_stopping_current(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B, reversible=False)
+    _write_state(tmp_path, active=SHA_A)
+    controller = FakeController(SHA_A)
+
+    with pytest.raises(ActivationBlocked, match="不可逆"):
+        ActivationCoordinator(SlotRegistry(tmp_path), controller).activate(SHA_B)
+
+    assert controller.calls == []
+    assert SlotRegistry(tmp_path).read()["active"] == SHA_A
+
+
+def test_registry_refuses_unknown_fields_and_keeps_two_slot_protection(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _candidate(tmp_path, SHA_C)
+    _write_state(tmp_path, active=SHA_A, previous=SHA_B)
+    (tmp_path / "active.json").write_text(
+        json.dumps({"schema": 1, "active": SHA_A, "previous": SHA_B,
+                    "pending": "", "status": "stable", "last_error": "", "extra": 1}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ActivationBlocked, match="字段集合"):
+        SlotRegistry(tmp_path).read()
+
+    _write_state(tmp_path, active=SHA_A, previous=SHA_B)
+    registry = SlotRegistry(tmp_path)
+    assert registry.protected_slots() == {SHA_A, SHA_B}
+    assert [path.name for path in registry.unreferenced_slots()] == [SHA_C]
+
+
+def test_already_active_is_idempotent(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _write_state(tmp_path, active=SHA_A)
+    controller = FakeController(SHA_A)
+
+    result = ActivationCoordinator(SlotRegistry(tmp_path), controller).activate(SHA_A)
+
+    assert result["status"] == "already_active"
+    assert controller.calls == []

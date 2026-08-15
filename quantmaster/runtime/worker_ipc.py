@@ -204,6 +204,7 @@ def call_worker_command(
     *,
     timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
     root: str | Path | None = None,
+    application_identity: ApplicationIdentity | None = None,
 ) -> dict[str, Any]:
     """Send one bounded command to runtime-worker and return its projection."""
 
@@ -211,7 +212,7 @@ def call_worker_command(
     endpoint = worker_command_endpoint(base)
     family = "AF_PIPE" if os.name == "nt" else "AF_UNIX"
     deadline = max(0.05, float(timeout))
-    identity = get_application_identity()
+    identity = application_identity or get_application_identity()
     try:
         connection = Client(endpoint, family=family, authkey=_authkey(base))
     except (AuthenticationError, OSError, EOFError) as exc:
