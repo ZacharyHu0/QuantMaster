@@ -19,14 +19,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
     from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 except ModuleNotFoundError:
     from pytest_windows_acl import prepare_pytest_directory
 
-from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 VERSION_PATHS = frozenset({"quantmaster/release.py", "CHANGELOG.md"})

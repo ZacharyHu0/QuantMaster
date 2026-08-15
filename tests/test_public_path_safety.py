@@ -9,6 +9,8 @@ from scripts.dev.github_sync import assert_public_github_body
 def test_github_body_rejects_local_paths_before_publish():
     with pytest.raises(ValueError, match="本地路径"):
         assert_public_github_body(r"CI failed at C:\Users\example\Quant\tests\test.py")
+    with pytest.raises(ValueError, match="本地路径"):
+        assert_public_github_body("Worktree: .worktrees/example")
 
 
 def test_github_body_accepts_public_task_identifiers():
