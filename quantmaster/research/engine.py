@@ -136,6 +136,20 @@ class ResearchEngine:
         assets = tuple(dict.fromkeys(AssetClass(item) for item in asset_classes))
         if not assets:
             raise ValueError("至少选择一种资产")
+        if AssetClass.FUTURE in assets:
+            from quantmaster.market_capabilities import (
+                MarketCapability,
+                require_market_capability,
+            )
+
+            require_market_capability(
+                {
+                    "market": "FUT",
+                    "asset_type": "future_continuous",
+                    "symbol": "future_continuous",
+                },
+                MarketCapability.FORMAL_RESEARCH,
+            )
         requested_specs = self.registry.select(spec_ids) if spec_ids else []
         for spec in requested_specs:
             if not any(asset in spec.asset_classes for asset in assets):

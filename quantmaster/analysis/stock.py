@@ -773,6 +773,12 @@ class StockAnalysisService:
         instrument = dict(result["instrument"])
         if instrument.get("asset_type") not in {"stock", "etf"}:
             raise ValueError("六维个股分析目前支持股票和 ETF；指数、期货请使用市场页")
+        from quantmaster.market_capabilities import (
+            MarketCapability,
+            require_market_capability,
+        )
+
+        require_market_capability(instrument, MarketCapability.FORMAL_RESEARCH)
         return instrument
 
     def analyze(self, query: str, progress: ProgressEmitter | None = None) -> dict[str, Any]:
@@ -847,6 +853,13 @@ class StockAnalysisService:
             coverage_values.get(item["status"], 0) * DIMENSION_WEIGHTS[item["key"]]
             for item in dimensions
         )
+        from quantmaster.market_capabilities import assess_formal_research_evidence
+
+        research_boundary = assess_formal_research_evidence(
+            instrument,
+            market_envelope.quality.to_dict(),
+            market_envelope.provenance,
+        )
         report = {
             "schema_version": "1.0",
             "framework": {
@@ -865,6 +878,7 @@ class StockAnalysisService:
             },
             "warnings": warnings,
             "data_quality": market_envelope.quality.to_dict(),
+            "market_boundary": research_boundary.to_dict(),
             "provenance": list(market_envelope.provenance),
             "disclaimer": "仅作量化研究与记录，不构成投资建议；市场有风险，结论需随新数据更新。",
         }

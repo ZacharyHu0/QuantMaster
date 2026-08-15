@@ -425,6 +425,8 @@ def _latest_report_period(now: pd.Timestamp | None = None) -> str:
 
 def _quote_page(symbol: str) -> str:
     code, _, suffix = symbol.partition(".")
+    if suffix == "HK":
+        return f"https://quote.eastmoney.com/hk/{code}.html"
     market = {"SH": "sh", "SZ": "sz", "BJ": "bj"}.get(suffix, "")
     return f"https://quote.eastmoney.com/{market}{code}.html" if market else ""
 
@@ -2039,6 +2041,8 @@ class _StockResearchRun:
         )
 
     def _source_collectors(self, subject: _ResearchSubject) -> dict[str, Callable]:
+        is_hk = str(subject.instrument.get("market") or "").upper() == "HK"
+
         def fundamental():
             warnings: list[str] = []
             try:
@@ -2052,31 +2056,40 @@ class _StockResearchRun:
                 warnings.append(
                     f"基本面结构化缓存不可用：{_public_error_text(exc, limit=160)}",
                 )
-            rows, extra = self.engine.deep_loader.fundamental(subject.symbol)
+            rows, extra = (
+                ([], [])
+                if is_hk
+                else self.engine.deep_loader.fundamental(subject.symbol)
+            )
             return panel, rows, [*warnings, *extra]
 
         def technical():
             warnings: list[str] = []
-            try:
-                envelope = self.engine.service.history_loader(
-                    "000300.SH",
-                    str(subject.start.date()),
-                    str(subject.end.date()),
-                    priority="interactive",
-                )
-                benchmark = envelope.require_data()
-                subject.market_contracts["000300.SH"] = envelope.quality.to_dict()
-                if envelope.quality.status == "degraded":
-                    warnings.append(
-                        "沪深300行情证据已降级：" + "；".join(envelope.quality.issues),
-                    )
-            except RECOVERABLE_RESEARCH_ERRORS as exc:
+            if is_hk:
                 benchmark = pd.DataFrame()
-                warnings.append(
-                    f"沪深300相对强弱不可用：{_public_error_text(exc, limit=160)}",
-                )
-            industry_frame, extra = self.engine.deep_loader.industry_history(
-                subject.industry,
+            else:
+                try:
+                    envelope = self.engine.service.history_loader(
+                        "000300.SH",
+                        str(subject.start.date()),
+                        str(subject.end.date()),
+                        priority="interactive",
+                    )
+                    benchmark = envelope.require_data()
+                    subject.market_contracts["000300.SH"] = envelope.quality.to_dict()
+                    if envelope.quality.status == "degraded":
+                        warnings.append(
+                            "沪深300行情证据已降级：" + "；".join(envelope.quality.issues),
+                        )
+                except RECOVERABLE_RESEARCH_ERRORS as exc:
+                    benchmark = pd.DataFrame()
+                    warnings.append(
+                        f"沪深300相对强弱不可用：{_public_error_text(exc, limit=160)}",
+                    )
+            industry_frame, extra = (
+                (pd.DataFrame(), [])
+                if is_hk
+                else self.engine.deep_loader.industry_history(subject.industry)
             )
             return (
                 _relative_strength_values(subject.bars, benchmark, industry_frame),
@@ -2097,7 +2110,9 @@ class _StockResearchRun:
                 warnings = []
             except RECOVERABLE_RESEARCH_ERRORS as exc:
                 flow, warnings = {}, [f"逐单资金流不可用：{str(exc)[:160]}"]
-            rows, extra = self.engine.deep_loader.capital(subject.symbol)
+            rows, extra = (
+                ([], []) if is_hk else self.engine.deep_loader.capital(subject.symbol)
+            )
             return flow, rows, [*warnings, *extra]
 
         return {
@@ -2105,8 +2120,14 @@ class _StockResearchRun:
             "technical": technical,
             "news": news,
             "capital": capital,
-            "sentiment": lambda: self.engine.deep_loader.sentiment(subject.symbol),
-            "macro": lambda: self.engine.deep_loader.macro(subject.symbol),
+            "sentiment": (
+                (lambda: ([], []))
+                if is_hk else (lambda: self.engine.deep_loader.sentiment(subject.symbol))
+            ),
+            "macro": (
+                (lambda: ([], []))
+                if is_hk else (lambda: self.engine.deep_loader.macro(subject.symbol))
+            ),
         }
 
     def _collect_sources(self, subject: _ResearchSubject) -> dict[str, Any]:
@@ -2541,6 +2562,13 @@ class _StockResearchRun:
         artifacts: list[dict[str, Any]],
         runtime: _ResearchRuntime,
     ) -> dict[str, Any]:
+        from quantmaster.market_capabilities import assess_formal_research_evidence
+
+        research_boundary = assess_formal_research_evidence(
+            subject.instrument,
+            subject.market_envelope.quality.to_dict(),
+            subject.market_envelope.provenance,
+        )
         score = sum(
             float(item["score"]) * DIMENSION_WEIGHTS[item["key"]]
             for item in dimensions
@@ -2575,6 +2603,8 @@ class _StockResearchRun:
                 "search": evidence.search,
                 "evidence_count": len(evidence.ledger.all()),
                 "completion_status": "completed",
+                "market_boundary": research_boundary.to_dict(),
+                "formal_eligible": research_boundary.formal_eligible,
                 "sources": evidence.ledger.sources(),
                 "artifacts": [evidence.artifact, *artifacts],
             },

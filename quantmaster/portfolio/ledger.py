@@ -303,6 +303,12 @@ class Ledger:
             symbol = normalize_symbol(str(value.get("symbol") or ""))
         except (ValueError, TypeError) as exc:
             raise ValueError(str(exc)) from None
+        from quantmaster.market_capabilities import (
+            MarketCapability,
+            require_market_capability,
+        )
+
+        require_market_capability(symbol, MarketCapability.LEDGER_EXECUTION)
         return {
             **value,
             "date": _normalized_date(value.get("date")),
