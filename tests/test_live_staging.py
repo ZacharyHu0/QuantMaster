@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
@@ -15,10 +16,10 @@ def _archive(path: Path, *members: tuple[str, bytes]) -> Path:
     return path
 
 
-def _small_report() -> dict[str, object]:
+def _small_report(build_sha: str = "a" * 40) -> dict[str, object]:
     return {
         "mode": "onedir-measurement",
-        "build_sha": "a" * 40,
+        "build_sha": build_sha,
         "onedir_bytes": 8,
         "zip_bytes": 8,
         "within_zip_target": True,
@@ -27,6 +28,284 @@ def _small_report() -> dict[str, object]:
         "module_attribution": [],
         "errors": [],
     }
+
+
+def _smoke_report(build_sha: str = "a" * 40) -> dict[str, object]:
+    return {
+        "layout": "onedir",
+        "build_sha": build_sha,
+        "slot_id": build_sha,
+        "runtime_generation": "b" * 32,
+        "help_seconds": 0.2,
+        "help_budget_seconds": 1.5,
+        "core_ready_seconds": 0.4,
+        "processes_stopped": True,
+        "port_released": True,
+        "executable_unchanged": True,
+    }
+
+
+def _git(cwd: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-c", f"safe.directory={cwd.as_posix()}", *args],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode:
+        raise AssertionError(f"git {' '.join(args)} failed: {completed.stderr.strip()}")
+    return completed.stdout.strip()
+
+
+def _verified_repository(tmp_path: Path, monkeypatch) -> tuple[Path, Path, str]:
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    _git(primary, "init", "-b", "main")
+    _git(primary, "config", "core.sharedRepository", "all")
+    _git(primary, "config", "user.email", "tests@example.com")
+    _git(primary, "config", "user.name", "QuantMaster Tests")
+    (primary / ".gitignore").write_text(".artifacts/\n.worktrees/\n", encoding="utf-8")
+    (primary / "payload.txt").write_text("verified\n", encoding="utf-8")
+    _git(primary, "add", ".gitignore", "payload.txt")
+    _git(primary, "commit", "-m", "verified main")
+    sha = _git(primary, "rev-parse", "HEAD")
+    _git(primary, "update-ref", "refs/remotes/origin/main", sha)
+    target = primary / ".worktrees" / "task"
+    _git(primary, "worktree", "add", "-b", "codex/task", str(target), sha)
+    evidence = {
+        "commit": sha,
+        "base": sha,
+        "python": "python",
+        "python_size": 1,
+        "python_mtime_ns": 1,
+        "environment": "environment",
+        "ui": False,
+        "rust": False,
+        "package": True,
+    }
+    evidence_path = primary / ".artifacts" / "worktrees" / "task" / "validation" / "full.json"
+    evidence_path.parent.mkdir(parents=True)
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    monkeypatch.setattr(live.tasks, "full_validation_identity", lambda *_args, **_kwargs: evidence)
+    monkeypatch.setattr(live.tasks, "project_python", lambda *_args, **_kwargs: Path("python"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+    return primary, target, sha
+
+
+def test_stage_builds_from_fixed_git_snapshot_when_primary_changes(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, sha = _verified_repository(tmp_path, monkeypatch)
+
+    def build(project_root, *_args):
+        assert project_root != primary
+        assert _git(project_root, "rev-parse", "HEAD") == sha
+        assert (project_root / "payload.txt").read_text(encoding="utf-8") == "verified\n"
+        (primary / "payload.txt").write_text("changed after validation\n", encoding="utf-8")
+        build_root = Path(_args[-1])
+        archive = _archive(
+            build_root / "QuantMaster.zip", ("QuantMaster/QuantMaster.exe", b"exe"),
+        )
+        return archive, _small_report(sha)
+
+    smoke_calls = []
+    monkeypatch.setattr(live, "_build_onedir", build)
+    monkeypatch.setattr(
+        live.smoke_frozen_runtime,
+        "smoke",
+        lambda executable, *, layout: smoke_calls.append((executable, layout))
+        or _smoke_report(sha),
+    )
+
+    result = live.stage("task", cwd=primary)
+
+    assert result["build_sha"] == sha
+    assert smoke_calls == [(Path(result["slot"]) / "QuantMaster.exe", "onedir")]
+
+
+@pytest.mark.parametrize("protected_name", ["active", "previous"])
+def test_stage_refuses_to_write_an_active_or_previous_slot(
+    tmp_path: Path, monkeypatch, protected_name: str,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, sha = _verified_repository(tmp_path, monkeypatch)
+    active = tmp_path / "localappdata" / "QuantMaster" / "app" / "active.json"
+    active.parent.mkdir(parents=True)
+    state = {
+        "schema": 1,
+        "active": sha if protected_name == "active" else "",
+        "previous": sha if protected_name == "previous" else "",
+        "pending": "",
+        "status": "stable",
+        "last_error": "",
+    }
+    expected = (json.dumps(state) + "\n").encode()
+    active.write_bytes(expected)
+    monkeypatch.setattr(live, "_build_onedir", lambda *_args: pytest.fail("must not build"))
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    assert failure.value.reason == "protected_slot"
+    assert active.read_bytes() == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("dirty-main", "main_dirty"),
+        ("unsynchronized-main", "main_unsynchronized"),
+        ("missing-package-gate", "package_evidence_required"),
+        ("environment-mismatch", "stale_validation_evidence"),
+        ("stale-task-evidence", "stale_validation_evidence"),
+        ("different-task-tree", "task_tree_mismatch"),
+    ],
+)
+def test_stage_rejects_untrusted_main_or_task_evidence(
+    tmp_path: Path, monkeypatch, case: str, reason: str,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, target, sha = _verified_repository(tmp_path, monkeypatch)
+    evidence_path = primary / ".artifacts" / "worktrees" / "task" / "validation" / "full.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    if case == "dirty-main":
+        (primary / "payload.txt").write_text("dirty\n", encoding="utf-8")
+    elif case == "unsynchronized-main":
+        _git(target, "commit", "--allow-empty", "-m", "remote moved")
+        _git(primary, "update-ref", "refs/remotes/origin/main", _git(target, "rev-parse", "HEAD"))
+    elif case == "missing-package-gate":
+        evidence["package"] = False
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    elif case == "environment-mismatch":
+        monkeypatch.setattr(
+            live.tasks,
+            "full_validation_identity",
+            lambda *_args, **_kwargs: {**evidence, "environment": "changed"},
+        )
+    else:
+        (target / "payload.txt").write_text("task differs\n", encoding="utf-8")
+        _git(target, "add", "payload.txt")
+        _git(target, "commit", "-m", "task differs")
+        if case == "different-task-tree":
+            evidence["commit"] = _git(target, "rev-parse", "HEAD")
+            evidence["base"] = sha
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+            monkeypatch.setattr(
+                live.tasks, "full_validation_identity", lambda *_args, **_kwargs: evidence,
+            )
+    monkeypatch.setattr(live, "_build_onedir", lambda *_args: pytest.fail("must not build"))
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    assert failure.value.reason == reason
+
+
+def test_stage_keeps_a_complete_slot_if_active_state_changes_after_marking(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, sha = _verified_repository(tmp_path, monkeypatch)
+    active = tmp_path / "localappdata" / "QuantMaster" / "app" / "active.json"
+    active.parent.mkdir(parents=True)
+    active.write_text(
+        json.dumps({
+            "schema": live.ACTIVE_STATE_SCHEMA,
+            "active": "c" * 40,
+            "previous": "",
+            "pending": "",
+        }),
+        encoding="utf-8",
+    )
+
+    def build(_project, *_args):
+        build_root = Path(_args[-1])
+        return _archive(
+            build_root / "QuantMaster.zip", ("QuantMaster/QuantMaster.exe", b"exe"),
+        ), _small_report(sha)
+
+    write_marker = live._write_marker
+
+    def mark_then_change_active(slot, payload):
+        write_marker(slot, payload)
+        active.write_text(
+            json.dumps({
+                "schema": live.ACTIVE_STATE_SCHEMA,
+                "active": "d" * 40,
+                "previous": "",
+                "pending": "",
+            }),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(live, "_build_onedir", build)
+    monkeypatch.setattr(live, "_write_marker", mark_then_change_active)
+    monkeypatch.setattr(
+        live.smoke_frozen_runtime, "smoke", lambda *_args, **_kwargs: _smoke_report(sha),
+    )
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    slot = active.parent / "slots" / sha
+    assert failure.value.reason == "active_state_changed"
+    assert (slot / live.STAGE_MARKER).is_file()
+    assert (slot / "QuantMaster.exe").read_bytes() == b"exe"
+
+
+def test_stage_fails_closed_while_the_application_lifecycle_lock_is_held(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, _sha = _verified_repository(tmp_path, monkeypatch)
+    app_root = tmp_path / "localappdata" / "QuantMaster" / "app"
+    app_root.mkdir(parents=True)
+    marker = app_root / live.LIFECYCLE_LOCK
+    with marker.open("a+b") as stream:
+        stream.write(b"0")
+        stream.flush()
+        assert live.tasks._try_lock(stream)
+        try:
+            with pytest.raises(live.StageBlocked) as failure:
+                live.stage("task", cwd=primary)
+        finally:
+            live.tasks._unlock(stream)
+
+    assert failure.value.reason == "lifecycle_busy"
+
+
+def test_stage_rejects_non_string_active_state_sha(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, _sha = _verified_repository(tmp_path, monkeypatch)
+    active = tmp_path / "localappdata" / "QuantMaster" / "app" / "active.json"
+    active.parent.mkdir(parents=True)
+    active.write_text(
+        json.dumps({
+            "schema": live.ACTIVE_STATE_SCHEMA,
+            "active": int("1" * 40),
+            "previous": "",
+            "pending": "",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(live, "_build_onedir", lambda *_args: pytest.fail("must not build"))
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    assert failure.value.reason == "active_state_invalid"
 
 
 def test_extract_rejects_traversal_without_writing_outside(tmp_path: Path) -> None:
@@ -63,6 +342,43 @@ def test_existing_partial_slot_is_not_repaired_implicitly(tmp_path: Path) -> Non
     assert (slot / "QuantMaster.exe").read_bytes() == b"partial"
 
 
+def test_existing_marker_without_complete_package_evidence_fails_closed(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    (primary / ".artifacts" / "worktrees" / "task").mkdir(parents=True)
+    sha = "a" * 40
+    local_appdata = tmp_path / "localappdata"
+    slot = local_appdata / "QuantMaster" / "app" / "slots" / sha
+    slot.mkdir(parents=True)
+    (slot / "QuantMaster.exe").write_bytes(b"unverified")
+    (slot / live.STAGE_MARKER).write_text(
+        json.dumps({
+            "schema": live.STAGE_SCHEMA,
+            "status": "staged",
+            "build_sha": sha,
+            "slot_id": sha,
+            "smoke": _smoke_report(),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(live, "_validate_primary", lambda _cwd: (primary, sha))
+    monkeypatch.setattr(live, "_validate_task", lambda *_args: (primary, {"commit": sha}))
+    monkeypatch.setattr(
+        live.smoke_frozen_runtime, "smoke", lambda *_args, **_kwargs: pytest.fail("must not smoke"),
+    )
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    assert failure.value.reason == "partial_slot"
+    assert (slot / "QuantMaster.exe").read_bytes() == b"unverified"
+
+
 def test_stage_smoke_failure_removes_only_the_new_candidate(tmp_path: Path, monkeypatch) -> None:
     if os.name != "nt":
         pytest.skip("slot staging is Windows-only")
@@ -73,7 +389,14 @@ def test_stage_smoke_failure_removes_only_the_new_candidate(tmp_path: Path, monk
     local_appdata = tmp_path / "localappdata"
     active = local_appdata / "QuantMaster" / "app" / "active.json"
     active.parent.mkdir(parents=True)
-    active.write_bytes(b'{"active":"old"}\n')
+    active.write_bytes(
+        (json.dumps({
+            "schema": live.ACTIVE_STATE_SCHEMA,
+            "active": "c" * 40,
+            "previous": "",
+            "pending": "",
+        }) + "\n").encode(),
+    )
     sha = "a" * 40
     evidence = {
         "commit": sha,
@@ -90,8 +413,11 @@ def test_stage_smoke_failure_removes_only_the_new_candidate(tmp_path: Path, monk
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
     monkeypatch.setattr(live, "_validate_primary", lambda _cwd: (primary, sha))
     monkeypatch.setattr(live, "_validate_task", lambda *_args: (primary, evidence))
+    monkeypatch.setattr(live, "_snapshot_main", lambda *_args: primary)
+    monkeypatch.setattr(live.tasks, "project_python", lambda *_args: Path("python"))
 
-    def build(_project, _sha, _artifacts, build_root):
+    def build(_project, *_args):
+        build_root = Path(_args[-1])
         archive = _archive(Path(build_root) / "QuantMaster.zip", ("QuantMaster/QuantMaster.exe", b"exe"))
         return archive, _small_report()
 
@@ -108,7 +434,7 @@ def test_stage_smoke_failure_removes_only_the_new_candidate(tmp_path: Path, monk
     slot = local_appdata / "QuantMaster" / "app" / "slots" / sha
     assert failure.value.reason == "packaged_smoke_failed"
     assert not slot.exists()
-    assert active.read_bytes() == b'{"active":"old"}\n'
+    assert json.loads(active.read_bytes())["active"] == "c" * 40
 
 
 def test_same_complete_slot_is_idempotent_without_rebuilding(tmp_path: Path, monkeypatch) -> None:
@@ -125,16 +451,15 @@ def test_same_complete_slot_is_idempotent_without_rebuilding(tmp_path: Path, mon
     payload = {
         "schema": live.STAGE_SCHEMA,
         "status": "staged",
+        "idempotent": False,
         "source_task": "task",
+        "source_task_commit": "a" * 40,
         "build_sha": "a" * 40,
         "slot_id": "a" * 40,
-        "smoke": {
-            "layout": "onedir",
-            "build_sha": "a" * 40,
-            "slot_id": "a" * 40,
-            "processes_stopped": True,
-            "port_released": True,
-        },
+        "slot": str(slot),
+        "size": _small_report(),
+        "smoke": _smoke_report(),
+        "staged_at": "2026-08-16T00:00:00+00:00",
     }
     (slot / live.STAGE_MARKER).write_text(json.dumps(payload), encoding="utf-8")
     evidence = {
@@ -152,8 +477,16 @@ def test_same_complete_slot_is_idempotent_without_rebuilding(tmp_path: Path, mon
     monkeypatch.setattr(live, "_validate_primary", lambda _cwd: (primary, "a" * 40))
     monkeypatch.setattr(live, "_validate_task", lambda *_args: (primary, evidence))
     monkeypatch.setattr(live, "_build_onedir", lambda *_args: pytest.fail("must not rebuild"))
+    smoke_calls = []
+    monkeypatch.setattr(
+        live.smoke_frozen_runtime,
+        "smoke",
+        lambda executable, *, layout: smoke_calls.append((executable, layout))
+        or _smoke_report(),
+    )
 
     result = live.stage("task", cwd=primary)
 
     assert result["status"] == "staged"
     assert result["idempotent"] is True
+    assert smoke_calls == [(slot / "QuantMaster.exe", "onedir")]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -25,7 +26,9 @@ from scripts.release import check_desktop_artifact, smoke_frozen_runtime  # noqa
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 STAGE_SCHEMA = 1
+ACTIVE_STATE_SCHEMA = 1
 STAGE_MARKER = ".quantmaster-stage.json"
+LIFECYCLE_LOCK = ".lifecycle.lock"
 MAX_EXTRACTED_BYTES = check_desktop_artifact.ONEDIR_MAX_MIB * 1024 * 1024
 
 
@@ -183,20 +186,72 @@ def _validate_task(primary: Path, slug: str, main_sha: str) -> tuple[Path, dict[
     return target, evidence
 
 
-def _slot_paths(main_sha: str) -> tuple[Path, Path, Path, tuple[bool, bytes]]:
+def _slot_paths(main_sha: str) -> tuple[Path, Path, Path]:
     local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
     if not local_appdata or not Path(local_appdata).is_absolute():
         _block("localappdata_required", "LOCALAPPDATA 必须是绝对路径")
     app_root = Path(local_appdata) / "QuantMaster" / "app"
     slots = app_root / "slots"
-    active = app_root / "active.json"
     for path in (app_root.parent, app_root, slots):
         if path.exists() and _is_link(path):
             _block("unsafe_slot_root", f"槽路径不能是 link/junction：{path}")
-    if active.exists() and (_is_link(active) or not active.is_file()):
+    return app_root, slots, slots / main_sha
+
+
+@contextlib.contextmanager
+def application_lifecycle_lock(app_root: Path):
+    """Serialize staging with the future activation helper for one installation."""
+
+    app_root.mkdir(parents=True, exist_ok=True)
+    marker = app_root / LIFECYCLE_LOCK
+    if _is_link(marker) or (marker.exists() and not marker.is_file()):
+        _block("unsafe_lifecycle_lock", f"应用生命周期锁不是普通文件：{marker}")
+    try:
+        with marker.open("a+b") as stream:
+            if stream.tell() == 0:
+                stream.write(b"0")
+                stream.flush()
+            if not tasks._try_lock(stream):
+                _block("lifecycle_busy", "另一个 staging/activation 操作正在进行")
+            try:
+                yield
+            finally:
+                tasks._unlock(stream)
+    except StageBlocked:
+        raise
+    except OSError as exc:
+        _block("lifecycle_lock_failed", f"无法持有应用生命周期锁：{exc}")
+
+
+def _active_snapshot(active: Path, main_sha: str) -> tuple[bool, bytes]:
+    if _is_link(active) or (active.exists() and not active.is_file()):
         _block("active_state_invalid", f"active.json 不是普通文件：{active}")
-    snapshot = (active.exists(), active.read_bytes() if active.exists() else b"")
-    return app_root, slots, slots / main_sha, snapshot
+    if not active.exists():
+        return False, b""
+    try:
+        raw = active.read_bytes()
+        state = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        _block("active_state_invalid", f"active.json 不可读：{active}: {exc}")
+    if not isinstance(state, dict) or type(state.get("schema")) is not int:
+        _block("active_state_invalid", "active.json 缺少受支持的 schema")
+    if state["schema"] != ACTIVE_STATE_SCHEMA:
+        _block("active_state_unknown", f"不支持 active.json schema：{state['schema']}")
+    for name in ("active", "previous", "pending"):
+        value = state.get(name, "")
+        if value not in (None, "") and (
+            not isinstance(value, str) or FULL_SHA.fullmatch(value) is None
+        ):
+            _block("active_state_invalid", f"active.json 的 {name} 不是完整 SHA")
+    protected = [name for name in ("active", "previous") if state.get(name) == main_sha]
+    if protected:
+        _block(
+            "protected_slot",
+            "staging 不得写入 active/previous 槽",
+            references=protected,
+            build_sha=main_sha,
+        )
+    return True, raw
 
 
 def _assert_active_unchanged(active: Path, snapshot: tuple[bool, bytes]) -> None:
@@ -206,7 +261,11 @@ def _assert_active_unchanged(active: Path, snapshot: tuple[bool, bytes]) -> None
 
 
 def _build_onedir(
-    project_root: Path, main_sha: str, task_artifacts: Path, build_root: Path,
+    project_root: Path,
+    python: Path,
+    main_sha: str,
+    task_artifacts: Path,
+    build_root: Path,
 ) -> tuple[Path, dict[str, object]]:
     desktop_root = build_root / "desktop"
     analysis_root = build_root / "pyinstaller"
@@ -214,7 +273,7 @@ def _build_onedir(
     build_env["QM_DESKTOP_LAYOUT"] = "onedir-measurement"
     build_env["UV_CACHE_DIR"] = str(task_artifacts / "uv-cache")
     command = [
-        "uv", "run", "--no-project", "--python", str(tasks.project_python(project_root)),
+        "uv", "run", "--no-project", "--python", str(python),
         "--with", "PyInstaller==6.19.0", "-m", "PyInstaller", "--noconfirm",
         "--distpath", str(desktop_root), "--workpath", str(analysis_root),
         "packaging/quantmaster.spec",
@@ -246,6 +305,38 @@ def _build_onedir(
             size_report=report,
         )
     return archive, report
+
+
+def _snapshot_main(primary: Path, main_sha: str, build_root: Path) -> Path:
+    """Materialize one exact commit without reading the mutable primary work tree."""
+
+    snapshot = build_root / "source"
+    try:
+        tasks.git(
+            ["clone", "--shared", "--no-checkout", "--quiet", str(primary), str(snapshot)],
+            cwd=primary,
+        )
+        tasks.git(
+            ["-c", f"core.hooksPath={os.devnull}", "checkout", "--detach", "--quiet", main_sha],
+            cwd=snapshot,
+        )
+        if _status(snapshot):
+            _block("source_snapshot_failed", "exact main snapshot 不干净")
+        snapshot_sha = tasks.git(
+            ["rev-parse", "HEAD^{commit}"], cwd=snapshot,
+        ).stdout.strip()
+        if snapshot_sha != main_sha:
+            _block(
+                "source_snapshot_failed",
+                "exact main snapshot 身份不匹配",
+                expected=main_sha,
+                actual=snapshot_sha,
+            )
+    except StageBlocked:
+        raise
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _block("source_snapshot_failed", f"无法创建 exact main snapshot：{exc}")
+    return snapshot
 
 
 def _safe_member_name(name: str) -> PurePosixPath:
@@ -323,15 +414,27 @@ def _read_marker(slot: Path, main_sha: str) -> dict[str, object] | None:
         _block("conflicting_slot", f"staging marker 与目标 SHA 冲突：{marker}")
     if payload.get("slot_id") != main_sha:
         _block("conflicting_slot", f"staging marker slot_id 冲突：{marker}")
-    smoke = payload.get("smoke")
-    if (
-        not isinstance(smoke, dict)
-        or smoke.get("layout") != "onedir"
-        or smoke.get("build_sha") != main_sha
-        or smoke.get("slot_id") != main_sha
-        or not smoke.get("processes_stopped")
-        or not smoke.get("port_released")
-    ):
+    size = payload.get("size")
+    complete = (
+        payload.get("idempotent") is False
+        and isinstance(payload.get("source_task"), str)
+        and tasks.SLUG_PATTERN.fullmatch(str(payload["source_task"])) is not None
+        and FULL_SHA.fullmatch(str(payload.get("source_task_commit") or "")) is not None
+        and payload.get("slot") == str(slot)
+        and isinstance(payload.get("staged_at"), str)
+        and bool(payload["staged_at"])
+        and isinstance(size, dict)
+        and size.get("mode") == "onedir-measurement"
+        and size.get("build_sha") == main_sha
+        and size.get("within_hard_limits") is True
+        and not size.get("errors")
+        and not size.get("limit_failures")
+    )
+    if not complete:
+        _block("partial_slot", f"staging marker 缺少完整 package evidence：{marker}")
+    try:
+        _verify_smoke(payload.get("smoke"), main_sha)
+    except StageBlocked:
         _block("partial_slot", f"staging marker 缺少匹配的 packaged smoke：{marker}")
     _validate_slot_tree(slot)
     return payload
@@ -357,27 +460,45 @@ def _verify_smoke(smoke: object, main_sha: str) -> dict[str, object]:
     for name in ("build_sha", "slot_id"):
         if smoke.get(name) != main_sha:
             _block("runtime_identity_mismatch", f"packaged smoke 的 {name} 不等于 main SHA")
-    if not smoke.get("processes_stopped") or not smoke.get("port_released"):
-        _block("packaged_smoke_rejected", "packaged smoke 未确认进程退出和端口释放")
+    generation = smoke.get("runtime_generation")
+    if not isinstance(generation, str) or re.fullmatch(r"[0-9a-f]{32}", generation) is None:
+        _block("runtime_identity_mismatch", "packaged smoke 的 runtime_generation 无效")
+    if (
+        smoke.get("help_budget_seconds") != 1.5
+        or not isinstance(smoke.get("help_seconds"), (int, float))
+        or float(smoke["help_seconds"]) > 1.5
+        or not isinstance(smoke.get("core_ready_seconds"), (int, float))
+        or not smoke.get("processes_stopped")
+        or not smoke.get("port_released")
+        or smoke.get("executable_unchanged") is not True
+    ):
+        _block("packaged_smoke_rejected", "packaged smoke 未满足完整 onedir 合同")
     return smoke
 
 
-def stage(slug: str, *, cwd: Path | None = None) -> dict[str, object]:
-    """Build, extract, smoke and mark one immutable slot without activation."""
+def _run_packaged_smoke(slot: Path, main_sha: str) -> dict[str, object]:
+    try:
+        smoke_result = smoke_frozen_runtime.smoke(
+            slot / "QuantMaster.exe", layout="onedir",
+        )
+    except Exception as exc:
+        _block("packaged_smoke_failed", f"packaged smoke failed：{exc}")
+    return _verify_smoke(smoke_result, main_sha)
 
-    current = (cwd or Path.cwd()).resolve()
-    primary, main_sha = _validate_primary(current)
+
+def _stage_candidate(
+    primary: Path, slug: str, main_sha: str, evidence: dict[str, object],
+) -> dict[str, object]:
     task_artifacts = primary / ".artifacts" / "worktrees" / slug
-    if not task_artifacts.is_dir():
-        _block("task_artifacts_missing", f"task artifacts 不存在：{task_artifacts}")
-    with tasks.task_artifact_lease(task_artifacts):
-        _task_target, evidence = _validate_task(primary, slug, main_sha)
-        app_root, slots, slot, active_snapshot = _slot_paths(main_sha)
-        active = app_root / "active.json"
+    app_root, slots, slot = _slot_paths(main_sha)
+    active = app_root / "active.json"
+    with application_lifecycle_lock(app_root):
+        active_snapshot = _active_snapshot(active, main_sha)
         existing = _read_marker(slot, main_sha)
         if existing is not None:
+            smoke = _run_packaged_smoke(slot, main_sha)
             _assert_active_unchanged(active, active_snapshot)
-            return {**existing, "idempotent": True}
+            return {**existing, "smoke": smoke, "idempotent": True}
 
         slots.mkdir(parents=True, exist_ok=True)
         owned_slot = False
@@ -385,22 +506,24 @@ def stage(slug: str, *, cwd: Path | None = None) -> dict[str, object]:
             with tempfile.TemporaryDirectory(
                 prefix=f"stage-{main_sha[:12]}-", dir=task_artifacts,
             ) as raw_build:
+                build_root = Path(raw_build)
+                snapshot = _snapshot_main(primary, main_sha, build_root)
                 archive, size_report = _build_onedir(
-                    primary, main_sha, task_artifacts, Path(raw_build),
+                    snapshot,
+                    tasks.project_python(primary),
+                    main_sha,
+                    task_artifacts,
+                    build_root,
                 )
-                with tempfile.TemporaryDirectory(prefix=f".{main_sha[:12]}-", dir=slots) as raw_extract:
+                with tempfile.TemporaryDirectory(
+                    prefix=f".{main_sha[:12]}-", dir=slots,
+                ) as raw_extract:
                     extracted_root = _extract_archive(archive, Path(raw_extract))
                     if slot.exists():
                         _block("conflicting_slot", f"目标槽在构建期间出现：{slot}")
                     os.replace(extracted_root, slot)
                     owned_slot = True
-                try:
-                    smoke_result = smoke_frozen_runtime.smoke(
-                        slot / "QuantMaster.exe", layout="onedir",
-                    )
-                except Exception as exc:
-                    _block("packaged_smoke_failed", f"packaged smoke failed：{exc}")
-                smoke = _verify_smoke(smoke_result, main_sha)
+                smoke = _run_packaged_smoke(slot, main_sha)
                 payload: dict[str, object] = {
                     "schema": STAGE_SCHEMA,
                     "status": "staged",
@@ -415,12 +538,25 @@ def stage(slug: str, *, cwd: Path | None = None) -> dict[str, object]:
                     "staged_at": datetime.now(UTC).isoformat(),
                 }
                 _write_marker(slot, payload)
-                _assert_active_unchanged(active, active_snapshot)
                 owned_slot = False
+                _assert_active_unchanged(active, active_snapshot)
                 return payload
         finally:
             if owned_slot:
                 _remove_owned_slot(slot)
+
+
+def stage(slug: str, *, cwd: Path | None = None) -> dict[str, object]:
+    """Build, extract, smoke and mark one immutable slot without activation."""
+
+    current = (cwd or Path.cwd()).resolve()
+    primary, main_sha = _validate_primary(current)
+    task_artifacts = primary / ".artifacts" / "worktrees" / slug
+    if not task_artifacts.is_dir():
+        _block("task_artifacts_missing", f"task artifacts 不存在：{task_artifacts}")
+    with tasks.task_artifact_lease(task_artifacts):
+        _task_target, evidence = _validate_task(primary, slug, main_sha)
+        return _stage_candidate(primary, slug, main_sha, evidence)
 
 
 def _parser() -> argparse.ArgumentParser:
