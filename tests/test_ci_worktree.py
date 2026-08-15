@@ -105,8 +105,15 @@ def _windows_cleanup_error(code: int, path: Path) -> OSError:
     return error
 
 
+def _task_run_root(tmp_path: Path, monkeypatch) -> Path:
+    pytest_root = tmp_path / "task-artifacts" / "pytest" / "runs"
+    pytest_root.mkdir(parents=True)
+    monkeypatch.setattr(run, "PYTEST_ROOT", pytest_root)
+    return pytest_root / ("a" * 12)
+
+
 def test_cleanup_run_root_retries_when_child_disappears_during_walk(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     run_root.mkdir()
     attempts = []
     delays = []
@@ -126,7 +133,7 @@ def test_cleanup_run_root_retries_when_child_disappears_during_walk(monkeypatch,
 
 
 def test_cleanup_run_root_accepts_concurrently_removed_root(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     attempts = []
     sleeps = []
     monkeypatch.setattr(
@@ -157,15 +164,20 @@ def test_cleanup_delay_spy_does_not_replace_process_global_sleep(monkeypatch):
 def test_cleanup_run_root_does_not_hide_permission_error_while_probing_root(
     monkeypatch, tmp_path,
 ):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     denied = PermissionError(13, "denied", run_root)
+
+    class DeniedRoot:
+        def stat(self):
+            raise denied
+
+    monkeypatch.setattr(run, "_verified_run_root", lambda _path: DeniedRoot())
     monkeypatch.setattr(
         run.shutil, "rmtree",
         lambda path, **_kwargs: (_ for _ in ()).throw(
             FileNotFoundError(2, "missing child", path)
         ),
     )
-    monkeypatch.setattr(run.Path, "stat", lambda _path: (_ for _ in ()).throw(denied))
 
     with pytest.raises(PermissionError) as captured:
         run.cleanup_run_root(run_root)
@@ -174,7 +186,7 @@ def test_cleanup_run_root_does_not_hide_permission_error_while_probing_root(
 
 
 def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     attempts = []
     delays = []
 
@@ -193,7 +205,7 @@ def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
 
 
 def test_cleanup_run_root_retries_directory_not_empty(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     run_root.mkdir()
     attempts = []
     delays = []
@@ -213,7 +225,7 @@ def test_cleanup_run_root_retries_directory_not_empty(monkeypatch, tmp_path):
 
 
 def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, tmp_path):
-    run_root = tmp_path / "run" / "ui" / "qm-ui0"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     attempts = []
     monkeypatch.setattr(
         run.shutil, "rmtree",
@@ -232,7 +244,7 @@ def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, 
 
 
 def test_cleanup_run_root_rejects_acl_error_outside_run_root(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     outside = tmp_path / "outside" / "blocked"
     error = _windows_cleanup_error(5, outside)
     attempts = []
@@ -254,7 +266,7 @@ def test_cleanup_run_root_rejects_acl_error_outside_run_root(monkeypatch, tmp_pa
 
 
 def test_cleanup_run_root_restores_acl_for_nested_permission_error(monkeypatch, tmp_path):
-    run_root = tmp_path / "run"
+    run_root = _task_run_root(tmp_path, monkeypatch)
     blocked = run_root / "primary" / ".git" / "objects" / "aa" / "object"
     error = _windows_cleanup_error(5, blocked)
     attempts = []
@@ -277,8 +289,8 @@ def test_cleanup_run_root_restores_acl_for_nested_permission_error(monkeypatch, 
     assert restored == [blocked.resolve()]
 
 
-def test_cleanup_run_root_removes_nested_git_repository(tmp_path):
-    run_root = tmp_path / "run"
+def test_cleanup_run_root_removes_nested_git_repository(tmp_path, monkeypatch):
+    run_root = _task_run_root(tmp_path, monkeypatch)
     repository = run_root / "primary"
     repository.mkdir(parents=True)
 
@@ -291,13 +303,80 @@ def test_cleanup_run_root_removes_nested_git_repository(tmp_path):
     git("init", "-b", "main")
     git("config", "user.name", "QuantMaster tests")
     git("config", "user.email", "tests@example.invalid")
-    (repository / "README.md").write_text("fixture\n", encoding="utf-8")
-    git("add", "README.md")
-    git("commit", "-m", "fixture")
+    for index in range(10):
+        fixture = repository / f"fixture-{index}.txt"
+        fixture.write_text(f"fixture {index}\n", encoding="utf-8")
+        git("add", fixture.name)
+        git("commit", "-m", f"fixture {index}")
+    git("commit-graph", "write", "--reachable")
 
     run.cleanup_run_root(run_root)
 
     assert not run_root.exists()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        "pytest-root", "artifact-root", "checkout", "bad-run-id",
+        "symlink-root", "junction-root",
+    ),
+)
+def test_cleanup_run_root_rejects_unverified_destructive_root_before_rmtree(
+    monkeypatch, tmp_path, kind,
+):
+    pytest_root = tmp_path / "task-artifacts" / "pytest" / "runs"
+    monkeypatch.setattr(run, "PYTEST_ROOT", pytest_root)
+    invalid = {
+        "pytest-root": pytest_root,
+        "artifact-root": pytest_root.parents[2],
+        "checkout": tmp_path / "checkout" / ("a" * 12),
+        "bad-run-id": pytest_root / "run",
+        "symlink-root": pytest_root / ("a" * 12),
+        "junction-root": pytest_root / ("a" * 12),
+    }[kind]
+    attempts = []
+    monkeypatch.setattr(
+        run.Path, "is_symlink",
+        lambda self: kind == "symlink-root" and self == invalid,
+    )
+    monkeypatch.setattr(
+        run.Path, "is_junction",
+        lambda self: kind == "junction-root" and self == invalid,
+    )
+    monkeypatch.setattr(run.shutil, "rmtree", lambda path, **_kwargs: attempts.append(path))
+
+    with pytest.raises(RuntimeError, match="verified pytest run root"):
+        run.cleanup_run_root(invalid)
+
+    assert attempts == []
+
+
+def test_cleanup_run_root_repairs_more_than_eight_acl_nodes_in_one_walk(
+    monkeypatch, tmp_path,
+):
+    run_root = _task_run_root(tmp_path, monkeypatch)
+    blocked = [
+        run_root / "primary" / ".git" / "objects" / f"{index:02x}" / "object"
+        for index in range(10)
+    ]
+    restored = []
+    retried = []
+    attempts = []
+
+    def remove(path, *, onexc):
+        attempts.append(path)
+        for child in blocked:
+            onexc(retried.append, str(child), _windows_cleanup_error(5, child))
+
+    monkeypatch.setattr(run.shutil, "rmtree", remove)
+    monkeypatch.setattr(run, "restore_acl_inheritance", restored.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root.resolve()]
+    assert restored == [path.resolve() for path in blocked]
+    assert retried == [str(path) for path in blocked]
 
 
 def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):
