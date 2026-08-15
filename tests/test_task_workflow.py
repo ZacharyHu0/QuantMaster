@@ -1065,8 +1065,13 @@ def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
         tasks.shutil, "rmtree",
         lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(13, "denied", blocked)),
     )
-    with pytest.raises(SystemExit, match=r"Windows ACL.*pytest[\\/]cache"):
+    with pytest.raises(SystemExit) as captured:
         remove_task_artifacts(primary, "recovery")
+    message = str(captured.value)
+    assert "kind=deletion_denied" in message
+    assert "blocked=pytest/cache" in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
     assert artifacts.exists()
 
 
@@ -1272,6 +1277,51 @@ def test_remove_task_artifacts_reports_transient_lock_without_acl_recovery(
     assert f"winerror={winerror}" in message
     assert "retry=" in message
     assert str(artifacts) not in message
+    assert artifacts.exists()
+
+
+@pytest.mark.parametrize(
+    ("retry_winerror", "expected_kind"),
+    ((32, "transient_lock"), (None, "deletion_denied")),
+)
+def test_remove_task_artifacts_classifies_failure_after_acl_recovery(
+    monkeypatch, tmp_path, retry_winerror, expected_kind,
+):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    blocked = artifacts / "pytest" / "runs" / "denied"
+    blocked.mkdir(parents=True)
+    calls = []
+
+    def remove(path, **_kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", blocked)
+        if retry_winerror is None:
+            raise PermissionError(13, "still denied", blocked)
+        raise _windows_cleanup_error(retry_winerror, blocked)
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
+        lambda *args, **kwargs: calls.append("restore") or SimpleNamespace(
+            returncode=0, stdout="", stderr="",
+        ),
+    )
+
+    with pytest.raises(SystemExit) as captured:
+        remove_task_artifacts(primary, "recovery")
+
+    message = str(captured.value)
+    assert f"kind={expected_kind}" in message
+    assert "retry=" in message
+    assert str(artifacts) not in message
+    assert calls == ["remove", "restore", "remove"]
     assert artifacts.exists()
 
 

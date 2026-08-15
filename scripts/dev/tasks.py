@@ -776,11 +776,23 @@ def remove_task_artifacts(
         try:
             shutil.rmtree(artifact_root, onexc=make_writable)
             return
-        except PermissionError as exc:
-            blocked = type(artifact_root)(exc.filename or artifact_root)
+        except OSError as retry_error:
+            blocked = type(artifact_root)(
+                retry_error.filename or artifact_root
+            ).resolve()
+            if blocked != artifact_root and artifact_root not in blocked.parents:
+                raise SystemExit(f"拒绝清理任务工件之外的路径：{blocked}") from None
+            winerror = getattr(retry_error, "winerror", None)
+            if winerror in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+                kind = "transient_lock"
+                reason = f"winerror={winerror}: {retry_error}"
+            elif isinstance(retry_error, PermissionError):
+                kind = "deletion_denied"
+                reason = retry_error
+            else:
+                raise
             raise SystemExit(
-                "Windows ACL 阻止删除任务工件："
-                f"{blocked}；已恢复继承但删除仍失败"
+                residual_message(blocked, kind=kind, reason=reason)
             ) from None
     except OSError as exc:
         blocked = type(artifact_root)(exc.filename or artifact_root)
