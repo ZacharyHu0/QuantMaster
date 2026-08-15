@@ -8,6 +8,7 @@ html[data-qm-theme="ink"]{
 --ink-sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
 color-scheme:dark;
 }
+
 html[data-qm-theme="ink"] body{
 margin:0;
 background:radial-gradient(1100px 480px at 72% -180px,rgba(232,163,61,.07),transparent 62%),radial-gradient(900px 620px at -8% 110%,rgba(160,110,52,.05),transparent 60%),var(--page);
@@ -858,6 +859,16 @@ html[data-qm-theme="ink"] #tab-market .mkt-grid{
   background:var(--ink-hairline);
   border:1px solid var(--ink-hairline-strong);
 }
+html[data-qm-theme="ink"] #tab-market .market-index-section .mkt-grid{
+  width:100%;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+}
+html[data-qm-theme="ink"] #tab-market .market-index-section .mkt-item .spark{
+  display:block;
+  width:100%;
+  height:88px;
+  min-height:88px;
+}
 html[data-qm-theme="ink"] #tab-market .mkt-item{
   background:var(--surface);
   padding:18px 20px;
@@ -1322,6 +1333,24 @@ html[data-qm-theme="ink"] #tab-decision .decision-detail-shell{
   background:var(--surface);
   border:1px solid var(--ink-hairline-strong);
   box-shadow:0 1px 2px rgba(18,14,10,.45), 0 3px 10px rgba(18,14,10,.28), inset 0 1px 0 rgba(44,35,27,.85);
+  box-sizing:border-box;
+  max-width:var(--decision-detail-inline-size,100%);
+}
+html[data-qm-theme="ink"] #tab-decision .decision-table tr.decision-detail-row > td{
+  padding:0;
+}
+@media (max-width:980px){
+  html[data-qm-theme="ink"] #tab-decision{
+    overflow-x:clip;
+  }
+  html[data-qm-theme="ink"] #tab-decision .decision-bottom-stack{
+    grid-template-columns:minmax(0,1fr);
+  }
+  html[data-qm-theme="ink"] #tab-decision .decision-grid > *,
+  html[data-qm-theme="ink"] #tab-decision .decision-bottom-stack > *,
+  html[data-qm-theme="ink"] #tab-decision .decision-history-panel{
+    min-width:0;
+  }
 }
 html[data-qm-theme="ink"] #tab-decision .decision-detail-toolbar{
   position:sticky;
@@ -3292,6 +3321,407 @@ html[data-qm-theme="ink"] .help-code::-webkit-scrollbar-thumb{
   html[data-qm-theme="ink"] .help-table{font-size:.8rem}
   html[data-qm-theme="ink"] .help-chapter h3::before{width:.4em;height:.4em}
 }
+
+html[data-qm-theme="ink"] #tab-decision .snapshot-record-row > td{
+  box-sizing:border-box;
+  block-size:56px;
+  padding-block:6px;
+  line-height:20px;
+  vertical-align:middle;
+}
+
+/* === Ink theme — Settings desktop layer (viewport-gated) === */
+/* Runtime contract: this layer never asks media or container queries to
+   notice CSS zoom. The gate below only separates the REAL <=900px mobile
+   contract from the desktop layer. Under zoom the gate stays active, so
+   every track, gap, and inset here is intrinsically shrinkable: tracks are
+   %/fr/clamp-based, minima sum to 198px (152 nav + 14 gap + 32 padding),
+   and both columns keep nonzero usable width at any zoomed layout width. */
+@media not all and (max-width: 900px) {
+
+  html[data-qm-theme="ink"] body {
+    overflow-x: hidden;
+    overflow-x: clip;
+  }
+
+  html[data-qm-theme="ink"] .settings-shell {
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    max-width: 74rem;
+    margin-inline: auto;
+    padding-inline: clamp(1rem, 4vw, 2.5rem);
+    padding-block-end: clamp(2.5rem, 6vh, 4.5rem);
+    display: grid;
+    grid-template-columns: clamp(9.5rem, 24%, 16.5rem) minmax(0, 1fr);
+    column-gap: clamp(0.875rem, 2.2vw, 1.75rem);
+    align-items: start;
+    justify-items: stretch;
+  }
+
+  html[data-qm-theme="ink"] .settings-shell > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  html[data-qm-theme="ink"] .settings-shell > :where(header, .settings-header) {
+    grid-column: 1 / -1;
+  }
+
+  /* Navigation rail — fluid width, sticky, always measurable */
+  html[data-qm-theme="ink"] .settings-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    min-width: 0;
+    margin: 0;
+    padding: 0.375rem;
+    border: 1px solid var(--qm-line, rgba(148, 163, 184, 0.18));
+    border-radius: 0.875rem;
+    background: var(--qm-surface-1, rgba(148, 163, 184, 0.07));
+    position: sticky;
+    top: clamp(0.75rem, 2.5vh, 1.5rem);
+    max-height: calc(100vh - clamp(1.5rem, 5vh, 3rem));
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+
+  html[data-qm-theme="ink"] .settings-nav :where(a, button, [role="link"]) {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    box-sizing: border-box;
+    width: 100%;
+    min-width: 0;
+    padding: 0.5rem 0.75rem 0.5rem 1rem;
+    border: 0;
+    border-radius: 0.625rem;
+    background: transparent;
+    color: var(--qm-fg-muted, #a8b0bd);
+    font: inherit;
+    font-size: 0.9375rem;
+    line-height: 1.35;
+    text-align: start;
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+
+  html[data-qm-theme="ink"] .settings-nav :where(a, button, [role="link"])::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: 0.3125rem;
+    inset-block: 0.5rem;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--qm-accent, #e2b23c);
+    opacity: 0;
+    transform: scaleY(0.4);
+    transition: opacity 160ms ease, transform 160ms ease;
+  }
+
+  html[data-qm-theme="ink"] .settings-nav :where(a, button, [role="link"]):hover {
+    background: rgba(148, 163, 184, 0.12);
+    color: var(--qm-fg, #eceff4);
+  }
+
+  html[data-qm-theme="ink"] .settings-nav :where(a, button, [role="link"]):where([aria-current], [aria-selected="true"], .is-active) {
+    background: rgba(226, 178, 60, 0.12);
+    color: var(--qm-fg, #f4f6f9);
+    font-weight: 600;
+  }
+
+  html[data-qm-theme="ink"] .settings-nav :where(a, button, [role="link"]):where([aria-current], [aria-selected="true"], .is-active)::before {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+
+  /* Content column — minmax(0,1fr) plus hard shrink guards so nothing
+     inside can re-inflate the page past the viewport at any zoom. */
+  html[data-qm-theme="ink"] .settings-content {
+    display: grid;
+    gap: clamp(1.5rem, 3.5vh, 2.5rem);
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: break-word;
+  }
+
+  html[data-qm-theme="ink"] .settings-content > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(fieldset) {
+    min-width: 0;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(img, video, canvas, svg) {
+    max-width: 100%;
+    height: auto;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(iframe) {
+    max-width: 100%;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(input, select, textarea) {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(pre) {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  html[data-qm-theme="ink"] .settings-content :where(table) {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  /* The mobile section picker never appears in the desktop layer. */
+  html[data-qm-theme="ink"] .settings-picker {
+    display: none;
+  }
+
+  html[data-qm-theme="ink"] .settings-shell :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--qm-accent, #e2b23c);
+    outline-offset: 2px;
+  }
+
+}
+/* === /Ink theme — Settings desktop layer (viewport-gated) === */
+
+/* Ink: return the header to normal flow so it cannot intercept disclosure
+   targets after scripted scrolling. Classic retains the base sticky header. */
+html[data-qm-theme="ink"] .app-header{
+  position:static;
+}
+
+/* ============================================================================
+   Ink theme — Backtest trading desk (#tab-backtest)
+   Scope: html[data-qm-theme="ink"] only. Classic theme untouched.
+
+   Regression fix: the history row overlapped the config/workspace row by
+   ~1.0696px at 1280x900 (a fractionally sized first row track plus a legacy
+   negative offset on the history section). Rows are now content-sized
+   (`auto`) with integer-pixel gaps, and no grid item carries a negative
+   margin or transform, so the history section can never start above the
+   bottom of the desk row. Responsive stacking keeps strict DOM order:
+   config -> workspace -> history, with nothing hidden.
+   ============================================================================ */
+
+html[data-qm-theme="ink"] #tab-backtest {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    "config   workspace"
+    "history  history";
+  grid-auto-flow: row;
+  align-content: start;
+  align-items: start;
+  justify-items: stretch;
+  column-gap: 24px;
+  row-gap: 24px;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  box-sizing: border-box;
+}
+
+/* Shrink-safe grid items: nothing may force a track wider than the tab. */
+html[data-qm-theme="ink"] #tab-backtest > * {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  box-sizing: border-box;
+}
+
+/* Config and workspace share row 1, top-aligned -> identical start y. */
+html[data-qm-theme="ink"] #tab-backtest .trading-config,
+html[data-qm-theme="ink"] #tab-backtest .trading-workspace {
+  margin-block-start: 0;
+  align-self: start;
+}
+
+html[data-qm-theme="ink"] #tab-backtest .trading-config {
+  grid-area: config;
+}
+
+html[data-qm-theme="ink"] #tab-backtest .trading-workspace {
+  grid-area: workspace;
+}
+
+html[data-qm-theme="ink"] #tab-backtest .trading-history-section {
+  grid-area: history;
+  align-self: start;
+  margin-block-start: 0;
+  /* The layout box must sit exactly on its grid row. Transforms / negative
+     margins on this box produced the subpixel overlap; any decorative ink
+     stacking must live on a pseudo-element, never on this box. */
+  transform: none;
+  translate: none;
+  /* Wide trade tables scroll inside the panel at narrow widths instead of
+     overflowing the document; the section header stays visible. */
+  overflow-x: auto;
+  overflow-y: visible;
+  overscroll-behavior-inline: contain;
+}
+
+/* Rich content inside the desk may never push the page wider. */
+html[data-qm-theme="ink"] #tab-backtest :is(canvas, svg, img, video, pre) {
+  max-inline-size: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   Narrow viewports (<= 760px covers the 390px contract width):
+   single column, DOM order preserved -> config y < workspace y < history y.
+   -------------------------------------------------------------------------- */
+@media (max-width: 760px) {
+  html[data-qm-theme="ink"] #tab-backtest {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "config"
+      "workspace"
+      "history";
+    column-gap: 0;
+    row-gap: 20px;
+  }
+}
+
+/* ==========================================================================
+   Ink · Industry — vertical compaction (matrix clearance)
+   ========================================================================== */
+html[data-qm-theme="ink"] .rotation-industry-toolbar{
+  gap:6px;
+  padding:2px 0;
+  margin-bottom:0;
+}
+
+html[data-qm-theme="ink"] .rotation-industry-workbench{
+  gap:12px;
+  align-items:start;
+  margin-bottom:0;
+}
+
+html[data-qm-theme="ink"] .rotation-industry-chart-panel{
+  padding:8px 12px;
+}
+
+html[data-qm-theme="ink"] .rotation-section-head{
+  margin:0 0 2px;
+  padding:0;
+  line-height:1.2;
+}
+
+html[data-qm-theme="ink"] #rotation-industry-scatter{
+  height:320px;
+  min-height:320px;
+  max-height:320px;
+}
+
+html[data-qm-theme="ink"] .rotation-industry-summary{
+  padding:8px 12px;
+  max-height:336px;
+  overflow-y:auto;
+}
+
+html[data-qm-theme="ink"] .rotation-industry-matrix{
+  padding-top:0;
+}
+
+/* ==========================================================================
+   K3 responsive containment pass — document-level horizontal-overflow fix
+   Root causes addressed:
+   1. Header actions were flex:none and the header could not wrap above the
+      900px breakpoint, so at browser zoom/reflow (viewport media queries do
+      not respond to CSS zoom) the actions row forced document overflow.
+   2. The base narrow-viewport collapse used bare `1fr` tracks, which carry a
+      min-content floor; long tokens in settings labels/small text re-expanded
+      the track and overflowed the 390px viewport.
+   3. Fixed multi-column control grids (migration/maintenance) only collapsed
+      via viewport media, so under zoom they retained intrinsic widths of
+      470–560px inside a sub-100px content column.
+   Strategy: intrinsic shrinkability everywhere (min-width:0), content-driven
+   collapse via container queries (which DO respond to zoom/reflow), gated to
+   widths the existing viewport breakpoints do not already handle. Classic
+   theme is untouched; all rules are scoped to the ink attribute.
+   ========================================================================== */
+
+/* 1. Header reflow at any width — wrap/shrink instead of pushing past the
+      viewport. No visual change when space is sufficient. */
+html[data-qm-theme="ink"] .header-primary{flex-wrap:wrap}
+html[data-qm-theme="ink"] .header-primary>*{min-width:0}
+html[data-qm-theme="ink"] .header-actions{flex:0 1 auto;min-width:0;flex-wrap:wrap}
+html[data-qm-theme="ink"] .header-actions>*{min-width:0}
+html[data-qm-theme="ink"] nav.workspace-nav{min-width:0}
+/* Above the 900px breakpoint (where the established mobile scroll-nav is not
+   active) let nav links wrap to a second line under zoom/reflow instead of
+   overflowing; the existing <=900px overflow-x:auto pattern is preserved. */
+@media (min-width:901px){
+  html[data-qm-theme="ink"] nav.workspace-nav{flex-wrap:wrap}
+}
+
+/* 2. Intrinsic shrinkability — grid/flex children may go below content size
+      so min-content can never re-expand a track past its container. */
+html[data-qm-theme="ink"] [class*="grid"]>*,
+html[data-qm-theme="ink"] [class*="controls"]>*,
+html[data-qm-theme="ink"] [class*="actions"]>*{min-width:0}
+html[data-qm-theme="ink"] #tab-settings :is(.settings-shell,.settings-content,#settings-form,.settings-group,.migration-box,.maintenance-box,.settings-subsection){min-width:0}
+html[data-qm-theme="ink"] .field-grid textarea{min-width:0}
+
+/* 3. Long tokens (paths, cache keys, namespaces) wrap instead of setting a
+      floor on the column width. */
+html[data-qm-theme="ink"] #tab-settings small,
+html[data-qm-theme="ink"] #tab-settings code{overflow-wrap:anywhere;word-break:break-word}
+
+/* 4. Correct the <=720px collapse: bare `1fr` is minmax(auto,1fr); use
+      minmax(0,1fr) so single columns can actually shrink (390px fix). */
+@media (max-width:720px){
+  html[data-qm-theme="ink"] .field-grid,
+  html[data-qm-theme="ink"] .channel-grid{grid-template-columns:minmax(0,1fr)}
+  html[data-qm-theme="ink"] .migration-controls,
+  html[data-qm-theme="ink"] .maintenance-controls,
+  html[data-qm-theme="ink"] .contract-migration-controls{grid-template-columns:minmax(0,1fr)}
+}
+
+/* 5. Content-driven collapse for zoom/reflow. Container queries measure the
+      real rendered width (which CSS zoom shrinks), unlike viewport media.
+      Gated to min-width:721px so the established <=720px mobile layouts keep
+      governing real narrow viewports exactly as before. */
+html[data-qm-theme="ink"] #tab-settings{container-type:inline-size}
+html[data-qm-theme="ink"] #tab-settings .settings-content{container-type:inline-size}
+@media (min-width:721px){
+  /* When the settings panel is genuinely narrow (zoom/reflow), stack the
+     shell so the content column gets the full panel width again. */
+  @container (max-width:720px){
+    html[data-qm-theme="ink"] #tab-settings .settings-shell{display:grid;grid-template-columns:minmax(0,1fr)}
+    html[data-qm-theme="ink"] #tab-settings .settings-shell>*{min-width:0}
+  }
+  /* When the content column itself is narrow, drop every multi-column form
+     grid to a single shrinkable column and stack the settings heading /
+     theme control exactly like the established <=640px treatment. */
+@container (max-width:640px){
+    html[data-qm-theme="ink"] #tab-settings .field-grid,
+    html[data-qm-theme="ink"] #tab-settings .channel-grid{grid-template-columns:minmax(0,1fr)}
+    html[data-qm-theme="ink"] #tab-settings .migration-controls,
+    html[data-qm-theme="ink"] #tab-settings .maintenance-controls,
+    html[data-qm-theme="ink"] #tab-settings .contract-migration-controls{grid-template-columns:minmax(0,1fr)}
+    html[data-qm-theme="ink"] #tab-settings .settings-heading{flex-wrap:wrap}
+    html[data-qm-theme="ink"] #tab-settings .settings-heading__meta{width:100%}
+    html[data-qm-theme="ink"] #tab-settings .theme-control{width:100%}
+    html[data-qm-theme="ink"] #tab-settings .theme-control>.theme-control__track{width:100%}
+    html[data-qm-theme="ink"] #tab-settings .theme-control__track>*{min-width:0}
+  }
+}
+
 html[data-qm-theme="ink"] .tab:not(.active){display:none!important}
 
 
