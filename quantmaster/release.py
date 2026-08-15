@@ -1,15 +1,56 @@
 """QuantMaster 发布元数据。
 
 这里是应用版本号、发布日期和前端最近 10 条更新日志的唯一运行时来源。
-每个合入 main 的 release 都必须递增版本，并同步更新保留完整历史的根目录 CHANGELOG.md。
+版本变更由 owner 要求时在单独版本 PR 完成，并同步更新根目录 CHANGELOG.md。
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.15.4"
-RELEASE_DATE = "2026-08-14"
+VERSION = "1.16.0"
+RELEASE_DATE = "2026-08-15"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
+    {
+        "version": VERSION,
+        "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "产品、架构与协作基线",
+                "items": (
+                    (
+                        "固定日常决策与量化研究双核心、四工作区与市场能力边界；"
+                        "CLI 收敛为 factor-test、backtest 薄入口，Web 与 CLI 共用可审计执行入口。"
+                    ),
+                    (
+                        "模块化单体依赖矩阵与唯一组成根保持明确；任务统一经 GitHub Issue、"
+                        "Draft PR、分层 CI 与自动状态对账管理，版本变更集中在单独版本 PR。"
+                    ),
+                ),
+            },
+            {
+                "title": "数据与因子证据",
+                "items": (
+                    (
+                        "全球参考行情、本地估值与因子验证共用统一数据门禁和降级证据；"
+                        "因子目录支持相关性矩阵与逐版本、逐周期的鲁棒性穿透详情。"
+                    ),
+                ),
+            },
+            {
+                "title": "开发流程与 Windows 交付",
+                "items": (
+                    (
+                        "Draft PR 快检、Ready 完整矩阵分层执行；ready --accept-ci 复用同一"
+                        " commit 的绿色 CI 证据；GitHub 管理记录由脚本自动对账。"
+                    ),
+                    (
+                        "Windows 打包默认绑定用户 AppData 配置与数据根，冻结运行时冒烟"
+                        "继续验证启动、核心就绪、进程身份与协调关闭。"
+                    ),
+                ),
+            },
+        ),
+    },
     {
         "version": VERSION,
         "date": RELEASE_DATE,
