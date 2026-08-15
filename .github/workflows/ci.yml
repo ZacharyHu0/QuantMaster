@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main", "claude/**"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 env:
   UV_VERSION: "0.11.32"
@@ -12,9 +13,9 @@ env:
 permissions:
   contents: read
 
-# Layered gates: Draft PRs only run fast-gate + core. Marking the PR Ready (or pushing to main)
-# escalates to the full matrix. This keeps checkpoint feedback fast and avoids burning Actions
-# minutes on known Work-in-Progress branches.
+# Layered gates: Draft PRs only run fast-gate + core. The ready_for_review activity (or pushing to
+# main) escalates to the full matrix. This keeps checkpoint feedback fast and avoids burning
+# Actions minutes on known Work-in-Progress branches.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

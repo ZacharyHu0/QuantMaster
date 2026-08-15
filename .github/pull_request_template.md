@@ -27,8 +27,10 @@ Closes #
 
 - [ ] 已在任务 worktree 使用主 checkout 的 `.venv` 运行 `scripts/dev/tasks.py check`。
 - [ ] 已只对齐一次 integration baseline，任务改动已提交且 worktree 干净。
+- [ ] 已在 Draft 状态推送 aligned commit，且 Draft fast/core 已通过。
+- [ ] 已标记 Ready，并等待同一 commit 的完整 CI 通过。
 - [ ] 已运行 `scripts/dev/tasks.py ready --accept-ci`（复用同一 commit 的绿色 CI），
-      或无 CI 时本地运行 `tasks.py ready`。
+      或无 CI 时本地运行 `tasks.py ready`；审查通过后执行 squash merge。
 
 Ready lanes（实际运行的勾选；不适用留空并说明）：
 

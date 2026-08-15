@@ -41,12 +41,13 @@ re-derive policy from prose or chat context.
 5. **Integrate once.** After development is complete: read local `main` and `origin/main` once,
    align the task to the selected integration baseline once, resolve conflicts inside the task
    worktree, and commit. Do not chase new `main` commits in a loop.
-6. **Run the integration gate.** `tasks.py ready --accept-ci` reuses the green GitHub Actions
-   run for the exact task commit as the authoritative full gate. Without GitHub/CI access, run
-   `tasks.py ready` locally (with `--ui` / `--rust` / `--package` when those lanes changed).
-7. **Mark Ready, merge, clean up.** Mark the PR ready only after the integration gate passes.
-   Resolve review, wait for the full CI matrix, squash-merge, then immediately
-   `tasks.py remove <slug>` from the primary checkout and finish with
+6. **Escalate CI and run the integration gate.** Push the aligned commit while the PR is still Draft,
+   wait for Draft fast/core to pass, then mark the PR Ready. The `ready_for_review` activity triggers
+   the full CI matrix. After that exact commit is green, `tasks.py ready --accept-ci` records the
+   authoritative full gate. Without GitHub/CI access, run `tasks.py ready` locally (with `--ui` /
+   `--rust` / `--package` when those lanes changed).
+7. **Merge and clean up.** Resolve review, confirm the integration gate passed, squash-merge, then
+   immediately `tasks.py remove <slug>` from the primary checkout and finish with
    `github_sync.py reconcile --apply`.
 
 ## Validation layers (do not duplicate)
