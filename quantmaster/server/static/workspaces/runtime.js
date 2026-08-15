@@ -3,6 +3,7 @@ let feature;
 
 const RESOURCES = {
   automation: ['/static/automation.css', '../automation.js'],
+  operations: ['/static/operations.css', '../operations.js'],
   help: ['/static/help.css', '../help.js'],
   settings: ['/static/settings.css', '../settings.js'],
 };

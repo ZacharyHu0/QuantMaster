@@ -21,8 +21,7 @@ if not exist "%QM_LAUNCHER%" (
 rem Do not use START here: it detaches Ctrl+C from QuantMaster and can leave
 rem its workers behind. The foreground QuantMaster process owns every app
 rem child; cmd.exe is only the unavoidable shell parent of a .cmd launch.
-rem Pass --no-reload for the traditional single-process mode.
-"%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*
+"%QM_LAUNCHER%" -m quantmaster.cli serve %*
 set "QM_EXIT_CODE=%ERRORLEVEL%"
 popd >nul
 

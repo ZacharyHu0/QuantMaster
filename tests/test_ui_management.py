@@ -1162,8 +1162,8 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         release.click()
         page.locator("#release-popover").wait_for(state="visible")
         assert "更新日志" in page.locator("#release-popover").inner_text()
-        assert page.get_by_role("button", name="立即热更新").is_visible()
-        assert "仅在点击后" in page.locator("#release-reload-status").inner_text()
+        assert page.get_by_role("button", name="立即热更新").count() == 0
+        assert page.locator("#release-reload-status").count() == 0
         assert page.locator("#release-popover #free-stockdb-release").count() == 0
         stockdb = page.locator("#stockdb-update-trigger")
         stockdb.click()
@@ -1209,7 +1209,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         assert page.url.endswith("#runtime/automation")
         runtime_pages = page.locator('[data-workspace-pages="runtime"]')
         assert runtime_pages.is_visible()
-        assert runtime_pages.locator("button").all_inner_texts() == ["任务与消息"]
+        assert runtime_pages.locator("button").all_inner_texts() == ["任务与消息", "运维更新"]
         settings.click()
         config_path = page.locator("#settings-config-path")
         config_path.wait_for(state="visible")

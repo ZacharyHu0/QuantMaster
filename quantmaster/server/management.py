@@ -9,7 +9,6 @@ from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Body,
     File,
     Form,
@@ -28,6 +27,7 @@ from quantmaster.data.legacy_migration import (
     registered_migrations,
 )
 from quantmaster.data.migration import MigrationError, migration_manager
+from quantmaster.runtime.activation import ActivationBlocked
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.security import (
@@ -124,6 +124,10 @@ class StockDBFundamentalsRequest(ContractModel):
     symbol: str = Field(min_length=6, max_length=12)
     dataset: Literal["cash_flow", "income", "balance", "valuation"]
     stat_date: str = Field(pattern=r"^\d{4}(?:q[1-4]|-\d{2}-\d{2})$")
+
+
+class UpdateActivationRequest(ContractModel):
+    build_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
 
 
 def _local(request: Request) -> bool:
@@ -509,22 +513,42 @@ def retry_settings_apply(request: Request) -> dict:
     return {"runtime_apply": task, "generation": saved["generation"], "runtime": _runtime_status()}
 
 
-@router.post("/system/reload", status_code=202)
-def reload_web_worker(request: Request, background_tasks: BackgroundTasks) -> dict:
-    """Manually replace the Web worker without applying automatic reload throttling."""
-    _require_csrf(request)
-    from quantmaster.server.lifecycle import manual_reload_trigger_path, request_manual_reload
+@router.get("/system/update")
+def system_update(request: Request) -> dict[str, object]:
+    """Expose only local staged immutable-slot state; never inspect Git or remote releases."""
 
-    trigger_path = manual_reload_trigger_path()
-    if trigger_path is None:
-        raise HTTPException(
-            409, "当前未启用热更新监督进程，请使用 scripts/dev/serve.cmd 启动",
-        )
-    background_tasks.add_task(request_manual_reload, trigger_path)
-    return {
-        "accepted": True,
-        "message": "已请求立即热更新；FreeStockDB 将保持运行。",
-    }
+    _require_local(request)
+    from quantmaster.runtime.update import update_status
+
+    return update_status()
+
+
+@router.post("/system/update/activate", status_code=202)
+def activate_system_update(request: Request, payload: UpdateActivationRequest) -> dict[str, object]:
+    """Start #61's external activation helper for one exact staged SHA."""
+
+    _require_csrf(request)
+    from quantmaster.runtime.update import start_activation
+
+    try:
+        return start_activation(payload.build_sha)
+    except ActivationBlocked as exc:
+        context = dict(exc.context)
+        context.setdefault("build_sha", payload.build_sha)
+        raise OperationProblem(
+            409,
+            make_problem(
+                exc.code,
+                severity="warning",
+                source="本地稳定更新",
+                title="候选版本未激活",
+                message=exc.detail,
+                action="刷新更新状态；补齐本地 staging 证据后重试。",
+                blocking=True,
+                can_continue=True,
+                **context,
+            ),
+        ) from exc
 
 
 @router.get("/settings/free-stockdb")

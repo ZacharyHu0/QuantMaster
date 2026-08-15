@@ -1482,8 +1482,6 @@ async function streamJson(path, opts, onProgress) {
   const panel = document.getElementById('release-popover');
   const list = document.getElementById('release-list');
   const dateElement = document.getElementById('release-date');
-  const reloadButton = document.getElementById('release-reload-button');
-  const reloadStatus = document.getElementById('release-reload-status');
   const stockdbTrigger = document.getElementById('stockdb-update-trigger');
   const stockdbPanel = document.getElementById('stockdb-update-popover');
   const stockdbDataDate = document.getElementById('stockdb-data-date');
@@ -1596,18 +1594,6 @@ async function streamJson(path, opts, onProgress) {
   trigger.addEventListener('click', event => {
     event.stopPropagation();
     setReleaseOpen(panel.hidden);
-  });
-  reloadButton.addEventListener('click', async () => {
-    reloadButton.disabled = true;
-    reloadStatus.textContent = '正在提交热更新请求…';
-    try {
-      await api('/api/v1/system/reload', {method:'POST'});
-      reloadStatus.textContent = '主站正在安全重载，页面即将刷新…';
-      window.setTimeout(() => window.location.reload(), 3000);
-    } catch (error) {
-      reloadStatus.textContent = error?.message || '热更新请求失败，请查看运行日志';
-      reloadButton.disabled = false;
-    }
   });
   stockdbTrigger.addEventListener('click', event => {
     event.stopPropagation();

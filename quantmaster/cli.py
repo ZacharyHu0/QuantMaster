@@ -1,6 +1,7 @@
 """命令行入口 `qm`。
 
 qm serve                                    启动 Web 界面
+qm setup-shortcut                           创建稳定槽用户快捷方式
 qm fetch --universe demo --start 2022-01-01 预取行情到本地缓存
 qm regime --universe demo                     牛熊/趋势/板块状态
 qm select --universe demo --horizon 3          每日短周期选股
@@ -21,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -86,7 +88,7 @@ def cmd_serve(args) -> None:
         browser_timer.daemon = True
         browser_timer.start()
     try:
-        serve(reload=bool(getattr(args, "reload", False)))
+        serve()
     finally:
         if browser_timer is not None:
             browser_timer.cancel()
@@ -96,14 +98,32 @@ def cmd_activate(args) -> int:
     """Activate a pre-staged immutable slot and print the transition result."""
 
     from quantmaster.runtime.activation import activate_installed_slot
+    if os.environ.get("QM_ACTIVATION_RESULT_PATH"):
+        from quantmaster.runtime.update import mark_activation_running
+
+        mark_activation_running()
 
     result = activate_installed_slot(
         args.build_sha,
         root_pid=args.root_pid,
         ready_timeout=args.ready_timeout,
     )
+    if os.environ.get("QM_ACTIVATION_RESULT_PATH"):
+        from quantmaster.runtime.update import write_activation_result
+
+        write_activation_result(result)
     _print_json(result)
     return 0 if result.get("status") in {"activated", "already_active", "rolled_back"} else 2
+
+
+def cmd_setup_shortcut(args) -> int:
+    """Create or refresh the user's fixed stable-slot launcher shortcut."""
+
+    from quantmaster.runtime.launcher import create_stable_shortcut
+
+    result = create_stable_shortcut(shortcut=args.shortcut or None)
+    _print_json(result)
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -1202,19 +1222,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="启动 Web 界面")
     p.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
-    p.add_argument(
-        "--reload",
-        action="store_true",
-        help="启用前端按钮触发的安全热更新（FreeStockDB 保持运行）",
-    )
-    p.add_argument(
-        "--no-reload",
-        dest="reload",
-        action="store_false",
-        help="关闭主站代码热更新",
-    )
-    p.set_defaults(reload=False)
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("setup-shortcut", help="创建或刷新稳定槽用户快捷方式")
+    p.add_argument("--shortcut", default="", help="可选的快捷方式路径；默认写入当前用户开始菜单")
+    p.set_defaults(func=cmd_setup_shortcut)
 
     p = sub.add_parser("activate", help="激活已验证的不可变使用槽并在失败时回滚")
     p.add_argument("build_sha", help="候选槽对应的完整 lowercase main SHA")
@@ -1223,7 +1235,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_activate)
 
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
-    p.set_defaults(func=cmd_serve, open_browser=True, reload=False)
+    p.set_defaults(func=cmd_serve, open_browser=True)
 
     p = sub.add_parser("doctor", help="检查运行边界、存储完整性和工程约束")
     p.add_argument("--deep", action="store_true", help="逐库、逐文件并执行架构/API 深度检查")
@@ -1636,6 +1648,15 @@ def main(argv: list[str] | None = None) -> int:
         from quantmaster.runtime.activation import ActivationBlocked
 
         if isinstance(exc, ActivationBlocked):
+            if os.environ.get("QM_ACTIVATION_RESULT_PATH"):
+                from quantmaster.runtime.update import write_activation_result
+
+                write_activation_result({
+                    "status": "blocked",
+                    "code": exc.code,
+                    "detail": exc.detail,
+                    **exc.context,
+                })
             _print_json({
                 "status": "blocked",
                 "blocker": {"reason": exc.code, "detail": exc.detail, **exc.context},
