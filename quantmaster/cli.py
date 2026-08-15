@@ -92,6 +92,20 @@ def cmd_serve(args) -> None:
             browser_timer.cancel()
 
 
+def cmd_activate(args) -> int:
+    """Activate a pre-staged immutable slot and print the transition result."""
+
+    from quantmaster.runtime.activation import activate_installed_slot
+
+    result = activate_installed_slot(
+        args.build_sha,
+        root_pid=args.root_pid,
+        ready_timeout=args.ready_timeout,
+    )
+    _print_json(result)
+    return 0 if result.get("status") in {"activated", "already_active", "rolled_back"} else 2
+
+
 def cmd_doctor(args) -> int:
     from quantmaster.doctor import run_doctor
 
@@ -1202,6 +1216,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(reload=False)
     p.set_defaults(func=cmd_serve)
 
+    p = sub.add_parser("activate", help="激活已验证的不可变使用槽并在失败时回滚")
+    p.add_argument("build_sha", help="候选槽对应的完整 lowercase main SHA")
+    p.add_argument("--root-pid", type=int, default=None, help="当前 QuantMaster root Job Object 的 PID")
+    p.add_argument("--ready-timeout", type=float, default=15.0, help="候选健康检查期限（最多 15 秒）")
+    p.set_defaults(func=cmd_activate)
+
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")
     p.set_defaults(func=cmd_serve, open_browser=True, reload=False)
 
@@ -1612,7 +1632,15 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("命令已停止")
         return 130
-    except Exception:
+    except Exception as exc:
+        from quantmaster.runtime.activation import ActivationBlocked
+
+        if isinstance(exc, ActivationBlocked):
+            _print_json({
+                "status": "blocked",
+                "blocker": {"reason": exc.code, "detail": exc.detail, **exc.context},
+            })
+            return 2
         logging.getLogger(__name__).exception(
             "命令执行失败",
             extra={"traceback_policy": "always"},
