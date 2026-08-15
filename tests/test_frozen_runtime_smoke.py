@@ -250,6 +250,80 @@ def test_frozen_smoke_reads_core_readiness_from_health_not_diagnostics(
     ]
 
 
+def test_frozen_onedir_smoke_skips_splash_and_preserves_the_slot(
+    tmp_path, monkeypatch,
+):
+    identity = {
+        "build_sha": "a" * 40,
+        "slot_id": "a" * 40,
+        "runtime_generation": "b" * 32,
+    }
+    application = tmp_path / "QuantMaster"
+    application.mkdir()
+    executable = application / "QuantMaster.exe"
+    executable.write_bytes(b"frozen")
+
+    class Launcher:
+        def __init__(self):
+            self.stdin = io.StringIO()
+            self.returncode = None
+
+        def wait(self, timeout):
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -1
+
+    def isolated(root, _port):
+        instance = root / "instance"
+        instance.mkdir()
+        return {}, instance
+
+    def start(_executable, _environment, stdout_path, stderr_path, _pid_path):
+        stdout_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return Launcher(), 10
+
+    def wait_json(url, _ready, **_kwargs):
+        if url.endswith("/health"):
+            return {"status": "ok", "core_ready": True, "process_pid": 20, **identity}
+        if url.endswith("/settings/runtime"):
+            return {"worker": {"available": True, "pid": 30, **identity}}
+        raise AssertionError(url)
+
+    report = json.dumps({"metrics": {"application_identity_probe": identity}})
+    monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
+    monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", isolated)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_run_deep_doctor",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=report, stderr=""),
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_help", lambda *_args, **_kwargs: 0.2)
+    monkeypatch.setattr(smoke_frozen_runtime, "_start_launcher", start)
+    monkeypatch.setattr(
+        smoke_frozen_runtime, "_wait_splash_window",
+        lambda *_args, **_kwargs: pytest.fail("onedir must not wait for a splash"),
+    )
+    monkeypatch.setattr(smoke_frozen_runtime, "_wait_json", wait_json)
+    monkeypatch.setattr(smoke_frozen_runtime, "_wait_stopped", lambda *_args: None)
+    monkeypatch.setattr(
+        smoke_frozen_runtime.socket, "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()),
+    )
+
+    evidence = smoke_frozen_runtime.smoke(executable, layout="onedir")
+
+    assert evidence["layout"] == "onedir"
+    assert evidence["help_budget_seconds"] == 1.5
+    assert evidence["splash_visible_before_core_ready"] is False
+    assert evidence["splash_closed_after_listener_and_core_ready"] is False
+    assert evidence["executable_unchanged"] is True
+
+
 def test_splash_window_waits_for_one_visible_handle_then_for_that_handle_to_close(
     monkeypatch,
 ):

@@ -376,13 +376,59 @@ def measure_help(executable: Path, *, layout: str) -> dict[str, Any]:
     }
 
 
-def smoke(executable: Path) -> dict[str, Any]:
+def _application_state(executable: Path, *, layout: str) -> object:
+    if layout == "onefile":
+        stat = executable.stat()
+        return stat.st_size, stat.st_mtime_ns
+    entries = []
+    for path in executable.parent.rglob("*"):
+        stat = path.lstat()
+        entries.append(
+            (
+                path.relative_to(executable.parent).as_posix(),
+                stat.st_mode,
+                stat.st_size,
+                stat.st_mtime_ns,
+            )
+        )
+    return tuple(sorted(entries))
+
+
+def _validate_layout(layout: str) -> None:
+    if layout not in _HELP_MAX_SECONDS:
+        raise RuntimeError(f"unsupported frozen layout: {layout}")
+
+
+def _wait_splash_for_layout(pid: int, *, layout: str) -> int | None:
+    if layout == "onefile":
+        return _wait_splash_window(pid)
+    return None
+
+
+def _close_splash_for_layout(handle: int | None) -> None:
+    if handle is not None:
+        _wait_splash_closed(handle)
+
+
+def _assert_application_unchanged(
+    executable: Path, *, layout: str, initial_state: object,
+) -> None:
+    if _application_state(executable, layout=layout) != initial_state:
+        messages = {
+            "onefile": "frozen runtime modified its onefile executable",
+            "onedir": "frozen runtime modified its onedir application",
+        }
+        raise RuntimeError(messages[layout])
+
+
+def smoke(executable: Path, *, layout: str = "onefile") -> dict[str, Any]:
     if os.name != "nt":
         raise RuntimeError("frozen runtime smoke requires Windows")
+    _validate_layout(layout)
     executable = executable.resolve()
     if not executable.is_file():
         raise FileNotFoundError(executable)
-    initial_state = (executable.stat().st_size, executable.stat().st_mtime_ns)
+    initial_state = _application_state(executable, layout=layout)
 
     with tempfile.TemporaryDirectory(prefix="quantmaster-frozen-smoke-") as raw_temp:
         root = Path(raw_temp)
@@ -394,7 +440,7 @@ def smoke(executable: Path) -> dict[str, Any]:
                 f"frozen schema bootstrap failed ({bootstrap.returncode}): "
                 f"{bootstrap.stderr[-2000:]}"
             )
-        help_seconds = _run_help(executable, environment, layout="onefile")
+        help_seconds = _run_help(executable, environment, layout=layout)
         stdout_path = instance / "serve.stdout.log"
         stderr_path = instance / "serve.stderr.log"
         pid_path = instance / "serve.pid"
@@ -406,14 +452,14 @@ def smoke(executable: Path) -> dict[str, Any]:
                 executable, environment, stdout_path, stderr_path, pid_path
             )
             try:
-                splash_window = _wait_splash_window(pids["bootloader"])
+                splash_window = _wait_splash_for_layout(pids["bootloader"], layout=layout)
                 base_url = f"http://127.0.0.1:{port}/api/v1"
                 health = _wait_json(
                     f"{base_url}/health",
                     lambda value: value.get("status") == "ok" and value.get("core_ready") is True,
                 )
                 pids["web"] = int(health["process_pid"])
-                _wait_splash_closed(splash_window)
+                _close_splash_for_layout(splash_window)
                 core_ready_seconds = time.monotonic() - server_started
                 if core_ready_seconds > _CORE_READY_MAX_SECONDS:
                     raise RuntimeError(
@@ -455,18 +501,19 @@ def smoke(executable: Path) -> dict[str, Any]:
                     pass
                 else:
                     raise RuntimeError("frozen runtime port remained bound after shutdown")
-                if (executable.stat().st_size, executable.stat().st_mtime_ns) != initial_state:
-                    raise RuntimeError("frozen runtime modified its onefile executable")
+                _assert_application_unchanged(
+                    executable, layout=layout, initial_state=initial_state,
+                )
                 return {
-                    "layout": "onefile",
+                    "layout": layout,
                     "build_sha": str(health["build_sha"]),
                     "slot_id": str(health["slot_id"]),
                     "runtime_generation": str(health["runtime_generation"]),
                     "help_seconds": round(help_seconds, 3),
-                    "help_budget_seconds": _HELP_MAX_SECONDS["onefile"],
+                    "help_budget_seconds": _HELP_MAX_SECONDS[layout],
                     "core_ready_seconds": round(core_ready_seconds, 3),
-                    "splash_visible_before_core_ready": True,
-                    "splash_closed_after_listener_and_core_ready": True,
+                    "splash_visible_before_core_ready": layout == "onefile",
+                    "splash_closed_after_listener_and_core_ready": layout == "onefile",
                     "processes_stopped": True,
                     "port_released": True,
                     "executable_unchanged": True,
@@ -502,14 +549,15 @@ def main() -> int:
         return _run_launcher(*(Path(value) for value in sys.argv[2:]))
     parser = argparse.ArgumentParser()
     parser.add_argument("executable", type=Path)
+    parser.add_argument("--layout", choices=sorted(_HELP_MAX_SECONDS), default="onefile")
     parser.add_argument("--help-layout", choices=sorted(_HELP_MAX_SECONDS))
     args = parser.parse_args()
     if args.help_layout:
         evidence = measure_help(args.executable, layout=args.help_layout)
         print("Frozen Windows help passed: " + json.dumps(evidence, sort_keys=True))
         return 0
-    evidence = smoke(args.executable)
-    print("Frozen Windows onefile smoke passed: " + json.dumps(evidence, sort_keys=True))
+    evidence = smoke(args.executable, layout=args.layout)
+    print(f"Frozen Windows {args.layout} smoke passed: " + json.dumps(evidence, sort_keys=True))
     return 0
 
 
