@@ -24,19 +24,12 @@ if __name__ == "__main__":
 
         arguments = ["app"] if len(sys.argv) == 1 else sys.argv[1:]
         command = next((argument for argument in arguments if not argument.startswith("-")), "")
-        # The activation helper must not own its child in a KILL_ON_JOB_CLOSE
-        # root job.  The candidate starts its own root job after the helper
-        # has handed it the immutable slot identity.
-        if command != "activate":
+        # The activation/setup helpers are short-lived control commands. They
+        # must not create an application root Job Object before handing off to
+        # the stable immutable-slot process.
+        if command not in {"activate", "setup-shortcut"}:
             initialize_windows_app_process(root=True)
-        reload_requested = False
-        if command == "serve":
-            for argument in arguments:
-                if argument == "--reload":
-                    reload_requested = True
-                elif argument == "--no-reload":
-                    reload_requested = False
-        web_command = command == "app" or (command == "serve" and not reload_requested)
+        web_command = command == "app" or command == "serve"
         update_splash(
             "正在启动 Web 服务"
             if web_command

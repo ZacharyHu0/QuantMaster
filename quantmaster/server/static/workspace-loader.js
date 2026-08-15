@@ -14,7 +14,7 @@ const PAGES = {
   },
   research: {lab: 'lab', backtest: 'backtest'},
   account: {paper: 'paper', ledger: 'ledger'},
-  runtime: {automation: 'automation', help: 'help', settings: 'settings'},
+  runtime: {automation: 'automation', operations: 'operations', help: 'help', settings: 'settings'},
 };
 
 const DEFAULT_PAGE = {today: 'quotes', research: 'lab', account: 'paper', runtime: 'automation'};
