@@ -2355,16 +2355,91 @@ function queueMarketSpark(element, render) {
   else marketSparkObserver.observe(element);
 }
 
+/* Market spark mounts: K3 eager Ink indexes + preserved lazy Classic path. */
+const _sparkMounts = new Map();
+let _sparkThemeSyncStarted = false;
+
+function _isIndexSparkEntry(entry) {
+  return !!entry && entry.group === 'A股指数';
+}
+
+function _liveMarketSparkChart(entry) {
+  const chart = entry ? charts[entry.sparkId] : null;
+  return chart && !chart.isDisposed() ? chart : null;
+}
+
+function _isSparkMounted(entry) {
+  return !!entry && _sparkMounts.has(entry.sparkId) && !!_liveMarketSparkChart(entry);
+}
+
+function mountMarketSpark(entry, buildOption) {
+  if (!entry || !entry.sparkId || typeof buildOption !== 'function') return null;
+  const host = document.getElementById(entry.sparkId);
+  if (!host) return null;
+  const rect = host.getBoundingClientRect();
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  const chart = _liveMarketSparkChart(entry) || mkChart(entry.sparkId);
+  if (!chart) return null;
+  if (width > 0 && height > 0) chart.resize({width,height});
+  else chart.resize({width:2,height:2});
+  chart.setOption(buildOption(), { notMerge: true });
+  const previous = _sparkMounts.get(entry.sparkId);
+  const record = {
+    entry,
+    buildOption,
+    bootstrapObserver: previous?.bootstrapObserver || null,
+  };
+  _sparkMounts.set(entry.sparkId,record);
+  if (!(width > 0 && height > 0) && !record.bootstrapObserver) {
+    record.bootstrapObserver = new ResizeObserver(() => {
+      const measured = host.getBoundingClientRect();
+      if (!(measured.width > 0 && measured.height > 0)) return;
+      record.bootstrapObserver.disconnect();
+      record.bootstrapObserver = null;
+      if (chart.isDisposed()) return;
+      chart.resize();
+      chart.setOption(record.buildOption(), {notMerge:true});
+    });
+    record.bootstrapObserver.observe(host);
+  }
+  return chart;
+}
+
+function initSparkThemeSync() {
+  if (_sparkThemeSyncStarted) return;
+  _sparkThemeSyncStarted = true;
+  new MutationObserver(() => {
+    _sparkMounts.forEach((record, sparkId) => {
+      if (!record.entry.element?.isConnected) {
+        _sparkMounts.delete(sparkId);
+        return;
+      }
+      mountMarketSpark(record.entry, record.buildOption);
+    });
+  }).observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ['data-qm-theme'],
+  });
+}
+
+initSparkThemeSync();
+
 function disposeMarketSparks() {
   marketSparkObserver?.disconnect();
   marketSparkObserver = null;
   for (const element of marketSparkTasks.keys()) cancelMarketSparkTask(element);
+  _sparkMounts.forEach(record => {
+    record.bootstrapObserver?.disconnect();
+    record.bootstrapObserver = null;
+  });
   for (const [id, chart] of Object.entries(charts)) {
     if (id.startsWith('spark-stream-')) {
       chart.dispose();
       delete charts[id];
     }
   }
+  _sparkMounts.clear();
 }
 
 function marketChangeSeries(nav) {
@@ -2545,11 +2620,13 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.element.setAttribute('aria-label',
       `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = () => showKline(item.symbol, item.name);
-    queueMarketSpark(entry.element,() => {
-      if (!document.getElementById(entry.sparkId)) return;
-      const chart = mkChart(entry.sparkId);
-      chart.setOption(marketSparkOption(item,changeSeries),{notMerge:true});
-    });
+    const renderSpark = () =>
+      mountMarketSpark(entry,() => marketSparkOption(item,changeSeries));
+    if (_isIndexSparkEntry(entry) && document.documentElement.dataset.qmTheme === 'ink' && !_isSparkMounted(entry)) {
+      renderSpark();
+    } else {
+      queueMarketSpark(entry.element,renderSpark);
+    }
   }
   return {
     add(group, item) {
@@ -2576,7 +2653,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       groupEntry.count.textContent = `${groupEntry.size} 只`;
       groupEntry.empty.hidden = true;
       count += 1;
-      const entry = {element, sparkId, item}; entries.set(key, entry); draw(entry, item);
+      const entry = {element, sparkId, item, group}; entries.set(key, entry); draw(entry, item);
       return true;
     },
     addAll(data) {
