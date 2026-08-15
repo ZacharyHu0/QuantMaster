@@ -108,7 +108,6 @@ class LLMExecutionCoordinator:
         self.path = Path(path) if path else root / "_runtime" / "llm_revisions.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._stores: weakref.WeakSet[UnifiedJobStore] = weakref.WeakSet()
-        self._lab_stores: weakref.WeakSet[Any] = weakref.WeakSet()
         self._lock = threading.RLock()
         with self._conn() as connection:
             connection.execute(
@@ -126,9 +125,6 @@ class LLMExecutionCoordinator:
 
     def register_store(self, store: UnifiedJobStore) -> None:
         self._stores.add(store)
-
-    def register_lab_store(self, store: Any) -> None:
-        self._lab_stores.add(store)
 
     def revision(self, scope: str = "global") -> str:
         normalized = "news" if scope == "news" else "global"
@@ -160,50 +156,6 @@ class LLMExecutionCoordinator:
             stores[str(default_path.resolve())] = UnifiedJobStore(default_path)
         return list(stores.values())
 
-    def _cancel_persisted_lab(
-        self, scope: str, revision: str, reason: str,
-    ) -> dict[str, int]:
-        """Fence Lab discovery rows even when they belong to runtime-worker.
-
-        The web process and Supervisor deliberately do not share Python
-        singletons.  Use a short SQLite attempt here so saving settings never
-        waits behind a long Lab operation; the worker's revision lease is the
-        fallback fence if the ledger is momentarily locked.
-        """
-        path = get_config().data_root / "lab.sqlite"
-        if not path.is_file():
-            return {"queued_cancelled": 0, "running_cancelling": 0}
-        try:
-            with connect_sqlite(path, timeout=0.25, row_factory=True) as connection:
-                columns = {
-                    str(row["name"])
-                    for row in connection.execute("PRAGMA table_info(lab_jobs)").fetchall()
-                }
-                if not {"llm_scope", "llm_revision", "cancellation_reason"} <= columns:
-                    return {"queued_cancelled": 0, "running_cancelling": 0}
-                now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                queued = connection.execute(
-                    "UPDATE lab_jobs SET status='cancelled',cancel_requested=1,"
-                    "cancellation_reason=?,phase='已取消',detail=?,finished_at=? "
-                    "WHERE kind IN ('discover_llm','discover_python') "
-                    "AND status IN ('queued','interrupted') AND llm_scope=? AND llm_revision<>?",
-                    (reason[:240], reason[:1000], now, scope, revision),
-                ).rowcount
-                running = connection.execute(
-                    "UPDATE lab_jobs SET status='cancelling',cancel_requested=1,"
-                    "cancellation_reason=?,phase='正在安全停止',detail=? "
-                    "WHERE kind IN ('discover_llm','discover_python') "
-                    "AND status IN ('running','cancelling') AND llm_scope=? AND llm_revision<>?",
-                    (reason[:240], reason[:1000], scope, revision),
-                ).rowcount
-            return {"queued_cancelled": int(queued), "running_cancelling": int(running)}
-        except Exception:
-            # The revision is already durable.  The Lab worker re-checks it
-            # before every provider call and final persistence, so a busy
-            # ledger cannot resurrect an old-result write.
-            logger.warning("Unable to fence persisted Lab LLM jobs immediately", exc_info=True)
-            return {"queued_cancelled": 0, "running_cancelling": 0}
-
     def rotate(
         self,
         *,
@@ -225,22 +177,6 @@ class LLMExecutionCoordinator:
         for store in self._job_stores():
             for scope in scopes:
                 result = store.cancel_stale_llm(scope, revisions[scope], reason)
-                for key in cancellation:
-                    cancellation[key] += int(result[key])
-        for store in list(self._lab_stores):
-            for scope in scopes:
-                result = store.cancel_stale_llm(scope, revisions[scope], reason)
-                for key in cancellation:
-                    cancellation[key] += int(result[key])
-        registered_lab_paths: set[str] = set()
-        for store in list(self._lab_stores):
-            path = getattr(store, "path", None)
-            if isinstance(path, Path):
-                registered_lab_paths.add(str(path.resolve()))
-        persisted_lab_path = str((get_config().data_root / "lab.sqlite").resolve())
-        if persisted_lab_path not in registered_lab_paths:
-            for scope in scopes:
-                result = self._cancel_persisted_lab(scope, revisions[scope], reason)
                 for key in cancellation:
                     cancellation[key] += int(result[key])
         return {"revisions": revisions, **cancellation, "reason": reason}
@@ -266,14 +202,6 @@ class LLMExecutionCoordinator:
         stores = {str(store.path.resolve()): store for store in self._job_stores()}
         for store in stores.values():
             for job in store.list(10_000):
-                scope = str(job.get("llm_scope") or "")
-                if scope not in counts:
-                    continue
-                status = str(job.get("status") or "")
-                if status in counts[scope]:
-                    counts[scope][status] += 1
-        for store in list(self._lab_stores):
-            for job in store.jobs(limit=500, summary=True):
                 scope = str(job.get("llm_scope") or "")
                 if scope not in counts:
                     continue

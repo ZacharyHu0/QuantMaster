@@ -28,7 +28,7 @@ from quantmaster.trading_sessions import daily_signal_cutoff
 _GENERATED_FACTOR_NAME = re.compile(
     r"^(AI|GP)\s+候选\s+(\d+)(?:\s*·\s*[0-9A-Za-z_-]+)?$"
 )
-LAB_SCHEMA_VERSION = 11
+LAB_SCHEMA_VERSION = 12
 
 
 class LabSchemaMigrationRequired(RuntimeError):
@@ -139,32 +139,11 @@ class LabStore:
                     dataset_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
                     config_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS lab_jobs (
-                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
-                    params_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
-                    dataset_id TEXT NOT NULL DEFAULT '',
-                    resource_class TEXT NOT NULL DEFAULT 'cpu',
-                    preflight_json TEXT NOT NULL DEFAULT '{}',
-                    progress INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT '',
-                    detail TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-                    error_code TEXT NOT NULL DEFAULT '', error_json TEXT NOT NULL DEFAULT '{}',
-                    telemetry_json TEXT NOT NULL DEFAULT '{}',
-                    cancel_requested INTEGER NOT NULL DEFAULT 0, worker TEXT NOT NULL DEFAULT '',
-                    llm_scope TEXT NOT NULL DEFAULT '', llm_revision TEXT NOT NULL DEFAULT '',
-                    cancellation_reason TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '',
-                    heartbeat_at TEXT NOT NULL DEFAULT '', finished_at TEXT NOT NULL DEFAULT '');
-                CREATE TABLE IF NOT EXISTS lab_job_events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
-                    event_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                    FOREIGN KEY(job_id) REFERENCES lab_jobs(id));
                 CREATE TABLE IF NOT EXISTS copilot_suggestions (
                     id TEXT PRIMARY KEY, version_id TEXT NOT NULL, base_hash TEXT NOT NULL,
                     payload_json TEXT NOT NULL, outbound_hash TEXT NOT NULL,
                     status TEXT NOT NULL, created_at TEXT NOT NULL,
                     FOREIGN KEY(version_id) REFERENCES factor_versions(id));
-                CREATE TABLE IF NOT EXISTS lab_schedule_slots (
-                    slot TEXT PRIMARY KEY, created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS optimization_studies (
                     id TEXT PRIMARY KEY, job_id TEXT NOT NULL DEFAULT '',
                     experiment_id TEXT NOT NULL DEFAULT '', config_hash TEXT NOT NULL,
@@ -190,6 +169,12 @@ class LabStore:
                     error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL, UNIQUE(run_id,candidate_key),
                     FOREIGN KEY(run_id) REFERENCES mining_runs(id));
+                CREATE TABLE IF NOT EXISTS lab_worker_results (
+                    job_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+                    kind TEXT NOT NULL, outcome TEXT NOT NULL,
+                    result_json TEXT NOT NULL, error_json TEXT NOT NULL DEFAULT '{}',
+                    telemetry_json TEXT NOT NULL DEFAULT '{}', content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL, PRIMARY KEY(job_id,attempt));
                 CREATE TABLE IF NOT EXISTS lab_publications (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, version_id TEXT NOT NULL,
                     experiment_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
@@ -231,10 +216,6 @@ class LabStore:
                     FOREIGN KEY(strategy_id) REFERENCES strategy_candidates(id));
                 CREATE INDEX IF NOT EXISTS idx_factor_versions_status
                     ON factor_versions(status,updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_lab_jobs_status
-                    ON lab_jobs(status,created_at);
-                CREATE INDEX IF NOT EXISTS idx_job_events
-                    ON lab_job_events(job_id,seq);
                 CREATE INDEX IF NOT EXISTS idx_studies_status
                     ON optimization_studies(status,updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_bias_audits_version
@@ -243,6 +224,8 @@ class LabStore:
                     ON mining_runs(updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_mining_candidates_run
                     ON mining_candidates(run_id,pareto_rank,created_at);
+                CREATE INDEX IF NOT EXISTS idx_lab_worker_results_kind
+                    ON lab_worker_results(kind,created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_lab_publications_due
                     ON lab_publications(status,next_run,created_at);
                 CREATE INDEX IF NOT EXISTS idx_strategy_candidates_status
@@ -284,41 +267,48 @@ class LabStore:
                 "CREATE INDEX IF NOT EXISTS idx_deployments_runtime "
                 "ON deployments(status,universe,horizon,profile,role)"
             )
-            job_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(lab_jobs)")
+            legacy_tables = {
+                str(row[0]) for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
             }
-            for name, declaration in (
-                ("dataset_id", "TEXT NOT NULL DEFAULT ''"),
-                ("resource_class", "TEXT NOT NULL DEFAULT 'cpu'"),
-                ("preflight_json", "TEXT NOT NULL DEFAULT '{}'"),
-                ("error_code", "TEXT NOT NULL DEFAULT ''"),
-                ("error_json", "TEXT NOT NULL DEFAULT '{}'"),
-                ("telemetry_json", "TEXT NOT NULL DEFAULT '{}'"),
-                ("llm_scope", "TEXT NOT NULL DEFAULT ''"),
-                ("llm_revision", "TEXT NOT NULL DEFAULT ''"),
-                ("cancellation_reason", "TEXT NOT NULL DEFAULT ''"),
-            ):
-                if name not in job_columns:
-                    conn.execute(f"ALTER TABLE lab_jobs ADD COLUMN {name} {declaration}")
-            conn.execute(
-                "UPDATE lab_jobs SET error_code='LEGACY_FAILURE',"
-                "error_json=json_object('code','LEGACY_FAILURE','message',error,"
-                "'action','查看历史任务详情','retryable',1,'context',json('{}')) "
-                "WHERE error<>'' AND error_code=''"
-            )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_lab_jobs_resource "
-                "ON lab_jobs(status,resource_class,created_at)"
-            )
+            if "lab_jobs" in legacy_tables:
+                job_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(lab_jobs)")
+                }
+                for name, declaration in (
+                    ("dataset_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("resource_class", "TEXT NOT NULL DEFAULT 'cpu'"),
+                    ("preflight_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("error_code", "TEXT NOT NULL DEFAULT ''"),
+                    ("error_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("telemetry_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("llm_scope", "TEXT NOT NULL DEFAULT ''"),
+                    ("llm_revision", "TEXT NOT NULL DEFAULT ''"),
+                    ("cancellation_reason", "TEXT NOT NULL DEFAULT ''"),
+                ):
+                    if name not in job_columns:
+                        conn.execute(f"ALTER TABLE lab_jobs ADD COLUMN {name} {declaration}")
+                conn.execute(
+                    "UPDATE lab_jobs SET error_code='LEGACY_FAILURE',"
+                    "error_json=json_object('code','LEGACY_FAILURE','message',error,"
+                    "'action','查看历史任务详情','retryable',1,'context',json('{}')) "
+                    "WHERE error<>'' AND error_code=''"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_lab_jobs_resource "
+                    "ON lab_jobs(status,resource_class,created_at)"
+                )
 
         with self._conn() as conn:
             migrate_schema(conn, ((LAB_SCHEMA_VERSION, schema_v8),))
 
     def _require_current(self) -> None:
         required_tables = {
-            "factor_definitions", "factor_versions", "lab_jobs", "lab_job_events",
+            "factor_definitions", "factor_versions", "lab_worker_results",
             "deployments", "research_cycles", "strategy_candidates", "shadow_signals",
         }
+        retired_tables = {"lab_jobs", "lab_job_events", "lab_schedule_slots"}
         with connect_sqlite(self.path, read_only=True) as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             tables = {
@@ -327,23 +317,25 @@ class LabStore:
                 )
             }
             missing = required_tables - tables
-            if version != LAB_SCHEMA_VERSION or missing:
+            retained = retired_tables & tables
+            if version != LAB_SCHEMA_VERSION or missing or retained:
                 raise LabSchemaMigrationRequired(
-                    f"lab schema 需显式迁移: version={version}; missing={sorted(missing)}"
+                    "lab schema 需显式迁移: "
+                    f"version={version}; missing={sorted(missing)}; retained={sorted(retained)}"
                 )
             definition_columns = {
                 str(row[1]) for row in connection.execute(
                     "PRAGMA table_info(factor_definitions)"
                 )
             }
-            job_columns = {
-                str(row[1]) for row in connection.execute("PRAGMA table_info(lab_jobs)")
+            result_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(lab_worker_results)")
             }
-            missing_columns = (
-                {"name_key"} - definition_columns
-                | {"error_code", "error_json", "telemetry_json", "cancellation_reason"}
-                - job_columns
-            )
+            missing_columns = ({"name_key"} - definition_columns) | ({
+                "job_id", "attempt", "kind", "outcome", "result_json",
+                "error_json", "telemetry_json", "content_hash", "created_at",
+            } - result_columns)
             if missing_columns:
                 raise LabSchemaMigrationRequired(
                     f"lab current schema 损坏: missing={sorted(missing_columns)}"
@@ -1115,17 +1107,27 @@ class LabStore:
             for row in rows
         ]
 
-    def create_study(self, config: dict, *, storage_url: str = "") -> dict:
-        study_id, now = uuid.uuid4().hex, utc_now()
+    def create_study(
+        self,
+        config: dict,
+        *,
+        storage_url: str = "",
+        study_id: str = "",
+    ) -> dict:
+        study_id, now = str(study_id or uuid.uuid4().hex), utc_now()
+        config_hash = content_hash(config)
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO optimization_studies "
+                "INSERT OR IGNORE INTO optimization_studies "
                 "(id,config_hash,status,config_json,storage_url,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (study_id, content_hash(config), "queued", canonical_json(config),
+                (study_id, config_hash, "queued", canonical_json(config),
                  storage_url, now, now),
             )
-        return self.study(study_id) or {}
+        study = self.study(study_id)
+        if study is None or str(study["config_hash"]) != config_hash:
+            raise ValueError("同一 Optimization Study ID 已存在不同配置")
+        return study
 
     def study(self, study_id: str) -> dict | None:
         with self._conn() as conn:
@@ -1254,15 +1256,20 @@ class LabStore:
             value["report"] = value.pop("report_json")
         return value
 
-    def create_mining_run(self, config: dict) -> dict:
-        run_id, now = uuid.uuid4().hex, utc_now()
+    def create_mining_run(self, config: dict, *, run_id: str = "") -> dict:
+        run_id, now = str(run_id or uuid.uuid4().hex), utc_now()
+        payload = canonical_json(config)
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO mining_runs (id,status,config_json,created_at,updated_at) "
+                "INSERT OR IGNORE INTO mining_runs "
+                "(id,status,config_json,created_at,updated_at) "
                 "VALUES (?,?,?,?,?)",
-                (run_id, "queued", canonical_json(config), now, now),
+                (run_id, "queued", payload, now, now),
             )
-        return self.mining_run(run_id) or {}
+        run = self.mining_run(run_id)
+        if run is None or canonical_json(run["config"]) != payload:
+            raise ValueError("同一 AutoMiner run ID 已存在不同配置")
+        return run
 
     def mining_run(self, run_id: str) -> dict | None:
         with self._conn() as conn:
@@ -1372,187 +1379,61 @@ class LabStore:
             result.append(value)
         return result
 
-    def enqueue(
+    def save_worker_result(
         self,
+        job_id: str,
+        attempt: int,
         kind: str,
-        params: dict,
+        outcome: str,
+        result: dict[str, Any],
         *,
-        preflight: dict[str, Any] | None = None,
-        dataset_id: str = "",
-    ) -> dict:
-        job_id, now = uuid.uuid4().hex, utc_now()
-        admission = dict(preflight or {})
-        llm_scope = llm_revision = ""
-        if kind in {"discover_llm", "discover_python"}:
-            from quantmaster.runtime.llm import get_llm_execution_coordinator
+        error_info: dict[str, Any] | None = None,
+        telemetry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist one immutable Lab outcome without owning runtime lifecycle."""
 
-            coordinator = get_llm_execution_coordinator()
-            coordinator.register_lab_store(self)
-            llm_scope = "global"
-            llm_revision = coordinator.revision(llm_scope)
+        payload = canonical_json(result)
+        failure = canonical_json(error_info or {})
+        runtime = canonical_json(telemetry or {})
+        digest = content_hash({
+            "kind": str(kind), "outcome": str(outcome), "result": result,
+            "error_info": error_info or {}, "telemetry": telemetry or {},
+        })
+        now = utc_now()
         with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT content_hash FROM lab_worker_results WHERE job_id=? AND attempt=?",
+                (str(job_id), max(1, int(attempt))),
+            ).fetchone()
+            if existing is not None and str(existing["content_hash"]) != digest:
+                raise ValueError("同一 Lab job attempt 已存在不同 worker result")
             conn.execute(
-                "INSERT INTO lab_jobs "
-                "(id,kind,status,params_json,dataset_id,resource_class,preflight_json,"
-                "llm_scope,llm_revision,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO lab_worker_results "
+                "(job_id,attempt,kind,outcome,result_json,error_json,telemetry_json,"
+                "content_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (
-                    job_id, kind, "queued", canonical_json(params), dataset_id,
-                    str(admission.get("resource_class") or "cpu"), canonical_json(admission),
-                    llm_scope, llm_revision, now,
+                    str(job_id), max(1, int(attempt)), str(kind), str(outcome),
+                    payload, failure, runtime, digest, now,
                 ),
             )
-        self.append_event(job_id, {
-            "type": "queued", "progress": 0, "phase": "等待执行",
-            "resource_class": str(admission.get("resource_class") or "cpu"),
-        })
-        return self.job(job_id) or {}
+        return self.worker_result(job_id, attempt) or {}
 
-    def interrupt_legacy_llm(self) -> int:
-        """Require an explicit retry for old discovery rows without a revision."""
+    def worker_result(self, job_id: str, attempt: int | None = None) -> dict | None:
+        query = "SELECT * FROM lab_worker_results WHERE job_id=?"
+        params: tuple[Any, ...] = (str(job_id),)
+        if attempt is not None:
+            query += " AND attempt=?"
+            params = (str(job_id), max(1, int(attempt)))
+        query += " ORDER BY attempt DESC LIMIT 1"
         with self._conn() as conn:
-            changed = conn.execute(
-                "UPDATE lab_jobs SET status='interrupted',phase='需要手动重试',"
-                "detail='旧 AI 发现任务缺少执行版本，已安全中断',finished_at=? "
-                "WHERE kind IN ('discover_llm','discover_python') "
-                "AND status IN ('queued','interrupted') AND llm_revision='' "
-                "AND phase<>'需要手动重试'",
-                (utc_now(),),
-            ).rowcount
-        return int(changed)
-
-    def interrupt_stale_llm(self) -> int:
-        """Do not resume discovery work created under an expired AI revision.
-
-        A configuration rotation normally cancels these rows immediately.  This
-        startup recovery covers the narrow crash/lock window where the durable
-        revision changed but the Lab ledger was unavailable for that update.
-        Such work must be retried explicitly with the current configuration;
-        it must never be silently rebound to a new provider setup.
-        """
-        from quantmaster.runtime.llm import get_llm_execution_coordinator
-
-        coordinator = get_llm_execution_coordinator()
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT id,llm_scope,llm_revision FROM lab_jobs "
-                "WHERE kind IN ('discover_llm','discover_python') "
-                "AND status IN ('queued','interrupted') "
-                "AND cancel_requested=0 AND llm_revision<>'' "
-                "AND phase<>'需要手动重试'"
-            ).fetchall()
-            stale_ids = [
-                str(row["id"])
-                for row in rows
-                if not coordinator.current(
-                    str(row["llm_scope"] or "global"), str(row["llm_revision"]),
-                )
-            ]
-            changed = 0
-            for job_id in stale_ids:
-                changed += conn.execute(
-                    "UPDATE lab_jobs SET status='interrupted',phase='需要手动重试',"
-                    "detail='AI 配置版本已过期，请按当前配置重新运行',"
-                    "cancellation_reason='configuration_revision_expired',finished_at=? "
-                    "WHERE id=? AND status IN ('queued','interrupted') "
-                    "AND cancel_requested=0",
-                    (utc_now(), job_id),
-                ).rowcount
-        return int(changed)
-
-    def cancel_stale_llm(self, scope: str, revision: str, reason: str) -> dict[str, int]:
-        """Fence Lab's own ledger when settings rotate an LLM scope."""
-        now = utc_now()
-        with self._conn() as conn:
-            queued = conn.execute(
-                "UPDATE lab_jobs SET status='cancelled',cancel_requested=1,"
-                "cancellation_reason=?,phase='已取消',detail=?,finished_at=? "
-                "WHERE kind IN ('discover_llm','discover_python') AND status IN ('queued','interrupted') "
-                "AND llm_scope=? AND llm_revision<>?",
-                (reason[:240], reason[:1000], now, scope, revision),
-            ).rowcount
-            running = conn.execute(
-                "UPDATE lab_jobs SET status='cancelling',cancel_requested=1,"
-                "cancellation_reason=?,phase='正在安全停止',detail=? "
-                "WHERE kind IN ('discover_llm','discover_python') AND status IN ('running','cancelling') "
-                "AND llm_scope=? AND llm_revision<>?",
-                (reason[:240], reason[:1000], scope, revision),
-            ).rowcount
-        return {"queued_cancelled": int(queued), "running_cancelling": int(running)}
-
-    def claim_next(
-        self,
-        worker: str,
-        *,
-        allow_scheduled: bool = True,
-        max_running: int | None = None,
-        resource_limits: dict[str, int] | None = None,
-    ) -> dict | None:
-        now = utc_now()
-        with self._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if max_running is not None:
-                running = int(conn.execute(
-                    "SELECT COUNT(*) FROM lab_jobs WHERE status='running'"
-                ).fetchone()[0])
-                if running >= max(1, int(max_running)):
-                    return None
-            resource_clauses: list[str] = []
-            resource_params: list[Any] = []
-            for resource, limit in (resource_limits or {}).items():
-                resource_clauses.append(
-                    "NOT (resource_class=? AND (SELECT COUNT(*) FROM lab_jobs "
-                    "WHERE status='running' AND resource_class=?)>=?)"
-                )
-                resource_params.extend([resource, resource, max(1, int(limit))])
-            resource_sql = (
-                " AND " + " AND ".join(resource_clauses) if resource_clauses else ""
-            )
-            row = conn.execute(
-                "SELECT id FROM lab_jobs WHERE status IN ('queued','interrupted') "
-                "AND NOT (kind IN ('discover_llm','discover_python') AND llm_revision='') "
-                "AND (? OR params_json NOT LIKE '%\"_scheduled\":true%') "
-                f"{resource_sql} ORDER BY created_at LIMIT 1",
-                (int(allow_scheduled), *resource_params),
-            ).fetchone()
-            if row is None:
-                return None
-            changed = conn.execute(
-                "UPDATE lab_jobs SET status='running',worker=?,started_at=CASE "
-                "WHEN started_at='' THEN ? ELSE started_at END,heartbeat_at=? "
-                "WHERE id=? AND status IN ('queued','interrupted')",
-                (worker, now, now, row["id"]),
-            ).rowcount
-            if not changed:
-                return None
-        return self.job(row["id"])
-
-    def reserve_schedule(self, slot: str) -> bool:
-        """跨进程幂等地占用一个调度时隙，防止双 Worker 重复入队。"""
-        with self._conn() as conn:
-            changed = conn.execute(
-                "INSERT OR IGNORE INTO lab_schedule_slots VALUES (?,?)",
-                (slot, utc_now()),
-            ).rowcount
-        return bool(changed)
-
-    def release_schedule(self, slot: str) -> bool:
-        """释放一个入队失败的调度时隙，使后续调度仍可重试。"""
-        with self._conn() as conn:
-            changed = conn.execute(
-                "DELETE FROM lab_schedule_slots WHERE slot=?", (slot,),
-            ).rowcount
-        return bool(changed)
-
-    def scheduled_usage_hours(self) -> float:
-        """当前 UTC 自然日已消耗的自动研究计算小时数。"""
-        with self._conn() as conn:
-            value = conn.execute(
-                "SELECT COALESCE(SUM(MAX(0,(julianday(CASE WHEN finished_at='' "
-                "THEN 'now' ELSE finished_at END)-julianday(started_at))*24)),0) "
-                "FROM lab_jobs WHERE started_at<>'' AND created_at>=date('now') "
-                "AND params_json LIKE '%\"_scheduled\":true%'"
-            ).fetchone()[0]
-        return max(0.0, float(value or 0.0))
+            row = conn.execute(query, params).fetchone()
+        value = self._decode(row, ("result_json", "error_json", "telemetry_json"))
+        if value is None:
+            return None
+        value["result"] = value.pop("result_json")
+        value["error_info"] = value.pop("error_json")
+        value["telemetry"] = value.pop("telemetry_json")
+        return value
 
     def active_deployments(
         self, *, universe: str | None = None, horizon: int | None = None,
@@ -1730,194 +1611,15 @@ class LabStore:
             raise RuntimeError(f"{as_of} 的事件账本重建出多个 Champion：{ids}")
         return result
 
-    def append_event(self, job_id: str, event: dict) -> int:
-        with self._conn() as conn:
-            cursor = conn.execute(
-                "INSERT INTO lab_job_events(job_id,event_json,created_at) VALUES (?,?,?)",
-                (job_id, canonical_json(event), utc_now()),
-            )
-        return int(cursor.lastrowid or 0)
-
-    def update_job(
-        self,
-        job_id: str,
-        progress: int,
-        phase: str,
-        detail: str = "",
-        *,
-        event_type: str = "progress",
-        metadata: dict[str, Any] | None = None,
-        expected_worker: str = "",
-    ) -> bool:
-        now = utc_now()
-        progress = max(0, min(100, int(progress)))
-        detail = str(detail)[:1000]
-        with self._conn() as conn:
-            where = "id=? AND status IN ('running','cancelling')"
-            params: list[Any] = [progress, phase, detail, now, job_id]
-            if expected_worker:
-                where += " AND worker=?"
-                params.append(expected_worker)
-            changed = conn.execute(
-                "UPDATE lab_jobs SET progress=?,phase=?,detail=?,heartbeat_at=? "
-                f"WHERE {where}", params,
-            ).rowcount
-        if not changed:
-            return False
-        event = {
-            "progress": progress, "phase": phase, "detail": detail, **(metadata or {}),
-        }
-        event["type"] = event_type
-        self.append_event(job_id, event)
-        return True
-
-    def heartbeat_job(self, job_id: str, worker: str = "") -> bool:
-        """只刷新执行器心跳，不向事件时间线写入高频噪声。"""
-        with self._conn() as conn:
-            where = "id=? AND status IN ('running','cancelling')"
-            params: list[Any] = [utc_now(), job_id]
-            if worker:
-                where += " AND worker=?"
-                params.append(worker)
-            changed = conn.execute(
-                f"UPDATE lab_jobs SET heartbeat_at=? WHERE {where}", params,
-            ).rowcount
-        return bool(changed)
-
-    def request_cancel(self, job_id: str) -> dict:
-        with self._conn() as conn:
-            changed = conn.execute(
-                "UPDATE lab_jobs SET cancel_requested=1 WHERE id=? "
-                "AND status IN ('queued','running','cancelling','paused','interrupted')", (job_id,),
-            ).rowcount
-        if not changed and self.job(job_id) is None:
-            raise KeyError("任务不存在")
-        self.append_event(job_id, {"type": "cancel_requested", "phase": "正在安全停止"})
-        return self.job(job_id) or {}
-
-    def is_cancel_requested(self, job_id: str) -> bool:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT cancel_requested FROM lab_jobs WHERE id=?", (job_id,),
-            ).fetchone()
-        return bool(row and row[0])
-
-    def finish_job(
-        self,
-        job_id: str,
-        *,
-        result: dict | None = None,
-        error: str = "",
-        error_info: dict[str, Any] | None = None,
-        telemetry: dict[str, Any] | None = None,
-        expected_worker: str = "",
-    ) -> bool:
-        current = self.job(job_id) or {}
-        cancelled = bool(current and current["cancel_requested"])
-        payload = result or {}
-        warnings = payload.get("warnings") if isinstance(payload, dict) else []
-        warnings = warnings if isinstance(warnings, list) else []
-        partial = bool(warnings)
-        paused = bool(isinstance(payload, dict) and payload.get("paused"))
-        status = (
-            "cancelled" if cancelled else "failed" if error else "paused" if paused
-            else "completed_with_warnings" if partial else "completed"
-        )
-        progress = int(current.get("progress") or 0) if cancelled or error or paused else 100
-        warning = warnings[0] if warnings else ""
-        warning_text = str(warning.get("message") if isinstance(warning, dict) else warning)
-        phase = (
-            "已取消" if cancelled else "执行失败" if error else "等待恢复" if paused
-            else "部分完成" if partial else "执行完成"
-        )
-        detail = (error if error else warning_text)[:1000]
-        now = utc_now()
-        failure = dict(error_info or {})
-        error_code = str(failure.get("code") or ("INTERNAL_ERROR" if error else ""))
-        runtime_telemetry = dict(telemetry or payload.get("telemetry") or {})
-        with self._conn() as conn:
-            where = "id=?"
-            params: list[Any] = [
-                status, progress, phase, detail, canonical_json(payload), error[:1000],
-                error_code, canonical_json(failure), canonical_json(runtime_telemetry),
-                now, now, job_id,
-            ]
-            if expected_worker:
-                where += " AND worker=? AND status IN ('running','cancelling')"
-                params.append(expected_worker)
-            changed = conn.execute(
-                "UPDATE lab_jobs SET "
-                "status=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE ? END,"
-                "progress=CASE WHEN cancel_requested=1 THEN progress ELSE ? END,"
-                "phase=CASE WHEN cancel_requested=1 THEN '已取消' ELSE ? END,"
-                "detail=CASE WHEN cancel_requested=1 THEN "
-                "COALESCE(NULLIF(cancellation_reason,''),'任务已取消；已丢弃迟到结果') ELSE ? END,"
-                "result_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
-                "error=CASE WHEN cancel_requested=1 THEN '' ELSE ? END,"
-                "error_code=CASE WHEN cancel_requested=1 THEN '' ELSE ? END,"
-                "error_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
-                "telemetry_json=CASE WHEN cancel_requested=1 THEN '{}' ELSE ? END,"
-                f"finished_at=?,heartbeat_at=? WHERE {where}", params,
-            ).rowcount
-        if not changed:
-            return False
-        completed = self.job(job_id) or {}
-        status = str(completed.get("status") or status)
-        progress = int(completed.get("progress") or progress)
-        phase = str(completed.get("phase") or phase)
-        detail = str(completed.get("detail") or detail)
-        self.append_event(job_id, {
-            "type": status, "progress": progress,
-            "phase": phase, "detail": detail[:300],
-        })
-        return True
-
-    def retry_job(self, job_id: str) -> dict:
-        source = self.job(job_id)
-        if source is None:
-            raise KeyError("任务不存在")
-        if source["status"] not in {
-            "paused", "completed", "completed_with_warnings", "failed", "cancelled", "interrupted",
-        }:
-            raise ValueError("只能按相同参数重新运行已结束的任务")
-        params = dict(source.get("params") or {})
-        params.pop("_scheduled", None)
-        created = self.enqueue(str(source["kind"]), params)
-        self.append_event(created["id"], {
-            "type": "retry_of", "source_job_id": job_id,
-            "phase": "按历史参数重新运行",
-        })
-        self.append_event(job_id, {
-            "type": "retried_as", "job_id": created["id"],
-            "phase": "已创建重新运行任务",
-        })
-        return self.job(created["id"]) or created
-
-    def interrupt_stale(self, worker: str = "", stale_after_seconds: int = 30) -> int:
-        with self._conn() as conn:
-            if worker:
-                cursor = conn.execute(
-                    "UPDATE lab_jobs SET status='interrupted',worker='' "
-                    "WHERE status='running' AND worker=?", (worker,),
-                )
-            else:
-                cursor = conn.execute(
-                    "UPDATE lab_jobs SET status='interrupted',worker='' "
-                    "WHERE status='running' AND (heartbeat_at='' OR "
-                    "julianday(heartbeat_at)<julianday('now',?))",
-                    (f"-{max(1, int(stale_after_seconds))} seconds",),
-                )
-        return cursor.rowcount
-
-    def recover_orphaned_records(self) -> dict[str, int]:
+    def recover_orphaned_records(
+        self, active_job_ids: set[str] | None = None,
+    ) -> dict[str, int]:
         """Close derived ledgers left running after their owning worker disappeared."""
         now = utc_now()
+        active = {str(value) for value in (active_job_ids or set())}
         recovered = {"experiments": 0, "studies": 0, "mining_runs": 0}
         with self._conn() as conn:
-            running_jobs = int(conn.execute(
-                "SELECT COUNT(*) FROM lab_jobs WHERE status='running'",
-            ).fetchone()[0])
-            if not running_jobs:
+            if not active:
                 recovered["experiments"] = conn.execute(
                     "UPDATE experiments SET status='interrupted',updated_at=? "
                     "WHERE status='running'", (now,),
@@ -1926,127 +1628,20 @@ class LabStore:
                 ("optimization_studies", "studies"),
                 ("mining_runs", "mining_runs"),
             ):
-                recovered[key] = conn.execute(
-                    f"UPDATE {table} SET status='interrupted',updated_at=? "
-                    "WHERE status='running' AND (job_id='' OR NOT EXISTS ("
-                    f"SELECT 1 FROM lab_jobs WHERE lab_jobs.id={table}.job_id "
-                    "AND lab_jobs.status IN ('queued','running'))) ",
-                    (now,),
-                ).rowcount
+                if active:
+                    placeholders = ",".join("?" for _value in active)
+                    recovered[key] = conn.execute(
+                        f"UPDATE {table} SET status='interrupted',updated_at=? "
+                        f"WHERE status='running' AND (job_id='' OR job_id NOT IN ({placeholders}))",
+                        (now, *sorted(active)),
+                    ).rowcount
+                else:
+                    recovered[key] = conn.execute(
+                        f"UPDATE {table} SET status='interrupted',updated_at=? "
+                        "WHERE status='running'",
+                        (now,),
+                    ).rowcount
         return recovered
-
-    @staticmethod
-    def _public_job(value: dict[str, Any]) -> dict[str, Any]:
-        value["params"] = value.pop("params_json")
-        value["result"] = value.pop("result_json")
-        value["preflight"] = value.pop("preflight_json", {})
-        value["error_info"] = value.pop("error_json", {})
-        value["telemetry"] = value.pop("telemetry_json", {})
-        if value.get("error") and not value.get("error_code"):
-            value["error_code"] = "LEGACY_FAILURE"
-            value["error_info"] = {
-                "code": "LEGACY_FAILURE", "message": value["error"],
-                "action": "查看历史任务详情", "retryable": True, "context": {},
-            }
-        return value
-
-    @staticmethod
-    def _summary_job(row: sqlite3.Row) -> dict[str, Any]:
-        """Return a stable job-list shape without touching JSON artifact blobs."""
-        value = dict(row)
-        value.update({
-            "params": {}, "result": {}, "preflight": {}, "error_info": {}, "telemetry": {},
-        })
-        if value.get("error") and not value.get("error_code"):
-            value["error_code"] = "LEGACY_FAILURE"
-            value["error_info"] = {
-                "code": "LEGACY_FAILURE", "message": value["error"],
-                "action": "查看历史任务详情", "retryable": True, "context": {},
-            }
-        return value
-
-    def job(self, job_id: str) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM lab_jobs WHERE id=?", (job_id,)).fetchone()
-            checkpoint_row = conn.execute(
-                "SELECT event_json,created_at FROM lab_job_events WHERE job_id=? "
-                "AND json_extract(event_json,'$.type')='partition_checkpoint' "
-                "ORDER BY seq DESC LIMIT 1",
-                (job_id,),
-            ).fetchone()
-        value = self._decode(
-            row, ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
-        )
-        if value is not None:
-            self._public_job(value)
-            value["checkpoint"] = (
-                {"created_at": checkpoint_row["created_at"], **json.loads(checkpoint_row["event_json"])}
-                if checkpoint_row is not None else {}
-            )
-        return value
-
-    def jobs(
-        self,
-        limit: int = 50,
-        *,
-        status: str | None = None,
-        kind: str | None = None,
-        cursor: str | None = None,
-        offset: int = 0,
-        summary: bool = False,
-    ) -> list[dict]:
-        clauses, params = [], []
-        if status:
-            clauses.append("status=?")
-            params.append(status)
-        if kind:
-            clauses.append("kind=?")
-            params.append(kind)
-        with self._conn() as conn:
-            if cursor:
-                cursor_row = conn.execute(
-                    "SELECT created_at,id FROM lab_jobs WHERE id=?", (cursor,),
-                ).fetchone()
-                if cursor_row is not None:
-                    clauses.append("(created_at<? OR (created_at=? AND id<?))")
-                    params.extend([
-                        cursor_row["created_at"], cursor_row["created_at"], cursor_row["id"],
-                    ])
-            where = "WHERE " + " AND ".join(clauses) if clauses else ""
-            columns = (
-                "id,kind,status,dataset_id,resource_class,progress,phase,detail,error,"
-                "error_code,cancel_requested,worker,created_at,started_at,heartbeat_at,finished_at"
-                if summary else "*"
-            )
-            rows = conn.execute(
-                f"SELECT {columns} FROM lab_jobs {where} "
-                "ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
-                (*params, max(1, min(limit, 500)), max(0, int(offset))),
-            ).fetchall()
-        result = []
-        for row in rows:
-            if summary:
-                result.append(self._summary_job(row))
-                continue
-            value = self._decode(
-                row,
-                ("params_json", "result_json", "preflight_json", "error_json", "telemetry_json"),
-            ) or {}
-            self._public_job(value)
-            result.append(value)
-        return result
-
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT seq,event_json,created_at FROM lab_job_events "
-                "WHERE job_id=? AND seq>? ORDER BY seq LIMIT ?",
-                (job_id, max(0, after), max(1, min(limit, 2000))),
-            ).fetchall()
-        return [
-            {"seq": row["seq"], "created_at": row["created_at"], **json.loads(row["event_json"])}
-            for row in rows
-        ]
 
     def save_suggestion(
         self, version_id: str, base_hash: str, payload: dict, outbound: dict,
@@ -2462,14 +2057,6 @@ class LabStore:
                     "SELECT status,COUNT(*) AS count FROM factor_versions GROUP BY status"
                 )
             }
-            running = conn.execute(
-                "SELECT COUNT(*) FROM lab_jobs WHERE status IN ('queued','running','paused','interrupted')"
-            ).fetchone()[0]
-            job_statuses = {
-                row["status"]: row["count"] for row in conn.execute(
-                    "SELECT status,COUNT(*) AS count FROM lab_jobs GROUP BY status"
-                )
-            }
             experiments = conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
             deployments = conn.execute(
                 "SELECT COUNT(*) FROM deployments WHERE status='active'"
@@ -2483,8 +2070,6 @@ class LabStore:
             }
         return {
             "factor_statuses": statuses,
-            "job_statuses": job_statuses,
-            "active_jobs": running,
             "experiments": experiments,
             "deployments": deployments,
             "studies": studies,

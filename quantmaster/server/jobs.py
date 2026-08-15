@@ -15,7 +15,7 @@ from quantmaster.backtest.workbench import BacktestStore, get_backtest_worker
 from quantmaster.config import get_config
 from quantmaster.data.maintenance import data_refresh_manager
 from quantmaster.data.repair import DataRepairManager
-from quantmaster.lab.store import LabStore
+from quantmaster.lab.jobs import LAB_JOB_TYPES, LabJobManager, get_lab_job_manager
 from quantmaster.research.jobs import (
     ResearchJobManager,
     get_research_job_manager,
@@ -52,7 +52,7 @@ _UNIFIED_DOMAIN_TYPES: dict[str, frozenset[str]] = {
     "after_close": frozenset({"after_close.scan"}),
     "news": frozenset({"news.crawl", "news.source_run", "news.reanalyze"}),
     "settings": frozenset({"settings.apply", "settings.diagnostic"}),
-    "lab": frozenset({"lab.cloud_suggestion"}),
+    "lab": LAB_JOB_TYPES | frozenset({"lab.cloud_suggestion"}),
     "rotation": frozenset({"rotation.refresh", "rotation.etf.scan"}),
 }
 
@@ -248,7 +248,19 @@ def _public_job(domain: str, value: dict[str, Any]) -> dict[str, Any]:
         payload = artifact.get("payload") if isinstance(artifact, dict) else None
         if isinstance(payload, dict):
             public["result"] = dict(payload)
-    if domain == "lab" and str(value.get("type") or "") in _UNIFIED_DOMAIN_TYPES["lab"]:
+    if domain == "lab" and str(value.get("type") or "") in LAB_JOB_TYPES:
+        projected = LabJobManager._project(_read_unified_store(), value)
+        public.update({
+            key: projected.get(key)
+            for key in (
+                "kind", "params", "result", "preflight", "error_info", "telemetry",
+                "dataset_id", "resource_class", "worker", "heartbeat_at", "started_at",
+                "finished_at", "error", "error_code", "checkpoint", "outcome",
+            )
+            if key in projected
+        })
+        return public
+    if domain == "lab" and str(value.get("type") or "") == "lab.cloud_suggestion":
         artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
         payload = artifact.get("payload") if isinstance(artifact, dict) else None
         if isinstance(payload, dict):
@@ -264,22 +276,6 @@ def _public_job(domain: str, value: dict[str, Any]) -> dict[str, Any]:
             for key in (
                 "scope", "universe_name", "start_date", "end_date", "next_index",
                 "total", "succeeded", "failed", "failures", "current_symbol",
-            )
-            if key in value
-        })
-    if domain == "lab":
-        kind = str(value.get("kind") or "job")
-        public["type"] = f"lab.{kind}"
-        # The Lab drawer needs its immutable input and diagnostic projection,
-        # but it must obtain it through the same task URL as every other
-        # heavy workload.  Keep this as a projection of the Lab ledger rather
-        # than a second task-query route.
-        public.update({
-            key: value.get(key)
-            for key in (
-                "kind", "params", "result", "preflight", "error_info", "telemetry",
-                "dataset_id", "resource_class", "worker", "heartbeat_at", "started_at",
-                "finished_at", "error", "error_code",
             )
             if key in value
         })
@@ -317,14 +313,7 @@ def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
     if domain == "rotation":
         return _rotation_job(job_id)
     if domain == "lab":
-        try:
-            return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["lab"])
-        except (KeyError, FileNotFoundError, sqlite3.Error):
-            pass
-        try:
-            raw_value = LabStore(read_only=True).job(job_id)
-        except (FileNotFoundError, sqlite3.OperationalError) as exc:
-            raise KeyError(job_id) from exc
+        return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["lab"])
     elif domain == "backtests":
         try:
             raw_value = _read_backtest_store().get(job_id)
@@ -364,12 +353,7 @@ def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
     if domain == "rotation":
         return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["rotation"])
     if domain == "lab":
-        try:
-            values = _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["lab"])
-            values.extend(LabStore(read_only=True).jobs(limit))
-            return values[:limit]
-        except (FileNotFoundError, sqlite3.OperationalError):
-            return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["lab"])
+        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["lab"])
     if domain == "backtests":
         try:
             return _read_backtest_store().list(limit)
@@ -409,13 +393,8 @@ def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict
         _rotation_job(job_id)
         return _read_unified_events(job_id, after, limit)
     if domain == "lab":
-        value = _get(domain, job_id)
-        if str(value.get("type") or "") in _UNIFIED_DOMAIN_TYPES["lab"]:
-            return _read_unified_events(job_id, after, limit)
-        try:
-            return LabStore(read_only=True).events(job_id, after, limit)
-        except (FileNotFoundError, sqlite3.OperationalError) as exc:
-            raise KeyError(job_id) from exc
+        _get(domain, job_id)
+        return _read_unified_events(job_id, after, limit)
     if domain == "backtests":
         try:
             return _read_backtest_store().events(job_id, after, limit)
@@ -463,11 +442,12 @@ def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
         return cancel_rotation_job(job_id)
     if domain == "lab":
         value = _get(domain, job_id)
-        if str(value.get("type") or "") in _UNIFIED_DOMAIN_TYPES["lab"]:
+        if str(value.get("type") or "") == "lab.cloud_suggestion":
             from quantmaster.lab.llm_jobs import get_lab_llm_jobs
 
             return get_lab_llm_jobs().runtime.store.cancel(job_id)
-        return LabStore().request_cancel(job_id)
+        get_lab_job_manager().cancel(job_id)
+        return _read_unified_job(job_id, types=LAB_JOB_TYPES)
     return get_backtest_worker().service.store.cancel(job_id)
 
 
@@ -509,11 +489,12 @@ def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
         return retry_rotation_job(job_id)
     if domain == "lab":
         value = _get(domain, job_id)
-        if str(value.get("type") or "") in _UNIFIED_DOMAIN_TYPES["lab"]:
+        if str(value.get("type") or "") == "lab.cloud_suggestion":
             from quantmaster.lab.llm_jobs import get_lab_llm_jobs
 
             return get_lab_llm_jobs().runtime.retry(job_id)
-        return LabStore().retry_job(job_id)
+        get_lab_job_manager().retry(job_id)
+        return _read_unified_job(job_id, types=LAB_JOB_TYPES)
 
     worker = get_backtest_worker()
     source = worker.service.store.get(job_id)
