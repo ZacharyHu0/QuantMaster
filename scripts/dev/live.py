@@ -340,7 +340,7 @@ def _snapshot_main(primary: Path, main_sha: str, build_root: Path) -> Path:
 
 
 def _safe_member_name(name: str) -> PurePosixPath:
-    if "\\" in name or not name.startswith("QuantMaster/"):
+    if "\\" in name or ":" in name or not name.startswith("QuantMaster/"):
         _block("unsafe_archive", f"ZIP member 不在 QuantMaster 根目录：{name}")
     relative = PurePosixPath(name.removeprefix("QuantMaster/"))
     if relative.is_absolute() or not relative.parts or any(
@@ -365,6 +365,7 @@ def _extract_archive(archive: Path, extraction_parent: Path) -> Path:
     if not archive.is_file():
         _block("package_archive_missing", f"onedir ZIP 不存在：{archive}")
     extracted_root = extraction_parent / "QuantMaster"
+    resolved_root = extracted_root.resolve()
     seen: set[str] = set()
     extracted_bytes = 0
     try:
@@ -378,7 +379,9 @@ def _extract_archive(archive: Path, extraction_parent: Path) -> Path:
                 mode = member.external_attr >> 16
                 if mode and stat.S_ISLNK(mode):
                     _block("unsafe_archive", f"ZIP member 不能是 symlink：{member.filename}")
-                destination = extracted_root / relative
+                destination = (extracted_root / relative).resolve()
+                if not destination.is_relative_to(resolved_root):
+                    _block("unsafe_archive", f"ZIP member 展开路径越界：{member.filename}")
                 if member.is_dir():
                     destination.mkdir(parents=True, exist_ok=True)
                     continue

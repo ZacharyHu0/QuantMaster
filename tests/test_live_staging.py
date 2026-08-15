@@ -327,6 +327,43 @@ def test_stage_rejects_non_string_active_state_sha(
     assert failure.value.reason == "active_state_invalid"
 
 
+@pytest.mark.parametrize("member_kind", ("drive", "ads"))
+def test_stage_rejects_windows_archive_aliases_before_writing_outside(
+    tmp_path: Path, monkeypatch, member_kind: str,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("slot staging is Windows-only")
+    primary, _target, sha = _verified_repository(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.txt"
+    malicious = (
+        f"QuantMaster/{outside.as_posix()}"
+        if member_kind == "drive"
+        else "QuantMaster/readme.txt:outside"
+    )
+
+    def build(_project, *_args):
+        build_root = Path(_args[-1])
+        return _archive(
+            build_root / "QuantMaster.zip",
+            ("QuantMaster/QuantMaster.exe", b"exe"),
+            (malicious, b"escape"),
+        ), _small_report(sha)
+
+    monkeypatch.setattr(live, "_build_onedir", build)
+    monkeypatch.setattr(
+        live.smoke_frozen_runtime,
+        "smoke",
+        lambda *_args, **_kwargs: _smoke_report(sha),
+    )
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live.stage("task", cwd=primary)
+
+    assert failure.value.reason == "unsafe_archive"
+    assert not outside.exists()
+    assert not (tmp_path / "localappdata" / "QuantMaster" / "app" / "slots" / sha).exists()
+
+
 def test_extract_rejects_traversal_without_writing_outside(tmp_path: Path) -> None:
     archive = _archive(tmp_path / "bad.zip", ("QuantMaster/../outside.txt", b"no"))
     extraction = tmp_path / "extract"
