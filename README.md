@@ -1,25 +1,58 @@
-# QuantMaster
+<div align="center">
 
-面向 **中国 A 股** 的开源量化研究与决策记录平台。
+# 📈 QuantMaster
 
-> QuantMaster 1.x 是首个稳定的探索版契约，不是生产级交易系统，也不构成投资建议。
-> 项目优先快速验证研究想法；用户仍需自行核验数据、模型与交易规则。
+**面向中国 A 股的开源量化研究与决策记录平台**
+
+[![CI](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/ci.yml/badge.svg)](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/ci.yml)
+[![Release](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/release.yml/badge.svg)](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/release.yml)
+[![CodeQL](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/codeql.yml/badge.svg)](https://github.com/ZacharyHu0/QuantMaster/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/github/license/ZacharyHu0/QuantMaster?color=blue)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/version-1.16.0-blue)](https://github.com/ZacharyHu0/QuantMaster/releases)
+[![GitHub stars](https://img.shields.io/github/stars/ZacharyHu0/QuantMaster?style=social)](https://github.com/ZacharyHu0/QuantMaster/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/ZacharyHu0/QuantMaster?style=social)](https://github.com/ZacharyHu0/QuantMaster/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/ZacharyHu0/QuantMaster)](https://github.com/ZacharyHu0/QuantMaster/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/ZacharyHu0/QuantMaster)](https://github.com/ZacharyHu0/QuantMaster/commits/main)
 
 为已开户的个人投资者设计：假定你有不错的编程能力（计算机本科水平），
 数学与金融只需本科基础——文档与代码注释会把用到的量化概念讲清楚。
 
-<p align="center">
-  <img src="docs/images/market.png" width="49%" alt="全球市场概览">
-  <img src="docs/images/factor.png" width="49%" alt="因子体检与样本外验证">
-</p>
-<p align="center">
-  <img src="docs/images/backtest.png" width="49%" alt="回测报告">
-  <img src="docs/images/ledger.png" width="49%" alt="真实账户账本与TWR净值">
-</p>
+</div>
 
-> 截图为合成数据渲染的界面演示；`qm serve` 拉取真实行情后即为实盘数据。
+> ⚠️ QuantMaster 1.x 是首个稳定的探索版契约，**不是生产级交易系统，也不构成投资建议**。
+> 项目优先快速验证研究想法；用户仍需自行核验数据、模型与交易规则。
 
-## 能做什么
+---
+
+## 📑 目录
+
+- [✨ 功能特性](#-功能特性)
+- [📸 界面预览](#-界面预览)
+- [🚀 快速开始](#-快速开始)
+- [⚙️ 配置](#️-配置)
+- [🎯 Hybrid v2 决策与 Champion](#-hybrid-v2-决策与-champion)
+- [🏷️ 证券代码与名称解析](#️-证券代码与名称解析)
+- [🔑 部署需要哪些 Key](#-部署需要哪些-key)
+- [💬 飞书 Bot 与微信 ClawBot](#-飞书-bot-主与微信-clawbot轻量补充)
+- [📰 资讯研究工作台](#-资讯研究工作台)
+- [🧪 开发测试](#-开发测试)
+- [📦 版本提交与 GitHub 自动同步](#-版本提交与-github-自动同步)
+- [🧭 设计原则](#-设计原则)
+- [📁 项目结构](#-项目结构)
+- [🛠️ 技术栈](#️-技术栈)
+- [🗺️ 路线图](#️-路线图)
+- [📖 文档](#-文档)
+- [🤝 贡献](#-贡献)
+- [👥 贡献者](#-贡献者)
+- [🙏 致谢](#-致谢)
+- [⭐ Star History](#-star-history)
+- [📄 License](#-license)
+- [⚠️ 免责声明](#️-免责声明)
+
+---
+
+## ✨ 功能特性
 
 | 模块 | 说明 |
 | --- | --- |
@@ -40,7 +73,30 @@
 | 🖥️ 本地 Web 界面 | FastAPI + ECharts 决策工作台；「今日 → 候选」集中查看与编辑研究范围，行情卡片逐标的呈现，决策按牛熊/板块/候选分阶段可用，不必等待整次任务结束 |
 | 📖 内置帮助 | 页头“帮助”提供按六部、两级目录组织的 21 章量化研究教材，从市场与数据递进到数学、定价、信号、组合和生产研究；覆盖测度变换、SDF/GMM、高级蒙特卡洛、波动率曲面、HJM、稳健优化、尾部风险与严格机器学习验证，并配有稳定深链、全文搜索、11 个可运行示例、42 道自测和 10 个本地实验工具 |
 
-## 快速开始
+## 📸 界面预览
+
+<p align="center">
+  <img src="docs/images/market.png" width="49%" alt="全球市场概览">
+  <img src="docs/images/factor.png" width="49%" alt="因子体检与样本外验证">
+</p>
+<p align="center">
+  <img src="docs/images/backtest.png" width="49%" alt="回测报告">
+  <img src="docs/images/ledger.png" width="49%" alt="真实账户账本与TWR净值">
+</p>
+
+> 截图为合成数据渲染的界面演示；`qm serve` 拉取真实行情后即为实盘数据。
+
+## 🚀 快速开始
+
+### 环境要求
+
+| 要求 | 说明 |
+| --- | --- |
+| Python | 3.12+ |
+| 操作系统 | Windows / macOS / Linux |
+| 可选 | Rust 工具链（原生研究内核加速）、Tushare Token（2000 积分） |
+
+### 安装与启动
 
 ```bash
 # 环境要求 Python 3.12+
@@ -76,7 +132,7 @@ worker 重载入口，只安全替换 Web worker，不会启停 FreeStockDB。
 traceback 时，可把 `--verbose` 放在任意命令位置，或设置 `QM_LOG_LEVEL=DEBUG`；命令
 参数优先于环境变量。日志固定写入 stderr，JSON 和表格等命令结果继续独占 stdout。
 
-命令行研究流程：
+### 命令行研究流程
 
 ```bash
 qm fetch --universe demo --start 2022-01-01          # 拉取内置示例候选行情
@@ -137,6 +193,8 @@ stockdb、运行可见的原生更新器并恢复服务。更新器退出后还�
 本地 SQLite 控制邮箱把更新交给持有 stockdb 的监督进程；异常关闭遗留的进程仅在
 PID、创建时间、可执行文件路径和失效 owner 均核验一致时才会被下次启动回收。
 
+### Python API
+
 Python API 同样直接：
 
 ```python
@@ -149,7 +207,20 @@ report = analyze_factor(compute_factor(factor, panel), panel["close"], name="5�
 print(report.summary())
 ```
 
-## 配置
+<details>
+<summary>📖 更多 Python API 示例</summary>
+
+```python
+from quantmaster.data import resolve_instrument, resolve_instruments, search_instruments
+
+matches = search_instruments("腾讯")
+one = resolve_instrument("NASDAQ:AAPL")
+batch = resolve_instruments(["600519", "700"], selections={"700": "00700.HK"})
+```
+
+</details>
+
+## ⚙️ 配置
 
 桌面端推荐启动 `qm serve` 后从「今日 → 候选」管理研究范围，从「设置」校验全部字段、读取模型列表、
 检测数据源、管理资讯处理、自动化、Quant Lab 及配置快照。普通字段在停止输入或
@@ -356,7 +427,7 @@ Windows 上会自动发现已安装的 Windows SDK 库目录，避免 Git hook �
 在 `main` 上提交版本时，已安装的 `.githooks/pre-commit` 会自动执行
 `python scripts/ci/run.py --fast`；完整的 `--all` 验收在发布前单独运行。门禁失败会阻止提交，因而不会触发 post-commit 的远端自动推送。
 
-### 版本提交与 GitHub 自动同步
+## 📦 版本提交与 GitHub 自动同步
 
 克隆仓库后执行一次：
 
@@ -398,7 +469,7 @@ python scripts/release/sync.py push
 浏览器 lane 只保留设置与数据导入、帮助主路径、决策、回测、自动化、轮动和个股分析等
 核心流程；计算细节、短暂错误和内部 DOM 结构不再重复做浏览器回归。
 
-## 设计原则
+## 🧭 设计原则
 
 1. **站在巨人肩膀上**：数据层直接复用
    [free-stockdb](https://github.com/hello245m/free-stockdb)、
@@ -416,7 +487,7 @@ python scripts/release/sync.py push
    不存在代码注入，也不盲信大模型的「故事」。
 5. **本地优先**：数据、账本、研究结果全部落在本地磁盘，不依赖任何云服务。
 
-## 项目结构
+## 📁 项目结构
 
 ```
 quantmaster/
@@ -434,13 +505,150 @@ quantmaster/
 └── server/              FastAPI + ECharts Web 界面及本机设置 API
 ```
 
-更多文档见 [docs/](docs/)。
+## 🛠️ 技术栈
 
-## 免责声明
+<div align="center">
 
-本项目仅供学习研究，不构成任何投资建议。历史回测收益不代表未来表现，
-入市有风险，投资需谨慎。
+| 类别 | 技术 |
+| --- | --- |
+| **语言** | Python 3.12+、Rust（可选原生加速）、TypeScript / HTML / CSS（前端） |
+| **后端** | FastAPI、Uvicorn、Pydantic、APScheduler |
+| **前端** | ECharts、原生 JS（无重框架依赖） |
+| **数据** | Pandas、NumPy、PyArrow（Parquet）、SQLite |
+| **机器学习** | scikit-learn、PyTorch、Optuna（多目标优化） |
+| **AI / LLM** | Anthropic Claude、OpenAI 及 OpenAI 协议网关（DeepSeek / 通义 / Kimi / GLM / Ollama） |
+| **数据源** | [free-stockdb](https://github.com/hello245m/free-stockdb)、[AKShare](https://github.com/akfamily/akshare)、yfinance、Tushare |
+| **自动化** | 飞书开放平台（lark-oapi）、微信 ClawBot iLink |
+| **工程** | Ruff、mypy、pytest、uv、PyInstaller、GitHub Actions、CodeQL、Dependabot |
+| **打包** | Windows / macOS / Linux 三平台桌面发行包 |
 
-## License
+</div>
 
-MIT
+## 🗺️ 路线图
+
+- [x] v1.0 — 首个稳定探索版契约，模块化单体与分层 CI 门禁
+- [x] v1.x — 多市场数据、研究湖、AI Quant Lab 与 Hybrid v2 决策
+- [x] 三平台桌面发行包（含 SBOM 与来源证明）
+- [ ] 更多策展因子与社区因子库集成
+- [ ] 更丰富的组合优化与风险预算
+- [ ] 更多 LLM 协议网关与本地模型适配
+- [ ] 更完善的多市场回测规则（港股 / 美股交易制度）
+
+> 路线图仅为方向参考，不代表承诺；具体计划以 [Release](https://github.com/ZacharyHu0/QuantMaster/releases) 与 [CHANGELOG](CHANGELOG.md) 为准。
+
+## 📖 文档
+
+更多文档见 [docs/](docs/) 目录：
+
+| 文档 | 说明 |
+| --- | --- |
+| [architecture.md](docs/architecture.md) | 系统架构与模块设计 |
+| [concepts.md](docs/concepts.md) | 核心概念与术语 |
+| [guide.md](docs/guide.md) | 使用指南 |
+| [research_pipeline.md](docs/research_pipeline.md) | 研究流水线与数据口径 |
+| [development-workflow.md](docs/development-workflow.md) | 开发流程与 worktree |
+| [github-workflow.md](docs/github-workflow.md) | GitHub Issue / PR / Actions 流程 |
+| [product-requirements.md](docs/product-requirements.md) | 产品需求 |
+| [api-error-contract.md](docs/api-error-contract.md) | API 错误契约 |
+| [cache-governance.md](docs/cache-governance.md) | 缓存治理 |
+| [numeric-semantics-matrix.md](docs/numeric-semantics-matrix.md) | 数值语义矩阵 |
+| [tushare_2000_guide.md](docs/tushare_2000_guide.md) | Tushare 2000 积分配置指南 |
+
+完整变更历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 🤝 贡献
+
+欢迎贡献代码、文档、测试或问题反馈！开始前请阅读：
+
+1. [CONTRIBUTING.md](CONTRIBUTING.md) — 贡献流程与仓库规则
+2. [AGENTS.md](AGENTS.md) — 所有 agent 和贡献者必须遵守的仓库规则
+3. [docs/development-workflow.md](docs/development-workflow.md) — worktree 与分层验证
+4. [docs/github-workflow.md](docs/github-workflow.md) — GitHub Issue / PR / Actions 流程
+
+### 快速贡献指南
+
+```bash
+# 1. Fork 仓库并克隆
+git clone https://github.com/<your-username>/QuantMaster.git
+cd QuantMaster
+
+# 2. 创建任务分支与独立 worktree
+./.venv/Scripts/python.exe scripts/dev/tasks.py start <task-slug>
+
+# 3. 进入 worktree 开发
+cd .worktrees/<task-slug>
+
+# 4. 运行受影响的测试
+../../.venv/Scripts/python.exe scripts/dev/tasks.py check
+
+# 5. 准备合入（复用绿色 CI）
+../../.venv/Scripts/python.exe scripts/dev/tasks.py ready --accept-ci
+```
+
+- 🐛 发现 Bug？[提交 Issue](https://github.com/ZacharyHu0/QuantMaster/issues/new)
+- 💡 有新想法？[发起 Discussion](https://github.com/ZacharyHu0/QuantMaster/discussions)
+- 🔄 想贡献代码？[发起 Pull Request](https://github.com/ZacharyHu0/QuantMaster/pulls)
+
+<details>
+<summary>📖 贡献者行为准则</summary>
+
+我们致力于为每个人提供友好、安全、欢迎的环境，无论经验水平、性别、性别认同与表达、
+性取向、残疾、外貌、体型、种族、国籍、宗教信仰或技术栈选择。请保持尊重和友善的交流。
+不接受骚扰行为，维护者有权删除违规评论、提交或封禁相关账号。
+
+</details>
+
+## 👥 贡献者
+
+感谢所有为 QuantMaster 做出贡献的人！
+
+<a href="https://github.com/ZacharyHu0/QuantMaster/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=ZacharyHu0/QuantMaster" alt="contributors" />
+</a>
+
+## 🙏 致谢
+
+QuantMaster 站在开源社区的肩膀上，感谢以下优秀项目：
+
+| 项目 | 用途 |
+| --- | --- |
+| [free-stockdb](https://github.com/hello245m/free-stockdb) | A 股本地行情数据库与 StockDBClient |
+| [AKShare](https://github.com/akfamily/akshare) | 免费财经数据接口 |
+| [yfinance](https://github.com/ranaroussi/yfinance) | 全球市场参考行情 |
+| [Tushare](https://tushare.pro) | A 股专业数据接口 |
+| [Microsoft Qlib](https://github.com/microsoft/qlib) | 表达式因子 + IC 分析范式参考 |
+| [Freqtrade](https://github.com/freqtrade/freqtrade) | Hyperopt / FreqAI 工作流参考 |
+| [FastAPI](https://github.com/tiangolo/fastapi) | Web 后端框架 |
+| [ECharts](https://echarts.apache.org/) | 数据可视化 |
+| [PyTorch](https://pytorch.org/) | 深度学习 |
+| [Optuna](https://optuna.org/) | 多目标超参数优化 |
+| [uv](https://github.com/astral-sh/uv) | 依赖与构建管理 |
+| [Ruff](https://github.com/astral-sh/ruff) | 代码检查与格式化 |
+
+> WorldQuant Alpha101 算子命名惯例被沿用，社区因子可直接迁移。
+
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=ZacharyHu0/QuantMaster&type=Date)](https://star-history.com/#ZacharyHu0/QuantMaster&Date)
+
+如果 QuantMaster 对你有帮助，欢迎点个 ⭐ Star 支持一下！
+
+## 📄 License
+
+本项目基于 [MIT License](LICENSE) 开源。
+
+Copyright (c) 2026 QuantMaster Contributors
+
+## ⚠️ 免责声明
+
+本项目仅供学习研究，**不构成任何投资建议**。历史回测收益不代表未来表现，
+入市有风险，投资需谨慎。使用者应自行承担因使用本工具而产生的一切后果，
+并遵守所在地区的法律法规。
+
+---
+
+<div align="center">
+
+<sub>Built with ❤️ by QuantMaster Contributors</sub>
+
+</div>
