@@ -51,7 +51,7 @@ backtrader = ["backtrader>=1.9"]
 rust = ["maturin==1.14.1"]
 dev = [
     "pytest>=8.0",
-    "httpx2>=2.7,<3",
+    "httpx2>=2.10.0,<3",
     "pytest-split>=0.10,<1",
     "pytest-timeout>=2.3,<3",
     "ruff>=0.4",
