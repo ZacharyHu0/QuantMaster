@@ -1715,6 +1715,9 @@ const settingsFeature = (() => {
   });
 
   function resumeActiveWork() {
+    document.getElementById('weixin-login-start').disabled = Boolean(
+      state.weixinLoginId || state.weixinLoginCreatePending,
+    );
     if (state.editRevision > state.savedRevision && !state.saveInFlight) {
       state.autoSaveTimer = setTimeout(flushAutosave, 0);
     }
@@ -1726,8 +1729,6 @@ const settingsFeature = (() => {
     if (state.weixinLoginId) {
       renderWeixinLoginSession();
       scheduleWeixinPoll(state.weixinLoginId, 0);
-    } else if (state.weixinLoginCreatePending) {
-      document.getElementById('weixin-login-start').disabled = true;
     }
   }
 

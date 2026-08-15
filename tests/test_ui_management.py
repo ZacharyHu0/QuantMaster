@@ -4926,6 +4926,60 @@ def test_settings_weixin_create_response_survives_navigation_before_session_id(l
         browser.close()
 
 
+def test_settings_weixin_create_rejection_off_workspace_allows_remount_retry(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="automation"]').click()
+        page.evaluate(
+            """() => {
+              const nativeApi = window.QuantMasterAPI;
+              window.__weixinRejectPending = false;
+              window.__weixinCreateAttempts = 0;
+              window.__rejectWeixinCreate = null;
+              window.QuantMasterAPI = (input, options = {}) => {
+                const path = new URL(input, location.href).pathname;
+                if (path === '/api/v1/automation/channels/weixin/login' && options.method === 'POST') {
+                  window.__weixinCreateAttempts += 1;
+                  if (window.__weixinCreateAttempts === 1) {
+                    window.__weixinRejectPending = true;
+                    return new Promise((_, reject) => {
+                      window.__rejectWeixinCreate = () => reject(new Error('二维码服务暂时不可用'));
+                    });
+                  }
+                  return Promise.resolve({
+                    session_id:'wx-retry', qrcode_url:'data:image/svg+xml,%3Csvg/%3E',
+                  });
+                }
+                if (path === '/api/v1/automation/channels/weixin/login/wx-retry') {
+                  return Promise.resolve({status:'expired'});
+                }
+                return nativeApi(input, options);
+              };
+            }"""
+        )
+        page.locator("#weixin-login-start").click()
+        page.wait_for_function("() => window.__weixinRejectPending === true")
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.evaluate("window.__rejectWeixinCreate()")
+        page.wait_for_timeout(100)
+        assert page.locator("#weixin-login-status").inner_text() == "正在申请二维码…"
+
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        assert page.locator("#weixin-login-start").is_enabled()
+        page.locator("#weixin-login-start").click()
+        page.get_by_text("二维码已失效，请重新生成", exact=True).wait_for()
+        assert page.evaluate("window.__weixinCreateAttempts") == 2
+        assert page.locator("#weixin-login-start").is_enabled()
+        browser.close()
+
+
 def test_settings_remount_resumes_only_active_research_and_migrations(live_server):
     url, _ = live_server
     polls = {"research": 0, "migration": 0, "contract": 0}
