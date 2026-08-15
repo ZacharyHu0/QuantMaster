@@ -107,6 +107,10 @@ to exactly one category:
 4. **Independent value remains** — port the value into a new task and integrate it through the
    same two phases.
 
+If a task artifact root cannot be inspected or have its ACL restored by the current identity,
+`tasks.py remove` reports `TASK_ARTIFACT_ACL_UNRECOVERABLE`, preserves the artifact and branch,
+and remains the only retry interface after the required path permission is available.
+
 Delete an old task only after its value is proven present on `main` or the owner explicitly
 abandons it. Report the exact category; never describe every non-removable task as active,
 unmerged, or safe to delete.

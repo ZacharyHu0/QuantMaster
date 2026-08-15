@@ -32,6 +32,7 @@ VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
 REMOVE_INTENT_SCHEMA = 1
+TASK_ARTIFACT_ACL_UNRECOVERABLE = "TASK_ARTIFACT_ACL_UNRECOVERABLE"
 
 
 def git(args: list[str], *, cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -726,18 +727,26 @@ def remove_task_artifacts(primary: Path, slug: str) -> None:
         )
         environment = os.environ.copy()
         environment["QM_TASK_ARTIFACT_BLOCKED"] = str(blocked)
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if result.returncode:
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+        else:
             detail = result.stderr.strip() or result.stdout.strip() or "unknown ACL error"
-            raise RuntimeError(f"无法恢复任务工件 ACL 继承：{detail}")
+            if result.returncode == 0:
+                return
+        raise SystemExit(
+            f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: 无法在当前身份检查或恢复任务工件 ACL："
+            f"{detail}；工件和任务分支已保留，请获得该路径权限后重新运行 tasks.py remove {slug}"
+        ) from None
 
     try:
         shutil.rmtree(artifact_root, onexc=make_writable)
