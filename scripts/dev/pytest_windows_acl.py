@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import stat
+import subprocess
 from os import environ
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,53 @@ def prepare_pytest_directory(path: Path) -> Path:
     if not os.access(target, os.W_OK):
         raise PermissionError(f"目录不可写: {target}")
     return target
+
+
+def make_writable(function: Any, path: str | bytes, error: BaseException) -> None:
+    """Clear a read-only file attribute before retrying a tree removal."""
+    if not isinstance(error, PermissionError):
+        raise error
+    os.chmod(path, stat.S_IWRITE)
+    function(path)
+
+
+def restore_acl_inheritance(path: Path) -> None:
+    """Restore inherited Windows ACLs for one path blocked during cleanup."""
+    if os.name != "nt":
+        return
+    blocked = path.resolve()
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$item=Get-Item -LiteralPath $env:QM_TASK_ARTIFACT_BLOCKED -Force;"
+        "$acl=if($item.PSIsContainer){"
+        "[System.IO.Directory]::GetAccessControl($item.FullName)"
+        "}else{[System.IO.File]::GetAccessControl($item.FullName)};"
+        "if($acl.AreAccessRulesProtected){"
+        "$acl.SetAccessRuleProtection($false,$true);"
+        "if($item.PSIsContainer){"
+        "[System.IO.Directory]::SetAccessControl($item.FullName,$acl)"
+        "}else{[System.IO.File]::SetAccessControl($item.FullName,$acl)}"
+        "}"
+    )
+    environment = os.environ.copy()
+    environment["QM_TASK_ARTIFACT_BLOCKED"] = str(blocked)
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PermissionError(
+            f"无法检查或恢复 Windows ACL：{type(exc).__name__}: {exc}"
+        ) from exc
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "unknown ACL error"
+        raise PermissionError(f"无法检查或恢复 Windows ACL：{detail}")
 
 
 def _install_task_artifact_lease(config: Any) -> None:

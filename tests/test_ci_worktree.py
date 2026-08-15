@@ -101,6 +101,7 @@ def test_prepare_pytest_cache_precreates_directory(tmp_path):
 def _windows_cleanup_error(code: int, path: Path) -> OSError:
     error = OSError(f"locked: {path}")
     error.winerror = code
+    error.filename = str(path)
     return error
 
 
@@ -110,7 +111,7 @@ def test_cleanup_run_root_retries_when_child_disappears_during_walk(monkeypatch,
     attempts = []
     delays = []
 
-    def remove(path):
+    def remove(path, **_kwargs):
         attempts.append(path)
         if len(attempts) == 1:
             raise FileNotFoundError(2, "missing child", path / "ui" / "jobs.sqlite-shm")
@@ -130,7 +131,7 @@ def test_cleanup_run_root_accepts_concurrently_removed_root(monkeypatch, tmp_pat
     sleeps = []
     monkeypatch.setattr(
         run.shutil, "rmtree",
-        lambda path: attempts.append(path) or (_ for _ in ()).throw(
+        lambda path, **_kwargs: attempts.append(path) or (_ for _ in ()).throw(
             FileNotFoundError(2, "missing root", path),
         ),
     )
@@ -160,7 +161,9 @@ def test_cleanup_run_root_does_not_hide_permission_error_while_probing_root(
     denied = PermissionError(13, "denied", run_root)
     monkeypatch.setattr(
         run.shutil, "rmtree",
-        lambda path: (_ for _ in ()).throw(FileNotFoundError(2, "missing child", path)),
+        lambda path, **_kwargs: (_ for _ in ()).throw(
+            FileNotFoundError(2, "missing child", path)
+        ),
     )
     monkeypatch.setattr(run.Path, "stat", lambda _path: (_ for _ in ()).throw(denied))
 
@@ -175,7 +178,7 @@ def test_cleanup_run_root_retries_transient_windows_lock(monkeypatch, tmp_path):
     attempts = []
     delays = []
 
-    def remove(path):
+    def remove(path, **_kwargs):
         attempts.append(path)
         if len(attempts) == 1:
             raise _windows_cleanup_error(32, path)
@@ -195,7 +198,7 @@ def test_cleanup_run_root_retries_directory_not_empty(monkeypatch, tmp_path):
     attempts = []
     delays = []
 
-    def remove(path):
+    def remove(path, **_kwargs):
         attempts.append(path)
         if len(attempts) == 1:
             raise _windows_cleanup_error(145, path)
@@ -214,7 +217,7 @@ def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, 
     attempts = []
     monkeypatch.setattr(
         run.shutil, "rmtree",
-        lambda path: attempts.append(path) or (_ for _ in ()).throw(
+        lambda path, **_kwargs: attempts.append(path) or (_ for _ in ()).throw(
             _windows_cleanup_error(32, path),
         ),
     )
@@ -228,23 +231,73 @@ def test_cleanup_run_root_reports_persistent_lock_and_retains_path(monkeypatch, 
     assert attempts == [run_root] * run._CLEANUP_ATTEMPTS
 
 
-def test_cleanup_run_root_does_not_retry_non_transient_error(monkeypatch, tmp_path):
+def test_cleanup_run_root_rejects_acl_error_outside_run_root(monkeypatch, tmp_path):
     run_root = tmp_path / "run"
-    error = _windows_cleanup_error(5, run_root)
+    outside = tmp_path / "outside" / "blocked"
+    error = _windows_cleanup_error(5, outside)
     attempts = []
     sleeps = []
+    restored = []
     monkeypatch.setattr(
         run.shutil, "rmtree",
-        lambda path: attempts.append(path) or (_ for _ in ()).throw(error),
+        lambda path, **_kwargs: attempts.append(path) or (_ for _ in ()).throw(error),
     )
     monkeypatch.setattr(run, "_cleanup_sleep", sleeps.append)
+    monkeypatch.setattr(run, "restore_acl_inheritance", restored.append)
 
-    with pytest.raises(OSError) as captured:
+    with pytest.raises(RuntimeError, match="outside run root"):
         run.cleanup_run_root(run_root)
 
-    assert captured.value is error
     assert attempts == [run_root]
     assert sleeps == []
+    assert restored == []
+
+
+def test_cleanup_run_root_restores_acl_for_nested_permission_error(monkeypatch, tmp_path):
+    run_root = tmp_path / "run"
+    blocked = run_root / "primary" / ".git" / "objects" / "aa" / "object"
+    error = _windows_cleanup_error(5, blocked)
+    attempts = []
+    sleeps = []
+    restored = []
+
+    def remove(path, **_kwargs):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise error
+
+    monkeypatch.setattr(run.shutil, "rmtree", remove)
+    monkeypatch.setattr(run, "_cleanup_sleep", sleeps.append)
+    monkeypatch.setattr(run, "restore_acl_inheritance", restored.append)
+
+    run.cleanup_run_root(run_root)
+
+    assert attempts == [run_root, run_root]
+    assert sleeps == [run._CLEANUP_INITIAL_DELAY_SECONDS]
+    assert restored == [blocked.resolve()]
+
+
+def test_cleanup_run_root_removes_nested_git_repository(tmp_path):
+    run_root = tmp_path / "run"
+    repository = run_root / "primary"
+    repository.mkdir(parents=True)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=repository, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+
+    git("init", "-b", "main")
+    git("config", "user.name", "QuantMaster tests")
+    git("config", "user.email", "tests@example.invalid")
+    (repository / "README.md").write_text("fixture\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "fixture")
+
+    run.cleanup_run_root(run_root)
+
+    assert not run_root.exists()
 
 
 def test_run_redirects_static_tool_caches(monkeypatch, tmp_path):

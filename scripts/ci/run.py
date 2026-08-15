@@ -19,7 +19,11 @@ if str(ROOT) not in sys.path:
 
 # This file is also executed directly, so repository imports follow the path bootstrap.
 from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
-from scripts.dev.pytest_windows_acl import prepare_pytest_directory  # noqa: E402
+from scripts.dev.pytest_windows_acl import (  # noqa: E402
+    make_writable,
+    prepare_pytest_directory,
+    restore_acl_inheritance,
+)
 
 
 def primary_root() -> Path:
@@ -76,13 +80,23 @@ _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 _cleanup_sleep = time.sleep
 
 
+def _cleanup_acl_target(root: Path, error: OSError) -> Path:
+    blocked = Path(error.filename or root).resolve()
+    if blocked != root and root not in blocked.parents:
+        raise RuntimeError(
+            "[local-ci] cleanup reported a path outside run root; "
+            "retained evidence at <local-path>"
+        ) from error
+    return blocked
+
+
 def cleanup_run_root(path: Path) -> None:
     """Remove one successful run despite transient locks or disappearing entries."""
 
     delay = _CLEANUP_INITIAL_DELAY_SECONDS
     for attempt in range(1, _CLEANUP_ATTEMPTS + 1):
         try:
-            shutil.rmtree(path)
+            shutil.rmtree(path, onexc=make_writable)
             return
         except FileNotFoundError as exc:
             try:
@@ -95,7 +109,17 @@ def cleanup_run_root(path: Path) -> None:
                     f"attempts; retained evidence at {redact_sensitive_text(path)}"
                 ) from exc
         except OSError as exc:
-            if getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            winerror = getattr(exc, "winerror", None)
+            if winerror == 5:
+                blocked = _cleanup_acl_target(path, exc)
+                try:
+                    restore_acl_inheritance(blocked)
+                except OSError as acl_error:
+                    raise RuntimeError(
+                        "[local-ci] successful run cleanup ACL recovery failed; "
+                        "retained evidence at <local-path>"
+                    ) from acl_error
+            elif winerror not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
                 raise
             if attempt == _CLEANUP_ATTEMPTS:
                 raise RuntimeError(
