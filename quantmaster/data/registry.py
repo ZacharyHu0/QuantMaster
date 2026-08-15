@@ -34,7 +34,6 @@ from quantmaster.data.base import (
     DataSource,
     Market,
     MarketDataUnavailable,
-    guess_market,
     validate_frequency,
 )
 from quantmaster.data.cache_freshness import (
@@ -52,6 +51,7 @@ from quantmaster.data.resilience import (
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.data.storage import BarStore, IntradayBarStore
 from quantmaster.market_data_access import register_history_refresh
+from quantmaster.market_identity import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
 
