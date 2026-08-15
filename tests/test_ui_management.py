@@ -4350,6 +4350,109 @@ def test_stock_analysis_ignores_delayed_poll_from_previous_mount(live_server):
         browser.close()
 
 
+def test_stock_analysis_slow_submit_does_not_start_poll_after_unmount(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#today/stock-analysis")
+        page.locator("#stock-analysis-query").wait_for(state="visible")
+        page.evaluate(
+            """() => {
+              const nativeApi = window.QuantMasterAPI;
+              window.__submitPending = false;
+              window.__hiddenPolls = 0;
+              window.__resolveSubmit = null;
+              window.QuantMasterAPI = (input, options = {}) => {
+                const path = new URL(input, location.href).pathname;
+                if (path === '/api/v1/market/stock-analyses' && options.method === 'POST') {
+                  window.__submitPending = true;
+                  return new Promise(resolve => {
+                    window.__resolveSubmit = () => resolve({
+                      analysis_id:'analysis-hidden', job_id:'job-hidden', status:'queued',
+                    });
+                  });
+                }
+                if (path.includes('/api/v1/jobs/job-hidden')) {
+                  window.__hiddenPolls += 1;
+                  return Promise.resolve({items:[]});
+                }
+                return nativeApi(input, options);
+              };
+            }"""
+        )
+        page.locator("#stock-analysis-query").fill("600519.SH")
+        page.locator("#stock-analysis-form button.primary").click()
+        page.wait_for_function("() => window.__submitPending === true")
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.evaluate("window.__resolveSubmit()")
+        page.wait_for_timeout(200)
+
+        assert page.evaluate("window.__hiddenPolls") == 0
+        assert page.evaluate("localStorage.getItem('qm.stock-analysis.active.v2')") is None
+        browser.close()
+
+
+def test_stock_analysis_slow_cancel_does_not_mutate_newer_run(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#today/stock-analysis")
+        page.locator("#stock-analysis-query").wait_for(state="visible")
+        page.evaluate(
+            """() => {
+              const nativeApi = window.QuantMasterAPI;
+              window.__cancelPending = false;
+              window.__resolveCancel = null;
+              window.QuantMasterAPI = (input, options = {}) => {
+                const path = new URL(input, location.href).pathname;
+                if (path === '/api/v1/market/stock-analyses' && options.method === 'POST') {
+                  const query = JSON.parse(options.body).query;
+                  const suffix = query === '600519.SH' ? 'old' : 'new';
+                  return Promise.resolve({
+                    analysis_id:`analysis-${suffix}`, job_id:`job-${suffix}`, status:'running',
+                  });
+                }
+                if (path.endsWith('/events')) return Promise.resolve({items:[]});
+                if (path === '/api/v1/jobs/job-old/cancel') {
+                  window.__cancelPending = true;
+                  return new Promise(resolve => {
+                    window.__resolveCancel = () => resolve({status:'cancelling'});
+                  });
+                }
+                if (path === '/api/v1/jobs/job-old') {
+                  return Promise.resolve({status:'running', progress:20, phase:'旧任务运行中'});
+                }
+                if (path === '/api/v1/jobs/job-new') {
+                  return Promise.resolve({status:'running', progress:30, phase:'新任务运行中'});
+                }
+                return nativeApi(input, options);
+              };
+            }"""
+        )
+        query = page.locator("#stock-analysis-query")
+        query.fill("600519.SH")
+        page.locator("#stock-analysis-form button.primary").click()
+        page.get_by_text("旧任务运行中", exact=True).wait_for()
+        page.locator("#stock-analysis-cancel").click()
+        page.wait_for_function("() => window.__cancelPending === true")
+
+        query.fill("000001.SZ")
+        page.locator("#stock-analysis-form button.primary").click()
+        page.get_by_text("新任务运行中", exact=True).wait_for()
+        page.evaluate("window.__resolveCancel()")
+        page.wait_for_timeout(100)
+
+        active = page.evaluate("JSON.parse(localStorage.getItem('qm.stock-analysis.active.v2'))")
+        assert active["jobId"] == "job-new"
+        assert active["status"] == "running"
+        assert page.locator("#stock-analysis-current-phase").inner_text() == "新任务运行中"
+        browser.close()
+
+
 def test_settings_remount_resumes_pending_autosave_and_active_data_poll(live_server):
     url, _ = live_server
     data_polls = {"count": 0}
@@ -4412,6 +4515,75 @@ def test_settings_remount_resumes_pending_autosave_and_active_data_poll(live_ser
         page.wait_for_timeout(1_000)
         assert data_polls["count"] > paused_polls
         assert saves["count"] == 1
+        browser.close()
+
+
+def test_settings_old_data_poll_cannot_overwrite_remounted_terminal_state(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="local-data"]').click()
+        page.evaluate(
+            """() => {
+              const nativeApi = window.QuantMasterAPI;
+              window.__dataPolls = 0;
+              window.__dataPollPending = false;
+              window.__resolveOldDataPoll = null;
+              const running = {
+                id:'data-race', status:'running', progress:20, next_index:1,
+                total:2, succeeded:1, failures:[], current_symbol:'旧响应',
+              };
+              window.QuantMasterAPI = (input, options = {}) => {
+                const method = String(options.method || 'GET').toUpperCase();
+                const url = new URL(input, location.href);
+                if (url.pathname === '/api/v1/data/refresh/preview' && method === 'POST') {
+                  return Promise.resolve({
+                    message:'同步 2 个标的', start:'2026-08-01', end:'2026-08-15',
+                    total:2, unhealthy_sources:[],
+                  });
+                }
+                if (url.pathname === '/api/v1/data/refresh' && method === 'POST') {
+                  return Promise.resolve(running);
+                }
+                if (url.pathname === '/api/v1/jobs' && url.searchParams.get('domain') === 'data') {
+                  return Promise.resolve({items:[]});
+                }
+                if (url.pathname === '/api/v1/jobs/data-race') {
+                  window.__dataPolls += 1;
+                  if (window.__dataPolls === 1) {
+                    window.__dataPollPending = true;
+                    return new Promise(resolve => {
+                      window.__resolveOldDataPoll = () => resolve(running);
+                    });
+                  }
+                  return Promise.resolve({
+                    id:'data-race', status:'completed', progress:100, next_index:2,
+                    total:2, succeeded:2, failures:[], current_symbol:'新结果',
+                  });
+                }
+                return nativeApi(input, options);
+              };
+            }"""
+        )
+        page.on("dialog", lambda dialog: dialog.accept())
+        page.locator("#data-refresh-preview").click()
+        page.locator("#data-refresh-start-button").click()
+        page.wait_for_function("() => window.__dataPollPending === true")
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        page.wait_for_function("() => window.__dataPolls === 2")
+        page.get_by_text("增量同步完成", exact=False).wait_for()
+
+        page.evaluate("window.__resolveOldDataPoll()")
+        page.wait_for_timeout(1_000)
+        assert page.evaluate("window.__dataPolls") == 2
+        assert "增量同步完成" in page.locator("[data-refresh-phase]").inner_text()
         browser.close()
 
 
@@ -4519,6 +4691,55 @@ def test_settings_remount_resumes_weixin_login_without_old_poll_rearm(live_serve
         assert page.evaluate("window.__weixinCalls") == 2
         assert page.locator("#weixin-login-start").is_enabled()
         assert page.locator("#weixin-login-status").inner_text() == "二维码已失效，请重新生成"
+        browser.close()
+
+
+def test_settings_weixin_create_response_survives_navigation_before_session_id(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="automation"]').click()
+        page.evaluate(
+            """() => {
+              const nativeApi = window.QuantMasterAPI;
+              window.__weixinCreatePending = false;
+              window.__weixinCreatePolls = 0;
+              window.__resolveWeixinCreate = null;
+              window.QuantMasterAPI = (input, options = {}) => {
+                const path = new URL(input, location.href).pathname;
+                if (path === '/api/v1/automation/channels/weixin/login' && options.method === 'POST') {
+                  window.__weixinCreatePending = true;
+                  return new Promise(resolve => {
+                    window.__resolveWeixinCreate = () => resolve({
+                      session_id:'wx-created', qrcode_url:'data:image/svg+xml,%3Csvg/%3E',
+                    });
+                  });
+                }
+                if (path === '/api/v1/automation/channels/weixin/login/wx-created') {
+                  window.__weixinCreatePolls += 1;
+                  return Promise.resolve({status:'expired'});
+                }
+                return nativeApi(input, options);
+              };
+            }"""
+        )
+        page.locator("#weixin-login-start").click()
+        page.wait_for_function("() => window.__weixinCreatePending === true")
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.evaluate("window.__resolveWeixinCreate()")
+        page.wait_for_timeout(900)
+        assert page.evaluate("window.__weixinCreatePolls") == 0
+
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        page.wait_for_function("() => window.__weixinCreatePolls === 1")
+        page.get_by_text("二维码已失效，请重新生成", exact=True).wait_for()
+        assert page.locator("#weixin-login-start").is_enabled()
         browser.close()
 
 

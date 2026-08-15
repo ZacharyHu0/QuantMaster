@@ -27,6 +27,7 @@ const settingsFeature = (() => {
     fillingForm: false,
     weixinLoginTimer: null,
     weixinLoginId: '',
+    weixinLoginQr: '',
     lastRuntime: null,
     diagnosticTasks: {},
     contractMigrationTimer: null,
@@ -876,11 +877,12 @@ const settingsFeature = (() => {
     el.textContent = detail || (configured ? '已配置' : '未配置');
   }
 
-  async function loadAutomationOverview() {
-    if (!state.loaded) return;
+  async function loadAutomationOverview(generation = lifecycleGeneration) {
+    if (!state.loaded || !mounted || generation !== lifecycleGeneration) return;
     const runtimeState = document.getElementById('automation-runtime-state');
     try {
       const data = await request('/api/v1/automation/overview');
+      if (!mounted || generation !== lifecycleGeneration) return;
       const runtimeLabels = {running: '运行中', standby: '等待调度租约', disabled: '已停用', degraded: '运行异常'};
       runtimeState.textContent = runtimeLabels[data.runtime] || data.runtime;
       runtimeState.className = `state-pill ${data.runtime === 'running' ? 'buy' : ''}`;
@@ -902,8 +904,10 @@ const settingsFeature = (() => {
       document.getElementById('automation-enable-connect').hidden = !(feishu && !data.enabled);
       document.getElementById('feishu-remove').disabled = !feishu;
       const runtime = await request('/api/v1/settings/runtime');
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderRuntime(runtime);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       runtimeState.textContent = `状态不可用：${error.message}`;
     }
   }
@@ -913,6 +917,16 @@ const settingsFeature = (() => {
     clearTimeout(state.weixinLoginTimer);
     state.weixinLoginId = String(sessionId);
     state.weixinLoginTimer = setTimeout(() => pollWeixinLogin(sessionId, generation), delay);
+  }
+
+  function renderWeixinLoginSession() {
+    if (!state.weixinLoginId) return;
+    const image = document.getElementById('weixin-login-qr');
+    image.src = state.weixinLoginQr;
+    image.hidden = !image.src;
+    document.getElementById('weixin-login-panel').hidden = false;
+    document.getElementById('weixin-login-status').textContent = '请使用微信扫码并确认';
+    document.getElementById('weixin-login-start').disabled = true;
   }
 
   async function pollWeixinLogin(sessionId, generation = lifecycleGeneration) {
@@ -934,10 +948,12 @@ const settingsFeature = (() => {
         clearTimeout(state.weixinLoginTimer);
         state.weixinLoginTimer = null;
         state.weixinLoginId = '';
+        state.weixinLoginQr = '';
         document.getElementById('weixin-login-start').disabled = false;
-        await loadAutomationOverview();
+        await loadAutomationOverview(generation);
       } else if (data.status === 'expired') {
         state.weixinLoginId = '';
+        state.weixinLoginQr = '';
         document.getElementById('weixin-login-start').disabled = false;
       } else {
         scheduleWeixinPoll(sessionId, 700, generation);
@@ -945,6 +961,7 @@ const settingsFeature = (() => {
     } catch (error) {
       if (!mounted || generation !== lifecycleGeneration || state.weixinLoginId !== String(sessionId)) return;
       state.weixinLoginId = '';
+      state.weixinLoginQr = '';
       status.textContent = `登录状态读取失败：${error.message}`;
       document.getElementById('weixin-login-start').disabled = false;
     }
@@ -954,22 +971,24 @@ const settingsFeature = (() => {
     const button = event.currentTarget;
     const panel = document.getElementById('weixin-login-panel');
     const status = document.getElementById('weixin-login-status');
-    const generation = lifecycleGeneration;
     clearTimeout(state.weixinLoginTimer);
     state.weixinLoginId = '';
+    state.weixinLoginQr = '';
     button.disabled = true;
     status.textContent = '正在申请二维码…';
     panel.hidden = false;
     try {
       const data = await request('/api/v1/automation/channels/weixin/login', {method: 'POST'});
-      if (!mounted || generation !== lifecycleGeneration) return;
-      const image = document.getElementById('weixin-login-qr');
-      image.src = data.qrcode_svg || data.qrcode_url;
-      image.hidden = !image.src;
-      status.textContent = '请使用微信扫码并确认';
-      scheduleWeixinPoll(data.session_id, 700, generation);
+      state.weixinLoginId = String(data.session_id || '');
+      state.weixinLoginQr = data.qrcode_svg || data.qrcode_url || '';
+      if (!state.weixinLoginId) throw new Error('微信登录没有返回可跟踪的会话');
+      if (!mounted) return;
+      renderWeixinLoginSession();
+      scheduleWeixinPoll(state.weixinLoginId);
     } catch (error) {
-      if (!mounted || generation !== lifecycleGeneration) return;
+      state.weixinLoginId = '';
+      state.weixinLoginQr = '';
+      if (!mounted) return;
       status.textContent = `二维码生成失败：${error.message}`;
       button.disabled = false;
     }
@@ -1221,15 +1240,18 @@ const settingsFeature = (() => {
     }
   }
 
-  async function pollDataRefresh(id) {
+  async function pollDataRefresh(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.dataRefreshTimer);
     try {
       const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderDataRefresh(task);
-      if (mounted && ['running', 'cancelling'].includes(task.status)) {
-        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id), 800);
+      if (['running', 'cancelling'].includes(task.status)) {
+        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id, generation), 800);
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('data-refresh-progress');
       root.hidden = false;
       root.querySelector('[data-refresh-phase]').textContent = error.message;
@@ -1393,15 +1415,18 @@ const settingsFeature = (() => {
     state.researchId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
   }
 
-  async function pollResearchJob(id) {
+  async function pollResearchJob(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.researchTimer);
     try {
       const task = await request(`/api/v1/research/data/jobs/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       renderResearchJob(task);
-      if (mounted && ['running', 'cancelling'].includes(task.status)) {
-        state.researchTimer = setTimeout(() => pollResearchJob(id), 2000);
+      if (['running', 'cancelling'].includes(task.status)) {
+        state.researchTimer = setTimeout(() => pollResearchJob(id, generation), 2000);
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('research-progress');
       root.hidden = false;
       root.querySelector('[data-research-detail]').textContent = error.message;
@@ -1469,10 +1494,12 @@ const settingsFeature = (() => {
     } finally { event.target.disabled = false; }
   });
 
-  async function pollMigration(id) {
+  async function pollMigration(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.migrationTimer);
     try {
       const task = await request(`/api/v1/data/migrations/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       const root = document.getElementById('migration-progress');
       root.hidden = false;
       root.style.setProperty('--migration-progress', task.progress / 100);
@@ -1480,16 +1507,18 @@ const settingsFeature = (() => {
       root.querySelector('[data-migration-percent]').textContent = `${task.progress}%`;
       state.migrationId = ['pending', 'running', 'cancelling'].includes(task.status)
         ? String(task.id || id) : '';
-      if (mounted && state.migrationId) {
-        state.migrationTimer = setTimeout(() => pollMigration(id), 600);
+      if (state.migrationId) {
+        state.migrationTimer = setTimeout(() => pollMigration(id, generation), 600);
       } else {
         document.getElementById('migration-cancel').hidden = true;
         if (task.status === 'completed') {
           state.loaded = false;
           await loadSettings(true);
+          if (!mounted || generation !== lifecycleGeneration) return;
         }
       }
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       document.querySelector('[data-migration-phase]').textContent = error.message;
     }
   }
@@ -1567,23 +1596,29 @@ const settingsFeature = (() => {
     if (mounted && active) scheduleContractMigrationPoll(task.id);
   }
 
-  function scheduleContractMigrationPoll(id, delay = 800) {
+  function scheduleContractMigrationPoll(id, delay = 800, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.contractMigrationTimer);
-    state.contractMigrationTimer = setTimeout(() => pollContractMigration(id), delay);
+    state.contractMigrationTimer = setTimeout(() => pollContractMigration(id, generation), delay);
   }
 
-  async function pollContractMigration(id) {
+  async function pollContractMigration(id, generation = lifecycleGeneration) {
+    if (!mounted || generation !== lifecycleGeneration) return;
     try {
       const task = await request(`/api/v1/data/contract-migrations/${id}`);
+      if (!mounted || generation !== lifecycleGeneration) return;
       state.contractMigrationFailures = 0;
       renderContractMigration(task);
     } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
       state.contractMigrationFailures += 1;
       if (state.contractMigrationFailures === 1) {
         document.querySelector('[data-contract-phase]').textContent = `状态暂时不可用：${error.message}`;
       }
       if (mounted && state.contractMigrationFailures < 5) {
-        scheduleContractMigrationPoll(id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)));
+        scheduleContractMigrationPoll(
+          id, Math.min(8000, 600 * (2 ** state.contractMigrationFailures)), generation,
+        );
       }
     }
   }
@@ -1679,15 +1714,18 @@ const settingsFeature = (() => {
     if (state.migrationId) void pollMigration(state.migrationId);
     if (state.contractMigrationId) scheduleContractMigrationPoll(state.contractMigrationId, 0);
     if (freeStockDbActive) scheduleFreeStockDbPoll(0);
-    if (state.weixinLoginId) scheduleWeixinPoll(state.weixinLoginId, 0);
+    if (state.weixinLoginId) {
+      renderWeixinLoginSession();
+      scheduleWeixinPoll(state.weixinLoginId, 0);
+    }
   }
 
   async function mountSettings() {
     const resume = state.loaded;
-    lifecycleGeneration += 1;
+    const generation = ++lifecycleGeneration;
     mounted = true;
     await loadSettings();
-    if (resume && mounted) resumeActiveWork();
+    if (resume && mounted && generation === lifecycleGeneration) resumeActiveWork();
   }
 
   const management = {
@@ -1705,6 +1743,7 @@ const settingsFeature = (() => {
     });
     clearTimeout(freeStockDbPollTimer);
     freeStockDbPollTimer = null;
+    document.getElementById('weixin-login-start').disabled = Boolean(state.weixinLoginId);
   }
 
   return {mount:mountSettings, unmount, refresh:() => loadSettings(true), ...management};
