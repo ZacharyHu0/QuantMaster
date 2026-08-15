@@ -28,6 +28,8 @@ const settingsFeature = (() => {
     weixinLoginTimer: null,
     weixinLoginId: '',
     weixinLoginQr: '',
+    weixinLoginCreateSequence: 0,
+    weixinLoginCreatePending: false,
     lastRuntime: null,
     diagnosticTasks: {},
     contractMigrationTimer: null,
@@ -968,10 +970,13 @@ const settingsFeature = (() => {
   }
 
   document.getElementById('weixin-login-start').addEventListener('click', async event => {
+    if (state.weixinLoginCreatePending) return;
     const button = event.currentTarget;
     const panel = document.getElementById('weixin-login-panel');
     const status = document.getElementById('weixin-login-status');
     clearTimeout(state.weixinLoginTimer);
+    const requestSequence = ++state.weixinLoginCreateSequence;
+    state.weixinLoginCreatePending = true;
     state.weixinLoginId = '';
     state.weixinLoginQr = '';
     button.disabled = true;
@@ -979,6 +984,8 @@ const settingsFeature = (() => {
     panel.hidden = false;
     try {
       const data = await request('/api/v1/automation/channels/weixin/login', {method: 'POST'});
+      if (requestSequence !== state.weixinLoginCreateSequence) return;
+      state.weixinLoginCreatePending = false;
       state.weixinLoginId = String(data.session_id || '');
       state.weixinLoginQr = data.qrcode_svg || data.qrcode_url || '';
       if (!state.weixinLoginId) throw new Error('微信登录没有返回可跟踪的会话');
@@ -986,6 +993,8 @@ const settingsFeature = (() => {
       renderWeixinLoginSession();
       scheduleWeixinPoll(state.weixinLoginId);
     } catch (error) {
+      if (requestSequence !== state.weixinLoginCreateSequence) return;
+      state.weixinLoginCreatePending = false;
       state.weixinLoginId = '';
       state.weixinLoginQr = '';
       if (!mounted) return;
@@ -1717,6 +1726,8 @@ const settingsFeature = (() => {
     if (state.weixinLoginId) {
       renderWeixinLoginSession();
       scheduleWeixinPoll(state.weixinLoginId, 0);
+    } else if (state.weixinLoginCreatePending) {
+      document.getElementById('weixin-login-start').disabled = true;
     }
   }
 
@@ -1743,7 +1754,9 @@ const settingsFeature = (() => {
     });
     clearTimeout(freeStockDbPollTimer);
     freeStockDbPollTimer = null;
-    document.getElementById('weixin-login-start').disabled = Boolean(state.weixinLoginId);
+    document.getElementById('weixin-login-start').disabled = Boolean(
+      state.weixinLoginId || state.weixinLoginCreatePending,
+    );
   }
 
   return {mount:mountSettings, unmount, refresh:() => loadSettings(true), ...management};
