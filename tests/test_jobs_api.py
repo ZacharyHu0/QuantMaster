@@ -2,8 +2,8 @@
 
 from fastapi.testclient import TestClient
 
+from quantmaster.backtest.jobs import get_backtest_job_manager
 from quantmaster.backtest.spec import BacktestSpec
-from quantmaster.backtest.workbench import get_backtest_worker
 from quantmaster.data.repair import get_data_repair_manager
 from quantmaster.server.app import app
 
@@ -21,9 +21,10 @@ def _spec(name: str = "统一任务") -> BacktestSpec:
 
 
 def test_unified_jobs_lists_gets_cancels_and_retries_backtests(monkeypatch):
-    worker = get_backtest_worker()
-    monkeypatch.setattr(worker, "start", lambda: None)
-    created = worker.service.store.create(_spec())
+    manager = get_backtest_job_manager()
+    monkeypatch.setattr(manager, "_owns_runtime", lambda: False)
+    monkeypatch.setattr(manager, "start", lambda: None)
+    created = manager.enqueue(_spec())
     client = TestClient(app)
 
     listed = client.get("/api/v1/jobs", params={"domain": "backtests"})
@@ -45,11 +46,12 @@ def test_unified_jobs_lists_gets_cancels_and_retries_backtests(monkeypatch):
         f"/api/v1/jobs/{created['id']}/retry", headers=headers,
     )
     assert retried.status_code == 202
-    assert retried.json()["id"] != created["id"]
+    assert retried.json()["id"] == created["id"]
+    assert retried.json()["attempt"] == 2
     events = client.get(
         f"/api/v1/jobs/{created['id']}/events",
     ).json()["items"]
-    assert any(event["type"] == "retried_as" for event in events)
+    assert any(event["type"] == "job_retried" for event in events)
 
 
 def test_unified_jobs_exposes_repair_events_cancel_and_retry():

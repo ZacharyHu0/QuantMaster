@@ -385,14 +385,14 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     )
     if "data.root" in changed:
         try:
+            from quantmaster.backtest.jobs import get_backtest_job_manager
             from quantmaster.backtest.paper_automation import get_paper_automation_worker
-            from quantmaster.backtest.workbench import get_backtest_worker
             from quantmaster.data.maintenance import data_refresh_manager
             from quantmaster.research.jobs import get_research_job_manager
 
             data_refresh_manager.start()
             get_research_job_manager().start()
-            get_backtest_worker().start()
+            get_backtest_job_manager().start()
             get_paper_automation_worker().start()
             apply_status["data_workers"] = {"status": "applied"}
         except Exception:

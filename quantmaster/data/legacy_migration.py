@@ -115,6 +115,7 @@ def register_builtin_migrations() -> None:
     from quantmaster.after_close.migration import after_close_legacy_migrator
     from quantmaster.ai.news_migration import news_contract_migrator
     from quantmaster.automation.migration import automation_contract_migrator
+    from quantmaster.backtest.job_migration import backtest_job_legacy_migrator
     from quantmaster.backtest.paper_legacy_migration import PaperLegacyMigrator
     from quantmaster.data.job_migration import data_job_legacy_migrator
     from quantmaster.data.legacy_migrations import market_data_legacy_migrator
@@ -135,6 +136,7 @@ def register_builtin_migrations() -> None:
         automation_contract_migrator,
         PaperLegacyMigrator(),
         startup_schema_migrator,
+        backtest_job_legacy_migrator,
         lab_job_legacy_migrator,
         store_schema_migrator,
         research_job_legacy_migrator,

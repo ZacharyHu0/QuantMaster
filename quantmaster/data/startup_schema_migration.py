@@ -11,7 +11,6 @@ from quantmaster.data.legacy_migration import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 _DOMAINS = (
-    ("backtests", "backtests.sqlite"),
     ("jobs", "jobs.sqlite"),
     ("paper", "paper.sqlite"),
 )
@@ -62,26 +61,6 @@ def _probe_jobs(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ..
     return ("upgrade", "startup_schema_upgrade_required", ())
 
 
-def _probe_backtests(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ...]]:
-    tables = _tables(connection)
-    core = {"backtest_runs", "backtest_events"}
-    row = connection.execute(
-        "SELECT value FROM backtest_store_meta WHERE key='schema_version'"
-    ).fetchone() if "backtest_store_meta" in tables else None
-    if row is not None and str(row[0]) == "1":
-        missing = tuple(sorted((core | {"backtest_store_meta"}) - tables))
-        return (
-            ("current", "", ()) if not missing
-            else ("conflict", "current_backtests_schema_corrupt", missing)
-        )
-    if "backtest_store_meta" in tables:
-        return ("conflict", "backtests_schema_version_unclassified", ("schema_version",))
-    missing_core = tuple(sorted(core - tables))
-    if missing_core:
-        return ("conflict", "backtests_schema_generation_unclassified", missing_core)
-    return ("upgrade", "startup_schema_upgrade_required", ())
-
-
 def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ...]]:
     from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION
 
@@ -114,7 +93,6 @@ def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, .
 def _probe(domain: str, connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ...]]:
     return {
         "jobs": _probe_jobs,
-        "backtests": _probe_backtests,
         "paper": _probe_paper,
     }[domain](connection)
 
@@ -147,14 +125,6 @@ def _upgrade(domain: str, path: Path, root: Path) -> None:
         store.read_only = False
         store.artifacts_root = root / "derived" / "job-artifacts"
         store._migrate_legacy_schema()
-    elif domain == "backtests":
-        from quantmaster.backtest.workbench import BacktestStore
-
-        store = BacktestStore.__new__(BacktestStore)
-        store.path = path
-        store.read_only = False
-        store.artifact_root = root / "backtests"
-        store._migrate_legacy_schema()
     else:
         from quantmaster.backtest.paper_accounts import PaperStore
 
@@ -163,7 +133,7 @@ def _upgrade(domain: str, path: Path, root: Path) -> None:
 
 class StartupSchemaMigrator:
     name = "startup-schemas"
-    backup_paths = ("backtests.sqlite", "jobs.sqlite", "paper.sqlite")
+    backup_paths = ("jobs.sqlite", "paper.sqlite")
 
     def inspect(self, root: Path) -> Iterable[MigrationRecord]:
         records: list[MigrationRecord] = []

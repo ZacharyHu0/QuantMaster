@@ -380,9 +380,9 @@ def collect_health_report() -> dict[str, Any]:
         issues.append(_component_failure("Quant Lab"))
 
     try:
-        from quantmaster.backtest.workbench import get_backtest_worker
+        from quantmaster.backtest.jobs import list_backtest_jobs
 
-        latest_runs = get_backtest_worker().service.store.list(1)
+        latest_runs = list_backtest_jobs(1)
         latest = latest_runs[0] if latest_runs else None
         if latest and latest.get("status") in {"queued", "running", "interrupted"}:
             issues.append(make_problem(
