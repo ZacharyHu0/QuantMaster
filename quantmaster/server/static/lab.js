@@ -674,9 +674,10 @@
     const matrix = workbench.matrix || [];
     const selected = matrix.find(item => Number(item.horizon) === Number(state.selectedHorizon)) || matrix[0] || {};
     state.selectedHorizon = Number(selected.horizon || state.selectedHorizon);
-    document.getElementById('lab-strategy-horizons').innerHTML = (workbench.horizons || []).map(value =>
-      `<button type="button" role="tab" data-strategy-horizon="${value}" aria-selected="${Number(value) === state.selectedHorizon}">${value} 日</button>`
-    ).join('');
+    document.getElementById('lab-strategy-horizons').innerHTML = (workbench.horizons || []).map(value => {
+      const horizon = Number(value);
+      return `<button type="button" role="tab" data-strategy-horizon="${horizon}" aria-selected="${horizon === state.selectedHorizon}">${horizon} 日</button>`;
+    }).join('');
     const metrics = selected.metrics || {};
     const failures = selected.gates?.failures || [];
     const promotion = selected.status === 'shadow_challenger'
@@ -693,7 +694,7 @@
       ['Paper', funnel.paper || 0], ['Champion', funnel.champion || 0],
       ['降级/退役', (funnel.degraded || 0) + (funnel.retired || 0)],
     ];
-    document.getElementById('lab-strategy-funnel').innerHTML = funnelStages.map(item => `<div><b>${item[1]}</b><span>${item[0]}</span></div>`).join('');
+    document.getElementById('lab-strategy-funnel').innerHTML = funnelStages.map(item => `<div><b>${Number(item[1])}</b><span>${h(item[0])}</span></div>`).join('');
     const portfolio = workbench.portfolio || {};
     const actionSource = document.getElementById('lab-action-source');
     if (actionSource) {
@@ -705,7 +706,10 @@
     const actions = (workbench.latest_actions || []).filter(item => Number(item.horizon) === state.selectedHorizon);
     const actionLabels = {buy:'买入', add:'加仓', hold:'持有', reduce:'减仓', exit:'退出', review:'人工复核'};
     document.getElementById('lab-action-list').innerHTML = actions.length ? actions.map(item => `<div class="lab-action-row"><b>${h(item.symbol)}</b><strong class="${h(item.action)}">${h(actionLabels[item.action] || item.action)}</strong><span>当前 ${percent(item.current_weight)}</span><span>目标 ${percent(item.target_weight)}</span><span>差异 ${percent(item.difference)}</span></div>`).join('') : '<div class="lab-empty">该周期尚无最新影子动作；数据不足时不会强制退出。</div>';
-    document.getElementById('lab-horizon-matrix').innerHTML = matrix.map(item => `<button type="button" class="lab-horizon-cell ${Number(item.horizon) === state.selectedHorizon ? 'active' : ''}" data-strategy-horizon="${item.horizon}"><b>${item.horizon}D</b><span>${h(statusLabel[item.status] || item.status)}</span><small>${item.strategy_id ? `${percent(item.metrics?.net_annual_excess_return)} · IR ${number(item.metrics?.net_information_ratio)}` : h(item.outcome?.reason || '等待组合')}</small></button>`).join('');
+    document.getElementById('lab-horizon-matrix').innerHTML = matrix.map(item => {
+      const horizon = Number(item.horizon);
+      return `<button type="button" class="lab-horizon-cell ${horizon === state.selectedHorizon ? 'active' : ''}" data-strategy-horizon="${horizon}"><b>${horizon}D</b><span>${h(statusLabel[item.status] || item.status)}</span><small>${item.strategy_id ? `${percent(item.metrics?.net_annual_excess_return)} · IR ${number(item.metrics?.net_information_ratio)}` : h(item.outcome?.reason || '等待组合')}</small></button>`;
+    }).join('');
     renderReturnChart(workbench.return_curve || {});
   }
 
@@ -799,7 +803,7 @@
       const resource = job.resource_class || job.preflight?.resource_class || 'cpu';
       return `<tr>
       <td><button class="lab-job-link" type="button" data-job-detail="${h(job.id)}">${h(kindLabel[job.kind] || job.kind)}</button></td><td><span class="lab-status ${h(job.status)}">${h(statusLabel[job.status] || job.status)}</span></td>
-      <td>${h(resource.toUpperCase())} · ${h(device)}</td><td title="${h(jobPhase(job))}">${h(jobPhase(job))}</td><td>${job.progress || 0}%</td><td>${h(formatDate(job.created_at))}</td>
+      <td>${h(resource.toUpperCase())} · ${h(device)}</td><td title="${h(jobPhase(job))}">${h(jobPhase(job))}</td><td>${Number(job.progress || 0)}%</td><td>${h(formatDate(job.created_at))}</td>
       <td class="lab-job-actions"><button type="button" data-job-detail="${h(job.id)}">查看</button>${activeJobStatuses.has(job.status) ? `<button class="danger" type="button" data-cancel-job="${h(job.id)}">取消</button>` : ''}</td></tr>`;
     }).join('')}</tbody></table></div>`;
   }
@@ -1150,7 +1154,7 @@
         <button type="button" data-factor-version="${h(item.version_id)}">
           <div class="lab-factor-item-head"><b>${h(item.name)}</b><span>${h(statusLabel[item.status] || item.status)}</span></div>
           <p>${h(item.spec?.description || item.spec?.rationale || '尚未填写因子含义')}</p>
-          <code>${h(item.spec?.expression || item.slug)}</code><small>V${item.version} · ${h(item.category)} · ${h(item.kind)} · ${h(validation)}</small>
+          <code>${h(item.spec?.expression || item.slug)}</code><small>V${Number(item.version || 0)} · ${h(item.category)} · ${h(item.kind)} · ${h(validation)}</small>
         </button></div>`;
     }).join('');
     syncCorrelationControls();
@@ -1354,7 +1358,7 @@
     const protocol = result.protocol || study.config?.protocol || {};
     const sealed = result.sealed_holdout || {};
     const foldCount = Number(protocol.development_folds || 3);
-    const folds = Array.from({length: foldCount}, (_, index) => `<div><span>DEV ${String(index + 1).padStart(2, '0')}</span><b>Purged fold</b><small>${protocol.test_window || 244} 交易日 · ${index + 1}/${foldCount}</small></div>`).join('');
+    const folds = Array.from({length: foldCount}, (_, index) => `<div><span>DEV ${String(index + 1).padStart(2, '0')}</span><b>Purged fold</b><small>${Number(protocol.test_window || 244)} 交易日 · ${index + 1}/${foldCount}</small></div>`).join('');
     const sealedMetrics = result.sealed_metrics || {};
     const recommended = result.recommended || null;
     const feasible = (result.trials || []).filter(item => item.feasible);
@@ -1364,7 +1368,7 @@
       <div class="lab-fold-timeline">${folds}<div><span>SEALED</span><b>${sealed.test_start ? `${h(sealed.test_start)} → ${h(sealed.test_end)}` : '等待锁参'}</b><small>只评估一次 · 不回流选参</small></div></div>
       <div class="lab-study-evidence"><div><span>可行 / Pareto</span><b>${feasible.length} / ${pareto.length}</b></div><div><span>净信息比率</span><b>${number(sealedMetrics.net_information_ratio, 2)}</b></div><div><span>RankIC</span><b>${number(sealedMetrics.rank_ic, 4)}</b></div><div><span>最大回撤</span><b>${sealedMetrics.max_drawdown == null ? '—' : number(sealedMetrics.max_drawdown * 100, 1) + '%'}</b></div></div>
       <div class="pareto-heading lab-block-head"><div><span>FEASIBLE FRONT</span><h4>锁参依据</h4></div><span class="lab-beta">${recommended ? h(String(recommended.params?.model || '').toUpperCase()) : 'WAITING'}</span></div>
-      <div class="lab-pareto-list">${trials.length ? trials.map(item => `<div class="${recommended?.number === item.number ? 'recommended' : ''}"><span>#${item.number}</span><b>${h(item.params?.model || '—')}</b><span>IR ${number(item.metrics?.net_information_ratio, 2)}</span><span>IC ${number(item.metrics?.rank_ic, 3)}</span><span>DD ${number((item.metrics?.max_drawdown || 0) * 100, 1)}%</span></div>`).join('') : '<div><span>—</span><b>尚无满足 FDR、稳定性与成本门槛的 Trial</b><span></span><span></span><span></span></div>'}</div>
+      <div class="lab-pareto-list">${trials.length ? trials.map(item => `<div class="${recommended?.number === item.number ? 'recommended' : ''}"><span>#${Number(item.number)}</span><b>${h(item.params?.model || '—')}</b><span>IR ${number(item.metrics?.net_information_ratio, 2)}</span><span>IC ${number(item.metrics?.rank_ic, 3)}</span><span>DD ${number((item.metrics?.max_drawdown || 0) * 100, 1)}%</span></div>`).join('') : '<div><span>—</span><b>尚无满足 FDR、稳定性与成本门槛的 Trial</b><span></span><span></span><span></span></div>'}</div>
       <div class="lab-study-actions">${result.version_id ? `<button type="button" data-factor-version="${h(result.version_id)}">查看 Shadow 候选</button>` : ''}${['paused','failed','interrupted'].includes(study.status) ? `<button type="button" data-resume-study="${h(study.id)}">从检查点恢复</button>` : ''}${study.job_id ? `<button type="button" data-job-detail="${h(study.job_id)}">打开任务时间线</button>` : ''}</div>`;
   }
 
