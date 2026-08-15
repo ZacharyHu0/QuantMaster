@@ -21,10 +21,11 @@
    Ready 后才运行。
 3. 运行 `python scripts/dev/github_sync.py reconcile`（默认 dry-run）检查 Issue/PR 状态；
    脚本列出的安全修复用 `--apply` 执行。需要人工决策的项必须处理到有明确结论。
-4. 开发完成后只对齐一次 integration baseline，运行 `tasks.py ready --accept-ci` 复用同一
-   commit 的绿色 GitHub Actions 证据；无 CI/网络时才本地运行 `tasks.py ready`。随后标记
-   Ready，等待完整 CI 与审查。
-5. 任何修复都在同一任务分支完成；涉及 UI、Rust 或打包时在 PR 中勾选相应 Ready lane。
+4. 开发完成后只对齐一次 integration baseline，并在 PR 仍为 Draft 时推送该 commit；先等待
+   Draft fast/core 通过，再标记 Ready，由 `ready_for_review` 触发完整 CI。
+5. 完整 CI 对同一 commit 全绿后，运行 `tasks.py ready --accept-ci` 复用 GitHub Actions 证据；
+   无 CI/网络时才本地运行 `tasks.py ready`。审查通过后执行 squash merge。
+6. 任何修复都在同一任务分支完成；涉及 UI、Rust 或打包时在 PR 中勾选相应 Ready lane。
    修复后重新验证受影响证据，不要盲目重跑全套。
 
 PR 是代码变更的权威验证报告，Issue 是范围与依赖的权威记录，Project 是阶段状态视图。

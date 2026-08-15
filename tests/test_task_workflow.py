@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
@@ -33,6 +34,11 @@ from scripts.dev.tasks import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _assert_ordered(text: str, *needles: str) -> None:
+    positions = [text.index(needle) for needle in needles]
+    assert positions == sorted(positions)
 
 
 def _hold_direct_pytest_task_lease(primary: str, ready, release) -> None:
@@ -373,6 +379,78 @@ def test_impact_map_references_existing_tests():
 
 def test_ready_state_accepts_clean_current_task_branch():
     validate_ready_state("codex/storage-fix", "", False, ["quantmaster/data/storage.py"])
+
+
+def test_ready_for_review_event_escalates_the_pull_request_ci_matrix() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+
+    assert workflow["on"]["pull_request"]["types"] == [
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+        "converted_to_draft",
+    ]
+    assert workflow["on"]["push"]["branches"] == ["main", "claude/**"]
+    jobs = workflow["jobs"]
+    assert jobs["fast-gate"]["if"] == (
+        "github.event_name == 'pull_request' && github.event.pull_request.draft == true"
+    )
+    assert "if" not in jobs["core"]
+    for job in (
+        "rust-quality",
+        "native-parity",
+        "coverage-shard",
+        "coverage",
+        "browser",
+        "windows-package",
+        "quality-package-audit",
+    ):
+        assert jobs[job]["if"] == "github.event.pull_request.draft != true"
+    assert workflow["concurrency"] == {
+        "group": "ci-${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+
+
+def test_documented_integration_order_has_no_ready_accept_ci_cycle() -> None:
+    contracts = {
+        "AGENTS.md": (
+            "Push the aligned commit while the PR is still Draft",
+            "Draft fast/core",
+            "mark the PR Ready",
+            "full CI matrix",
+            "`tasks.py ready --accept-ci`",
+            "squash-merge",
+        ),
+        "docs/development-workflow.md": (
+            "Push the aligned commit while the PR is still Draft",
+            "Draft fast/core",
+            "mark the PR Ready",
+            "full CI matrix",
+            "`tasks.py ready --accept-ci`",
+            "squash-merge",
+        ),
+        "docs/github-workflow.md": (
+            "Draft fast/core",
+            "标记 Ready",
+            "完整 CI",
+            "`tasks.py ready --accept-ci`",
+            "squash merge",
+        ),
+        ".github/pull_request_template.md": (
+            "Draft fast/core",
+            "标记 Ready",
+            "完整 CI",
+            "tasks.py ready --accept-ci",
+            "squash merge",
+        ),
+    }
+    for relative, needles in contracts.items():
+        _assert_ordered((ROOT / relative).read_text(encoding="utf-8"), *needles)
 
 
 def test_ready_state_rejects_main_dirty_behind_and_version_changes():
