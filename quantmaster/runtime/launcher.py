@@ -8,7 +8,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from quantmaster.runtime.activation import FULL_SHA, ActivationBlocked, installed_app_root
+from quantmaster.runtime.activation import (
+    FULL_SHA,
+    ActivationBlocked,
+    _is_link,
+    installed_app_root,
+)
 
 STABLE_LAUNCHER_NAME = "QuantMaster Stable Launcher.cmd"
 SHORTCUT_NAME = "QuantMaster.lnk"
@@ -45,11 +50,18 @@ def read_launcher_target(app_root: str | Path | None = None) -> str:
 def stable_slot_executable(app_root: str | Path | None = None) -> Path:
     """Resolve the active executable without consulting checkout or Python."""
 
-    root = Path(app_root).resolve() if app_root is not None else installed_app_root()
+    raw_root = Path(app_root) if app_root is not None else installed_app_root()
+    if _is_link(raw_root):
+        raise ActivationBlocked("active_slot_unavailable", "稳定 launcher target 对应的不可变槽不可用")
+    root = raw_root.resolve()
     build_sha = read_launcher_target(root)
-    slot = root / "slots" / build_sha
+    slots = root / "slots"
+    slot = slots / build_sha
     executable = slot / "QuantMaster.exe"
-    if not slot.is_dir() or slot.is_symlink() or not executable.is_file() or executable.is_symlink():
+    if (
+        _is_link(slots) or not slot.is_dir() or _is_link(slot)
+        or not executable.is_file() or _is_link(executable)
+    ):
         raise ActivationBlocked("active_slot_unavailable", "稳定 launcher target 对应的不可变槽不可用")
     return executable
 
@@ -68,19 +80,35 @@ def _launcher_script() -> str:
     # %~dp0 is the fixed installed app root.  launcher.target is the only
     # mutable input, and it is validated as a full lowercase SHA before the
     # target is expanded into a command path.
-    sha_pattern = "".join("[0-9a-f]" for _ in range(40))
     return (
         "@echo off\r\n"
         "setlocal EnableExtensions DisableDelayedExpansion\r\n"
         "set \"QM_APP_ROOT=%~dp0\"\r\n"
+        "set \"QM_APP_DIR=%QM_APP_ROOT:~0,-1%\"\r\n"
+        "\"%SystemRoot%\\System32\\fsutil.exe\" reparsepoint query "
+        "\"%QM_APP_DIR%\" >nul 2>&1 && exit /b 6\r\n"
         "set \"QM_TARGET=\"\r\n"
-        f"\"%SystemRoot%\\System32\\findstr.exe\" /r /x \"{sha_pattern}\" "
+        "set \"QM_LINES=\"\r\n"
+        "for /f %%N in ('%SystemRoot%\\System32\\findstr.exe /n \"^\" "
+        "\"%QM_APP_ROOT%launcher.target\" ^| %SystemRoot%\\System32\\find.exe /c \":\"') "
+        "do set \"QM_LINES=%%N\"\r\n"
+        "if not \"%QM_LINES%\"==\"1\" exit /b 3\r\n"
+        "\"%SystemRoot%\\System32\\findstr.exe\" /r /x \"[0-9a-f]*\" "
         "\"%QM_APP_ROOT%launcher.target\" >nul 2>&1\r\n"
         "if errorlevel 1 exit /b 3\r\n"
         "for /f \"usebackq delims=\" %%A in (\"%QM_APP_ROOT%launcher.target\") do set \"QM_TARGET=%%A\"\r\n"
-        "set \"QM_SLOT=%QM_APP_ROOT%slots\\%QM_TARGET%\"\r\n"
+        "if not defined QM_TARGET exit /b 3\r\n"
+        "if \"%QM_TARGET:~39,1%\"==\"\" exit /b 3\r\n"
+        "if not \"%QM_TARGET:~40,1%\"==\"\" exit /b 3\r\n"
+        "set \"QM_SLOTS=%QM_APP_ROOT%slots\"\r\n"
+        "if not exist \"%QM_SLOTS%\\\" exit /b 4\r\n"
+        "\"%SystemRoot%\\System32\\fsutil.exe\" reparsepoint query \"%QM_SLOTS%\" >nul 2>&1 && exit /b 6\r\n"
+        "set \"QM_SLOT=%QM_SLOTS%\\%QM_TARGET%\"\r\n"
+        "if not exist \"%QM_SLOT%\\\" exit /b 4\r\n"
+        "\"%SystemRoot%\\System32\\fsutil.exe\" reparsepoint query \"%QM_SLOT%\" >nul 2>&1 && exit /b 6\r\n"
         "set \"QM_EXE=%QM_SLOT%\\QuantMaster.exe\"\r\n"
         "if not exist \"%QM_EXE%\" exit /b 4\r\n"
+        "\"%SystemRoot%\\System32\\fsutil.exe\" reparsepoint query \"%QM_EXE%\" >nul 2>&1 && exit /b 6\r\n"
         "pushd \"%QM_SLOT%\" >nul || exit /b 5\r\n"
         "\"%QM_EXE%\" serve %*\r\n"
         "set \"QM_EXIT_CODE=%ERRORLEVEL%\"\r\n"
