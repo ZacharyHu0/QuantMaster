@@ -1,10 +1,9 @@
-"""Durable, rate-limited repair queue for rebuildable local data artifacts."""
+"""Rate-limited repair handlers backed by the unified job lifecycle."""
 
 from __future__ import annotations
 
 import builtins
 import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -12,18 +11,26 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
-from quantmaster.runtime.jobs import WorkerIdentity, lease_deadline
+from quantmaster.runtime.jobs import (
+    JobContext,
+    JobOutcome,
+    UnifiedJobRuntime,
+    UnifiedJobStore,
+)
 from quantmaster.runtime.json import strict_json_dumps
-from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
-
 RepairHandler = Callable[[dict[str, Any]], dict[str, Any] | None]
+DATA_REPAIR_TASK_TYPE = "data.repair"
+REPAIR_RESULT_KIND = "data.repair.result"
+REPAIR_FAILURE_CHECKPOINT = "data.repair.failure"
 
 
 def _canonical(value: dict[str, Any]) -> str:
@@ -43,7 +50,6 @@ def _file_sha256(path: Path) -> str:
 
 
 def _sync_directory(path: Path) -> None:
-    """Best-effort directory fsync; Windows does not expose it through ``os.open``."""
     if os.name == "nt":
         return
     descriptor = os.open(path, os.O_RDONLY)
@@ -61,6 +67,7 @@ def quarantine_file(
     reason: str,
 ) -> dict[str, Any] | None:
     """Move an original aside atomically and persist an audit manifest beside it."""
+
     source = Path(path).resolve()
     if not source.is_file():
         return None
@@ -69,8 +76,7 @@ def quarantine_file(
     quarantine.mkdir(parents=True, exist_ok=True)
     content_sha256 = _file_sha256(source)
     file_size = source.stat().st_size
-    token = uuid.uuid4().hex
-    destination = quarantine / f"{source.name}.{token}.quarantine"
+    destination = quarantine / f"{source.name}.{uuid.uuid4().hex}.quarantine"
     os.replace(source, destination)
     _sync_directory(source.parent)
     _sync_directory(quarantine)
@@ -94,105 +100,56 @@ def quarantine_file(
 
 
 class DataRepairManager:
-    """Persistent repair scheduler with leases, backoff, budgets and audit events."""
+    """Own repair admission and handlers while the kernel owns lifecycle state."""
 
-    def __init__(self, path: str | Path | None = None, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        read_only: bool = False,
+        runtime: UnifiedJobRuntime | None = None,
+    ) -> None:
         self._explicit_path = Path(path) if path is not None else None
         self.read_only = bool(read_only)
-        self.identity = WorkerIdentity.create("data-repair")
+        self._runtime = runtime
+        self._fixed_runtime = runtime is not None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._wakeup = threading.Event()
         self._workers: list[threading.Thread] = []
         self._handlers: dict[str, RepairHandler] = {}
-        self._initialized: set[str] = set()
-        if not self.read_only:
-            self._register_builtin_handlers()
-            self._ensure_schema()
+        self._register_builtin_handlers()
+        if runtime is not None:
+            runtime.register(DATA_REPAIR_TASK_TYPE, self._handle)
 
     def _path(self) -> Path:
-        return self._explicit_path or get_config().data_root / "data_repairs.sqlite"
+        return self._explicit_path or get_config().data_root / "jobs.sqlite"
 
-    def _conn(self) -> sqlite3.Connection:
-        connection = connect_sqlite(
-            self._path(),
-            timeout=0.25 if self.read_only else 5.0,
-            row_factory=True,
-            read_only=self.read_only,
-        )
-        if not self.read_only:
-            self._initialize(connection)
-        return connection
-
-    def _ensure_schema(self) -> None:
-        with self._conn():
-            pass
-
-    def _initialize(self, connection: sqlite3.Connection) -> None:
-        key = str(self._path().resolve())
+    def _ensure_runtime(self) -> UnifiedJobRuntime:
+        if self.read_only:
+            raise RuntimeError("只读修复投影不能执行任务")
+        path = self._path()
         with self._lock:
-            if key in self._initialized:
-                return
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS data_repairs (
-                    id TEXT PRIMARY KEY,
-                    kind TEXT NOT NULL,
-                    target TEXT NOT NULL,
-                    idempotency_key TEXT NOT NULL UNIQUE,
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    spec_json TEXT NOT NULL,
-                    attempt INTEGER NOT NULL DEFAULT 0,
-                    max_attempts INTEGER NOT NULL,
-                    next_run REAL NOT NULL,
-                    cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    owner TEXT NOT NULL DEFAULT '',
-                    lease_expires REAL NOT NULL DEFAULT 0,
-                    last_error TEXT NOT NULL DEFAULT '',
-                    result_json TEXT NOT NULL DEFAULT '{}',
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    completed_at REAL NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS idx_data_repairs_due
-                    ON data_repairs(status,next_run,created_at);
-                CREATE TABLE IF NOT EXISTS data_repair_events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                    repair_id TEXT NOT NULL,
-                    attempt INTEGER NOT NULL,
-                    event_json TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    FOREIGN KEY(repair_id) REFERENCES data_repairs(id)
-                );
-                CREATE TABLE IF NOT EXISTS data_repair_budget (
-                    day TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    attempts INTEGER NOT NULL,
-                    PRIMARY KEY(day,source)
-                );
-                """
+            if self._runtime is not None:
+                same_root = self._runtime.store.path.resolve() == path.resolve()
+                if self._fixed_runtime or same_root:
+                    return self._runtime
+                if not self._runtime.idle:
+                    raise RuntimeError("数据修复仍在旧数据目录运行，拒绝切换任务账本")
+                self._runtime.stop()
+            self._runtime = UnifiedJobRuntime(
+                UnifiedJobStore(path),
+                max_workers=max(1, min(int(get_config().data.repair_max_workers), 8)),
+                dispatch=False,
             )
-            columns = {
-                row[1] for row in connection.execute(
-                    "PRAGMA table_info(data_repairs)"
-                ).fetchall()
-            }
-            if "cancel_requested" not in columns:
-                connection.execute(
-                    "ALTER TABLE data_repairs ADD COLUMN "
-                    "cancel_requested INTEGER NOT NULL DEFAULT 0"
-                )
-            now = time.time()
-            connection.execute(
-                "UPDATE data_repairs SET status='queued',owner='',lease_expires=0,"
-                "next_run=MIN(next_run,?),updated_at=? WHERE status='running' "
-                "AND lease_expires<=?",
-                (now, now, now),
-            )
-            connection.commit()
-            self._initialized.add(key)
+            self._runtime.register(DATA_REPAIR_TASK_TYPE, self._handle)
+            return self._runtime
+
+    def _read_store(self) -> UnifiedJobStore:
+        if self._runtime is not None:
+            if self._fixed_runtime or self._runtime.store.path.resolve() == self._path().resolve():
+                return self._runtime.store
+        return UnifiedJobStore(self._path(), read_only=True)
 
     def register_handler(self, kind: str, handler: RepairHandler) -> None:
         self._handlers[str(kind)] = handler
@@ -201,6 +158,10 @@ class DataRepairManager:
         self.register_handler("bar", self._repair_bar)
         self.register_handler("api_cache", self._repair_api_cache)
         self.register_handler("research_partition", self._repair_research_partition)
+
+    @staticmethod
+    def _business_key(kind: str, target: str) -> str:
+        return f"repair:{_idempotency_key(kind, target)}"
 
     def enqueue(
         self,
@@ -211,324 +172,245 @@ class DataRepairManager:
         spec: dict[str, Any],
         source: str = "unknown",
     ) -> dict[str, Any]:
-        """Create one active repair per logical target without rewriting its specification."""
-        now = time.time()
-        key = _idempotency_key(kind, target)
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM data_repairs WHERE idempotency_key=?", (key,),
-            ).fetchone()
-            if row is None:
-                repair_id = uuid.uuid4().hex
-                maximum = max(1, int(get_config().data.repair_max_attempts))
-                connection.execute(
-                    "INSERT INTO data_repairs "
-                    "(id,kind,target,idempotency_key,source,status,reason,spec_json,"
-                    "max_attempts,next_run,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,'queued',?,?,?,?,?,?)",
-                    (
-                        repair_id, kind, target, key, source, reason, _canonical(spec),
-                        maximum, now, now, now,
-                    ),
-                )
-                self._event(connection, repair_id, 0, {"type": "queued", "reason": reason})
-            else:
-                repair_id = str(row["id"])
-                if row["status"] in {"completed", "quarantined"}:
-                    return self._decode(row)
-                connection.execute(
-                    "UPDATE data_repairs SET reason=?,updated_at=? WHERE id=?",
-                    (reason, now, repair_id),
-                )
-        self._wakeup.set()
-        return self.get(repair_id)
-
-    @staticmethod
-    def _event(
-        connection: sqlite3.Connection,
-        repair_id: str,
-        attempt: int,
-        payload: dict[str, Any],
-    ) -> None:
-        connection.execute(
-            "INSERT INTO data_repair_events(repair_id,attempt,event_json,created_at) "
-            "VALUES (?,?,?,?)",
-            (repair_id, attempt, _canonical(payload), time.time()),
+        runtime = self._ensure_runtime()
+        key = self._business_key(kind, target)
+        existing = runtime.store.find_business_job(DATA_REPAIR_TASK_TYPE, key)
+        if existing is None:
+            existing, _created = runtime.store.submit(
+                DATA_REPAIR_TASK_TYPE,
+                {
+                    "kind": str(kind),
+                    "target": str(target),
+                    "source": str(source),
+                    "reason": str(reason),
+                    "repair_spec": dict(spec),
+                },
+                business_key=key,
+                max_attempts=max(1, int(get_config().data.repair_max_attempts)),
+                deadline_seconds=600,
+            )
+        runtime.store.append_event(
+            str(existing["id"]), "data_repair_evidence",
+            {"reason": str(reason)[:1000], "source": str(source)[:100]},
         )
+        self._wakeup.set()
+        return self.get(str(existing["id"]))
 
     @staticmethod
-    def _decode(row: sqlite3.Row) -> dict[str, Any]:
-        value = dict(row)
-        value["spec"] = json.loads(value.pop("spec_json"))
-        value["result"] = json.loads(value.pop("result_json"))
-        value.pop("idempotency_key", None)
+    def _latest_reason(store: UnifiedJobStore, job: dict[str, Any]) -> str:
+        events = store.events(str(job["id"]), 0, 2000)
+        for event in reversed(events):
+            if event["type"] == "data_repair_evidence":
+                return str((event.get("payload") or {}).get("reason") or "")
+        return str((job.get("spec") or {}).get("reason") or "")
+
+    def _project(self, store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
+        if str(job.get("type")) != DATA_REPAIR_TASK_TYPE:
+            raise KeyError(str(job.get("id") or ""))
+        spec = dict(job["spec"])
+        artifact = store.latest_artifact(str(job["id"]), REPAIR_RESULT_KIND)
+        payload = dict(artifact["payload"]) if artifact else {}
+        failure = store.checkpoint(
+            str(job["id"]), REPAIR_FAILURE_CHECKPOINT, str(job["spec_hash"]),
+        ) or {}
+        value = UnifiedJobRuntime.public(job)
+        value.update({
+            "kind": spec.get("kind"),
+            "target": spec.get("target"),
+            "source": spec.get("source"),
+            "reason": self._latest_reason(store, job),
+            "spec": dict(spec.get("repair_spec") or {}),
+            "result": dict(payload.get("result") or {}),
+            "outcome": str(payload.get("outcome") or ""),
+            "last_error": str(failure.get("error") or job.get("detail") or ""),
+            "next_run": float(job.get("next_retry_at") or 0),
+            "completed_at": str(job.get("finished_at") or ""),
+        })
         return value
 
     def get(self, repair_id: str) -> dict[str, Any]:
-        with self._conn() as connection:
-            row = connection.execute(
-                "SELECT * FROM data_repairs WHERE id=?", (repair_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(repair_id)
-        return self._decode(row)
+        try:
+            store = self._read_store()
+            return self._project(store, store.get(repair_id))
+        except (FileNotFoundError, sqlite3.Error) as exc:
+            raise KeyError(repair_id) from exc
 
     def list(self, *, status: str = "", limit: int = 100) -> list[dict[str, Any]]:
-        query = "SELECT * FROM data_repairs"
-        params: builtins.list[Any] = []
-        if status:
-            query += " WHERE status=?"
-            params.append(status)
-        query += " ORDER BY created_at DESC LIMIT ?"
-        params.append(max(1, min(int(limit), 1000)))
-        with self._conn() as connection:
-            rows = connection.execute(query, params).fetchall()
-        return [self._decode(row) for row in rows]
+        try:
+            store = self._read_store()
+            values = [
+                self._project(store, job)
+                for job in store.list(limit, job_type=DATA_REPAIR_TASK_TYPE)
+            ]
+        except (FileNotFoundError, sqlite3.Error):
+            return []
+        return [value for value in values if not status or value["status"] == status]
 
     def events(self, repair_id: str, after: int = 0) -> builtins.list[dict[str, Any]]:
-        with self._conn() as connection:
-            rows = connection.execute(
-                "SELECT seq,attempt,event_json,created_at FROM data_repair_events "
-                "WHERE repair_id=? AND seq>? ORDER BY seq LIMIT 2000",
-                (repair_id, max(0, int(after))),
-            ).fetchall()
-        return [
-            {
-                "seq": row["seq"], "attempt": row["attempt"],
-                "created_at": row["created_at"], **json.loads(row["event_json"]),
-            }
-            for row in rows
-        ]
+        store = self._read_store()
+        self._project(store, store.get(repair_id))
+        return store.events(repair_id, after, 2000)
 
     def retry(self, repair_id: str) -> dict[str, Any]:
-        now = time.time()
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT status,attempt FROM data_repairs WHERE id=?", (repair_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(repair_id)
-            if row["status"] not in {"failed", "quarantined", "cancelled"}:
-                raise ValueError("只有失败、已隔离或已取消的修复任务可以重试")
-            attempt = int(row["attempt"])
-            connection.execute(
-                "UPDATE data_repairs SET status='queued',next_run=?,owner='',"
-                "lease_expires=0,last_error='',completed_at=0,cancel_requested=0,"
-                "updated_at=? WHERE id=?",
-                (now, now, repair_id),
-            )
-            self._event(connection, repair_id, attempt, {"type": "retried"})
+        runtime = self._ensure_runtime()
+        self._project(runtime.store, runtime.store.get(repair_id))
+        runtime.store.retry(repair_id)
         self._wakeup.set()
         return self.get(repair_id)
 
     def resolve(
         self, kind: str, target: str, *, result: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Close a stale repair after an independent integrity check succeeds."""
-        now = time.time()
-        key = _idempotency_key(kind, target)
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT * FROM data_repairs WHERE idempotency_key=?", (key,),
-            ).fetchone()
-            if row is None:
-                return None
-            status = str(row["status"])
-            if status == "completed":
-                return self._decode(row)
-            if status not in {"queued", "failed", "cancelled", "quarantined"}:
-                return self._decode(row)
-            repair_id = str(row["id"])
-            attempt = int(row["attempt"])
-            connection.execute(
-                "UPDATE data_repairs SET status='completed',owner='',lease_expires=0,"
-                "result_json=?,last_error='',completed_at=?,updated_at=?,"
-                "cancel_requested=0 WHERE id=?",
-                (_canonical(result), now, now, repair_id),
-            )
-            self._event(connection, repair_id, attempt, {
-                "type": "resolved_by_validation", "result": result,
-            })
-        return self.get(repair_id)
+        runtime = self._ensure_runtime()
+        job = runtime.store.find_business_job(
+            DATA_REPAIR_TASK_TYPE, self._business_key(kind, target),
+        )
+        if job is None:
+            return None
+        if job["status"] == "completed":
+            return self.get(str(job["id"]))
+        if job["status"] in {"running", "cancelling"}:
+            return self.get(str(job["id"]))
+        artifact = runtime.store.write_artifact(
+            str(job["id"]), REPAIR_RESULT_KIND,
+            {"schema_version": "1.0", "outcome": "resolved_by_validation", "result": result},
+            {"schema_version": "1.0", "lineage": {"spec_hash": job["spec_hash"]}},
+        )
+        runtime.store.complete_from_evidence(
+            str(job["id"]),
+            JobOutcome("completed", "独立完整性检查已确认修复", str(artifact["id"])),
+        )
+        return self.get(str(job["id"]))
 
     def cancel(self, repair_id: str) -> dict[str, Any]:
-        now = time.time()
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT status,attempt FROM data_repairs WHERE id=?", (repair_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(repair_id)
-            status = str(row["status"])
-            if status == "queued":
-                connection.execute(
-                    "UPDATE data_repairs SET status='cancelled',cancel_requested=1,"
-                    "updated_at=? WHERE id=?", (now, repair_id),
-                )
-                event = "cancelled"
-            elif status == "running":
-                connection.execute(
-                    "UPDATE data_repairs SET status='cancelling',cancel_requested=1,"
-                    "updated_at=? WHERE id=?", (now, repair_id),
-                )
-                event = "cancel_requested"
-            elif status in {"cancelling", "cancelled"}:
-                return self.get(repair_id)
-            else:
-                raise ValueError("当前修复任务不能取消")
-            self._event(connection, repair_id, int(row["attempt"]), {"type": event})
+        runtime = self._ensure_runtime()
+        self._project(runtime.store, runtime.store.get(repair_id))
+        runtime.store.cancel(repair_id)
         return self.get(repair_id)
 
-    def _claim(self) -> dict[str, Any] | None:
-        now = time.time()
-        today = market_date().isoformat()
-        budget = max(0, int(get_config().data.repair_daily_budget))
-        with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
-                "SELECT * FROM data_repairs WHERE status='queued' AND cancel_requested=0 "
-                "AND next_run<=? "
-                "ORDER BY next_run,created_at LIMIT 100",
-                (now,),
-            ).fetchall()
-            selected: sqlite3.Row | None = None
-            for row in rows:
-                used = connection.execute(
-                    "SELECT attempts FROM data_repair_budget WHERE day=? AND source=?",
-                    (today, row["source"]),
-                ).fetchone()
-                if budget and int(used[0] if used else 0) >= budget:
-                    continue
-                selected = row
-                break
-            if selected is None:
-                return None
-            repair_id = str(selected["id"])
-            attempt = int(selected["attempt"]) + 1
-            changed = connection.execute(
-                "UPDATE data_repairs SET status='running',attempt=?,owner=?,lease_expires=?,"
-                "updated_at=? WHERE id=? AND status='queued'",
-                (attempt, self.identity.value, lease_deadline(120), now, repair_id),
-            ).rowcount
-            if not changed:
-                return None
-            connection.execute(
-                "INSERT INTO data_repair_budget(day,source,attempts) VALUES (?,?,1) "
-                "ON CONFLICT(day,source) DO UPDATE SET attempts=attempts+1",
-                (today, selected["source"]),
+    def _budget_used(self, store: UnifiedJobStore, source: str) -> int:
+        today = market_date()
+        used = 0
+        for job in store.list(1000, job_type=DATA_REPAIR_TASK_TYPE):
+            if str((job.get("spec") or {}).get("source") or "") != source:
+                continue
+            used += sum(
+                event["type"] == "job_started"
+                and datetime.fromisoformat(str(event["created_at"])).astimezone(
+                    ZoneInfo("Asia/Shanghai")
+                ).date() == today
+                for event in store.events(str(job["id"]), 0, 2000)
             )
-            self._event(connection, repair_id, attempt, {
-                "type": "claimed", "owner": self.identity.value,
-            })
-            selected = connection.execute(
-                "SELECT * FROM data_repairs WHERE id=?", (repair_id,),
-            ).fetchone()
-        return self._decode(selected)
+        return used
+
+    def _next_due(self, store: UnifiedJobStore) -> dict[str, Any] | None:
+        now = time.time()
+        budget = max(0, int(get_config().data.repair_daily_budget))
+        jobs = sorted(
+            store.list(1000, job_type=DATA_REPAIR_TASK_TYPE),
+            key=lambda item: str(item.get("created_at") or ""),
+        )
+        for job in jobs:
+            if job["status"] not in {"queued", "interrupted"}:
+                continue
+            if float(job.get("next_retry_at") or 0) > now:
+                continue
+            source = str((job.get("spec") or {}).get("source") or "unknown")
+            if budget and self._budget_used(store, source) >= budget:
+                continue
+            return job
+        return None
 
     def run_one(self) -> dict[str, Any] | None:
-        """Claim and execute one due item; exposed for deterministic maintenance/tests."""
-        item = self._claim()
-        if item is None:
+        runtime = self._ensure_runtime()
+        job = self._next_due(runtime.store)
+        if job is None:
             return None
-        handler = self._handlers.get(str(item["kind"]))
+        runtime.dispatch_job(str(job["id"]))
+        runtime.wait(str(job["id"]), timeout=610.0)
+        return self.get(str(job["id"]))
+
+    def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+        kind = str(spec["kind"])
+        target = str(spec["target"])
+        item: dict[str, Any] = {
+            "id": context.job_id,
+            "kind": kind,
+            "target": target,
+            "source": str(spec.get("source") or "unknown"),
+            "reason": self._latest_reason(context.store, context.store.get(context.job_id)),
+            "spec": dict(spec.get("repair_spec") or {}),
+            "attempt": context.attempt,
+        }
+        handler = self._handlers.get(kind)
         try:
             if handler is None:
-                raise RuntimeError(f"没有 {item['kind']} 修复处理器")
+                raise RuntimeError(f"没有 {kind} 修复处理器")
+            context.progress(5, "验证修复目标", target)
             result = handler(item) or {}
+            context.ensure_active()
         except Exception as exc:
-            logger.exception("数据修复失败 repair=%s target=%s", item["id"], item["target"])
-            self._finish_failure(item, exc)
-        else:
-            self._finish_success(item, result)
-        return self.get(str(item["id"]))
+            from quantmaster.logging_config import redact_sensitive_text
 
-    def _finish_success(self, item: dict[str, Any], result: dict[str, Any]) -> None:
-        now = time.time()
-        with self._conn() as connection:
-            connection.execute(
-                "UPDATE data_repairs SET status='completed',owner='',lease_expires=0,"
-                "result_json=?,last_error='',completed_at=?,updated_at=? "
-                "WHERE id=? AND owner=? AND status IN ('running','cancelling')",
-                (_canonical(result), now, now, item["id"], self.identity.value),
+            logger.exception(
+                "数据修复 handler 失败 job=%s kind=%s", context.job_id, kind,
             )
-            self._event(connection, str(item["id"]), int(item["attempt"]), {
-                "type": "completed", "result": result,
-                "cancel_arrived_after_claim": bool(connection.execute(
-                    "SELECT cancel_requested FROM data_repairs WHERE id=?", (item["id"],),
-                ).fetchone()[0]),
-            })
-
-    def _finish_failure(self, item: dict[str, Any], error: Exception) -> None:
-        now = time.time()
-        attempt = int(item["attempt"])
-        exhausted = attempt >= int(item["max_attempts"])
-        base = max(0.01, float(get_config().data.repair_retry_backoff))
-        delay = min(base * (2 ** max(0, attempt - 1)), 86400.0)
-        status = "failed" if exhausted else "queued"
-        with self._conn() as connection:
-            cancelled = bool(connection.execute(
-                "SELECT cancel_requested FROM data_repairs WHERE id=?", (item["id"],),
-            ).fetchone()[0])
-            if cancelled:
-                status = "cancelled"
-            connection.execute(
-                "UPDATE data_repairs SET status=?,owner='',lease_expires=0,last_error=?,"
-                "next_run=?,updated_at=? WHERE id=? AND owner=?",
-                (
-                    status, f"{type(error).__name__}: {error}"[:2000],
-                    0 if cancelled else now + delay,
-                    now, item["id"], self.identity.value,
-                ),
+            detail = f"{type(exc).__name__}: {redact_sensitive_text(exc)}"[:1000]
+            context.write_checkpoint(
+                REPAIR_FAILURE_CHECKPOINT, context.spec_hash,
+                {"schema_version": "1.0", "error": detail},
             )
-            self._event(connection, str(item["id"]), attempt, {
-                "type": status, "error": f"{type(error).__name__}: {error}",
-                "retry_at": 0 if exhausted or cancelled else now + delay,
-            })
+            base = max(0.01, float(get_config().data.repair_retry_backoff))
+            delay = min(base * (2 ** max(0, context.attempt - 1)), 86400.0)
+            return JobOutcome("failed", detail, retry_delay_seconds=delay)
+        outcome = str(result.get("state") or "completed")
+        artifact = context.write_artifact(
+            REPAIR_RESULT_KIND,
+            {"schema_version": "1.0", "outcome": outcome, "result": result},
+            {"schema_version": "1.0", "lineage": {"spec_hash": context.spec_hash}},
+        )
+        context.emit("data_repair_completed", {"outcome": outcome})
+        return JobOutcome("completed", "数据修复已完成", str(artifact["id"]))
 
     def start(self) -> None:
+        if self.read_only:
+            return
+        self._ensure_runtime()
         with self._lock:
             if self._workers:
                 return
             self._stop.clear()
             count = max(1, min(int(get_config().data.repair_max_workers), 8))
             for index in range(count):
-                thread = threading.Thread(
-                    target=self._loop,
-                    name=f"data-repair-{index + 1}",
-                    daemon=True,
+                worker = threading.Thread(
+                    target=self._loop, name=f"data-repair-{index + 1}", daemon=True,
                 )
-                self._workers.append(thread)
-                thread.start()
+                self._workers.append(worker)
+                worker.start()
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            if self.run_one() is None:
-                self._wakeup.wait(5.0)
+            runtime = self._ensure_runtime()
+            job = self._next_due(runtime.store)
+            if job is None:
+                self._wakeup.wait(0.75)
                 self._wakeup.clear()
+                continue
+            runtime.dispatch_job(str(job["id"]))
+            self._wakeup.wait(0.05)
+            self._wakeup.clear()
 
     def shutdown(self, timeout: float = 10.0) -> None:
         self._stop.set()
         self._wakeup.set()
         with self._lock:
             workers, self._workers = self._workers, []
+            runtime = self._runtime
         per_worker = max(0.05, timeout / max(1, len(workers)))
         for worker in workers:
             worker.join(per_worker)
-        with self._conn() as connection:
-            table = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='data_repairs'"
-            ).fetchone()
-            if table is None:
-                return
-            connection.execute(
-                "UPDATE data_repairs SET status='queued',owner='',lease_expires=0,"
-                "next_run=?,updated_at=? WHERE owner=? AND status IN ('running','cancelling')",
-                (time.time(), time.time(), self.identity.value),
-            )
+        if runtime is not None:
+            runtime.stop(deadline_seconds=timeout)
 
     @staticmethod
     def _repair_bar(item: dict[str, Any]) -> dict[str, Any]:
@@ -546,17 +428,13 @@ class DataRepairManager:
             quarantine = quarantine_file(
                 target, category="bars", target=symbol, reason=str(item["reason"]),
             )
-            market_envelope = refresh_history(
+            envelope = refresh_history(
                 symbol, start, end, store=store, mode=RefreshMode.FULL,
                 work_class="maintenance",
             )
-            frame = market_envelope.require_data()
+            frame = envelope.require_data()
             result = store.read(symbol, enqueue_repair=False)
-        if (
-            result.status != "ready"
-            or frame.empty
-            or market_envelope.quality.status != "verified"
-        ):
+        if result.status != "ready" or frame.empty or envelope.quality.status != "verified":
             raise RuntimeError(f"重拉后完整性仍异常: {result.status}: {result.reason}")
         return {
             "rows": len(frame), "content_sha256": result.content_sha256,
@@ -565,7 +443,6 @@ class DataRepairManager:
 
     @staticmethod
     def _repair_api_cache(item: dict[str, Any]) -> dict[str, Any]:
-        """Validate a replacement written after a corrupt endpoint cache was isolated."""
         import pandas as pd
 
         spec = item["spec"]
@@ -578,25 +455,18 @@ class DataRepairManager:
         quarantine = spec.get("quarantine")
         if not target.exists():
             return {
-                "state": "quarantined",
-                "replacement": "not_available",
+                "state": "quarantined", "replacement": "not_available",
                 "quarantine": quarantine,
             }
         try:
             frame = pd.read_parquet(target)
         except (ImportError, OSError, TypeError, ValueError) as exc:
             quarantine_file(
-                target,
-                category="api-cache",
-                target=str(item["target"]),
+                target, category="api-cache", target=str(item["target"]),
                 reason=f"替换缓存仍不可读: {type(exc).__name__}: {exc}",
             )
             raise RuntimeError("替换后的接口缓存仍不可读") from exc
-        return {
-            "state": "replaced",
-            "rows": len(frame),
-            "quarantine": quarantine,
-        }
+        return {"state": "replaced", "rows": len(frame), "quarantine": quarantine}
 
     @staticmethod
     def _repair_research_partition(item: dict[str, Any]) -> dict[str, Any]:
@@ -614,10 +484,7 @@ class DataRepairManager:
         try:
             target = lake.path_for_repair(metadata)
             quarantine = quarantine_file(
-                target,
-                category="research",
-                target=key,
-                reason=str(item["reason"]),
+                target, category="research", target=key, reason=str(item["reason"]),
             )
             lake.catalog.delete_partition(key)
         finally:
@@ -706,5 +573,4 @@ def enqueue_repair(
 def resolve_repair(
     kind: str, target: str, *, result: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Reconcile a queued or terminal repair with independently validated data."""
     return get_data_repair_manager().resolve(kind, target, result=result)
