@@ -1,3 +1,13 @@
+/* #32: 筛选方案绑定到不可变快照。
+ * 每个方案应保存：
+ * - filter JSON
+ * - snapshot_id / artifact id
+ * - effective as-of
+ * - 规则/策略版本
+ * - coverage / data quality / provenance
+ * 无绑定字段的旧方案标记为 unbound/preview-only，不可进入 formal 流程。
+ * 后端扩展：ScreeningSchemeEvidence 模型，GET/POST /api/v1/research/selection/schemes。 */
+
 const candidatesFeature = (() => {
   'use strict';
 
