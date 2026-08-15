@@ -366,6 +366,131 @@ def test_live_server_fixture_disables_worker_supervisor() -> None:
     assert 'env["QM_DISABLE_WORKER_SUPERVISOR"] = "1"' in source
 
 
+def test_factor_robustness_deep_link_renders_frozen_charts_and_tables(live_server):
+    url, _ = live_server
+    evidence = {
+        "schema_version": 2,
+        "status": "pass",
+        "factor": {
+            "version_id": "test-version", "version": 2, "name": "动量稳健性",
+            "slug": "momentum", "description": "检验动量在不同路径和市场状态下的稳定性",
+        },
+        "horizon": 3,
+        "available_horizons": [3, 5],
+        "validation": {
+            "created_at": "2026-08-15T02:00:00Z", "dataset_hash": "frozen-snapshot",
+            "protocol": {"train_window": 756, "test_window": 244},
+        },
+        "metrics": {
+            "oos_days": 244, "oos_rank_ic": 0.032, "oos_icir": 0.45,
+            "retention": 0.72, "positive_ratio": 0.58, "candidate_score": 74,
+        },
+        "summary": {"tests_passed": 4, "tests_applicable": 4, "failed_tests": []},
+        "sections": [
+            {
+                "key": "monte_carlo", "status": "pass", "title": "Monte Carlo 区块自助法",
+                "explanation": "重复抽样检验路径稳定性。", "action": "保留当前证据。",
+                "evidence": {
+                    "available": True, "passed": True, "paths": 500, "block_days": 20,
+                    "probability_positive_ic": 0.96, "probability_positive_net": 0.82,
+                    "ic_mean_ci_95": [0.012, 0.051],
+                    "thresholds": {"probability_positive_ic": 0.9},
+                    "ic_mean_distribution": {
+                        "quantiles": [
+                            {"probability": 0.05, "value": 0.018},
+                            {"probability": 0.5, "value": 0.032},
+                        ],
+                        "histogram": [
+                            {"start": 0.01, "end": 0.03, "count": 180, "share": 0.36},
+                            {"start": 0.03, "end": 0.05, "count": 320, "share": 0.64},
+                        ],
+                    },
+                    "net_annual_distribution": {
+                        "quantiles": [{"probability": 0.5, "value": 0.14}],
+                        "histogram": [
+                            {"start": -0.02, "end": 0.10, "count": 90, "share": 0.18},
+                            {"start": 0.10, "end": 0.22, "count": 410, "share": 0.82},
+                        ],
+                    },
+                },
+            },
+            {
+                "key": "parameter_sensitivity", "status": "pass", "title": "参数敏感性",
+                "explanation": "检验参数平台。", "action": "保留邻域证据。",
+                "evidence": {
+                    "available": True, "applicable": True, "passed": True,
+                    "thresholds": {"same_sign_ratio": 0.75},
+                    "variants": [{
+                        "variant": "window:20→16", "rank_ic": 0.029, "retention": 0.91,
+                        "same_sign": True, "factor_rank_correlation": 0.88,
+                    }],
+                },
+            },
+            {
+                "key": "walk_forward", "status": "pass", "title": "Walk-forward 分析",
+                "explanation": "过去训练未来测试。", "action": "不得回看密封窗口。",
+                "evidence": {
+                    "available": True, "passed": True,
+                    "thresholds": {"sign_consistency": 0.75},
+                    "folds": [{
+                        "train_start": "2018-01-01", "train_end": "2020-12-31",
+                        "test_start": "2021-01-01", "test_end": "2021-12-31",
+                        "train_rank_ic": 0.04, "rank_ic": 0.031, "retention": 0.78,
+                    }],
+                    "sealed": {
+                        "train_start": "2019-01-01", "train_end": "2022-12-31",
+                        "test_start": "2023-01-01", "test_end": "2023-12-31",
+                        "train_rank_ic": 0.038, "rank_ic": 0.029, "retention": 0.76,
+                    },
+                },
+            },
+            {
+                "key": "penetration", "status": "pass", "title": "穿透性测试",
+                "explanation": "拆解条件依赖。", "action": "持续观察弱分层。",
+                "evidence": {
+                    "available": True, "passed": True,
+                    "thresholds": {"effective_names": 8},
+                    "time": {"years": [{"year": 2024, "rank_ic": 0.031}]},
+                    "regimes": {"buckets": [{"regime": "downtrend", "rank_ic": 0.021}]},
+                    "liquidity": {"buckets": [{"bucket": "low", "rank_ic": 0.026}]},
+                    "concentration": {
+                        "top1_absolute_contribution_share": 0.12,
+                        "top5_absolute_contribution_share": 0.42,
+                        "effective_names": 14, "symbols": 320,
+                        "top_contributors": [{"symbol": "000001.SZ", "share": 0.12}],
+                    },
+                },
+            },
+        ],
+    }
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route(
+            "**/api/v1/lab/factors/test-version/robustness?*",
+            lambda route: route.fulfill(status=200, json=evidence),
+        )
+        page.goto(
+            f"{url}/?lab_version=test-version&lab_horizon=3#research/lab",
+            wait_until="domcontentloaded",
+        )
+
+        detail = page.locator('[data-lab-panel="robustness"]')
+        playwright_sync.expect(detail).to_have_class(re.compile(r"(?:^|\s)active(?:\s|$)"))
+        _wait_for_text(page.locator("#lab-robustness-title"), "动量稳健性 · 3 日鲁棒性")
+        playwright_sync.expect(page.locator(".lab-robust-section")).to_have_count(4)
+        playwright_sync.expect(page.locator(".lab-histogram i")).to_have_count(4)
+        _wait_for_text(detail, "2023-01-01 → 2023-12-31")
+        _wait_for_text(detail, "000001.SZ")
+        assert "lab_version=test-version" in page.url
+        page.locator("[data-robustness-back]").click()
+        playwright_sync.expect(page.locator('[data-lab-panel="library"]')).to_have_class(
+            re.compile(r"(?:^|\s)active(?:\s|$)"),
+        )
+        assert "lab_version" not in page.url
+        browser.close()
+
+
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:

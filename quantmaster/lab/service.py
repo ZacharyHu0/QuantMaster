@@ -48,6 +48,29 @@ _SPACE_PARTITION_OVERHEAD = 256 * 1024
 _SPACE_SQLITE_HEADROOM = 16 * 1024 * 1024
 _SPACE_MINIMUM_RESERVE = 64 * 1024 * 1024
 
+_ROBUSTNESS_GUIDANCE = {
+    "monte_carlo": {
+        "title": "Monte Carlo 区块自助法",
+        "explanation": "保留交易日依赖结构后重复抽样，观察 IC 与扣费年化收益是否稳定为正。",
+        "action": "若失败，检查收益是否由少数时段驱动，并降低对单一历史路径的信任。",
+    },
+    "parameter_sensitivity": {
+        "title": "参数敏感性",
+        "explanation": "扰动白名单时序窗口，检验有效性是否形成平台而不是恰好命中单点参数。",
+        "action": "若失败，扩大参数邻域或删除只在单一窗口成立的因子。",
+    },
+    "walk_forward": {
+        "title": "Walk-forward 分析",
+        "explanation": "每折只用过去训练、未来测试，并以 purge 隔离标签；密封窗口不参与选择。",
+        "action": "若失败，调整设置中的训练/测试/步长，重新验证；不得回看密封窗口调参。",
+    },
+    "penetration": {
+        "title": "穿透性测试",
+        "explanation": "按年份、市场状态、流动性和个股贡献拆解，识别集中或条件依赖。",
+        "action": "若失败，检查最弱年份/状态及贡献集中标的，必要时缩小适用范围。",
+    },
+}
+
 
 def _repair_space_estimate(
     repair: dict[str, Any], *, workers: int, probe: Path,
@@ -846,6 +869,96 @@ class LabService:
             "high_correlations": self._high_correlation_pairs(
                 correlation, unique_ids, threshold,
             ),
+        }
+
+    @staticmethod
+    def _robustness_section(name: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        if evidence.get("applicable") is False:
+            status = "not_applicable"
+        elif not evidence.get("available", True):
+            status = "evidence_insufficient"
+        else:
+            status = "pass" if evidence.get("passed") else "fail"
+        return {"key": name, "status": status, **_ROBUSTNESS_GUIDANCE[name], "evidence": evidence}
+
+    @staticmethod
+    def _insufficient_robustness_evidence(
+        version: dict[str, Any], horizon: int, reason: str,
+        available_horizons: list[int] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "status": "evidence_insufficient",
+            "reason": reason,
+            "action": "运行统一验证以生成当前图表证据；如数据不足，请在设置中调整 WFA 周期。",
+            "factor": {
+                "version_id": version["id"], "version": version["version"],
+                "name": version["name"], "slug": version["slug"],
+            },
+            "horizon": horizon,
+            "available_horizons": available_horizons or [],
+        }
+
+    def robustness_evidence(self, version_id: str, horizon: int) -> dict[str, Any]:
+        """Project frozen validation evidence; never calculate or refresh data here."""
+        version = self.store.version(version_id)
+        if version is None:
+            raise KeyError("因子版本不存在")
+        report = version.get("validation")
+        if not report:
+            return self._insufficient_robustness_evidence(
+                version, horizon, "该因子版本尚未完成统一验证",
+            )
+        horizons = report.get("horizons") or {}
+        horizon_report = horizons.get(str(horizon))
+        available = sorted(int(value) for value in horizons if str(value).isdigit())
+        if not horizon_report:
+            return self._insufficient_robustness_evidence(
+                version, horizon, f"冻结证据不包含 {horizon} 日预测周期", available,
+            )
+        robustness = horizon_report.get("robustness") or {}
+        if robustness.get("schema_version") != 2:
+            return self._insufficient_robustness_evidence(
+                version, horizon, "现有验证缺少可绘图的鲁棒性证据，请重新验证", available,
+            )
+        tests = {
+            "monte_carlo": dict(robustness.get("monte_carlo") or {}),
+            "parameter_sensitivity": dict(robustness.get("parameter_sensitivity") or {}),
+            "walk_forward": {
+                **dict(robustness.get("walk_forward") or {}),
+                "folds": list(horizon_report.get("folds") or []),
+                "sealed": dict(horizon_report.get("sealed") or {}),
+            },
+            "penetration": dict(robustness.get("penetration") or {}),
+        }
+        return {
+            "schema_version": 2,
+            "status": "pass" if robustness.get("passed") else "fail",
+            "factor": {
+                "version_id": version["id"], "version": version["version"],
+                "name": version["name"], "slug": version["slug"],
+                "description": version["spec"].get("description") or "",
+            },
+            "horizon": horizon,
+            "available_horizons": available,
+            "validation": {
+                "created_at": version.get("validation_created_at") or "",
+                "dataset_hash": version.get("validation_dataset_hash") or "",
+                "protocol": report.get("protocol") or {},
+            },
+            "metrics": {
+                key: horizon_report.get(key)
+                for key in (
+                    "oos_days", "oos_rank_ic", "oos_icir", "retention",
+                    "positive_ratio", "candidate_score",
+                )
+            },
+            "summary": {
+                "tests_passed": robustness.get("tests_passed"),
+                "tests_applicable": robustness.get("tests_applicable"),
+                "failed_tests": robustness.get("failed_tests") or [],
+            },
+            "sections": [self._robustness_section(name, evidence) for name, evidence in tests.items()],
         }
 
     def prepare_data(

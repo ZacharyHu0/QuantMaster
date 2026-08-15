@@ -227,6 +227,21 @@ def test_factor_catalog_ui_exposes_semantic_filters_and_shared_correlation_route
     assert "VERSION HISTORY" in lab_script
 
 
+def test_robustness_detail_ui_has_independent_route_and_four_explanatory_sections():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    index = (root / "quantmaster/server/static/index.html").read_text(encoding="utf-8")
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    assert 'data-lab-panel="robustness"' in index
+    assert "lab_version" in lab_script and "lab_horizon" in lab_script
+    assert "/robustness?horizon=" in lab_script
+    for renderer in (
+        "renderMonteCarlo", "renderParameterSensitivity",
+        "renderWalkForward", "renderPenetration",
+    ):
+        assert f"function {renderer}" in lab_script
+
+
 class _SequenceLLMClient:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -1367,7 +1382,7 @@ def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     assert set(report["robustness"]["failed_tests"]).issubset({
         "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
     })
-    assert report["robustness"]["schema_version"] == 1
+    assert report["robustness"]["schema_version"] == 2
     assert report["robustness"]["parameter_sensitivity"]["passed"]
     assert not report["robustness"]["parameter_sensitivity"]["applicable"]
     assert all(
@@ -1386,6 +1401,10 @@ def test_robustness_bootstrap_is_deterministic_and_expression_variants_are_safe(
     first = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
     second = monte_carlo_block_bootstrap(daily_ic, net, horizon=3, paths=300, seed=91)
     assert first == second
+    assert len(first["ic_mean_distribution"]["histogram"]) == 12
+    assert [item["probability"] for item in first["ic_mean_distribution"]["quantiles"]] == [
+        0.05, 0.25, 0.5, 0.75, 0.95,
+    ]
     assert first["method"] == "circular_moving_block_bootstrap"
     assert first["probability_positive_ic"] > 0.95
 
@@ -1395,6 +1414,77 @@ def test_robustness_bootstrap_is_deterministic_and_expression_variants_are_safe(
     assert all("0.5" in item for item in variants.values())
     assert any("pct_change(close, 4)" in item for item in variants.values())
     assert any("ts_mean(pct_change(close, 5), 24)" in item for item in variants.values())
+
+
+def test_robustness_detail_projects_only_frozen_v2_evidence(tmp_path, monkeypatch):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    _factor, version, _created = store.create_factor(FactorSpec(
+        slug="robust_detail", name="鲁棒详情", expression="rank(close)", horizons=(3,),
+    ))
+    monkeypatch.setattr(service, "_context", lambda *_args, **_kwargs: pytest.fail("不得读取行情"))
+    store.save_validation(version["id"], "frozen-dataset", {
+        "protocol": {"train_window": 756, "test_window": 244, "step_days": 244},
+        "horizons": {"3": {
+            "horizon": 3, "oos_days": 244, "oos_rank_ic": 0.031,
+            "oos_icir": 0.42, "retention": 0.71, "positive_ratio": 0.58,
+            "candidate_score": 72.0,
+            "folds": [{
+                "fold": 1, "train_start": "2018-01-01", "train_end": "2020-12-31",
+                "test_start": "2021-01-01", "test_end": "2021-12-31",
+                "train_rank_ic": 0.04, "rank_ic": 0.03, "retention": 0.75,
+                "test_days": 244,
+            }],
+            "sealed": {
+                "train_start": "2019-01-01", "train_end": "2022-12-31",
+                "test_start": "2023-01-01", "test_end": "2023-12-31",
+                "train_rank_ic": 0.035, "rank_ic": 0.028, "retention": 0.8,
+            },
+            "robustness": {
+                "schema_version": 2, "passed": True,
+                "tests_passed": 4, "tests_applicable": 4, "failed_tests": [],
+                "monte_carlo": {"available": True, "passed": True, "thresholds": {}},
+                "parameter_sensitivity": {
+                    "available": True, "applicable": True, "passed": True,
+                    "thresholds": {}, "variants": [],
+                },
+                "walk_forward": {"available": True, "passed": True, "thresholds": {}},
+                "penetration": {"available": True, "passed": True, "thresholds": {}},
+            },
+        }},
+        "gates": {"passed": True, "hard_failures": [], "soft_failures": []},
+    })
+
+    detail = service.robustness_evidence(version["id"], 3)
+
+    assert detail["status"] == "pass"
+    assert detail["validation"]["dataset_hash"] == "frozen-dataset"
+    assert [section["key"] for section in detail["sections"]] == [
+        "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
+    ]
+    walk_forward = next(item for item in detail["sections"] if item["key"] == "walk_forward")
+    assert walk_forward["evidence"]["folds"][0]["test_start"] == "2021-01-01"
+    assert walk_forward["evidence"]["sealed"]["test_start"] == "2023-01-01"
+
+
+def test_robustness_detail_rejects_legacy_plot_contract(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    _factor, version, _created = store.create_factor(FactorSpec(
+        slug="legacy_robust_detail", name="旧鲁棒详情",
+        expression="rank(close)", horizons=(3,),
+    ))
+    store.save_validation(version["id"], "legacy-dataset", {
+        "horizons": {"3": {"robustness": {"schema_version": 1, "passed": True}}},
+        "gates": {"passed": True, "hard_failures": [], "soft_failures": []},
+    })
+
+    detail = service.robustness_evidence(version["id"], 3)
+
+    assert detail["status"] == "evidence_insufficient"
+    assert "重新验证" in detail["reason"]
 
 
 def test_validation_executes_parameter_and_penetration_layers(tmp_path):
@@ -1472,6 +1562,11 @@ def test_lab_api_catalog_create_and_queue(tmp_path, monkeypatch):
         })
         assert created.status_code == 200
         version_id = created.json()["id"]
+        robustness = client.get(
+            f"/api/v1/lab/factors/{version_id}/robustness?horizon=3",
+        )
+        assert robustness.status_code == 200
+        assert robustness.json()["status"] == "evidence_insufficient"
         duplicate = client.post("/api/v1/lab/factors", json={
             "name": "人工反转", "expression": "rank(close)",
         })

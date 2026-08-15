@@ -41,6 +41,32 @@ def _percentile(values: np.ndarray, level: float) -> float:
     return _finite(float(np.percentile(values, level))) if values.size else 0.0
 
 
+def _compact_distribution(values: np.ndarray, bins: int = 12) -> dict[str, Any]:
+    """Keep renderable distribution evidence without persisting bootstrap paths."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if not finite.size:
+        return {"quantiles": [], "histogram": []}
+    levels = (0.05, 0.25, 0.50, 0.75, 0.95)
+    counts, edges = np.histogram(finite, bins=max(5, min(int(bins), 20)))
+    total = max(1, int(counts.sum()))
+    return {
+        "quantiles": [
+            {"probability": level, "value": _percentile(finite, level * 100)}
+            for level in levels
+        ],
+        "histogram": [
+            {
+                "start": _finite(edges[index]),
+                "end": _finite(edges[index + 1]),
+                "count": int(count),
+                "share": _finite(count / total),
+            }
+            for index, count in enumerate(counts)
+        ],
+    }
+
+
 def expression_parameter_variants(
     expression: str, *, scales: tuple[float, ...] = (0.8, 1.2), limit: int = 8,
 ) -> dict[str, str]:
@@ -137,6 +163,7 @@ def monte_carlo_block_bootstrap(
         "ic_mean_ci_95": [_percentile(ic_means, 2.5), _percentile(ic_means, 97.5)],
         "icir_ci_95": [_percentile(icirs, 2.5), _percentile(icirs, 97.5)],
         "probability_positive_ic": _finite((ic_means > 0).mean()),
+        "ic_mean_distribution": _compact_distribution(ic_means),
     }
 
     probability_positive_net = None
@@ -153,6 +180,7 @@ def monte_carlo_block_bootstrap(
         result.update({
             "net_annual_ci_95": [_percentile(annual, 2.5), _percentile(annual, 97.5)],
             "probability_positive_net": _finite(probability_positive_net),
+            "net_annual_distribution": _compact_distribution(annual),
         })
 
     ic_pass = float(result["probability_positive_ic"]) >= 0.90
@@ -429,7 +457,7 @@ def robustness_summary(
     failed = [name for name, report in tests.items() if not bool(report.get("passed"))]
     applicable = [name for name, report in tests.items() if report.get("applicable", True)]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "passed": not failed,
         "tests_passed": len(applicable) - len(failed),
         "tests_applicable": len(applicable),

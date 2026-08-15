@@ -613,7 +613,7 @@ class LabStore:
             "JOIN factor_definitions d ON d.id=v.factor_id WHERE v.id=?", (version_id,),
         ).fetchone()
         report = conn.execute(
-            "SELECT report_json,created_at FROM validation_reports WHERE version_id=? "
+            "SELECT report_json,created_at,dataset_hash FROM validation_reports WHERE version_id=? "
             "ORDER BY created_at DESC,id DESC LIMIT 1", (version_id,),
         ).fetchone()
         value = LabStore._decode(row, ("spec_json",))
@@ -621,6 +621,7 @@ class LabStore:
             value["spec"] = value.pop("spec_json")
             value["validation"] = json.loads(report[0]) if report else None
             value["validation_created_at"] = str(report[1]) if report else ""
+            value["validation_dataset_hash"] = str(report[2]) if report else ""
         return value
 
     def version(self, version_id: str) -> dict | None:
