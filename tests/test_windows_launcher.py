@@ -214,6 +214,28 @@ def test_pyinstaller_collects_only_required_scipy_array_api_modules() -> None:
     assert 'if sys.platform == "win32":' in spec
 
 
+def test_pyinstaller_prunes_unused_lark_oapi_and_pyarrow_payloads() -> None:
+    from pathlib import Path
+
+    spec = (Path(__file__).parents[1] / "packaging" / "quantmaster.spec").read_text(
+        encoding="utf-8",
+    )
+    assert 'collect_submodules("lark_oapi"' not in spec
+    assert '"lark_oapi.api.im.v1"' in spec
+    assert '"lark_oapi.channel.events"' in spec
+    assert '"lark_oapi.ws.client"' in spec
+    assert '"lark_oapi.adapter"' in spec
+    for module in (
+        "pyarrow.flight",
+        "pyarrow.substrait",
+        "pyarrow.cuda",
+        "pyarrow.dataset",
+        "pyarrow.feather",
+        "pyarrow.parquet.encryption",
+    ):
+        assert f'"{module}"' in spec
+
+
 def test_pyinstaller_runtime_hook_binds_clean_full_git_sha() -> None:
     from pathlib import Path
 

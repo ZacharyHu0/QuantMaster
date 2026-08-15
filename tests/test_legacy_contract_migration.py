@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 import uuid
@@ -29,11 +30,8 @@ class FixtureMigrator:
     def __init__(self) -> None:
         self.records = [
             MigrationRecord("001", "converted"),
-            MigrationRecord(
-                "002", "blank", "optional_semantics_ambiguous", ("market", "adjustment"),
-                "原记录未声明市场和复权语义",
-            ),
-            MigrationRecord("003", "conflict", "identity_conflict"),
+            MigrationRecord("002", "converted"),
+            MigrationRecord("003", "unchanged"),
         ]
         self.rolled_back = False
 
@@ -89,6 +87,14 @@ def test_builtin_domain_migrations_are_registered_without_touching_data(tmp_path
 
 
 def test_dry_run_persists_counts_and_specific_unknown_evidence(tmp_path, fixture_migrator):
+    fixture_migrator.records = [
+        MigrationRecord("001", "converted"),
+        MigrationRecord(
+            "002", "blank", "optional_semantics_ambiguous", ("market", "adjustment"),
+            "原记录未声明市场和复权语义",
+        ),
+        MigrationRecord("003", "conflict", "identity_conflict"),
+    ]
     manager = LegacyMigrationManager(tmp_path)
     task = manager.create(fixture_migrator.name, mode="dry_run", batch_size=2)
     result = wait_finished(manager, task["id"])
@@ -101,6 +107,75 @@ def test_dry_run_persists_counts_and_specific_unknown_evidence(tmp_path, fixture
     unknown = {item["record_key"]: item for item in result["unknown_results"]}
     assert unknown["002"]["diagnostic_code"] == "optional_semantics_ambiguous"
     assert unknown["002"]["unknown_fields"] == ["market", "adjustment"]
+
+
+def test_apply_rejects_conflict_before_creating_state(tmp_path, fixture_migrator):
+    fixture_migrator.records = [
+        MigrationRecord("001", "conflict", "unknown_schema", ("schema_version",)),
+    ]
+    manager = offline_manager(tmp_path)
+
+    with pytest.raises(LegacyMigrationError, match="存在冲突"):
+        manager.create(fixture_migrator.name, mode="apply")
+
+    assert not manager.state_path.exists()
+    assert not manager.backup_root.exists()
+
+
+def test_plan_inventories_backup_boundary_without_writes(tmp_path, fixture_migrator):
+    import sqlite3
+
+    root = tmp_path / "cutover-data"
+    root.mkdir()
+    with sqlite3.connect(root / "facts.sqlite") as connection:
+        connection.execute("CREATE TABLE facts(value TEXT)")
+    artifacts = root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "bars.parquet").write_bytes(b"parquet")
+    (artifacts / "schema-manifest.json").write_text("{}", encoding="utf-8")
+    (artifacts / "result.bin").write_bytes(b"result")
+    fixture_migrator.backup_paths = ("artifacts", "missing-artifacts")
+    backup_root = tmp_path / "external" / "backups"
+    stockdb_root = tmp_path / "stockdb"
+    manager = offline_manager(
+        root, backup_root=backup_root, stockdb_root=stockdb_root,
+    )
+
+    plan = manager.plan(fixture_migrator.name)
+
+    inventory = {Path(item["path"]).name: item for item in plan["inventory"]}
+    assert inventory["facts.sqlite"]["kind"] == "sqlite"
+    assert inventory["bars.parquet"]["kind"] == "parquet"
+    assert inventory["schema-manifest.json"]["kind"] == "schema_marker"
+    assert inventory["result.bin"]["kind"] == "artifact"
+    assert inventory["missing-artifacts"]["exists"] is False
+    assert Path(plan["data_root"]).is_absolute()
+    assert Path(plan["stockdb_root"]).is_absolute()
+    assert Path(plan["backup_root"]).is_absolute()
+    assert plan["required_backup_bytes"] > plan["inventory_bytes"]
+    assert plan["free_backup_bytes"] >= plan["required_backup_bytes"]
+    assert plan["stockdb_action"] == "preserve_in_place"
+    assert not backup_root.exists()
+    assert not manager.state_path.exists()
+
+
+def test_apply_rejects_missing_backup_capacity_before_writes(
+    tmp_path, fixture_migrator, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from quantmaster.data import migration
+
+    monkeypatch.setattr(
+        migration.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1),
+    )
+    manager = offline_manager(tmp_path, backup_root=tmp_path.parent / "external")
+
+    with pytest.raises(LegacyMigrationError, match="剩余空间不足"):
+        manager.create(fixture_migrator.name, mode="apply")
+
+    assert not manager.state_path.exists()
+    assert not manager.backup_root.exists()
 
 
 def test_apply_backs_up_before_batches_and_can_rollback(tmp_path, fixture_migrator):
@@ -303,7 +378,27 @@ def test_incomplete_staging_is_discarded_and_rebuilt_not_reused(tmp_path):
 
     assert not staging.exists()
     assert not (target / "partial.txt").exists()
-    assert validate_backup_tree(target)["schema_version"] == 1
+    assert validate_backup_tree(target)["schema_version"] == 2
+
+
+def test_backup_manifest_rejects_non_sqlite_corruption_and_old_schema(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "facts.parquet").write_bytes(b"verified")
+    target = tmp_path / "backup"
+    backup_sqlite_tree(source, target, extra_paths=("facts.parquet",))
+
+    (target / "facts.parquet").write_bytes(b"truncated")
+    with pytest.raises(ValueError, match="大小校验失败"):
+        validate_backup_tree(target)
+
+    backup_sqlite_tree(source, tmp_path / "current", extra_paths=("facts.parquet",))
+    marker = tmp_path / "current" / BACKUP_MARKER
+    value = json.loads(marker.read_text(encoding="utf-8"))
+    value["schema_version"] = 1
+    marker.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(ValueError, match="完成标记无效"):
+        validate_backup_tree(tmp_path / "current")
 
 
 def test_restore_declared_absent_path_and_refuse_uncovered_path(tmp_path):

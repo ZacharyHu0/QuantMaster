@@ -30,7 +30,7 @@ from quantmaster.research.adapters import (
 )
 from quantmaster.research.diagnostics import factor_diagnostics
 from quantmaster.research.engine import ResearchEngine
-from quantmaster.research.jobs import ResearchJobManager
+from quantmaster.research.jobs import RESEARCH_TASK_TYPE, ResearchJobManager
 from quantmaster.research.kernel import Kernel
 from quantmaster.research.lake import (
     FeatureBatchProvider,
@@ -44,6 +44,7 @@ from quantmaster.research.providers import (
     compute_qm_style_v1,
 )
 from quantmaster.research.registry import built_in_registry
+from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.server.app import app
 
 
@@ -62,27 +63,26 @@ def _verified_empty_suspension_snapshot(monkeypatch):
     )
 
 
-def test_catalog_legacy_migration_rolls_back_when_schema_upgrade_fails(
-    tmp_path, monkeypatch,
-):
-    from quantmaster.research.catalog import ResearchCatalog
+def test_catalog_legacy_lifecycle_requires_explicit_migration_without_writing(tmp_path):
+    from quantmaster.research.catalog import (
+        ResearchCatalog,
+        ResearchSchemaMigrationRequired,
+    )
 
     path = tmp_path / "legacy-catalog.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE research_jobs (id TEXT PRIMARY KEY)")
+        connection.execute("PRAGMA user_version=1")
 
-    def broken_schema(connection):
-        connection.execute("CREATE TABLE partial_upgrade (id INTEGER)")
-        raise sqlite3.OperationalError("upgrade failed")
-
-    monkeypatch.setattr(ResearchCatalog, "_schema_v1", staticmethod(broken_schema))
-
-    with pytest.raises(sqlite3.OperationalError, match="upgrade failed"):
-        ResearchCatalog.migrate_legacy_database(path)
+    with pytest.raises(ResearchSchemaMigrationRequired, match="research-jobs"):
+        ResearchCatalog(path)
 
     with sqlite3.connect(path) as connection:
         tables = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
-        assert "partial_upgrade" not in tables
+        assert tables == {"research_jobs"}
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
 
 
 def synthetic_bars(days: int = 80, symbols: int = 4) -> pd.DataFrame:
@@ -1355,33 +1355,50 @@ def test_execution_plan_hash_excludes_runtime_identity():
     assert first.to_dict()["plan_hash"] == second.to_dict()["plan_hash"]
 
 
-def test_research_job_lease_is_atomic_and_only_expired_owner_is_recovered(tmp_path):
-    from quantmaster.research.catalog import ResearchCatalog
-
-    catalog = ResearchCatalog(tmp_path / "catalog.sqlite")
-    payload = ExecutionPlan(
+def test_research_job_lifecycle_is_owned_by_unified_store(tmp_path):
+    lake = ResearchLake(tmp_path / "research_lake")
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1, dispatch=False)
+    manager = ResearchJobManager(
+        ResearchEngine(lake=lake, adapter=FakePlanningAdapter()), runtime,
+    )
+    plan = ExecutionPlan(
         id="leased", start="2024-01-02", end="2024-01-02",
         target_dates=("2024-01-02",), asset_classes=(AssetClass.STOCK,),
         frequency=Frequency.DAILY, datasets=(), selected_specs=(), tasks=(),
-    ).to_dict()
-    catalog.create_job("job-one", "historical", payload)
-    assert catalog.claim_job("job-one", "worker-a", lease_seconds=60)
-    assert not catalog.claim_job("job-one", "worker-b", lease_seconds=60)
-    assert catalog.recover_interrupted_jobs() == 0
-    assert catalog.job("job-one")["status"] == "running"
-
-    with catalog._connect() as connection:
+    )
+    queued = manager.create(plan)
+    assert store.claim(queued["id"], "dead-worker", lease_seconds=60)
+    with store._conn() as connection:
         connection.execute(
-            "UPDATE research_jobs SET lease_expires=0 WHERE id='job-one'"
+            "UPDATE runtime_jobs SET lease_expires=0 WHERE id=?", (queued["id"],),
         )
-    assert catalog.recover_interrupted_jobs() == 1
-    assert catalog.job("job-one")["status"] == "interrupted"
+    assert store.recover_expired() == [queued["id"]]
+    assert manager.get(queued["id"])["status"] == "interrupted"
+    resumed = manager.resume(queued["id"])
+    runtime.dispatch_job(resumed["id"])
+    runtime.wait(queued["id"])
+
+    completed = manager.get(queued["id"])
+    assert completed["status"] == "completed"
+    assert completed["outcome"] == "completed"
+    assert completed["attempt"] == 2
+    assert store.get(queued["id"])["type"] == RESEARCH_TASK_TYPE
+    with lake.catalog._connect() as connection:
+        tables = {row[0] for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+    assert "research_jobs" not in tables
+    assert "research_job_events" not in tables
+    runtime.stop()
 
 
-def test_research_retry_preserves_original_plan_and_records_attempt(tmp_path):
-    from quantmaster.research.catalog import ResearchCatalog
-
-    catalog = ResearchCatalog(tmp_path / "catalog.sqlite")
+def test_research_retry_preserves_original_plan_and_records_attempt(tmp_path, monkeypatch):
+    lake = ResearchLake(tmp_path / "research_lake")
+    engine = ResearchEngine(lake=lake, adapter=FakePlanningAdapter())
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1, dispatch=False)
+    manager = ResearchJobManager(engine, runtime)
     plan = ExecutionPlan(
         id="immutable", start="2024-01-02", end="2024-01-02",
         target_dates=("2024-01-02",), asset_classes=(AssetClass.STOCK,),
@@ -1391,18 +1408,33 @@ def test_research_retry_preserves_original_plan_and_records_attempt(tmp_path):
         ),),
     )
     original = plan.to_dict()
-    catalog.create_job("retry-job", "historical", original)
-    catalog.update_job(
-        "retry-job", status="completed_with_errors", next_index=1, failed=1,
-        failures_json=[{"task_index": 0, "task": plan.tasks[0].to_dict(), "error": "x"}],
-    )
-    resumed = catalog.resume_job("retry-job")
-    assert resumed["plan"] == original
+    calls = []
+
+    def execute_task(*_args, **_kwargs):
+        calls.append("execute")
+        if len(calls) == 1:
+            raise RuntimeError("fixture failure")
+        return []
+
+    monkeypatch.setattr(engine, "execute_task", execute_task)
+    first = manager.create(plan)
+    runtime.dispatch_job(first["id"])
+    runtime.wait(first["id"])
+    warning = manager.get(first["id"])
+    assert warning["status"] == "completed"
+    assert warning["outcome"] == "completed_with_warnings"
+
+    resumed = manager.resume(first["id"])
+    runtime.dispatch_job(resumed["id"])
+    runtime.wait(resumed["id"])
+    completed = manager.get(resumed["id"])
+    assert completed["plan"] == original
     assert resumed["attempt"] == 2
-    assert resumed["task_indexes"] == [0]
-    assert [event["type"] for event in catalog.job_events("retry-job")] == [
-        "queued", "resumed",
-    ]
+    assert completed["task_indexes"] == [0]
+    assert completed["outcome"] == "completed"
+    assert "job_retried" in [event["type"] for event in manager.events(first["id"])]
+    assert calls == ["execute", "execute"]
+    runtime.stop()
 
 
 def test_research_management_api_is_local_and_csrf_protected(monkeypatch):

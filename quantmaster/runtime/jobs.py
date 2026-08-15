@@ -18,7 +18,7 @@ import time
 import traceback
 import uuid
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -90,6 +90,53 @@ def _content_hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
+def _legacy_iso(value: Any, default: str = "") -> str:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), UTC).isoformat()
+    return str(value or default)
+
+
+def _import_legacy_artifacts(
+    connection: sqlite3.Connection,
+    job_id: str,
+    record: Mapping[str, Any],
+    artifacts: Sequence[Mapping[str, Any]],
+    spec_hash: str,
+    updated_at: str,
+) -> str:
+    result_artifact_id = ""
+    for artifact in artifacts:
+        payload = artifact.get("payload") or {}
+        encoded = _canonical(payload)
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        kind = str(artifact.get("kind") or "legacy.result")[:200]
+        checkpoint = str(artifact.get("checkpoint_key") or "")[:200]
+        artifact_key = f"{job_id}\0{kind}\0{checkpoint}\0{digest}"
+        artifact_id = f"artifact_legacy_{hashlib.sha256(artifact_key.encode()).hexdigest()[:32]}"
+        row = connection.execute(
+            "SELECT content_hash FROM runtime_job_artifacts WHERE id=?", (artifact_id,),
+        ).fetchone()
+        if row is not None and str(row["content_hash"]) != digest:
+            raise ValueError(f"旧任务产物 ID 冲突: {artifact_id}")
+        connection.execute(
+            "INSERT OR IGNORE INTO runtime_job_artifacts "
+            "(id,job_id,attempt,kind,schema_version,payload_json,content_hash,"
+            "payload_bytes,lineage_json,checkpoint_key,spec_hash,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                artifact_id, job_id,
+                max(1, int(artifact.get("attempt") or record.get("attempt") or 1)),
+                kind, str(artifact.get("schema_version") or "1.0")[:50], encoded,
+                digest, len(encoded.encode("utf-8")),
+                _canonical({"legacy_import": True}), checkpoint, spec_hash,
+                _legacy_iso(artifact.get("created_at"), updated_at),
+            ),
+        )
+        if artifact.get("result"):
+            result_artifact_id = artifact_id
+    return result_artifact_id
+
+
 class ArtifactIntegrityError(RuntimeError):
     """A persisted artifact no longer matches its committed content hash."""
 
@@ -107,6 +154,7 @@ class JobOutcome:
     status: str = "completed"
     detail: str = ""
     result_artifact_id: str = ""
+    retry_delay_seconds: float | None = None
 
 
 class JobHandler(Protocol):
@@ -535,6 +583,97 @@ class UnifiedJobStore:
         if value is None:
             raise KeyError(job_id)
         return value
+
+    def find_business_job(self, job_type: str, business_key: str) -> dict[str, Any] | None:
+        with self._conn() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_jobs WHERE type=? AND business_key=?",
+                (str(job_type), str(business_key)),
+            ).fetchone()
+        return self._decode_job(row)
+
+    def import_legacy_job(
+        self,
+        record: Mapping[str, Any],
+        *,
+        events: Sequence[Mapping[str, Any]] = (),
+        artifacts: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """Idempotently import one classified legacy job without interpreting unknown state."""
+
+        job_id = str(record.get("id") or "").strip()
+        job_type = str(record.get("type") or "").strip()
+        spec = record.get("spec")
+        status = str(record.get("status") or "").strip()
+        allowed = {"queued", "interrupted", "completed", "failed", "cancelled"}
+        if not job_id or not job_type or not isinstance(spec, Mapping) or status not in allowed:
+            raise ValueError("旧任务缺少已分类的 id/type/spec/status")
+        spec_json = _canonical(dict(spec))
+        spec_hash = hashlib.sha256(spec_json.encode("utf-8")).hexdigest()
+
+        now = _utc_now()
+        created_at = _legacy_iso(record.get("created_at"), now)
+        updated_at = _legacy_iso(record.get("updated_at"), created_at)
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT type,spec_hash FROM runtime_jobs WHERE id=?", (job_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO runtime_jobs ("
+                    "id,type,spec_json,spec_hash,idempotency_key,business_key,input_fingerprint,"
+                    "algorithm_version,status,progress,phase,detail,attempt,max_attempts,"
+                    "next_retry_at,diagnostic_code,cancel_requested,deadline_seconds,"
+                    "created_at,updated_at,started_at,finished_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        job_id, job_type, spec_json, spec_hash,
+                        str(record.get("idempotency_key") or "")[:200],
+                        str(record.get("business_key") or "")[:300],
+                        str(record.get("input_fingerprint") or "")[:200],
+                        str(record.get("algorithm_version") or "")[:120],
+                        status, max(0, min(100, int(record.get("progress") or 0))),
+                        str(record.get("phase") or "")[:200],
+                        str(record.get("detail") or "")[:1000],
+                        max(1, int(record.get("attempt") or 1)),
+                        max(1, int(record.get("max_attempts") or 2)),
+                        max(0.0, float(record.get("next_retry_at") or 0)),
+                        str(record.get("diagnostic_code") or "")[:80],
+                        int(bool(record.get("cancel_requested"))),
+                        max(1.0, min(3600.0, float(record.get("deadline_seconds") or 300))),
+                         created_at, updated_at,
+                         _legacy_iso(record.get("started_at")), _legacy_iso(record.get("finished_at")),
+                    ),
+                )
+            elif str(existing["type"]) != job_type or str(existing["spec_hash"]) != spec_hash:
+                raise ValueError(f"旧任务 ID 与现有任务契约冲突: {job_id}")
+            for offset, event in enumerate(events, start=1):
+                connection.execute(
+                    "INSERT OR IGNORE INTO runtime_job_events "
+                    "(job_id,seq,attempt,type,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+                    (
+                        job_id, max(1, int(event.get("seq") or offset)),
+                        max(1, int(event.get("attempt") or record.get("attempt") or 1)),
+                        str(event.get("type") or "legacy_event")[:120],
+                        _canonical(event.get("payload") or {}),
+                         _legacy_iso(event.get("created_at"), created_at),
+                    ),
+                )
+            result_artifact_id = _import_legacy_artifacts(
+                connection, job_id, record, artifacts, spec_hash, updated_at,
+            )
+            if result_artifact_id:
+                connection.execute(
+                    "UPDATE runtime_jobs SET result_artifact_id=? WHERE id=?",
+                    (result_artifact_id, job_id),
+                )
+            if not events:
+                self._append_event_conn(
+                    connection, job_id, max(1, int(record.get("attempt") or 1)),
+                    "legacy_job_imported", {"type": job_type},
+                )
+        return self.get(job_id)
 
     def list(self, limit: int = 100, *, job_type: str = "") -> list[dict[str, Any]]:
         query = "SELECT * FROM runtime_jobs"
@@ -1041,6 +1180,38 @@ class UnifiedJobStore:
                 "job_terminal",
                 {"status": outcome.status, "detail": outcome.detail[:1000]},
             )
+        return self.get(job_id)
+
+    def complete_from_evidence(self, job_id: str, outcome: JobOutcome) -> dict[str, Any]:
+        """Complete inactive work after independent domain evidence is durable."""
+
+        if outcome.status != "completed":
+            raise ValueError("外部证据只能确认任务完成")
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status,attempt FROM runtime_jobs WHERE id=?", (job_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            status = str(row["status"])
+            if status in {"running", "cancelling"}:
+                raise ValueError("运行中的任务不能由外部证据直接完成")
+            if status != "completed":
+                now = _utc_now()
+                connection.execute(
+                    "UPDATE runtime_jobs SET status='completed',progress=100,phase='证据确认完成',"
+                    "detail=?,result_artifact_id=?,owner='',lease_token='',lease_expires=0,"
+                    "cancel_requested=0,last_completed_unit_at=?,finished_at=?,updated_at=? WHERE id=?",
+                    (
+                        outcome.detail[:1000], outcome.result_artifact_id,
+                        time.time(), now, now, job_id,
+                    ),
+                )
+                self._append_event_conn(
+                    connection, job_id, int(row["attempt"]), "job_completed_from_evidence",
+                    {"detail": outcome.detail[:1000]},
+                )
         return self.get(job_id)
 
     def interrupt_owned(self, owner: str) -> builtins.list[str]:
@@ -1599,6 +1770,7 @@ def _run_process_handler(
             "status": outcome.status,
             "detail": outcome.detail,
             "result_artifact_id": outcome.result_artifact_id,
+            "retry_delay_seconds": outcome.retry_delay_seconds,
         })
     except BaseException as exc:  # child must report before its process exits
         result_queue.put({
@@ -1848,6 +2020,33 @@ class UnifiedJobRuntime:
             self._schedule(job["id"])
         return job, created
 
+    def dispatch_job(self, job_id: str) -> dict[str, Any]:
+        """Schedule one registered durable job from a domain-owned admission loop."""
+
+        if self.stopping:
+            raise RuntimeError("任务运行时正在维护或已经停止")
+        job = self.store.get(job_id)
+        if str(job["type"]) not in self._handlers:
+            raise ValueError(f"任务类型未注册：{job['type']}")
+        if job["status"] in {"queued", "interrupted"}:
+            self._schedule(job_id)
+        return self.store.get(job_id)
+
+    def wait(self, job_id: str, timeout: float = 30.0) -> dict[str, Any]:
+        """Wait for one scheduled job to leave the active lifecycle states."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._activity_changed:
+            while True:
+                job = self.store.get(job_id)
+                scheduled = any(active_id == job_id for active_id, _generation in self._active)
+                if not scheduled:
+                    return job
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return job
+                self._activity_changed.wait(timeout=min(0.05, remaining))
+
     def _schedule(
         self,
         job_id: str,
@@ -1975,6 +2174,10 @@ class UnifiedJobRuntime:
                 str(message.get("status") or "completed"),
                 str(message.get("detail") or ""),
                 str(message.get("result_artifact_id") or ""),
+                (
+                    float(message["retry_delay_seconds"])
+                    if message.get("retry_delay_seconds") is not None else None
+                ),
             )
         detail = str(message.get("detail") or message.get("type") or "计算子进程失败")
         error_type = str(message.get("type") or "")
@@ -2093,12 +2296,18 @@ class UnifiedJobRuntime:
             self.store.finish(
                 job_id, self.identity.value, outcome, lease_token=lease_token,
             )
+            explicit_retry = outcome.retry_delay_seconds
+            should_retry = explicit_retry is not None or self._is_transient_failure(outcome.detail)
             if (
                 outcome.status == "failed"
                 and int(job["attempt"]) < int(job["max_attempts"])
-                and self._is_transient_failure(outcome.detail)
+                and should_retry
             ):
-                retry_delay = min(60.0, 5.0 * (2 ** (int(job["attempt"]) - 1)))
+                retry_delay = (
+                    max(0.0, float(explicit_retry))
+                    if explicit_retry is not None
+                    else min(60.0, 5.0 * (2 ** (int(job["attempt"]) - 1)))
+                )
                 retried = self.store.retry(job_id, delay_seconds=retry_delay)
                 self.store.append_event(
                     job_id,
@@ -2117,7 +2326,11 @@ class UnifiedJobRuntime:
                 self._activity_changed.notify_all()
             if reschedule and self._accepting_generation(generation):
                 self._schedule(job_id, generation=generation)
-            elif retry_delay and self._accepting_generation(generation):
+            elif (
+                retry_delay
+                and self._dispatch_enabled
+                and self._accepting_generation(generation)
+            ):
                 self._start_retry_timer(job_id, generation, retry_delay)
 
     def _start_retry_timer(self, job_id: str, generation: int, delay: float) -> None:
@@ -2175,8 +2388,7 @@ class UnifiedJobRuntime:
             self._phase = "paused"
             self._generation += 1
         self._cancel_retry_timers()
-        if self._dispatch_enabled:
-            self.store.interrupt_owned(self.identity.value)
+        self.store.interrupt_owned(self.identity.value)
 
     def resume(self) -> None:
         """Resume interrupted jobs after a bounded maintenance window."""
@@ -2228,10 +2440,10 @@ class UnifiedJobRuntime:
             self._phase = "stopping"
             self._generation += 1
             self._activity_changed.notify_all()
-        if self._dispatch_enabled:
-            # This durable fence rejects every late artifact/result from the
-            # old generation and leaves interrupted work recoverable.
-            self.store.interrupt_owned(self.identity.value)
+        # This durable fence rejects every late artifact/result from the old
+        # generation and leaves interrupted work recoverable. Read-only/Web
+        # runtimes never own a lease, so the same call is a harmless no-op.
+        self.store.interrupt_owned(self.identity.value)
         self._stop.set()
         with self._lock:
             self._phase = "stopped"

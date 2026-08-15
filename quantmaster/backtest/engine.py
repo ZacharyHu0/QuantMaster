@@ -573,6 +573,12 @@ def run_backtest(
 
     config = config or BacktestConfig()
     market = _prepare_market_data(panel)
+    from quantmaster.market_capabilities import (
+        MarketCapability,
+        require_symbols_capability,
+    )
+
+    require_symbols_capability(market.symbols, MarketCapability.BACKTEST)
     _validate_production_panel(panel, config)
     target_weights = target_weights.reindex(
         index=market.dates,

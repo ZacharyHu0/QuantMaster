@@ -80,4 +80,6 @@ def test_unified_jobs_exposes_repair_events_cancel_and_retry():
     events = client.get(
         f"/api/v1/jobs/{created['id']}/events",
     ).json()["items"]
-    assert [item["type"] for item in events] == ["queued", "cancelled", "retried"]
+    assert [item["type"] for item in events] == [
+        "job_queued", "data_repair_evidence", "job_cancel_requested", "job_retried",
+    ]

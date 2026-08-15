@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 import time
@@ -382,9 +381,13 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: symbols)
     monkeypatch.setattr(manager, "_start", lambda job_id: None)
     calls = []
+    fail_once = {"000001.SZ"}
 
     def fake_load(symbol, start, end, **kwargs):
         calls.append((symbol, start, end, kwargs))
+        if symbol in fail_once:
+            fail_once.remove(symbol)
+            raise OSError("offline")
         return BarDataEnvelope(
             data=pd.DataFrame({"close": [1.0]}, index=pd.to_datetime([end])),
             quality=BarDataQuality(
@@ -411,27 +414,23 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     manager._run(job["id"])
     completed = manager.get(job["id"])
     assert completed["status"] == "completed"
+    assert completed["outcome"] == "completed_with_warnings"
+    assert completed["failed"] == 1
     assert {item[0] for item in calls} == set(symbols)
     assert all(item[3]["mode"] == RefreshMode.INCREMENTAL for item in calls)
     assert all(item[3]["work_class"] == "maintenance" for item in calls)
 
-    # 已结束任务中的失败项续跑时只重排失败标的，不重复成功标的。
-    with manager._conn() as conn:
-        conn.execute(
-            "UPDATE refresh_jobs SET status='completed_with_errors',failed=1,"
-            "failures_json=?,next_index=total WHERE id=?",
-            ('[{"symbol":"000001.SZ","error":"offline"}]', job["id"]),
-        )
+    # 领域 outcome 保留失败标的；统一 lifecycle retry 只重跑失败项。
     resumed = manager.resume(job["id"])
     assert resumed["status"] == "queued"
-    assert resumed["total"] == 1
-    assert resumed["next_index"] == 0
     assert resumed["attempt"] == 2
-    with manager._conn() as conn:
-        original = json.loads(conn.execute(
-            "SELECT original_symbols_json FROM refresh_jobs WHERE id=?", (job["id"],)
-        ).fetchone()[0])
-    assert original == symbols
+    manager._run(job["id"])
+    retried = manager.get(job["id"])
+    assert retried["status"] == "completed"
+    assert retried["outcome"] == "completed"
+    assert retried["total"] == 1
+    assert [item[0] for item in calls].count("600000.SH") == 1
+    assert [item[0] for item in calls].count("000001.SZ") == 2
 
 
 def test_incremental_refresh_job_limits_per_job_parallelism(isolated_config, monkeypatch):
@@ -498,9 +497,10 @@ def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, t
     # Web/status construction is inert after a root change; only the
     # runtime-worker startup path is allowed to publish the task schema.
     assert manager.latest() is None
-    assert not (isolated_config.data_root / "data_refresh.sqlite").exists()
+    assert not (isolated_config.data_root / "jobs.sqlite").exists()
     manager.initialize()
-    assert (isolated_config.data_root / "data_refresh.sqlite").exists()
+    assert (isolated_config.data_root / "jobs.sqlite").exists()
+    assert not (isolated_config.data_root / "data_refresh.sqlite").exists()
 
 
 def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, monkeypatch):
@@ -513,18 +513,12 @@ def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, mo
     monkeypatch.setattr(first, "_resolve_symbols", lambda *args: ["600000.SH"])
     monkeypatch.setattr(first, "_start", lambda job_id: None)
     job = first.create("market")
-    with first._conn() as conn:
-        conn.execute(
-            "UPDATE refresh_jobs SET status='running',owner=?,lease_expires=? WHERE id=?",
-            (first.identity.value, time.time() + 60, job["id"]),
-        )
-
-    second._initialized_roots.clear()
+    store = first._ensure_runtime().store
+    assert store.claim(job["id"], "fixture-owner", lease_seconds=60)
     second.initialize()
     assert second.get(job["id"])["status"] == "running"
 
-    with first._conn() as conn:
-        conn.execute("UPDATE refresh_jobs SET lease_expires=0 WHERE id=?", (job["id"],))
-    second._initialized_roots.clear()
-    second.initialize()
+    future = time.time() + 120
+    monkeypatch.setattr("quantmaster.runtime.jobs.time.time", lambda: future)
+    second._ensure_runtime().store.recover_expired()
     assert second.get(job["id"])["status"] == "interrupted"

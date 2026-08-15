@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,11 @@ if str(ROOT) not in sys.path:
 
 # This file is also executed directly, so repository imports follow the path bootstrap.
 from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
-from scripts.dev.pytest_windows_acl import prepare_pytest_directory  # noqa: E402
+from scripts.dev.pytest_windows_acl import (  # noqa: E402
+    make_writable,
+    prepare_pytest_directory,
+    restore_acl_inheritance,
+)
 
 
 def primary_root() -> Path:
@@ -74,15 +79,63 @@ _CLEANUP_INITIAL_DELAY_SECONDS = 0.1
 _CLEANUP_MAX_DELAY_SECONDS = 1.0
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 _cleanup_sleep = time.sleep
+_RUN_ID_PATTERN = re.compile(r"[0-9a-f]{12}")
+
+
+def _verified_run_root(path: Path) -> Path:
+    candidate = Path(path)
+    if candidate.is_symlink() or candidate.is_junction():
+        raise RuntimeError(
+            "[local-ci] refused cleanup outside verified pytest run root"
+        )
+    resolved = candidate.resolve()
+    pytest_root = PYTEST_ROOT.resolve()
+    if resolved.parent != pytest_root or not _RUN_ID_PATTERN.fullmatch(resolved.name):
+        raise RuntimeError(
+            "[local-ci] refused cleanup outside verified pytest run root"
+        )
+    return resolved
+
+
+def _cleanup_acl_target(root: Path, error: OSError) -> Path:
+    blocked = Path(error.filename or root).resolve()
+    if blocked != root and root not in blocked.parents:
+        raise RuntimeError(
+            "[local-ci] cleanup reported a path outside run root; "
+            "retained evidence at <local-path>"
+        ) from error
+    return blocked
+
+
+def _cleanup_onexc(root: Path):
+    def onexc(function, path, error: BaseException) -> None:
+        if isinstance(error, OSError) and getattr(error, "winerror", None) == 5:
+            blocked = _cleanup_acl_target(root, error)
+            try:
+                restore_acl_inheritance(blocked)
+            except OSError as acl_error:
+                raise RuntimeError(
+                    "[local-ci] successful run cleanup ACL recovery failed; "
+                    "retained evidence at <local-path>"
+                ) from acl_error
+            try:
+                function(path)
+            except PermissionError as retry_error:
+                make_writable(function, path, retry_error)
+            return
+        make_writable(function, path, error)
+
+    return onexc
 
 
 def cleanup_run_root(path: Path) -> None:
     """Remove one successful run despite transient locks or disappearing entries."""
 
+    path = _verified_run_root(path)
     delay = _CLEANUP_INITIAL_DELAY_SECONDS
     for attempt in range(1, _CLEANUP_ATTEMPTS + 1):
         try:
-            shutil.rmtree(path)
+            shutil.rmtree(path, onexc=_cleanup_onexc(path))
             return
         except FileNotFoundError as exc:
             try:
@@ -95,7 +148,17 @@ def cleanup_run_root(path: Path) -> None:
                     f"attempts; retained evidence at {redact_sensitive_text(path)}"
                 ) from exc
         except OSError as exc:
-            if getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            winerror = getattr(exc, "winerror", None)
+            if winerror == 5:
+                blocked = _cleanup_acl_target(path, exc)
+                try:
+                    restore_acl_inheritance(blocked)
+                except OSError as acl_error:
+                    raise RuntimeError(
+                        "[local-ci] successful run cleanup ACL recovery failed; "
+                        "retained evidence at <local-path>"
+                    ) from acl_error
+            elif winerror not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
                 raise
             if attempt == _CLEANUP_ATTEMPTS:
                 raise RuntimeError(
@@ -423,11 +486,17 @@ def main() -> int:
             if args.measure_onedir:
                 if not artifact.is_dir():
                     raise SystemExit(f"[local-ci] PyInstaller did not produce onedir: {artifact}")
+                measurement_root = PACKAGE_ROOT / "desktop" / "measurement"
+                measurement_root.mkdir(parents=True, exist_ok=True)
+                timing_evidence = measurement_root / "startup-budgets.json"
                 run_external(
-                    "onedir EXE help budget",
+                    "onedir startup budgets",
                     [
                         str(PYTHON), "scripts/release/smoke_frozen_runtime.py",
-                        str(artifact / "QuantMaster.exe"), "--help-layout", "onedir",
+                        str(artifact / "QuantMaster.exe"),
+                        "--onedir-smoke",
+                        "--evidence", str(timing_evidence),
+                        "--instance-root", str(measurement_root),
                     ],
                 )
                 archive = artifact.with_suffix(".zip")

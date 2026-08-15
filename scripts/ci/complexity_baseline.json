@@ -1,0 +1,781 @@
+{
+  "count": 129,
+  "reason": "Issue #79/#87 final audited ceiling after architecture and lifecycle integration",
+  "at": "2026-08-15T22:30:50+00:00",
+  "findings": [
+    {
+      "file": "quantmaster/after_close/service.py",
+      "line": 205,
+      "function": "_gate",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/after_close/service.py",
+      "line": 402,
+      "function": "_score",
+      "complexity": 25
+    },
+    {
+      "file": "quantmaster/after_close/service.py",
+      "line": 737,
+      "function": "scan",
+      "complexity": 21
+    },
+    {
+      "file": "quantmaster/after_close/service.py",
+      "line": 1070,
+      "function": "evaluate_pending",
+      "complexity": 20
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 183,
+      "function": "_analysis_error_message",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 493,
+      "function": "save",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 1054,
+      "function": "query",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 1265,
+      "function": "sandbox_factor_rows",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 1858,
+      "function": "_process_annotation_batch",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 1987,
+      "function": "_enrich_pending_events_unlocked",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/ai/crawler.py",
+      "line": 2207,
+      "function": "_run_unlocked",
+      "complexity": 15
+    },
+    {
+      "file": "quantmaster/ai/llm.py",
+      "line": 515,
+      "function": "_parse_openai_responses",
+      "complexity": 15
+    },
+    {
+      "file": "quantmaster/ai/llm.py",
+      "line": 832,
+      "function": "_openai_search_results",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/ai/news_contracts.py",
+      "line": 282,
+      "function": "normalize_published_at",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/ai/news_providers.py",
+      "line": 149,
+      "function": "fetch_sina_live",
+      "complexity": 25
+    },
+    {
+      "file": "quantmaster/ai/news_providers.py",
+      "line": 676,
+      "function": "_official_html_provider",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/ai/news_sources.py",
+      "line": 159,
+      "function": "_validate_source_dict",
+      "complexity": 28
+    },
+    {
+      "file": "quantmaster/ai/news_sources.py",
+      "line": 817,
+      "function": "register_ingest_batch",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/ai/news_sources.py",
+      "line": 1693,
+      "function": "fetch_declarative_source",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/ai/sentiment.py",
+      "line": 28,
+      "function": "_factor_metadata",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/ai/sentiment.py",
+      "line": 236,
+      "function": "quality_sentiment_panel",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/analysis/stock.py",
+      "line": 357,
+      "function": "_fundamental_dimension",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/backtest/paper_accounts.py",
+      "line": 171,
+      "function": "_migrate_legacy_schema",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/backtest/paper_accounts.py",
+      "line": 1734,
+      "function": "propose",
+      "complexity": 23
+    },
+    {
+      "file": "quantmaster/backtest/paper_market.py",
+      "line": 308,
+      "function": "select_next_open_bar",
+      "complexity": 15
+    },
+    {
+      "file": "quantmaster/backtest/spec.py",
+      "line": 24,
+      "function": "split_factor_references",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/backtest/workbench.py",
+      "line": 513,
+      "function": "run_one",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_ingest.py",
+      "line": 919,
+      "function": "cross_validation_sample",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_ingest.py",
+      "line": 1012,
+      "function": "_cross_source_validation",
+      "complexity": 32
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_ingest.py",
+      "line": 1275,
+      "function": "load_or_create",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_runtime.py",
+      "line": 541,
+      "function": "_start_service",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_runtime.py",
+      "line": 898,
+      "function": "_validate_data",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_runtime.py",
+      "line": 1162,
+      "function": "_update_now_locked",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_source.py",
+      "line": 508,
+      "function": "daily_cross_section",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/data/free_stockdb_source.py",
+      "line": 899,
+      "function": "adjustment_factors",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/data/fundamentals.py",
+      "line": 500,
+      "function": "fundamental_panel",
+      "complexity": 19
+    },
+    {
+      "file": "quantmaster/data/industry.py",
+      "line": 261,
+      "function": "_verified_industry_payload",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/industry.py",
+      "line": 322,
+      "function": "save_industry_map",
+      "complexity": 19
+    },
+    {
+      "file": "quantmaster/data/industry.py",
+      "line": 507,
+      "function": "load_industry_map",
+      "complexity": 19
+    },
+    {
+      "file": "quantmaster/data/instrument_snapshots.py",
+      "line": 282,
+      "function": "_normalize_tushare_catalog_partition",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/data/instrument_snapshots.py",
+      "line": 689,
+      "function": "_load_snapshot_file",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/data/instrument_snapshots.py",
+      "line": 751,
+      "function": "snapshot_symbols",
+      "complexity": 23
+    },
+    {
+      "file": "quantmaster/data/instrument_snapshots.py",
+      "line": 861,
+      "function": "load_instrument_catalog_snapshot",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/data/instruments.py",
+      "line": 405,
+      "function": "upsert",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/instruments.py",
+      "line": 625,
+      "function": "_replace_generated_aliases",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/data/migration.py",
+      "line": 110,
+      "function": "preflight_data_root_migration",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/migration.py",
+      "line": 614,
+      "function": "_copy_and_switch",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/reference_market.py",
+      "line": 193,
+      "function": "refresh_reference_panel",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 398,
+      "function": "_assess_daily_frame",
+      "complexity": 29
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 1502,
+      "function": "_full_refresh",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 1590,
+      "function": "_fetch_segment",
+      "complexity": 22
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 2065,
+      "function": "refresh_spot",
+      "complexity": 15
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 2185,
+      "function": "_load_history_locked",
+      "complexity": 15
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 2428,
+      "function": "_load_intraday_frame",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/data/registry.py",
+      "line": 2606,
+      "function": "_load_bar_panel_frame",
+      "complexity": 32
+    },
+    {
+      "file": "quantmaster/data/research.py",
+      "line": 159,
+      "function": "validate",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/research.py",
+      "line": 243,
+      "function": "load_research_bundle",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/resilience.py",
+      "line": 94,
+      "function": "classify_provider_failure",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/data/resilience.py",
+      "line": 406,
+      "function": "_worker",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/data/semantics.py",
+      "line": 100,
+      "function": "require_formal",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/storage.py",
+      "line": 357,
+      "function": "read",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/data/storage.py",
+      "line": 433,
+      "function": "read_many",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/data/storage.py",
+      "line": 708,
+      "function": "put",
+      "complexity": 19
+    },
+    {
+      "file": "quantmaster/data/tushare_source.py",
+      "line": 101,
+      "function": "_validate_tushare_frame",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/data/tushare_source.py",
+      "line": 426,
+      "function": "research_daily",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/decision/hybrid.py",
+      "line": 305,
+      "function": "resolve_policy",
+      "complexity": 31
+    },
+    {
+      "file": "quantmaster/decision/hybrid.py",
+      "line": 819,
+      "function": "hybrid_daily_selection",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/decision/storage.py",
+      "line": 200,
+      "function": "load_market_input",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/decision/storage.py",
+      "line": 252,
+      "function": "save",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/factors/base.py",
+      "line": 113,
+      "function": "_validate",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/factors/base.py",
+      "line": 170,
+      "function": "eval_expression",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/factors/base.py",
+      "line": 173,
+      "function": "_eval",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/factors/mining/llm_miner.py",
+      "line": 105,
+      "function": "mine_report",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/factors/mining/python_miner.py",
+      "line": 245,
+      "function": "mine_report",
+      "complexity": 38
+    },
+    {
+      "file": "quantmaster/lab/dataset.py",
+      "line": 42,
+      "function": "build_membership_mask",
+      "complexity": 21
+    },
+    {
+      "file": "quantmaster/lab/dataset.py",
+      "line": 275,
+      "function": "_bar_quality_for_range",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/lab/dataset.py",
+      "line": 457,
+      "function": "inspect_local_dataset",
+      "complexity": 25
+    },
+    {
+      "file": "quantmaster/lab/dataset.py",
+      "line": 686,
+      "function": "dataset_repair_plan",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/lab/dataset.py",
+      "line": 1081,
+      "function": "load_local_dataset",
+      "complexity": 22
+    },
+    {
+      "file": "quantmaster/lab/ml.py",
+      "line": 703,
+      "function": "_train_indexed_torch",
+      "complexity": 26
+    },
+    {
+      "file": "quantmaster/lab/ml.py",
+      "line": 954,
+      "function": "_torch_models",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/lab/multihorizon.py",
+      "line": 306,
+      "function": "make_multi_horizon_samples",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/lab/multihorizon.py",
+      "line": 751,
+      "function": "_fit_torch",
+      "complexity": 22
+    },
+    {
+      "file": "quantmaster/lab/multihorizon.py",
+      "line": 1046,
+      "function": "predict_multi_bundle",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/lab/optimization.py",
+      "line": 200,
+      "function": "run",
+      "complexity": 27
+    },
+    {
+      "file": "quantmaster/lab/preflight.py",
+      "line": 85,
+      "function": "run_preflight",
+      "complexity": 25
+    },
+    {
+      "file": "quantmaster/lab/robustness.py",
+      "line": 70,
+      "function": "expression_parameter_variants",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/lab/robustness.py",
+      "line": 308,
+      "function": "penetration_analysis",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/lab/store.py",
+      "line": 699,
+      "function": "deploy",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/lab/store.py",
+      "line": 1579,
+      "function": "deployments_as_of",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/lab/store.py",
+      "line": 1673,
+      "function": "champion_strategies_as_of",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/lab/store.py",
+      "line": 2340,
+      "function": "promote_strategy",
+      "complexity": 20
+    },
+    {
+      "file": "quantmaster/lab/validation.py",
+      "line": 127,
+      "function": "validate_factor_values",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/market/overview.py",
+      "line": 268,
+      "function": "build_market_overview_data",
+      "complexity": 31
+    },
+    {
+      "file": "quantmaster/operational_diagnostics.py",
+      "line": 31,
+      "function": "_market_session_metrics",
+      "complexity": 20
+    },
+    {
+      "file": "quantmaster/portfolio/performance.py",
+      "line": 105,
+      "function": "ledger_report",
+      "complexity": 19
+    },
+    {
+      "file": "quantmaster/research/adapters.py",
+      "line": 726,
+      "function": "fetch_date",
+      "complexity": 21
+    },
+    {
+      "file": "quantmaster/research/diagnostics.py",
+      "line": 22,
+      "function": "factor_diagnostics",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/research/engine.py",
+      "line": 119,
+      "function": "plan",
+      "complexity": 26
+    },
+    {
+      "file": "quantmaster/research/engine.py",
+      "line": 367,
+      "function": "execute_task",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/research/engine.py",
+      "line": 432,
+      "function": "_provider_inputs",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/research/lake.py",
+      "line": 260,
+      "function": "_normalize_frame",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/research/providers.py",
+      "line": 173,
+      "function": "build_future_continuous",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/rotation/etf_v2.py",
+      "line": 334,
+      "function": "adjusted_daily_metrics",
+      "complexity": 26
+    },
+    {
+      "file": "quantmaster/rotation/etf_v2.py",
+      "line": 801,
+      "function": "build_sector_research",
+      "complexity": 32
+    },
+    {
+      "file": "quantmaster/rotation/provider.py",
+      "line": 1013,
+      "function": "_sync_eastmoney_themes",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/rotation/provider.py",
+      "line": 1135,
+      "function": "_sync_tushare_themes",
+      "complexity": 18
+    },
+    {
+      "file": "quantmaster/rotation/provider.py",
+      "line": 1326,
+      "function": "_sync_ths_themes",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/rotation/provider.py",
+      "line": 1487,
+      "function": "sync_themes",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/runtime/json.py",
+      "line": 44,
+      "function": "sanitize_json",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/runtime/llm.py",
+      "line": 202,
+      "function": "rotate",
+      "complexity": 13
+    },
+    {
+      "file": "quantmaster/runtime/process.py",
+      "line": 220,
+      "function": "run_restricted_process",
+      "complexity": 16
+    },
+    {
+      "file": "quantmaster/runtime/windows_app.py",
+      "line": 207,
+      "function": "_role_executable",
+      "complexity": 11
+    },
+    {
+      "file": "quantmaster/runtime/worker.py",
+      "line": 215,
+      "function": "_handle_command",
+      "complexity": 12
+    },
+    {
+      "file": "quantmaster/runtime/worker_ipc.py",
+      "line": 110,
+      "function": "_serve",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/settings.py",
+      "line": 820,
+      "function": "validate",
+      "complexity": 14
+    },
+    {
+      "file": "quantmaster/settings_checks.py",
+      "line": 43,
+      "function": "list_llm_models",
+      "complexity": 17
+    },
+    {
+      "file": "quantmaster/settings_checks.py",
+      "line": 390,
+      "function": "check_data_sources",
+      "complexity": 17
+    },
+    {
+      "file": "scripts/ci/run.py",
+      "line": 376,
+      "function": "main",
+      "complexity": 15
+    },
+    {
+      "file": "scripts/dev/tasks.py",
+      "line": 536,
+      "function": "serve",
+      "complexity": 11
+    },
+    {
+      "file": "scripts/dev/tasks.py",
+      "line": 728,
+      "function": "remove_task_artifacts",
+      "complexity": 16
+    },
+    {
+      "file": "scripts/dev/tasks.py",
+      "line": 829,
+      "function": "gc_task_artifacts",
+      "complexity": 25
+    },
+    {
+      "file": "scripts/dev/tasks.py",
+      "line": 1029,
+      "function": "_remove_locked",
+      "complexity": 14
+    },
+    {
+      "file": "scripts/maintenance/update_security_master.py",
+      "line": 57,
+      "function": "_tushare_records",
+      "complexity": 16
+    },
+    {
+      "file": "scripts/release/smoke_frozen_runtime.py",
+      "line": 431,
+      "function": "smoke",
+      "complexity": 18
+    },
+    {
+      "file": "scripts/release/sync.py",
+      "line": 109,
+      "function": "validate_metadata",
+      "complexity": 14
+    },
+    {
+      "file": "tests/test_settings.py",
+      "line": 746,
+      "function": "test_data_refresh_api_requires_preview_confirmation_and_supports_resume",
+      "complexity": 13
+    },
+    {
+      "file": "tests/test_ui_management.py",
+      "line": 2529,
+      "function": "test_automation_subscriptions_audit_and_source_save_feedback",
+      "complexity": 13
+    },
+    {
+      "file": "tests/test_ui_management.py",
+      "line": 3712,
+      "function": "test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog",
+      "complexity": 12
+    }
+  ]
+}

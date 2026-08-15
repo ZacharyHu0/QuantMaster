@@ -19,7 +19,15 @@ ZIP_TARGET_MIB = 125
 ZIP_MAX_MIB = 130
 V1_15_4_ZIP_BYTES = 127_674_671
 GROWTH_ATTRIBUTION_BYTES = 2 * 1024 * 1024
-FORBIDDEN_MODULES = ("torch", "dask", "pytest", "_pytest", "qrcode.tests")
+FORBIDDEN_MODULES = (
+    "torch", "dask", "pytest", "_pytest", "qrcode.tests",
+    # Feishu adapter module not used by QuantMaster's automation flows.
+    "lark_oapi.adapter",
+    # PyArrow optional/backend modules not needed by the Research Lake path.
+    "pyarrow.acero", "pyarrow.cuda", "pyarrow.dataset", "pyarrow.feather",
+    "pyarrow.flight", "pyarrow.gandiva", "pyarrow.json", "pyarrow.substrait",
+    "pyarrow.parquet.encryption",
+)
 MODULE_ENTRY = re.compile(r"(?m)^\s*\('([^']+)'[,)]")
 PACKAGED_INPUT_PATHS = (
     "quantmaster",

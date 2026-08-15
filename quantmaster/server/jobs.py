@@ -16,8 +16,12 @@ from quantmaster.config import get_config
 from quantmaster.data.maintenance import data_refresh_manager
 from quantmaster.data.repair import DataRepairManager
 from quantmaster.lab.store import LabStore
-from quantmaster.research.catalog import ResearchCatalog
-from quantmaster.research.jobs import ResearchJobManager, get_research_job_manager
+from quantmaster.research.jobs import (
+    get_research_job_manager,
+    list_research_jobs,
+    read_research_job,
+    research_job_events,
+)
 from quantmaster.runtime.jobs import UnifiedJobStore
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.rotation import (
@@ -143,13 +147,6 @@ def _read_unified_artifact(artifact_id: str) -> dict[str, Any] | None:
 
 def _read_backtest_store() -> BacktestStore:
     return BacktestStore(read_only=True)
-
-
-def _read_research_catalog() -> ResearchCatalog:
-    return ResearchCatalog(
-        get_config().data_root / "research_lake" / "_meta" / "catalog.sqlite",
-        read_only=True,
-    )
 
 
 def _read_repair_manager() -> DataRepairManager:
@@ -295,12 +292,9 @@ def _get_repairs(job_id: str) -> dict[str, Any]:
 
 def _get_research(job_id: str) -> dict[str, Any]:
     try:
-        value = _read_research_catalog().job(job_id)
+        return read_research_job(job_id)
     except (FileNotFoundError, sqlite3.Error) as exc:
         raise KeyError(job_id) from exc
-    if value is None:
-        raise KeyError(job_id)
-    return ResearchJobManager.public(value)
 
 
 def _get_lab(job_id: str) -> dict[str, Any]:
@@ -356,10 +350,7 @@ def _list_repairs(limit: int) -> list[dict[str, Any]]:
 
 def _list_research(limit: int) -> list[dict[str, Any]]:
     try:
-        return [
-            ResearchJobManager.public(value)
-            for value in _read_research_catalog().jobs(limit)
-        ]
+        return list_research_jobs(limit)
     except (FileNotFoundError, sqlite3.Error):
         return []
 
@@ -410,7 +401,7 @@ def _events_repairs(job_id: str, after: int, limit: int) -> list[dict[str, Any]]
 def _events_research(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
     try:
         _get("research", job_id)
-        return _read_research_catalog().job_events(job_id, after, limit)
+        return research_job_events(job_id, after, limit)
     except (FileNotFoundError, sqlite3.Error) as exc:
         raise KeyError(job_id) from exc
 

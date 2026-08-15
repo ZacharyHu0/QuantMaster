@@ -109,9 +109,10 @@ def test_corrupt_bar_is_quarantined_refetched_and_audited(
     assert len(list(quarantine.rglob("*.quarantine"))) == 1
     assert len(list(quarantine.rglob("*.quarantine.json"))) == 1
     assert store.read("600000.SH", enqueue_repair=False).status == "ready"
-    assert [event["type"] for event in manager.events(completed["id"])] == [
-        "queued", "claimed", "completed",
-    ]
+    event_types = [event["type"] for event in manager.events(completed["id"])]
+    assert event_types[0] == "job_queued"
+    assert event_types.count("job_started") == 1
+    assert event_types[-2:] == ["data_repair_completed", "job_terminal"]
 
 
 def test_bar_read_never_moves_a_legacy_filename(isolated_config):

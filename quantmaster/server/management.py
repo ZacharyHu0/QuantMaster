@@ -1456,6 +1456,10 @@ def update_universe(name: str, request: Request, value: UniverseBody) -> dict:
 def _validate_universe_instruments(symbols: list[str]) -> None:
     """拒绝未知、歧义和没有可验证日线能力的标的。"""
     from quantmaster.data.instruments import resolve_instruments, validate_bar_capability
+    from quantmaster.market_capabilities import (
+        MarketCapability,
+        require_market_capability,
+    )
 
     resolution = resolve_instruments(symbols)
     if resolution["ambiguous"] or resolution["unresolved"]:
@@ -1467,6 +1471,7 @@ def _validate_universe_instruments(symbols: list[str]) -> None:
         raise HTTPException(422, detail)
     for item in resolution["resolved"]:
         try:
+            require_market_capability(item["instrument"], MarketCapability.CANDIDATE)
             validate_bar_capability(item["instrument"]["symbol"], verify_foreign=True)
         except ValueError as exc:
             raise HTTPException(

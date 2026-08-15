@@ -55,7 +55,7 @@ class RemainingSchemaMigrator:
     backup_paths = (
         "source_health.sqlite", "tushare_rate.sqlite", "bars", "fundamentals",
         "pit_execution", "ledger_default.sqlite", "ledger_paper.sqlite",
-        "paper_accounts", "research_lake/_meta/catalog.sqlite",
+        "paper_accounts",
     )
 
     @staticmethod
@@ -158,7 +158,7 @@ class RemainingSchemaMigrator:
         prefixes = ("bars/", "fundamentals/", "pit_execution/", "paper_accounts/")
         exact = {
             "source_health.sqlite", "tushare_rate.sqlite", "ledger_default.sqlite",
-            "ledger_paper.sqlite", "research_lake/_meta/catalog.sqlite",
+            "ledger_paper.sqlite",
         }
         for entry in manifest["entries"]:
             relative = str(entry["path"])

@@ -390,6 +390,12 @@ class PaperStore:
         universe_meta: dict | None = None,
         warning: str = "",
     ) -> dict:
+        from quantmaster.market_capabilities import (
+            MarketCapability,
+            require_symbols_capability,
+        )
+
+        require_symbols_capability(symbols, MarketCapability.PAPER_ACCOUNT)
         account_id, now = uuid.uuid4().hex, utc_now()
         strategy = spec.strategy.model_dump(mode="json")
         universe_snapshot = {
@@ -1244,6 +1250,15 @@ class PaperStore:
         now = utc_now()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+            if row is None:
+                raise KeyError("模拟订单不存在")
+            from quantmaster.market_capabilities import (
+                MarketCapability,
+                require_market_capability,
+            )
+
+            require_market_capability(str(row["symbol"]), MarketCapability.LEDGER_EXECUTION)
             duplicate = conn.execute(
                 "SELECT order_id,quantity,price,fee,market_ref,rule_version "
                 "FROM paper_order_fills WHERE fill_key=?", (fill_key,),
@@ -1253,13 +1268,7 @@ class PaperStore:
                     duplicate, order_id=order_id, quantity=quantity, price=price,
                     fee=fee, market_ref=market_ref, rule_version=rule_version,
                 )
-                row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
-                if row is None:
-                    raise KeyError("模拟订单不存在")
                 return dict(row), False
-            row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
-            if row is None:
-                raise KeyError("模拟订单不存在")
             current = str(row["status"])
             if current in ORDER_TERMINAL_STATUSES:
                 raise ValueError(f"终态订单 {current} 不能新增成交")
@@ -1933,6 +1942,15 @@ class PaperService:
                 "account_id": account_id,
                 "message": "账户已暂停或归档，待开盘订单没有处理。",
             }
+        from quantmaster.market_capabilities import (
+            MarketCapability,
+            require_symbols_capability,
+        )
+
+        require_symbols_capability(
+            account["universe_snapshot"].get("symbols", []),
+            MarketCapability.LEDGER_EXECUTION,
+        )
         cycles = [
             cycle
             for cycle in self.store.cycles(account_id, limit=100)
