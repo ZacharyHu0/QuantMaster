@@ -120,6 +120,12 @@ class _PolicyVisitor(ast.NodeVisitor):
                             f"{method} 周期必须是非负整数常量或 params 参数"
                         )
                     self.period_params.setdefault(method, set()).add(parameter)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "rolling":
+            center = next((item.value for item in node.keywords if item.arg == "center"), None)
+            if center is not None and not (
+                isinstance(center, ast.Constant) and center.value is False
+            ):
+                raise PythonFactorPolicyError("rolling(center=True) 会使用未来数据，禁止执行")
         self.generic_visit(node)
 
 

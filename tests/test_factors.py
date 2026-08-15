@@ -46,6 +46,12 @@ class TestExpressionSafety:
         with pytest.raises(ExpressionError):
             ExpressionFactor("delay(close, 'a')")
 
+    def test_rejects_future_and_invalid_periods(self):
+        with pytest.raises(ExpressionError, match="禁止未来数据"):
+            ExpressionFactor("delay(close, -1)")
+        with pytest.raises(ExpressionError, match="正整数"):
+            ExpressionFactor("ts_mean(close, 0)")
+
     def test_rejects_comparison(self):
         with pytest.raises(ExpressionError):
             ExpressionFactor("close > 10")

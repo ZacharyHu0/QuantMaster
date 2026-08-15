@@ -17,6 +17,7 @@ from quantmaster.factors.analysis import (
     top_quantile_turnover,
 )
 from quantmaster.horizons import SUPPORTED_HORIZONS
+from quantmaster.lab.research import WalkForwardSpec, walk_forward_folds
 from quantmaster.lab.robustness import (
     monte_carlo_block_bootstrap,
     parameter_sensitivity,
@@ -60,41 +61,51 @@ def _walk_forward_ic(
     values: pd.DataFrame,
     close: pd.DataFrame,
     horizon: int,
-    folds: int,
-) -> tuple[pd.Series, list[dict], int, pd.Series]:
+    protocol: WalkForwardSpec,
+) -> tuple[pd.Series, list[dict], int, pd.Series, dict[str, Any]]:
     fwd = forward_returns(close, periods=horizon)
     raw_ic = information_coefficient(values, fwd)
-    if len(raw_ic) < max(80, folds * 20):
-        raise ValueError(f"{horizon}日 IC 样本不足：仅 {len(raw_ic)} 个交易日")
-    min_train = max(60, len(raw_ic) // 3)
-    discovery = raw_ic.iloc[: max(1, min_train - horizon)]
+    maximum_horizon = max(protocol.horizons)
+    if len(close.index) <= maximum_horizon:
+        raise ValueError("行情长度不足以生成成熟标签")
+    maturity_cutoff = pd.Timestamp(close.index[-maximum_horizon - 1])
+    raw_ic = raw_ic.loc[raw_ic.index <= maturity_cutoff]
+    folds, sealed = walk_forward_folds(raw_ic.index, protocol)
+    first = folds[0]
+    discovery = raw_ic.loc[first.train_start:first.train_end]
     direction = 1 if float(discovery.mean()) >= 0 else -1
     oriented = raw_ic * direction
-    remaining = np.arange(min_train, len(oriented))
-    chunks = [chunk for chunk in np.array_split(remaining, folds) if len(chunk)]
     reports, oos = [], []
-    for number, positions in enumerate(chunks, start=1):
-        test_start = int(positions[0])
-        train = oriented.iloc[: max(0, test_start - horizon)]
-        test = oriented.iloc[positions]
+
+    def fold_report(fold, number: int) -> tuple[pd.Series, dict[str, Any]]:
+        train = oriented.loc[fold.train_start:fold.train_end]
+        test = oriented.loc[fold.test_start:fold.test_end]
         train_mean = float(train.mean()) if len(train) else 0.0
         test_mean = float(test.mean()) if len(test) else 0.0
         retention = abs(test_mean) / abs(train_mean) if abs(train_mean) > 1e-12 else 0.0
-        oos.append(test)
-        reports.append({
+        return test, {
             "fold": number,
-            "train_start": str(train.index[0].date()) if len(train) else None,
-            "train_end": str(train.index[-1].date()) if len(train) else None,
-            "test_start": str(test.index[0].date()),
-            "test_end": str(test.index[-1].date()),
+            "name": fold.name,
+            "sealed": bool(fold.sealed),
+            "train_start": fold.train_start,
+            "train_end": fold.train_end,
+            "test_start": fold.test_start,
+            "test_end": fold.test_end,
             "train_days": len(train),
             "test_days": len(test),
             "train_rank_ic": _finite(train_mean),
             "rank_ic": _finite(test_mean),
             "icir": _finite(test.mean() / test.std()) if test.std() > 0 else 0.0,
             "retention": _finite(retention),
-        })
-    return pd.concat(oos), reports, direction, discovery * direction
+        }
+
+    for number, fold in enumerate(folds, start=1):
+        test, report = fold_report(fold, number)
+        oos.append(test)
+        reports.append(report)
+    _sealed_values, sealed_report = fold_report(sealed, len(folds) + 1)
+    combined_oos = pd.concat(oos).groupby(level=0, sort=True).mean()
+    return combined_oos, reports, direction, discovery * direction, sealed_report
 
 
 def _correlation_with_existing(
@@ -119,7 +130,7 @@ def validate_factor_values(
     *,
     name: str = "factor",
     horizons: tuple[int, ...] = SUPPORTED_HORIZONS,
-    folds: int = 4,
+    protocol: WalkForwardSpec | None = None,
     membership: pd.DataFrame | None = None,
     approved_values: dict[str, pd.DataFrame] | None = None,
     research_quality: str = "production",
@@ -130,6 +141,11 @@ def validate_factor_values(
     essential_only: bool = False,
 ) -> dict[str, Any]:
     """对表达式、遗传、LLM 和学习型因子使用同一套验证口径。"""
+    protocol = protocol or WalkForwardSpec.from_lab_config(
+        get_config().lab, horizons=horizons,
+    )
+    if tuple(protocol.horizons) != tuple(horizons):
+        raise ValueError("滚动协议 horizons 必须与本次验证周期完全一致")
     values, prices = factor_values.align(close, join="inner")
     if membership is not None:
         member_mask = membership.reindex(index=values.index, columns=values.columns).fillna(False)
@@ -147,8 +163,8 @@ def validate_factor_values(
     horizon_reports: dict[str, dict] = {}
     essential_execution_cache: dict[int, dict[str, Any]] = {}
     for horizon in horizons:
-        oos, fold_reports, direction, discovery = _walk_forward_ic(
-            values, prices, horizon, folds
+        oos, fold_reports, direction, discovery, sealed_report = _walk_forward_ic(
+            values, prices, horizon, protocol,
         )
         oriented = values * direction
         daily, _nav = quantile_backtest(oriented, prices, quantiles=5, periods=horizon)
@@ -210,10 +226,7 @@ def validate_factor_values(
         if open_prices is not None:
             execution_result = essential_execution_cache.get(direction)
             if execution_result is None or not essential_only:
-                execution_index = (
-                    oriented.index if essential_only
-                    else oos.index.intersection(oriented.index)
-                )
+                execution_index = oos.index.intersection(oriented.index)
                 execution_panel = {
                     key: frame.reindex(index=execution_index, columns=oriented.columns)
                     for key, frame in (panel or {}).items()
@@ -253,6 +266,7 @@ def validate_factor_values(
             "top_annual": _finite(quantile_annual.get("Q5", 0.0)),
             "monotonicity": _finite(monotonicity),
             "folds": fold_reports,
+            "sealed": sealed_report,
             "robustness": robustness,
             "execution": execution,
             "bootstrap": execution_bootstrap,
@@ -291,6 +305,7 @@ def validate_factor_values(
 
     return {
         "factor": name,
+        "protocol": protocol.to_dict(),
         "coverage": _finite(coverage),
         "max_existing_correlation": max_corr,
         "max_existing_factor": max_corr_name,

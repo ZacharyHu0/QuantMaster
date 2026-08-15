@@ -648,11 +648,13 @@ class LabService:
     def create_study(self, payload: dict[str, Any]) -> dict:
         """校验配置、登记 Study，再把长任务放入统一可恢复队列。"""
 
-        from quantmaster.lab.research import OptimizationSpec
+        from quantmaster.lab.research import OptimizationSpec, WalkForwardSpec
 
         config = dict(payload)
         scheduled = bool(config.pop("_scheduled", False))
         config["end"] = config.get("end") or market_date().isoformat()
+        if not config.get("protocol"):
+            config["protocol"] = WalkForwardSpec.from_lab_config(get_config().lab).to_dict()
         spec = OptimizationSpec.from_dict(config)
         require_runnable(self.preflight("optimize", spec.to_dict()))
         study = self.store.create_study(spec.to_dict())
@@ -2066,8 +2068,15 @@ class LabService:
                 length = max(120, int(len(panel["close"]) * ratio))
                 truncated = {key: value.iloc[:length] for key, value in panel.items()}
                 prefix_checks.append(compare_prefixes(full.iloc[:length], compute_factor(factor, truncated)))
+            first_failure = next(
+                (item for item in prefix_checks if not item["passed"]), None,
+            )
             checks["lookahead"] = {
                 "passed": all(item["passed"] for item in prefix_checks), "prefixes": prefix_checks,
+                "operator": spec.expression or spec.slug,
+                "first_pollution_date": (
+                    first_failure.get("first_changed_at") if first_failure else None
+                ),
             }
             warmups = {}
             for length in (60, 120, 240, 480):
@@ -2095,7 +2104,20 @@ class LabService:
                 spec.artifact.get("source_sha256") or ""
             )
             audit = manifest.get("audit") or {}
-            checks["lookahead"] = audit.get("lookahead") or {"passed": False}
+            lookahead = dict(audit.get("lookahead") or {"passed": False})
+            first_failure = next(
+                (
+                    item for item in lookahead.get("prefixes", [])
+                    if not item.get("passed", False)
+                ),
+                None,
+            )
+            lookahead.setdefault("operator", "restricted Python factor")
+            lookahead.setdefault(
+                "first_pollution_date",
+                first_failure.get("first_changed_at") if first_failure else None,
+            )
+            checks["lookahead"] = lookahead
             checks["recursive"] = audit.get("recursive") or {"passed": False}
             checks["artifact_integrity"] = {"passed": integrity}
         else:
@@ -2109,10 +2131,12 @@ class LabService:
                 raise ValueError("学习模型 manifest 完整性校验失败")
             learned_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             folds = learned_manifest.get("fold_artifacts") or []
-            temporal = all(
-                item.get("fold", {}).get("train_end", "")
-                < item.get("fold", {}).get("test_start", "") for item in folds
-            )
+            temporal_failures = [
+                item for item in folds
+                if item.get("fold", {}).get("train_end", "")
+                >= item.get("fold", {}).get("test_start", "")
+            ]
+            temporal = not temporal_failures
             integrity = True
             for item in folds:
                 artifact = (root / str(item.get("artifact") or "")).resolve()
@@ -2122,7 +2146,15 @@ class LabService:
                 ):
                     integrity = False
                     break
-            checks["lookahead"] = {"passed": temporal, "fold_count": len(folds)}
+            checks["lookahead"] = {
+                "passed": temporal,
+                "fold_count": len(folds),
+                "operator": "train/test temporal boundary",
+                "first_pollution_date": (
+                    temporal_failures[0].get("fold", {}).get("test_start")
+                    if temporal_failures else None
+                ),
+            }
             checks["recursive"] = {"passed": True, "reason": "模型由固定长度序列清单约束"}
             checks["artifact_integrity"] = {"passed": integrity}
         protocol = learned_manifest.get("protocol") or {}
@@ -2279,8 +2311,11 @@ class LabService:
             universe, start, end, progress=progress, data_policy=DataPolicy.PREFER_LOCAL.value,
         )
         dates = pd.DatetimeIndex(panel["close"].index).normalize().unique().sort_values()
-        protocol = WalkForwardSpec(horizons=SUPPORTED_HORIZONS)
-        folds, sealed = walk_forward_folds(dates, protocol)
+        protocol = WalkForwardSpec.from_lab_config(
+            get_config().lab, horizons=SUPPORTED_HORIZONS,
+        )
+        mature_dates = dates[:-max(protocol.horizons)]
+        folds, sealed = walk_forward_folds(mature_dates, protocol)
         cycle = self.store.create_research_cycle(
             snapshot_id=str(snapshot.get("id") or ""),
             protocol={
@@ -2289,9 +2324,6 @@ class LabService:
             },
         )
         development_dates = dates[dates <= pd.Timestamp(sealed.train_end)]
-        development_panel = {
-            key: frame.reindex(index=development_dates) for key, frame in panel.items()
-        }
         development_membership = (
             membership.reindex(index=development_dates) if membership is not None else None
         )
@@ -2315,12 +2347,12 @@ class LabService:
                 values = self._expression_values(version, panel, start, end)
                 raw_values[version_id] = values
                 report = validate_factor_values(
-                    values.reindex(index=development_dates), development_panel["close"],
+                    values, panel["close"],
                     name=str(version.get("name") or version_id),
-                    horizons=SUPPORTED_HORIZONS, membership=development_membership,
+                    horizons=SUPPORTED_HORIZONS, protocol=protocol, membership=membership,
                     research_quality=str((snapshot.get("payload") or {}).get(
                         "research_quality", "production"
-                    )), panel=development_panel, open_prices=development_panel.get("open"),
+                    )), panel=panel, open_prices=panel.get("open"),
                     essential_only=True,
                 )
                 reports[version_id] = report

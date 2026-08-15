@@ -25,6 +25,7 @@ from quantmaster.factors.python_artifact import (
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     build_membership_mask,
+    clear_local_dataset_caches,
     create_snapshot,
     inspect_local_dataset,
     load_csi800_members_as_of,
@@ -61,6 +62,11 @@ def _config(tmp_path, *, enabled=False):
     cfg = Config()
     cfg.data.root = str(tmp_path)
     cfg.lab.enabled = enabled
+    cfg.lab.walk_forward_train_days = 120
+    cfg.lab.walk_forward_test_days = 84
+    cfg.lab.walk_forward_step_days = 84
+    cfg.lab.walk_forward_purge_days = 30
+    cfg.lab.walk_forward_folds = 3
     set_config(cfg)
     return cfg
 
@@ -496,7 +502,7 @@ def test_lab_summary_lists_never_decode_large_job_or_study_artifacts(tmp_path, m
     })
     study = store.create_study({
         "universe": "demo", "start": "2024-01-01", "budget_hours": 1,
-        "protocol": {"fold_test_days": 63},
+        "protocol": {"test_window": 244},
     })
     store.update_study(study["id"], status="completed", result={
         "trials": [{"number": index, "artifact": marker} for index in range(2)],
@@ -973,6 +979,13 @@ def test_local_snapshot_plans_actual_membership_ranges_and_invalidates(tmp_path,
         "csi800", "2023-01-02", "2023-12-29",
     )
     assert repeated["cache_hit"] is True
+    clear_local_dataset_caches()
+    _panel2, _membership2, persistent = load_local_dataset(
+        "csi800", "2023-01-02", "2023-12-29",
+    )
+    assert persistent["cache_hit"] is True
+    assert persistent["load_profile"]["source"] == "persistent_evidence"
+    assert persistent["snapshot_hash"] == snapshot["snapshot_hash"]
     changed = bars(dates)
     changed.iloc[-1, changed.columns.get_loc("close")] += 1
     store.put("A.SH", changed, replace=True, source="test:bars", quality=verified)
@@ -1237,7 +1250,17 @@ def test_validation_report_contains_walk_forward_and_fdr(tmp_path):
     report = validate_factor_values(values, close, name="momentum", research_quality="production")
     assert report["best_horizon"] in {1, 3, 5, 7, 10, 20, 30}
     assert len(report["horizons"]) == 7
-    assert all(len(item["folds"]) == 4 for item in report["horizons"].values())
+    assert all(len(item["folds"]) == 3 for item in report["horizons"].values())
+    assert report["protocol"] == {
+        "train_window": 120,
+        "test_window": 84,
+        "step_days": 84,
+        "purge_gap": 30,
+        "development_folds": 3,
+        "horizons": [1, 3, 5, 7, 10, 20, 30],
+        "seed": 42,
+    }
+    assert all(item["sealed"]["sealed"] for item in report["horizons"].values())
     assert set(report["robustness"]["failed_tests"]).issubset({
         "monte_carlo", "parameter_sensitivity", "walk_forward", "penetration",
     })
@@ -1400,6 +1423,7 @@ def test_restricted_python_policy_and_subprocess_contract():
     for unsafe in (
         "import os\ndef compute(features, params):\n    return features['close']",
         "def compute(features, params):\n    return features['close'].shift(-1)",
+        "def compute(features, params):\n    return features['close'].rolling(5, center=True).mean()",
         "def compute(features, params):\n    open('leak')\n    return features['close']",
     ):
         with pytest.raises(PythonFactorPolicyError):

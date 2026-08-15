@@ -317,7 +317,7 @@ class LabWorker:
         if self.service.store.reserve_schedule(f"optimize:{week}"):
             from quantmaster.lab.research import OptimizationSpec, WalkForwardSpec
 
-            protocol = WalkForwardSpec(horizons=tuple(cfg.horizons))
+            protocol = WalkForwardSpec.from_lab_config(cfg)
             spec = OptimizationSpec(
                 universe=cfg.universe, start=cfg.start, end=day,
                 budget_hours=min(10.0, max(0.1, self._budget_remaining())),

@@ -1115,7 +1115,7 @@ class LabStore:
                     json_extract(config_json, '$.start') AS config_start,
                     json_extract(config_json, '$.end') AS config_end,
                     json_extract(config_json, '$.budget_hours') AS config_budget_hours,
-                    json_extract(config_json, '$.protocol.fold_test_days') AS config_fold_test_days,
+                    json_extract(config_json, '$.protocol.test_window') AS config_test_window,
                     json_extract(result_json, '$.version_id') AS result_version_id,
                     json_extract(result_json, '$.candidate') AS result_candidate,
                     json_array_length(COALESCE(json_extract(result_json, '$.trials'), '[]'))
@@ -1138,9 +1138,9 @@ class LabStore:
                     for key in ("universe", "start", "end", "budget_hours")
                     if value.get(f"config_{key}") is not None
                 }
-                fold_days = value.pop("config_fold_test_days")
-                if fold_days is not None:
-                    config["protocol"] = {"fold_test_days": fold_days}
+                test_window = value.pop("config_test_window")
+                if test_window is not None:
+                    config["protocol"] = {"test_window": test_window}
                 trial_count = int(value.pop("result_trial_count") or 0)
                 value["config"] = config
                 value["result"] = {

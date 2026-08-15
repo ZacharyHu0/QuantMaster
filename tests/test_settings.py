@@ -160,6 +160,11 @@ def test_gui_round_trip_preserves_extended_config_fields(tmp_path):
     update.lab.panel_cache_mb = 4096
     update.lab.feature_cache_gb = 12
     update.lab.gpu_memory_fraction = 0.65
+    update.lab.walk_forward_train_days = 630
+    update.lab.walk_forward_test_days = 210
+    update.lab.walk_forward_step_days = 105
+    update.lab.walk_forward_purge_days = 30
+    update.lab.walk_forward_folds = 4
     manager.save(update)
 
     reloaded = document_from_config(manager.load())
@@ -171,6 +176,11 @@ def test_gui_round_trip_preserves_extended_config_fields(tmp_path):
     assert reloaded.lab.panel_cache_mb == 4096
     assert reloaded.lab.feature_cache_gb == 12
     assert reloaded.lab.gpu_memory_fraction == 0.65
+    assert reloaded.lab.walk_forward_train_days == 630
+    assert reloaded.lab.walk_forward_test_days == 210
+    assert reloaded.lab.walk_forward_step_days == 105
+    assert reloaded.lab.walk_forward_purge_days == 30
+    assert reloaded.lab.walk_forward_folds == 4
 
 
 class FakeCredentials:
