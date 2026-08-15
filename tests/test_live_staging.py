@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import uuid
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
@@ -61,18 +62,34 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def _verified_repository(tmp_path: Path, monkeypatch) -> tuple[Path, Path, str]:
-    primary = tmp_path / "primary"
-    primary.mkdir()
+    source = Path(__file__).resolve().parents[1]
+    sha = _git(source, "rev-parse", "HEAD~1")
+    task_sha = _git(source, "rev-parse", "HEAD")
+    common_dir = Path(_git(source, "rev-parse", "--git-common-dir"))
+    if not common_dir.is_absolute():
+        common_dir = source / common_dir
+
+    primary = tmp_path.parent / f"repo-{uuid.uuid4().hex[:8]}"
+    for path in (
+        primary,
+        primary / ".git",
+        primary / ".git" / "objects",
+        primary / ".git" / "objects" / "info",
+        primary / ".git" / "refs" / "heads",
+        primary / ".git" / "refs" / "remotes" / "origin",
+        primary / ".git" / "refs" / "test",
+        primary / ".git" / "worktrees",
+    ):
+        live.tasks.prepare_pytest_directory(path)
     _git(primary, "init", "-b", "main")
-    _git(primary, "config", "core.sharedRepository", "all")
-    _git(primary, "config", "user.email", "tests@example.com")
-    _git(primary, "config", "user.name", "QuantMaster Tests")
-    (primary / ".gitignore").write_text(".artifacts/\n.worktrees/\n", encoding="utf-8")
-    (primary / "payload.txt").write_text("verified\n", encoding="utf-8")
-    _git(primary, "add", ".gitignore", "payload.txt")
-    _git(primary, "commit", "-m", "verified main")
-    sha = _git(primary, "rev-parse", "HEAD")
+    (primary / ".git" / "objects" / "info" / "alternates").write_bytes(
+        f"{(common_dir / 'objects').resolve()}\n".encode(),
+    )
+    _git(primary, "update-ref", "refs/heads/main", sha)
+    _git(primary, "reset", "--hard", sha)
     _git(primary, "update-ref", "refs/remotes/origin/main", sha)
+    _git(primary, "update-ref", "refs/test/task", task_sha)
+    live.tasks.prepare_pytest_directory(primary / ".worktrees")
     target = primary / ".worktrees" / "task"
     _git(primary, "worktree", "add", "-b", "codex/task", str(target), sha)
     evidence = {
@@ -95,18 +112,23 @@ def _verified_repository(tmp_path: Path, monkeypatch) -> tuple[Path, Path, str]:
     return primary, target, sha
 
 
+def _task_sha(primary: Path) -> str:
+    return _git(primary, "rev-parse", "refs/test/task")
+
+
 def test_stage_builds_from_fixed_git_snapshot_when_primary_changes(
     tmp_path: Path, monkeypatch,
 ) -> None:
     if os.name != "nt":
         pytest.skip("slot staging is Windows-only")
     primary, _target, sha = _verified_repository(tmp_path, monkeypatch)
+    verified_readme = (primary / "README.md").read_bytes()
 
     def build(project_root, *_args):
         assert project_root != primary
         assert _git(project_root, "rev-parse", "HEAD") == sha
-        assert (project_root / "payload.txt").read_text(encoding="utf-8") == "verified\n"
-        (primary / "payload.txt").write_text("changed after validation\n", encoding="utf-8")
+        assert (project_root / "README.md").read_bytes() == verified_readme
+        (primary / "README.md").write_text("changed after validation\n", encoding="utf-8")
         build_root = Path(_args[-1])
         archive = _archive(
             build_root / "QuantMaster.zip", ("QuantMaster/QuantMaster.exe", b"exe"),
@@ -121,7 +143,6 @@ def test_stage_builds_from_fixed_git_snapshot_when_primary_changes(
         lambda executable, *, layout: smoke_calls.append((executable, layout))
         or _smoke_report(sha),
     )
-
     result = live.stage("task", cwd=primary)
 
     assert result["build_sha"] == sha
@@ -176,10 +197,9 @@ def test_stage_rejects_untrusted_main_or_task_evidence(
     evidence_path = primary / ".artifacts" / "worktrees" / "task" / "validation" / "full.json"
     evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     if case == "dirty-main":
-        (primary / "payload.txt").write_text("dirty\n", encoding="utf-8")
+        (primary / "README.md").write_text("dirty\n", encoding="utf-8")
     elif case == "unsynchronized-main":
-        _git(target, "commit", "--allow-empty", "-m", "remote moved")
-        _git(primary, "update-ref", "refs/remotes/origin/main", _git(target, "rev-parse", "HEAD"))
+        _git(primary, "update-ref", "refs/remotes/origin/main", _task_sha(primary))
     elif case == "missing-package-gate":
         evidence["package"] = False
         evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -190,11 +210,10 @@ def test_stage_rejects_untrusted_main_or_task_evidence(
             lambda *_args, **_kwargs: {**evidence, "environment": "changed"},
         )
     else:
-        (target / "payload.txt").write_text("task differs\n", encoding="utf-8")
-        _git(target, "add", "payload.txt")
-        _git(target, "commit", "-m", "task differs")
+        task_sha = _task_sha(primary)
+        _git(target, "reset", "--hard", task_sha)
         if case == "different-task-tree":
-            evidence["commit"] = _git(target, "rev-parse", "HEAD")
+            evidence["commit"] = task_sha
             evidence["base"] = sha
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
             monkeypatch.setattr(
