@@ -278,6 +278,11 @@ class LabSettings(StrictModel):
     horizons: list[Literal[1, 3, 5, 7, 10, 20, 30]] = Field(
         default_factory=lambda: [1, 3, 5, 7, 10, 20, 30], min_length=1, max_length=7
     )
+    walk_forward_train_days: int = Field(default=756, ge=120, le=2520)
+    walk_forward_test_days: int = Field(default=244, ge=20, le=756)
+    walk_forward_step_days: int = Field(default=244, ge=1, le=756)
+    walk_forward_purge_days: int = Field(default=30, ge=1, le=252)
+    walk_forward_folds: int = Field(default=3, ge=3, le=12)
     weekly_days: list[int] = Field(default_factory=lambda: [1, 3, 5], min_length=1, max_length=7)
     window_start: str = Field(default="19:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     window_end: str = Field(default="07:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -328,6 +333,8 @@ class LabSettings(StrictModel):
     def validate_window(self):
         if self.window_start == self.window_end:
             raise ValueError("研究窗口的开始和结束时间不能相同")
+        if self.walk_forward_purge_days < max(self.horizons):
+            raise ValueError("滚动验证 purge 天数不能短于最长预测周期")
         return self
 
 

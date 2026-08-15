@@ -1229,7 +1229,7 @@
     const target = document.getElementById('lab-study-list');
     if (!target) return;
     if (!state.studies.length) {
-      target.innerHTML = '<div class="lab-empty">尚无 Study。默认协议会在开发期选参，并将末尾 252 日保持密封。</div>';
+      target.innerHTML = '<div class="lab-empty">尚无 Study。默认协议使用过去三年训练、未来一年测试，并将最后一年保持密封。</div>';
       return;
     }
     target.innerHTML = `<div class="table-scroll"><table class="lab-study-table"><thead><tr><th>Study</th><th>状态</th><th>候选</th><th>Trials</th><th>密封集</th><th>更新</th><th></th></tr></thead><tbody>${state.studies.map(item => {
@@ -1259,7 +1259,8 @@
     const result = study.result || {};
     const protocol = result.protocol || study.config?.protocol || {};
     const sealed = result.sealed_holdout || {};
-    const folds = ['DEV 01','DEV 02','DEV 03','DEV 04'].map((name, index) => `<div><span>${name}</span><b>Purged fold</b><small>${protocol.fold_test_days || 63} 交易日 · ${index + 1}/4</small></div>`).join('');
+    const foldCount = Number(protocol.development_folds || 3);
+    const folds = Array.from({length: foldCount}, (_, index) => `<div><span>DEV ${String(index + 1).padStart(2, '0')}</span><b>Purged fold</b><small>${protocol.test_window || 244} 交易日 · ${index + 1}/${foldCount}</small></div>`).join('');
     const sealedMetrics = result.sealed_metrics || {};
     const recommended = result.recommended || null;
     const feasible = (result.trials || []).filter(item => item.feasible);

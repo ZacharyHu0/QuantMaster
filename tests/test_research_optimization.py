@@ -10,6 +10,7 @@ from quantmaster.cli import build_parser
 from quantmaster.config import Config, set_config
 from quantmaster.data.research import PitDataStore, ResearchDataBundle, load_research_bundle
 from quantmaster.data.tushare_source import TushareSource
+from quantmaster.lab.errors import LabError
 from quantmaster.lab.multihorizon import (
     apply_probability_calibrators,
     fit_multi_fold,
@@ -25,6 +26,7 @@ from quantmaster.lab.research import (
     TimeFold,
     WalkForwardSpec,
     benjamini_hochberg_family,
+    compare_prefixes,
     walk_forward_folds,
 )
 from quantmaster.lab.store import LabStore
@@ -57,15 +59,42 @@ def _panel(days: int = 300, symbols: int = 8) -> dict[str, pd.DataFrame]:
 
 
 def test_walk_forward_keeps_development_before_sealed_holdout():
-    dates = pd.bdate_range("2015-01-05", periods=1400)
+    dates = pd.bdate_range("2015-01-05", periods=2200)
     protocol = WalkForwardSpec()
     folds, sealed = walk_forward_folds(dates, protocol)
 
-    assert len(folds) == 4
+    assert len(folds) == 3
     assert sealed.sealed is True
     assert all(pd.Timestamp(fold.train_end) < pd.Timestamp(fold.test_start) for fold in folds)
     assert pd.Timestamp(folds[-1].test_end) < pd.Timestamp(sealed.test_start)
-    assert len(pd.bdate_range(sealed.test_start, sealed.test_end)) >= 252
+    assert len(pd.bdate_range(sealed.test_start, sealed.test_end)) >= 244
+
+
+def test_walk_forward_reports_actionable_insufficient_evidence():
+    dates = pd.bdate_range("2020-01-02", periods=800)
+    protocol = WalkForwardSpec()
+
+    with pytest.raises(LabError) as raised:
+        walk_forward_folds(dates, protocol)
+
+    error = raised.value
+    assert error.code == "WALK_FORWARD_EVIDENCE_INSUFFICIENT"
+    assert error.context["required_days"] == protocol.required_days
+    assert error.context["available_days"] == 800
+    assert "walk_forward_train_days" in error.context["configurable_fields"]
+
+
+def test_prefix_audit_identifies_first_polluted_value():
+    index = pd.bdate_range("2026-01-05", periods=5)
+    full = pd.DataFrame({"A": range(5), "B": range(5)}, index=index, dtype=float)
+    prefix = full.copy()
+    prefix.loc[index[2], "B"] += 1
+
+    result = compare_prefixes(full, prefix)
+
+    assert result["passed"] is False
+    assert result["first_changed_at"].startswith("2026-01-07")
+    assert result["first_changed_symbol"] == "B"
 
 
 def test_family_fdr_is_monotone_in_original_hypothesis_family():
@@ -230,7 +259,7 @@ def test_study_ledger_persists_protocol_and_resume_state(tmp_path):
     )
 
     assert paused["config_hash"] == spec.config_hash
-    assert paused["config"]["protocol"]["sealed_holdout"] == 252
+    assert paused["config"]["protocol"]["test_window"] == 244
     assert paused["result"]["sealed_completed_blocks"] == 3
 
 
@@ -300,8 +329,8 @@ def test_optuna_runner_persists_a_ridge_baseline_and_reuses_sealed_blocks(
     set_config(cfg)
     panel = _panel()
     protocol = WalkForwardSpec(
-        train_window=120, retrain_every=10, sealed_holdout=20,
-        purge_gap=30, development_folds=2, fold_test_days=10,
+        train_window=120, test_window=20, step_days=10,
+        purge_gap=30, development_folds=3,
     )
     spec = OptimizationSpec(
         universe="demo", start=str(panel["close"].index.min().date()),
