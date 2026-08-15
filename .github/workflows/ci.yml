@@ -71,6 +71,9 @@ jobs:
           --timeout=180
           --junitxml=.artifacts/reports/core-${{ matrix.os }}.xml
           --durations=30
+      - name: Scrub local paths from test reports
+        if: always()
+        run: uv run python scripts/ci/sanitize_reports.py .artifacts/reports
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -156,6 +159,9 @@ jobs:
           --ignore=tests/test_ui_management.py
           --timeout=180
           --junitxml=.artifacts/reports/coverage-${{ matrix.shard }}.xml --durations=30
+      - name: Scrub local paths from test reports
+        if: always()
+        run: uv run python scripts/ci/sanitize_reports.py .artifacts/reports
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -216,6 +222,9 @@ jobs:
           uv run python -m pytest tests/test_ui_management.py
           --timeout=180
           --junitxml=.artifacts/reports/browser.xml --durations=30
+      - name: Scrub local paths from test reports
+        if: always()
+        run: uv run python scripts/ci/sanitize_reports.py .artifacts/reports
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

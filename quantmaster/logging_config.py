@@ -74,6 +74,33 @@ _SECRET_PATTERNS = (
     (re.compile(r"(?i)([?&](?:token|api_key|apikey|key|secret|password|signature)=)[^&#\s]+"), r"\1***"),
     (re.compile(r"(?i)(://[^:/\s]+:)[^@/\s]+(@)"), r"\1***\2"),
 )
+_LOCAL_PATH_PATTERN = re.compile(
+    r"""(?ix)
+    (?<![A-Z0-9_])
+    (?:
+        [A-Z]:[\\/]+[^,\s"'<>]+
+        |\\\\[^,\s"'<>]+(?:[\\/]+[^,\s"'<>]+)+
+        |/(?:Users|home|private|var/folders|tmp|runner|workspace)
+            (?:/[^,\s"'<>]+)+
+    )
+    """
+)
+_LOCAL_REFERENCE_PATTERN = re.compile(
+    r"""(?ix)
+    (?:
+        (?:[A-Z0-9_.<>-]+[\\/])*(?:\.codex[\\/])?worktrees[\\/][^,\s"'<>|)]+
+        |(?:[A-Z0-9_.<>-]+[\\/])?\.artifacts[\\/][^,\s"'<>|)]+
+        |(?:[A-Z0-9_.<>-]+[\\/])?\.venv[\\/][^,\s"'<>|)]+
+        |(?:[A-Z0-9_.<>-]+[\\/])?pytest[\\/]runs[\\/][^,\s"'<>|)]+
+        |\.worktrees\b
+        |\.artifacts\b
+        |\.venv\b
+        |uv-cache\b
+        |basetemp\b
+        |debug\.log\b
+    )
+    """
+)
 _SECRET_FIELD = re.compile(
     r"(?i)(?:api.?key|authorization|cookie|app.?secret|tenant.*token|token|"
     r"password|passwd|credential|database.?url|dsn|prompt|model.?response|response.?body)"
@@ -113,8 +140,10 @@ _state = LoggingState(level=logging.INFO, verbose=False, log_path=None)
 
 
 def redact_sensitive_text(value: object) -> str:
-    """遮蔽日志与客户端错误中常见的凭据形态。"""
+    """遮蔽凭据与本地绝对路径，避免诊断文本越过公开边界。"""
     text = str(value)
+    text = _LOCAL_PATH_PATTERN.sub("<local-path>", text)
+    text = _LOCAL_REFERENCE_PATTERN.sub("<local-path>", text)
     for pattern, replacement in _SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text

@@ -43,6 +43,16 @@ def _isolated_logger(name: str, handler: logging.Handler) -> logging.Logger:
     return logger
 
 
+def test_redact_sensitive_text_removes_local_absolute_paths():
+    text = qm_logging.redact_sensitive_text(
+        r"failure C:\Users\example\Quant\worker.py /home/runner/work/project/project/tests/test.py"
+    )
+
+    assert "<local-path>" in text
+    assert "Users" not in text
+    assert "/home/runner" not in text
+
+
 def test_console_shows_key_frame_then_folds_repeated_traceback(tmp_path):
     stream = io.StringIO()
     clock = iter((1.0, 2.0, 603.0))

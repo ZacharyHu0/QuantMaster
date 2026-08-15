@@ -11,6 +11,13 @@ re-derive policy from prose or chat context.
   unavailable and must not silently reinterpret old data as a new contract.
 - Data source priority: inspect stockdb and existing local caches first; only call Tushare or
   another remote provider for fields that are missing or stale locally.
+- Public GitHub boundary: never publish a real machine path, user name, home directory,
+  absolute worktree/artifact path, traceback, or command output containing one in an Issue,
+  PR, comment, commit status, or uploaded report. Use the task slug, branch, commit SHA, or
+  <local-path-omitted> instead; if generated public text contains a path, fail closed and
+  scrub/delete the exposed record before continuing.
+- When a leak is found, delete the offending public comment or report, scrub the current
+  mutable body, and inspect reachable Git history before claiming the exposure is removed.
 - Use the primary checkout's project interpreter for every Python command:
   `<primary>\.venv\Scripts\python.exe` on Windows (`.venv/bin/python` elsewhere). Task worktrees
   share that interpreter. Never fall back to system Python.

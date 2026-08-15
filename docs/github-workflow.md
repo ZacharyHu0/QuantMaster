@@ -8,10 +8,18 @@
 
 每个功能、缺陷、基础设施修复或独立重构必须先创建 GitHub Issue。Issue 模板负责收集范围、
 非目标、公开 seam、数据/迁移风险、性能预算和验收检查；agent 创建 Issue 时设置 owner、
-类型/风险 label 和 milestone，并把任务 slug、分支和 worktree 路径回链到 Issue。
+类型/风险 label 和 milestone，并把任务 slug、分支和开发基线回链到 Issue；不得回链或
+粘贴本地 worktree 路径。
 
 任务开始后使用 `scripts/dev/tasks.py start <slug>` 创建 `codex/<slug>` 分支和独立 worktree，
 固定一个开发基线；开发阶段不跟踪移动中的 `main`。
+
+## 公共文本边界
+
+Issue、PR、评论、commit status、Actions 日志和上传报告不得包含真实机器路径、用户名、
+用户目录或绝对 worktree/artifact 路径。任务启动输出只留在本地；公开记录使用任务 slug、
+分支、commit SHA 或 <local-path-omitted>。发现泄露后删除含路径的评论/报告，清理当前
+可编辑正文，并检查可达 Git 历史和 Actions 工件。
 
 ## 2. 开发与 PR
 
@@ -66,6 +74,7 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 宣布任务完成前，逐项确认：
 
 - [ ] Issue 已存在，范围/非目标/验收齐全，并链接任务 slug；
+- [ ] Issue/PR/评论/Actions 报告中没有真实本地路径；泄露记录已删除或清理并复核。
 - [ ] 分支为 `codex/<slug>`，独立 worktree，开发基线固定；
 - [ ] Draft PR 使用 `Closes #<issue>`，按模板填写验证与回滚证据；
 - [ ] Draft 快检与 Ready 后完整 CI 均绿；`tasks.py ready --accept-ci`（或本地 ready）已记录；
