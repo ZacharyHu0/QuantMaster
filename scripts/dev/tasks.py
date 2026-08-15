@@ -198,6 +198,26 @@ def task_artifacts_active(artifacts: Path) -> bool:
     return False
 
 
+def cleanup_task_lease_marker(primary: Path, slug: str) -> bool:
+    """Remove an orphaned task lease marker after its artifact root is gone.
+
+    The caller must not hold the same marker's lock.  If another process owns
+    the marker, deletion is skipped so the active lease stays observable.
+    """
+    marker = primary / ".artifacts" / "task-leases" / f"{slug}{TASK_LEASE}"
+    if not marker.exists():
+        return False
+    try:
+        with marker.open("a+b") as stream:
+            if not _try_lock(stream):
+                return False
+            _unlock(stream)
+        marker.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def task_completion_path(primary: Path, slug: str) -> Path:
     return primary / ".artifacts" / "task-completions" / f"{slug}.json"
 
@@ -826,6 +846,7 @@ def gc_task_artifacts(
                         print(f"[task-gc] state changed, invalid content skipped: {artifacts}")
                         continue
                     remove_task_artifacts(primary, slug)
+                cleanup_task_lease_marker(primary, slug)
                 counts["removed"] += 1
                 print(f"[task-gc] removed legacy invalid root: {artifacts}")
             except (OSError, SystemExit) as exc:
@@ -882,11 +903,38 @@ def gc_task_artifacts(
                         superseded_by="legacy-orphan-owner-authorized",
                     )
                 remove_task_artifacts(primary, slug)
+            cleanup_task_lease_marker(primary, slug)
             counts["removed"] += 1
             print(f"[task-gc] removed: {slug}")
         except (OSError, SystemExit) as exc:
             counts["failed"] += 1
             print(f"[task-gc] failed: {slug}: {exc}")
+
+    lease_root = primary / ".artifacts" / "task-leases"
+    if lease_root.is_dir():
+        for marker in sorted(lease_root.glob(f"*{TASK_LEASE}")):
+            slug = marker.name[: -len(TASK_LEASE)]
+            if not SLUG_PATTERN.fullmatch(slug):
+                continue
+            artifacts = primary / ".artifacts" / "worktrees" / slug
+            target = (primary / ".worktrees" / slug).resolve()
+            branch = f"codex/{slug}"
+            branch_exists = git(
+                ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=primary, check=False,
+            ).returncode == 0
+            if artifacts.exists() or target.exists() or branch_exists:
+                continue
+            if task_artifacts_active(artifacts):
+                counts["active"] += 1
+                continue
+            if not apply:
+                counts["eligible"] += 1
+                print(f"[task-gc] eligible orphan lease marker: {marker}")
+                continue
+            if cleanup_task_lease_marker(primary, slug):
+                counts["removed"] += 1
+                print(f"[task-gc] removed orphan lease marker: {marker.name}")
 
     print("[task-gc] summary " + " ".join(f"{key}={value}" for key, value in counts.items()))
     if counts["failed"]:
@@ -1043,6 +1091,7 @@ def remove(
             slug, superseded_by=superseded_by,
             adopt_partial_removal=adopt_partial_removal,
         )
+    cleanup_task_lease_marker(primary, slug)
 
 
 def parser() -> argparse.ArgumentParser:
