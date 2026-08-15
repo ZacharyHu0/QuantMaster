@@ -73,7 +73,7 @@ BASELINE = {
     "quantmaster/server/news.py": 8,
     "quantmaster/server/trading.py": 11,
     "quantmaster/settings_checks.py": 4,
-    "quantmaster/server/settings_jobs.py": 1,
+    "quantmaster/settings_jobs.py": 1,
 }
 
 STRICT_PREFIXES = (

@@ -191,6 +191,9 @@ class _DefaultWorkerPlan:
         )
         from quantmaster.rotation.etf_research import reset_etf_research_service
         from quantmaster.rotation.service import get_rotation_worker
+        from quantmaster.worker_components import register_worker_components
+
+        register_worker_components()
         (
             settings_manager,
             get_settings_jobs,

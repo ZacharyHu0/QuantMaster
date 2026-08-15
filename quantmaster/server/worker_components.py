@@ -1,4 +1,4 @@
-"""Web-owned worker components exposed to the composition root."""
+"""Web-owned overrides for the runtime worker component seam."""
 
 from __future__ import annotations
 

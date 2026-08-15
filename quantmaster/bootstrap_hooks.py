@@ -38,3 +38,7 @@ def server_worker_hooks() -> tuple[
     if _worker_hooks is None:
         raise RuntimeError("后台 Worker 的服务器组件尚未注册")
     return _worker_hooks
+
+
+def server_worker_hooks_registered() -> bool:
+    return _worker_hooks is not None
