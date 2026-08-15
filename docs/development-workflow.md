@@ -57,12 +57,14 @@ Only after development is complete:
 1. Read the latest local `main` and `origin/main` state once and select the integration baseline.
 2. Verify the task branch and all Git write targets using absolute paths.
 3. Align the completed task to that baseline once; resolve conflicts inside the task worktree.
-4. Run focused conflict-sensitive checks, then `tasks.py ready --accept-ci` to record the green
-   GitHub Actions evidence for the exact task commit. Without GitHub/CI access, run
-   `tasks.py ready` locally (add `--ui` / `--rust` / `--package` for those lanes).
-5. Push the validated task commit, update the Draft PR with the exact evidence, and mark it ready.
-6. After the full CI matrix and review pass, squash-merge as one independently revertible `main`
-   commit, then run `tasks.py remove <slug>` from the primary checkout.
+4. Run focused conflict-sensitive checks. Push the aligned commit while the PR is still Draft.
+5. Wait for Draft fast/core to pass, then mark the PR Ready; `ready_for_review` triggers the
+   full CI matrix for that exact commit.
+6. After the matrix is green, run `tasks.py ready --accept-ci` to record its authoritative evidence.
+   Without GitHub/CI access, run `tasks.py ready` locally (add `--ui` / `--rust` / `--package` for
+   those lanes).
+7. Update the PR with the exact evidence. After review passes, squash-merge as one independently
+   revertible `main` commit, then run `tasks.py remove <slug>` from the primary checkout.
 
 The integration baseline is fixed for that attempt. A genuine dependency or conflicting change
 requires a deliberate new integration attempt, not a background loop that chases `main`.
@@ -138,8 +140,10 @@ development-phase view:
 1. Create or select the Issue; start the isolated `codex/<slug>` worktree.
 2. Push the first coherent commit and open a Draft PR with `Closes #<issue>`.
 3. Run `scripts/dev/github_sync.py reconcile` (dry-run) and apply safe fixes with `--apply`.
-4. Complete the one-time integration alignment and `tasks.py ready --accept-ci`; mark the PR Ready.
-5. Let the full CI matrix run, resolve review, squash-merge, then `tasks.py remove <slug>`.
+4. Complete the one-time integration alignment and push the aligned Draft commit.
+5. Wait for Draft fast/core, mark the PR Ready, and let the full CI matrix run.
+6. Record the green exact-SHA evidence with `tasks.py ready --accept-ci`, resolve review,
+   squash-merge, then `tasks.py remove <slug>`.
 
 Discussions host architecture proposals and evidence-backed decisions. Irreversible migrations,
 required features that exceed a hard package budget, or inconclusive SciPy/Rust benchmarks pause
