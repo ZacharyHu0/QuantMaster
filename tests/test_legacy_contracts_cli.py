@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -64,3 +65,53 @@ def test_external_backup_rejects_drive_or_filesystem_root(tmp_path):
     broad = Path(root.anchor)
     with pytest.raises(SystemExit, match="drive/filesystem root"):
         legacy_contracts.main(_args(root, broad))
+
+
+def test_plan_reports_confirmed_roots_without_starting_migration(
+    tmp_path, monkeypatch, capsys,
+):
+    root = (tmp_path / "confirmed-data").resolve()
+    stockdb = (tmp_path / "stockdb").resolve()
+    backup = (tmp_path / "external" / "backups").resolve()
+    root.mkdir()
+    captured = {}
+
+    class Manager:
+        def __init__(self, value, **kwargs):
+            captured.update(root=Path(value), **kwargs)
+
+        @staticmethod
+        def plan(domain):
+            return {"domain": domain, "required_backup_bytes": 123}
+
+    monkeypatch.setattr(legacy_contracts, "LegacyMigrationManager", Manager)
+    args = [
+        "plan", "--domain", "fixture", "--data-root", str(root),
+        "--confirm-root", str(root), "--stockdb-root", str(stockdb),
+        "--confirm-stockdb-root", str(stockdb), "--backup-root", str(backup),
+        "--confirm-backup-root", str(backup),
+    ]
+
+    assert legacy_contracts.main(args) == 0
+    assert captured["root"] == root
+    assert captured["stockdb_root"] == stockdb
+    assert captured["backup_root"] == backup
+    assert json.loads(capsys.readouterr().out)["required_backup_bytes"] == 123
+
+
+def test_apply_requires_reviewed_plan_and_writer_stop_evidence(tmp_path):
+    root = (tmp_path / "confirmed-data").resolve()
+    stockdb = (tmp_path / "stockdb").resolve()
+    backup = (tmp_path / "external" / "backups").resolve()
+    root.mkdir()
+    args = [
+        "apply", "--domain", "fixture", "--data-root", str(root),
+        "--confirm-root", str(root), "--stockdb-root", str(stockdb),
+        "--confirm-stockdb-root", str(stockdb), "--backup-root", str(backup),
+        "--confirm-backup-root", str(backup),
+    ]
+
+    with pytest.raises(SystemExit, match="writer-stopped-evidence"):
+        legacy_contracts.main(args)
+    with pytest.raises(SystemExit, match="accept-plan"):
+        legacy_contracts.main([*args, "--writer-stopped-evidence", "stopped"])

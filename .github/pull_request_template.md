@@ -25,6 +25,8 @@ Closes #
 
 ### Task workflow
 
+- [ ] 公开正文、评论和上传报告不含真实本地路径或用户名。
+
 - [ ] 已在任务 worktree 使用主 checkout 的 `.venv` 运行 `scripts/dev/tasks.py check`。
 - [ ] 已只对齐一次 integration baseline，任务改动已提交且 worktree 干净。
 - [ ] 已在 Draft 状态推送 aligned commit，且 Draft fast/core 已通过。

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # This file is also executed directly, so repository imports follow the path bootstrap.
+from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory  # noqa: E402
 
 
@@ -91,7 +92,7 @@ def cleanup_run_root(path: Path) -> None:
             if attempt == _CLEANUP_ATTEMPTS:
                 raise RuntimeError(
                     f"[local-ci] successful run cleanup kept changing after {attempt} "
-                    f"attempts; retained evidence at {path}"
+                    f"attempts; retained evidence at {redact_sensitive_text(path)}"
                 ) from exc
         except OSError as exc:
             if getattr(exc, "winerror", None) not in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
@@ -99,7 +100,7 @@ def cleanup_run_root(path: Path) -> None:
             if attempt == _CLEANUP_ATTEMPTS:
                 raise RuntimeError(
                     f"[local-ci] successful run cleanup remained locked after {attempt} "
-                    f"attempts; retained evidence at {path}"
+                    f"attempts; retained evidence at {redact_sensitive_text(path)}"
                 ) from exc
         _cleanup_sleep(delay)
         delay = min(delay * 2, _CLEANUP_MAX_DELAY_SECONDS)
@@ -123,7 +124,11 @@ def project_python() -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise SystemExit(f"[local-ci] project interpreter missing under {primary}: run uv sync first")
+    raise SystemExit(
+        redact_sensitive_text(
+            f"[local-ci] project interpreter missing under {primary}: run uv sync first"
+        )
+    )
 
 
 PYTHON = project_python()
@@ -131,7 +136,10 @@ PYTHON = project_python()
 
 def run(label: str, args: list[str], *, env: dict[str, str] | None = None) -> None:
     command = [str(PYTHON), *args]
-    print(f"\n[local-ci] {label}: {' '.join(command)}", flush=True)
+    print(
+        f"\n[local-ci] {label}: {redact_sensitive_text(' '.join(command))}",
+        flush=True,
+    )
     effective_env = os.environ.copy()
     effective_env["RUFF_CACHE_DIR"] = str(ARTIFACTS / "cache" / "ruff")
     effective_env["MYPY_CACHE_DIR"] = str(ARTIFACTS / "cache" / "mypy")
@@ -153,7 +161,10 @@ def run_external(
     cwd: Path = ROOT,
     env: dict[str, str] | None = None,
 ) -> None:
-    print(f"\n[local-ci] {label}: {' '.join(command)}", flush=True)
+    print(
+        f"\n[local-ci] {label}: {redact_sensitive_text(' '.join(command))}",
+        flush=True,
+    )
     completed = subprocess.run(command, cwd=cwd, env=env, check=False)
     if completed.returncode:
         raise SystemExit(f"[local-ci] FAILED: {label} (exit {completed.returncode})")

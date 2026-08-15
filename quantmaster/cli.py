@@ -25,6 +25,7 @@ import sys
 
 import pandas as pd
 
+from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.trading_sessions import market_date, resolve_session_target
 
 
@@ -289,7 +290,7 @@ def cmd_fetch(args) -> None:
             print(f"  {symbol} {args.frequency}: {len(df)} 条 ({df.index.min()} ~ {df.index.max()})")
             ok += 1
         except Exception as e:
-            print(f"  {symbol}: 失败 {e}", file=sys.stderr)
+            print(f"  {symbol}: 失败 {redact_sensitive_text(e)}", file=sys.stderr)
             failed += 1
     print(f"完成: {ok} 成功, {failed} 失败")
 
@@ -868,7 +869,7 @@ def cmd_daily(args) -> None:
             )
             ok += 1
         except Exception as e:
-            print(f"  {symbol}: {e}", file=sys.stderr)
+            print(f"  {symbol}: {redact_sensitive_text(e)}", file=sys.stderr)
     print(f"  行情就绪 {ok}/{len(symbols) + 1}", file=sys.stderr)
 
     print("== 2/4 抓取财经快讯 ==", file=sys.stderr)
@@ -876,7 +877,10 @@ def cmd_daily(args) -> None:
         crawl = AICrawler().run(skip_llm=args.skip_llm)
         print(f"  抓取 {crawl['fetched']} 条，入库 {crawl['saved']} 条", file=sys.stderr)
     except Exception as e:
-        print(f"  快讯抓取失败（不影响后续）: {e}", file=sys.stderr)
+        print(
+            f"  快讯抓取失败（不影响后续）: {redact_sensitive_text(e)}",
+            file=sys.stderr,
+        )
 
     print("== 3/4 生成并保存每日选股 ==", file=sys.stderr)
     market_envelope = refresh_panel(symbols, args.start, end)
@@ -1019,7 +1023,10 @@ def cmd_ledger(args) -> None:
                     refresh_history(symbol, start, end, store=store), label=symbol,
                 )["close"]
             except Exception as e:
-                print(f"  {symbol} 行情缺失（按最近成交价估值）: {e}", file=sys.stderr)
+                print(
+                    f"  {symbol} 行情缺失（按最近成交价估值）: {redact_sensitive_text(e)}",
+                    file=sys.stderr,
+                )
         nav = daily_nav(ledger, pd.DataFrame(prices))
         for warning in nav_warnings(nav):
             print(f"⚠️  {warning}", file=sys.stderr)

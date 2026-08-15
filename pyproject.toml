@@ -97,6 +97,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
+relative_files = true
 source = ["quantmaster"]
 omit = [
     "*/quantmaster/fake_component.py",
