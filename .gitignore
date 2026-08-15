@@ -38,6 +38,9 @@ config.yaml
 config.checks.json
 .env
 
+# 本地调研笔记（人工维护，不进入版本管理）
+/docs/research/stock-dashboard-quantmaster.md
+
 # OS / IDE
 .DS_Store
 .idea/
