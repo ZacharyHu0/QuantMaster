@@ -283,6 +283,7 @@ class LabSettings(StrictModel):
     walk_forward_step_days: int = Field(default=244, ge=1, le=756)
     walk_forward_purge_days: int = Field(default=30, ge=1, le=252)
     walk_forward_folds: int = Field(default=3, ge=3, le=12)
+    factor_correlation_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
     weekly_days: list[int] = Field(default_factory=lambda: [1, 3, 5], min_length=1, max_length=7)
     window_start: str = Field(default="19:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     window_end: str = Field(default="07:00", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")

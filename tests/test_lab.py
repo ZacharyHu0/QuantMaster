@@ -212,6 +212,21 @@ def test_discovery_form_uses_the_queue_preflight_once():
     assert "confirmPreflight(operation, params, kindLabel[operation]" not in lab_script
 
 
+def test_factor_catalog_ui_exposes_semantic_filters_and_shared_correlation_route():
+    root = __import__("pathlib").Path(__file__).parents[1]
+    index = (root / "quantmaster/server/static/index.html").read_text(encoding="utf-8")
+    lab_script = (root / "quantmaster/server/static/lab.js").read_text(encoding="utf-8")
+
+    for field in (
+        "lab-factor-category", "lab-factor-kind", "lab-factor-validation",
+        "lab-factor-horizon", "lab-factor-tag", "lab-correlation-horizon",
+    ):
+        assert field in index
+    assert "/api/v1/lab/factors/correlation-matrix" in lab_script
+    assert "因子含义" in lab_script
+    assert "VERSION HISTORY" in lab_script
+
+
 class _SequenceLLMClient:
     def __init__(self, outcomes):
         self.outcomes = list(outcomes)
@@ -234,6 +249,94 @@ def test_curated_catalog_has_48_unique_specs():
     assert len({spec.slug for spec in specs}) == 48
     assert {"expression"} <= {spec.kind for spec in specs}
     assert any(spec.slug == "news_sentiment" for spec in specs)
+
+
+def test_factor_catalog_projects_validation_and_version_history(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    first = FactorSpec(
+        slug="catalog_history", name="目录历史", expression="rank(close)",
+        description="价格截面排序", tags=("价格",), horizons=(3,),
+    )
+    _factor, first_version, _created = store.create_factor(first, source="manual")
+    store.save_validation(
+        first_version["id"], "dataset-1",
+        {"gates": {"passed": True, "hard_failures": [], "soft_failures": []}},
+    )
+    second = FactorSpec(
+        slug="catalog_history", name="目录历史", expression="rank(-close)",
+        description="反向价格截面排序", tags=("价格",), horizons=(3,),
+    )
+    _factor, second_version, _created = store.create_factor(
+        second, source="manual", parent_id=first_version["id"],
+    )
+
+    item = next(
+        value for value in store.list_factors(limit=500)["items"]
+        if value["version_id"] == second_version["id"]
+    )
+    assert item["validation_passed"] is None
+    history = store.version_history(second_version["id"])
+    assert [value["version"] for value in history] == [2, 1]
+    assert history[0]["validation_passed"] is None
+    assert history[1]["validation_passed"] is True
+
+
+def test_factor_correlation_uses_one_snapshot_and_configured_threshold(tmp_path, monkeypatch):
+    cfg = _config(tmp_path)
+    cfg.lab.factor_correlation_threshold = 0.65
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    versions = []
+    for slug, name in (("corr_a", "相关 A"), ("corr_b", "相关 B")):
+        _factor, version, _created = store.create_factor(FactorSpec(
+            slug=slug, name=name, expression="rank(close)", horizons=(3,),
+        ))
+        versions.append(version)
+    panel = _panel(days=12, symbols=4)
+    snapshot = store.save_snapshot({"snapshot_hash": "one-frozen-snapshot"})
+    calls = []
+    monkeypatch.setattr(
+        service, "_context",
+        lambda *args, **kwargs: (calls.append((args, kwargs)) or (panel, None, snapshot)),
+    )
+    base = panel["close"].rank(axis=1)
+    values = {"corr_a": base, "corr_b": -base}
+    monkeypatch.setattr(
+        service, "_expression_values",
+        lambda version, _panel, _start, _end: values[version["slug"]],
+    )
+
+    result = service.factor_correlation_matrix(
+        version_ids=[value["id"] for value in versions], universe="demo",
+        start="2023-01-02", end="2023-02-01", horizon=3,
+    )
+
+    assert len(calls) == 1
+    assert result["snapshot_hash"] == "one-frozen-snapshot"
+    assert result["threshold"] == 0.65
+    assert result["matrix"] == [[1.0, -1.0], [-1.0, 1.0]]
+    assert result["high_correlations"][0]["absolute_rho"] == 1.0
+
+
+def test_factor_correlation_rejects_cross_horizon_selection(tmp_path):
+    _config(tmp_path)
+    store = LabStore(tmp_path / "lab.sqlite")
+    service = LabService(store)
+    version_ids = []
+    for slug, horizon in (("corr_3d", 3), ("corr_5d", 5)):
+        _factor, version, _created = store.create_factor(FactorSpec(
+            slug=slug, name=slug, expression="rank(close)", horizons=(horizon,),
+        ))
+        version_ids.append(version["id"])
+
+    with pytest.raises(LabError) as captured:
+        service.factor_correlation_matrix(
+            version_ids=version_ids, universe="demo",
+            start="2023-01-02", end="2023-02-01", horizon=3,
+        )
+    assert captured.value.code == "FACTOR_CORRELATION_INCOMPARABLE"
+    assert captured.value.context["incompatible"][0]["version_id"] == version_ids[1]
 
 
 def test_lab_sandbox_feature_entry_preserves_news_preview_eligibility(tmp_path, monkeypatch):

@@ -513,21 +513,54 @@ class LabStore:
         base = (
             "FROM factor_definitions d JOIN factor_versions v ON v.factor_id=d.id "
             "AND v.version=(SELECT MAX(v2.version) FROM factor_versions v2 WHERE v2.factor_id=d.id) "
+            "LEFT JOIN validation_reports r ON r.id=(SELECT r2.id FROM validation_reports r2 "
+            "WHERE r2.version_id=v.id ORDER BY r2.created_at DESC,r2.id DESC LIMIT 1) "
         )
         with self._conn() as conn:
             total = conn.execute(f"SELECT COUNT(*) {base}{where}", params).fetchone()[0]
             rows = conn.execute(
-                "SELECT d.*,v.id AS version_id,v.version,v.status,v.source,v.spec_json,v.updated_at "
+                "SELECT d.*,v.id AS version_id,v.version,v.status,v.source,v.spec_json,v.updated_at,"
+                "r.report_json AS validation_json "
                 f"{base}{where} ORDER BY v.updated_at DESC,d.slug LIMIT ? OFFSET ?",
                 (*params, max(1, min(limit, 500)), max(0, offset)),
             ).fetchall()
         items = []
         for row in rows:
-            value = self._decode(row, ("spec_json",)) or {}
+            value = self._decode(row, ("spec_json", "validation_json")) or {}
             value["spec"] = value.pop("spec_json")
+            validation = value.pop("validation_json")
+            value["validation_passed"] = (
+                bool((validation.get("gates") or {}).get("passed")) if validation else None
+            )
             value.pop("name_key", None)
             items.append(value)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    def version_history(self, version_id: str) -> list[dict[str, Any]]:
+        """Return the immutable version lineage for the selected logical factor."""
+        with self._conn() as conn:
+            factor = conn.execute(
+                "SELECT factor_id FROM factor_versions WHERE id=?", (version_id,),
+            ).fetchone()
+            if factor is None:
+                raise KeyError("因子版本不存在")
+            rows = conn.execute(
+                "SELECT v.id,v.version,v.parent_id,v.status,v.source,v.created_by,"
+                "v.created_at,v.updated_at,"
+                "(SELECT r.report_json FROM validation_reports r WHERE r.version_id=v.id "
+                "ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS validation_json "
+                "FROM factor_versions v WHERE v.factor_id=? ORDER BY v.version DESC",
+                (factor[0],),
+            ).fetchall()
+        history = []
+        for row in rows:
+            value = self._decode(row, ("validation_json",)) or {}
+            validation = value.pop("validation_json")
+            value["validation_passed"] = (
+                bool((validation.get("gates") or {}).get("passed")) if validation else None
+            )
+            history.append(value)
+        return history
 
     def factor_reference(self, reference: str) -> dict | None:
         """Resolve the latest factor version by its stable slug or unique display name."""

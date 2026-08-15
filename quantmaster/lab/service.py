@@ -203,6 +203,7 @@ class LabService:
                 "max_workers": cfg.max_workers,
                 "window": [cfg.window_start, cfg.window_end],
                 "weekly_days": cfg.weekly_days,
+                "factor_correlation_threshold": cfg.factor_correlation_threshold,
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
                 "allow_cloud_sample": cfg.allow_cloud_sample,
             },
@@ -719,6 +720,119 @@ class LabService:
         if progress:
             progress(52, "数据快照已冻结")
         return panel, membership, stored
+
+    def factor_correlation_matrix(
+        self,
+        *,
+        version_ids: list[str],
+        universe: str,
+        start: str,
+        end: str,
+        horizon: int,
+    ) -> dict[str, Any]:
+        """Compare expression factors on one frozen panel with the shared rank engine."""
+        from quantmaster.factors.composite import factor_correlation
+
+        unique_ids = list(dict.fromkeys(str(value).strip() for value in version_ids if value))
+        if len(unique_ids) != len(version_ids):
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析不能包含重复因子版本",
+                action="取消重复选择后重试",
+                status_code=400,
+            )
+        if not 2 <= len(unique_ids) <= 30:
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析需要选择 2–30 个因子",
+                action="在因子目录中调整勾选数量",
+                status_code=400,
+            )
+        if horizon not in SUPPORTED_HORIZONS:
+            raise LabError(
+                "FACTOR_CORRELATION_SELECTION_INVALID",
+                "相关性分析周期只支持 1/3/5/7/10/20/30 日",
+                action="选择受支持的预测周期",
+                status_code=400,
+            )
+
+        versions = []
+        incompatible = []
+        for version_id in unique_ids:
+            version = self.store.version(version_id)
+            if version is None:
+                raise KeyError(f"因子版本不存在: {version_id}")
+            spec = FactorSpec.from_dict(version["spec"])
+            reasons = []
+            if spec.kind != "expression":
+                reasons.append(f"{spec.kind} 类型尚未接入统一表达式计算内核")
+            if horizon not in spec.horizons:
+                reasons.append(f"未声明支持 {horizon} 日预测周期")
+            if reasons:
+                incompatible.append({
+                    "version_id": version_id, "name": version["name"], "reasons": reasons,
+                })
+            versions.append(version)
+        if incompatible:
+            raise LabError(
+                "FACTOR_CORRELATION_INCOMPARABLE",
+                "所选因子不能在同一研究口径下比较",
+                action="只选择支持同一周期的表达式因子",
+                context={"incompatible": incompatible},
+            )
+
+        end = end or market_date().isoformat()
+        panel, membership, snapshot = self._context(
+            universe, start, end, data_policy=DataPolicy.PREFER_LOCAL.value,
+        )
+        values: dict[str, pd.DataFrame] = {}
+        for version in versions:
+            frame = self._expression_values(version, panel, start, end)
+            if membership is not None:
+                mask = membership.reindex(index=frame.index, columns=frame.columns).fillna(False)
+                frame = frame.where(mask)
+            values[str(version["id"])] = frame
+
+        correlation = factor_correlation(values)
+        threshold = float(get_config().lab.factor_correlation_threshold)
+        matrix = [
+            [float(value) if np.isfinite(value) else None for value in correlation.loc[row]]
+            for row in unique_ids
+        ]
+        high_pairs = []
+        for index, left in enumerate(unique_ids):
+            for right in unique_ids[index + 1:]:
+                value = float(correlation.loc[left, right])
+                if np.isfinite(value) and abs(value) >= threshold:
+                    high_pairs.append({
+                        "left_version_id": left,
+                        "right_version_id": right,
+                        "rho": value,
+                        "absolute_rho": abs(value),
+                    })
+        high_pairs.sort(key=lambda item: item["absolute_rho"], reverse=True)
+        return {
+            "schema_version": 1,
+            "snapshot_hash": snapshot["snapshot_hash"],
+            "universe": universe,
+            "start": start,
+            "end": end,
+            "horizon": horizon,
+            "threshold": threshold,
+            "method": "mean_daily_cross_sectional_spearman",
+            "explanation": (
+                "先在每个交易日对股票截面排名并计算 Spearman 相关，再对日期取均值；"
+                "这衡量因子选股排序的重合度，不把时间趋势误当成正交性。"
+            ),
+            "items": [{
+                "version_id": version["id"],
+                "name": version["name"],
+                "slug": version["slug"],
+                "category": version["category"],
+            } for version in versions],
+            "matrix": matrix,
+            "high_correlations": high_pairs,
+        }
 
     def prepare_data(
         self,

@@ -19,6 +19,13 @@
     selectedVersion: '',
     status: '',
     search: '',
+    factorCategory: '',
+    factorKind: '',
+    factorValidation: '',
+    factorHorizon: '',
+    factorTag: '',
+    correlationHorizon: 3,
+    correlationSelection: new Set(),
     selectedModel: 'ridge',
     suggestion: null,
     suggestionTask: null,
@@ -1089,8 +1096,41 @@
     return state.factors.filter(item => {
       if (state.status && item.status !== state.status) return false;
       const spec = item.spec || {};
-      return !search || `${item.name} ${item.slug} ${spec.expression || ''}`.toLowerCase().includes(search);
+      if (state.factorCategory && item.category !== state.factorCategory) return false;
+      if (state.factorKind && item.kind !== state.factorKind) return false;
+      if (state.factorValidation === 'passed' && item.validation_passed !== true) return false;
+      if (state.factorValidation === 'failed' && item.validation_passed !== false) return false;
+      if (state.factorValidation === 'unvalidated' && item.validation_passed != null) return false;
+      if (state.factorHorizon && !(spec.horizons || []).map(Number).includes(Number(state.factorHorizon))) return false;
+      if (state.factorTag && !(spec.tags || []).includes(state.factorTag)) return false;
+      const searchable = [item.name, item.slug, spec.expression, spec.description, spec.rationale, ...(spec.tags || [])].join(' ');
+      return !search || searchable.toLowerCase().includes(search);
     });
+  }
+
+  function factorCanCorrelate(item) {
+    return item.kind === 'expression' && (item.spec?.horizons || []).map(Number).includes(state.correlationHorizon);
+  }
+
+  function syncCorrelationControls() {
+    const count = state.correlationSelection.size;
+    const label = document.getElementById('lab-correlation-count');
+    const button = document.getElementById('lab-run-correlation');
+    if (label) label.textContent = `已选 ${count} / 30`;
+    if (button) button.disabled = count < 2 || count > 30;
+  }
+
+  function populateFactorFilters() {
+    const options = (id, values) => {
+      const select = document.getElementById(id);
+      if (!select) return;
+      const current = select.value;
+      select.innerHTML = `<option value="">全部</option>${values.map(value => `<option value="${h(value)}">${h(value)}</option>`).join('')}`;
+      select.value = values.includes(current) ? current : '';
+    };
+    options('lab-factor-category', [...new Set(state.factors.map(item => item.category).filter(Boolean))].sort());
+    options('lab-factor-kind', [...new Set(state.factors.map(item => item.kind).filter(Boolean))].sort());
+    options('lab-factor-tag', [...new Set(state.factors.flatMap(item => item.spec?.tags || []))].sort());
   }
 
   function renderFactorList() {
@@ -1101,9 +1141,19 @@
       target.innerHTML = '<div class="lab-empty">没有符合筛选条件的因子</div>';
       return;
     }
-    target.innerHTML = factors.map(item => `<button type="button" class="lab-factor-item ${state.selectedVersion === item.version_id ? 'active' : ''}" data-factor-version="${h(item.version_id)}">
-      <div class="lab-factor-item-head"><b>${h(item.name)}</b><span>${h(statusLabel[item.status] || item.status)}</span></div>
-      <code>${h(item.spec?.expression || item.slug)}</code><small>V${item.version} · ${h(item.category)} · ${h(item.kind)}</small></button>`).join('');
+    target.innerHTML = factors.map(item => {
+      const checked = state.correlationSelection.has(item.version_id);
+      const comparable = factorCanCorrelate(item);
+      const validation = item.validation_passed === true ? '验证通过' : item.validation_passed === false ? '验证未通过' : '未验证';
+      return `<div class="lab-factor-item ${state.selectedVersion === item.version_id ? 'active' : ''}">
+        <label class="lab-factor-select" title="${comparable ? '加入相关性分析' : `仅支持所选周期的表达式因子可比较`}"><input type="checkbox" data-correlation-version="${h(item.version_id)}" ${checked ? 'checked' : ''} ${comparable ? '' : 'disabled'}><span></span></label>
+        <button type="button" data-factor-version="${h(item.version_id)}">
+          <div class="lab-factor-item-head"><b>${h(item.name)}</b><span>${h(statusLabel[item.status] || item.status)}</span></div>
+          <p>${h(item.spec?.description || item.spec?.rationale || '尚未填写因子含义')}</p>
+          <code>${h(item.spec?.expression || item.slug)}</code><small>V${item.version} · ${h(item.category)} · ${h(item.kind)} · ${h(validation)}</small>
+        </button></div>`;
+    }).join('');
+    syncCorrelationControls();
   }
 
   async function selectFactor(versionId) {
@@ -1113,15 +1163,18 @@
     const evidence = document.getElementById('lab-factor-evidence');
     evidence.innerHTML = '<div class="lab-empty">读取版本证据…</div>';
     try {
-      const detail = await request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}`);
-      renderEvidence(detail);
+      const [detail, history] = await Promise.all([
+        request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}`),
+        request(`/api/v1/lab/factors/${encodeURIComponent(versionId)}/history`),
+      ]);
+      renderEvidence(detail, history.items || []);
       renderCopilot(detail);
     } catch (error) {
       evidence.innerHTML = `<div class="lab-empty">${h(error.message)}</div>`;
     }
   }
 
-  function renderEvidence(detail) {
+  function renderEvidence(detail, history = []) {
     const report = detail.validation;
     const horizons = report?.horizons || {};
     const gates = report?.gates;
@@ -1149,12 +1202,16 @@
     const validatedHorizons = Object.keys(horizons).map(Number).filter(Number.isFinite);
     const deployHorizons = validatedHorizons.length ? validatedHorizons : researchHorizons;
     const preferredHorizon = deployHorizons.includes(3) ? 3 : deployHorizons[0];
+    const tags = detail.spec?.tags || [];
+    const versionHistory = history.map(item => `<li class="${item.id === detail.id ? 'active' : ''}"><button type="button" data-factor-version="${h(item.id)}">V${item.version}</button><span>${h(statusLabel[item.status] || item.status)} · ${item.validation_passed === true ? '验证通过' : item.validation_passed === false ? '验证未通过' : '未验证'} · ${h(formatDate(item.updated_at))}</span></li>`).join('');
     document.getElementById('lab-factor-evidence').innerHTML = `
       <div class="lab-evidence-title"><div><h4>${h(detail.name)}</h4><span>${h(statusLabel[detail.status] || detail.status)}</span></div><code>${h(detail.spec?.expression || detail.slug)}</code></div>
+      <div class="lab-factor-meaning"><span>因子含义</span><p>${h(detail.spec?.description || '尚未填写说明')}</p><span>研究逻辑</span><p>${h(detail.spec?.rationale || '尚未填写研究逻辑')}</p><small>${tags.length ? tags.map(tag => `#${h(tag)}`).join(' · ') : '无标签'} · 支持 ${(detail.spec?.horizons || []).map(value => `${value}D`).join(' / ') || '未声明周期'}</small></div>
       <div class="lab-evidence-meta"><div><span>CANDIDATE SCORE</span><b>${number(report?.candidate_score, 1)}</b></div><div><span>COVERAGE</span><b>${report ? number(report.coverage * 100, 1) + '%' : '—'}</b></div><div><span>MAX CORR</span><b>${number(report?.max_existing_correlation, 2)}</b></div></div>
       <div class="lab-gate ${gates?.passed ? 'pass' : ''}"><i></i><span>${h(gateText)}</span></div>
       <div class="lab-horizon-grid">${horizonCards || '<div class="lab-empty">验证后显示 1 / 3 / 5 / 7 日证据</div>'}</div>
       ${robustness ? `<div class="lab-robustness"><div class="lab-robustness-head"><span>ROBUSTNESS GATE</span><b>${robustness.tests_passed}/${robustness.tests_applicable}</b></div><div class="lab-robustness-grid">${robustnessCards}</div></div>` : ''}
+      <div class="lab-version-history"><span>VERSION HISTORY</span><ol>${versionHistory || '<li><span>暂无版本记录</span></li>'}</ol></div>
       <div class="lab-evidence-actions">
         <button class="primary" type="button" data-validate-version="${h(detail.id)}">运行统一验证</button>
         ${report?.gates?.bias_audit_required ? `<button type="button" data-audit-version="${h(detail.id)}">运行防偏差审计</button>` : ''}
@@ -1166,6 +1223,43 @@
           <button type="button" data-deploy-version="${h(detail.id)}">设为 Champion</button>
         </div>` : ''}
       </div>`;
+  }
+
+  function correlationCell(value) {
+    if (!Number.isFinite(Number(value))) return '<td class="empty">—</td>';
+    const rho = Number(value);
+    const alpha = Math.max(.08, Math.min(.88, Math.abs(rho)));
+    const color = rho >= 0 ? `rgba(219,75,75,${alpha})` : `rgba(64,132,255,${alpha})`;
+    return `<td style="background:${color}" title="ρ = ${rho.toFixed(4)}">${rho.toFixed(2)}</td>`;
+  }
+
+  function renderCorrelation(result) {
+    const names = new Map(result.items.map(item => [item.version_id, item.name]));
+    const pairs = result.high_correlations || [];
+    const pairRows = pairs.map(item => `<tr><td>${h(names.get(item.left_version_id))}</td><td>${h(names.get(item.right_version_id))}</td><td>${number(item.rho, 4)}</td><td>超过 |ρ| ≥ ${number(result.threshold, 2)}</td></tr>`).join('');
+    document.getElementById('lab-correlation-body').innerHTML = `
+      <div class="lab-correlation-summary"><div><span>比较口径</span><b>${h(result.universe)} · ${result.horizon} 日</b><small>${h(result.start)} → ${h(result.end)}</small></div><div><span>高相关阈值</span><b>|ρ| ≥ ${number(result.threshold, 2)}</b><small>可在设置 → Quant Lab 修改</small></div><div><span>冻结快照</span><b>${h(String(result.snapshot_hash).slice(0, 12))}</b><small>${result.items.length} 个因子</small></div></div>
+      <p class="lab-correlation-explanation">${h(result.explanation)}</p>
+      <div class="lab-heatmap-scroll"><table class="lab-heatmap"><thead><tr><th></th>${result.items.map(item => `<th title="${h(item.name)}">${h(item.name)}</th>`).join('')}</tr></thead><tbody>${result.items.map((item, row) => `<tr><th>${h(item.name)}</th>${result.matrix[row].map(correlationCell).join('')}</tr>`).join('')}</tbody></table></div>
+      <div class="lab-correlation-pairs"><h4>高相关因子对</h4>${pairs.length ? `<div class="table-scroll"><table><thead><tr><th>因子 A</th><th>因子 B</th><th>ρ</th><th>判断</th></tr></thead><tbody>${pairRows}</tbody></table></div>` : `<div class="lab-empty">当前阈值下没有高相关因子对；这不等于因子已通过完整鲁棒性验证。</div>`}</div>`;
+  }
+
+  async function runCorrelation() {
+    const dialog = document.getElementById('lab-correlation-dialog');
+    const body = document.getElementById('lab-correlation-body');
+    if (!dialog.open) dialog.showModal();
+    body.innerHTML = '<div class="lab-job-loading"><i></i><span>正在从同一冻结快照计算日截面秩相关…</span></div>';
+    const research = state.overview?.research || {};
+    try {
+      const result = await request('/api/v1/lab/factors/correlation-matrix', {method:'POST', body:JSON.stringify({
+        version_ids:[...state.correlationSelection], universe:research.universe || 'csi800',
+        start:research.start || '2015-01-01', end:new Date().toISOString().slice(0, 10),
+        horizon:state.correlationHorizon,
+      })});
+      renderCorrelation(result);
+    } catch (error) {
+      body.innerHTML = `<div class="lab-empty">${h(error.message)}</div>`;
+    }
   }
 
   function renderCopilot(detail) {
@@ -1426,6 +1520,9 @@
   async function refreshFactors() {
     const response = await request('/api/v1/lab/factors?limit=500');
     state.factors = response.items || [];
+    const known = new Set(state.factors.map(item => item.version_id));
+    state.correlationSelection = new Set([...state.correlationSelection].filter(id => known.has(id)));
+    populateFactorFilters();
     renderFactorList();
     document.dispatchEvent(new CustomEvent('quantmaster:factors-changed'));
     if (!state.selectedVersion && state.factors.length) selectFactor(state.factors[0].version_id);
@@ -1603,6 +1700,9 @@
       if (event.target.closest('[data-lab-close-dialog]')) {
         document.getElementById('lab-factor-dialog').close();
       }
+      if (event.target.closest('[data-correlation-close]')) {
+        document.getElementById('lab-correlation-dialog').close();
+      }
       const copyButton = event.target.closest('[data-copy-target]');
       if (copyButton) {
         const command = document.getElementById(copyButton.dataset.copyTarget)?.textContent || '';
@@ -1765,6 +1865,43 @@
       state.search = event.target.value;
       renderFactorList();
     });
+
+    const factorFilterState = {
+      'lab-factor-category': 'factorCategory',
+      'lab-factor-kind': 'factorKind',
+      'lab-factor-validation': 'factorValidation',
+      'lab-factor-horizon': 'factorHorizon',
+      'lab-factor-tag': 'factorTag',
+    };
+    Object.entries(factorFilterState).forEach(([id, key]) => {
+      document.getElementById(id)?.addEventListener('change', event => {
+        state[key] = event.target.value;
+        renderFactorList();
+      });
+    });
+    document.getElementById('lab-correlation-horizon')?.addEventListener('change', event => {
+      state.correlationHorizon = Number(event.target.value);
+      const retained = [...state.correlationSelection].filter(versionId => {
+        const item = state.factors.find(factor => factor.version_id === versionId);
+        return item && factorCanCorrelate(item);
+      });
+      if (retained.length !== state.correlationSelection.size) announce('已移除不支持该预测周期的因子');
+      state.correlationSelection = new Set(retained);
+      renderFactorList();
+    });
+    document.getElementById('lab-factor-list')?.addEventListener('change', event => {
+      const input = event.target.closest('[data-correlation-version]');
+      if (!input) return;
+      if (input.checked && state.correlationSelection.size >= 30) {
+        input.checked = false;
+        announce('相关性分析最多选择 30 个因子');
+        return;
+      }
+      if (input.checked) state.correlationSelection.add(input.dataset.correlationVersion);
+      else state.correlationSelection.delete(input.dataset.correlationVersion);
+      syncCorrelationControls();
+    });
+    document.getElementById('lab-run-correlation')?.addEventListener('click', runCorrelation);
 
     document.querySelectorAll('#lab-discovery-form [name=method]').forEach(input => input.addEventListener('change', event => {
       const llm = event.target.value === 'llm';

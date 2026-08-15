@@ -165,6 +165,7 @@ def test_gui_round_trip_preserves_extended_config_fields(tmp_path):
     update.lab.walk_forward_step_days = 105
     update.lab.walk_forward_purge_days = 30
     update.lab.walk_forward_folds = 4
+    update.lab.factor_correlation_threshold = 0.75
     manager.save(update)
 
     reloaded = document_from_config(manager.load())
@@ -181,6 +182,7 @@ def test_gui_round_trip_preserves_extended_config_fields(tmp_path):
     assert reloaded.lab.walk_forward_step_days == 105
     assert reloaded.lab.walk_forward_purge_days == 30
     assert reloaded.lab.walk_forward_folds == 4
+    assert reloaded.lab.factor_correlation_threshold == 0.75
 
 
 class FakeCredentials:
