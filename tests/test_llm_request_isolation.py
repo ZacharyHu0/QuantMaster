@@ -10,6 +10,7 @@ import pytest
 from quantmaster.ai.llm import LLMClient
 from quantmaster.config import Config, LLMConfig, set_config
 from quantmaster.credentials import CredentialError, CredentialStore
+from quantmaster.lab.jobs import LabJobManager
 from quantmaster.lab.store import LabStore
 from quantmaster.runtime.jobs import JobOutcome, UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.runtime.llm import (
@@ -93,34 +94,60 @@ def test_rotation_discards_late_llm_result_and_does_not_publish_artifact(tmp_pat
 
 
 def test_lab_revision_fences_late_result_and_stale_startup_work(tmp_path):
+    release = threading.Event()
     try:
         set_config(_config(tmp_path))
-        store = LabStore(tmp_path / "data" / "lab.sqlite")
+        domain = LabStore(tmp_path / "data" / "lab.sqlite")
         coordinator = get_llm_execution_coordinator()
+        started = threading.Event()
 
-        running = store.enqueue("discover_llm", {"universe": "fixture"})
-        assert store.claim_next("fixture-worker")["id"] == running["id"]
-        coordinator.rotate(global_scope=True, news_scope=False, reason="settings_saved")
-        assert store.job(running["id"])["status"] == "cancelling"
-        assert store.finish_job(
-            running["id"], result={"candidate": "late-result"},
-            expected_worker="fixture-worker",
+        class Service:
+            store = domain
+
+            @staticmethod
+            def preflight(*_args, **_kwargs):
+                return {
+                    "runnable": True, "state": "ready", "resource_class": "external",
+                    "blockers": [], "warnings": [], "dataset": {},
+                }
+
+            @staticmethod
+            def run_job(_job, progress=None, cancelled=None):
+                started.set()
+                release.wait(2)
+                return {"candidate": "late-result"}
+
+        manager = LabJobManager(service=Service())
+        running = manager.submit(
+            "discover_llm", {"universe": "fixture"}, preflight=Service.preflight(),
         )
-        finished = store.job(running["id"])
-        assert finished["status"] == "cancelled"
-        assert finished["result"] == {}
+        assert started.wait(2)
 
-        stale = store.enqueue("discover_python", {"universe": "fixture"})
-        with store._conn() as connection:
-            connection.execute(
-                "UPDATE lab_jobs SET llm_revision='expired-revision' WHERE id=?",
-                (stale["id"],),
-            )
-        assert store.interrupt_stale_llm() == 1
-        expired = store.job(stale["id"])
+        coordinator.rotate(global_scope=True, news_scope=False, reason="settings_saved")
+        store = manager._ensure_runtime().store
+        assert _wait(store, running["id"], {"cancelling", "cancelled"})["cancel_requested"]
+        release.set()
+        finished = _wait(store, running["id"], {"cancelled"})
+        assert finished["status"] == "cancelled"
+        assert finished["result_artifact_id"] == ""
+        assert domain.worker_result(running["id"]) is None
+
+        stale, _created = store.submit(
+            "lab.discover_python",
+            {
+                "kind": "discover_python", "params": {"universe": "fixture"},
+                "preflight": Service.preflight(), "dataset_id": "",
+                "resource_class": "external",
+            },
+            llm_scope="global", llm_revision="expired-revision",
+        )
+        manager._ensure_runtime()._dispatch_pending(job_type="lab.discover_python")
+        expired = store.get(stale["id"])
         assert expired["status"] == "interrupted"
         assert expired["phase"] == "需要手动重试"
+        manager.shutdown()
     finally:
+        release.set()
         set_config(None)
 
 

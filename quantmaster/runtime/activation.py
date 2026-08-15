@@ -462,7 +462,7 @@ class SubprocessGenerationController:
         environment.pop("QM_WINDOWS_APP_JOB_ROOT", None)
         try:
             return subprocess.Popen(
-                [str(executable), "serve", "--no-reload"],
+                [str(executable), "serve"],
                 cwd=slot,
                 env=environment,
                 stdin=subprocess.DEVNULL,

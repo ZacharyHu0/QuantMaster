@@ -422,22 +422,27 @@ class TestBasics:
         assert len(data["releases"]) == 10
         assert data["history_url"].endswith("/CHANGELOG.md")
 
-    def test_manual_reload_endpoint_requires_supervisor_and_writes_trigger(
-        self, monkeypatch, tmp_path,
-    ):
-        trigger = tmp_path / "reload.trigger"
-        monkeypatch.delenv("QM_SERVER_RELOAD_WORKER", raising=False)
-        monkeypatch.setenv("QM_SERVER_RELOAD_TRIGGER_PATH", str(trigger))
-        unavailable = client.post("/api/v1/system/reload")
-        assert unavailable.status_code == 409
-        assert not trigger.exists()
+    def test_update_routes_require_local_staged_identity_and_remove_reload(self, monkeypatch, tmp_path):
+        from quantmaster.runtime import update
 
-        monkeypatch.setenv("QM_SERVER_RELOAD_WORKER", "1")
-        accepted = client.post("/api/v1/system/reload")
-        assert accepted.status_code == 202
-        assert accepted.json()["accepted"] is True
-        assert "FreeStockDB" in accepted.json()["message"]
-        assert trigger.read_text(encoding="ascii").isdigit()
+        root = tmp_path / "app"
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
+        monkeypatch.setattr(update, "installed_app_root", lambda: root)
+        status = client.get("/api/v1/system/update")
+        assert status.status_code == 200
+        assert status.json()["status"] == "empty"
+        assert status.json()["staged"] == []
+        assert client.post("/api/v1/system/reload").status_code == 404
+
+        invalid = client.post(
+            "/api/v1/system/update/activate",
+            json={"build_sha": "not-a-sha"},
+        )
+        assert invalid.status_code == 422
+        assert client.post(
+            "/api/v1/system/update/activate",
+            json={"build_sha": "0" * 40},
+        ).status_code == 409
 
     def test_index_serves_html(self):
         resp = client.get("/")
@@ -657,8 +662,8 @@ class TestBasics:
         assert "unhandledrejection" in app_script
         assert 'id="release-trigger"' in resp.text
         assert 'id="release-popover"' in resp.text
-        assert 'id="release-reload-button"' in resp.text
-        assert 'id="release-reload-status"' in resp.text
+        assert 'id="release-reload-button"' not in resp.text
+        assert 'id="release-reload-status"' not in resp.text
         assert 'id="stockdb-update-trigger"' in resp.text
         assert 'id="stockdb-update-popover"' in resp.text
         assert 'id="stockdb-data-date"' in resp.text
@@ -676,7 +681,10 @@ class TestBasics:
         assert 'id="free-stockdb-release"' in stockdb_popover
         assert 'id="stockdb-popover-session"' in stockdb_popover
         assert '/api/v1/settings/free-stockdb/vendor-notice' in app_script
-        assert "/api/v1/system/reload" in app_script
+        assert "/api/v1/system/reload" not in app_script
+        assert "/api/v1/system/update/activate" not in app_script
+        assert 'id="operations-progress"' in resp.text
+        assert 'data-workspace-page="operations"' in resp.text
         assert "api('/api/v1/settings/free-stockdb')" in app_script
         assert 'qm-free-stockdb-release-seen' in app_script
         assert f'v{__version__}' not in resp.text  # 版本由 data 属性无闪烁注入，脚本负责呈现
@@ -701,7 +709,7 @@ class TestBasics:
         workspace_pages = (
             "quotes", "temperature", "style", "rotation", "industry", "themes", "etfs", "news",
             "after-close", "candidates", "stock-analysis", "decision", "lab", "backtest", "paper",
-            "ledger", "automation",
+            "ledger", "automation", "operations",
         )
         assert [resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages] == sorted(
             resp.text.index(f'data-workspace-page="{page}"') for page in workspace_pages

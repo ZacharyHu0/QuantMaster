@@ -36,8 +36,40 @@ def test_development_launcher_keeps_quantmaster_attached_to_ctrl_c() -> None:
         encoding="utf-8",
     )
 
-    assert '"%QM_LAUNCHER%" -m quantmaster.cli serve --reload %*' in launcher
+    assert '"%QM_LAUNCHER%" -m quantmaster.cli serve %*' in launcher
     assert 'start "QuantMaster" /b' not in launcher
+
+
+def test_stable_launcher_reads_only_the_validated_active_slot(tmp_path) -> None:
+    from quantmaster.runtime.launcher import (
+        _launcher_script,
+        read_launcher_target,
+        stable_slot_executable,
+    )
+
+    sha = "a" * 40
+    slot = tmp_path / "slots" / sha
+    slot.mkdir(parents=True)
+    executable = slot / "QuantMaster.exe"
+    executable.write_bytes(b"candidate")
+    (tmp_path / "launcher.target").write_text(f"{sha}\n", encoding="ascii")
+
+    assert read_launcher_target(tmp_path) == sha
+    assert stable_slot_executable(tmp_path) == executable.resolve()
+    script = _launcher_script()
+    assert "launcher.target" in script
+    assert "slots\\%QM_TARGET%" in script
+    assert '"%QM_EXE%" serve %*' in script
+    assert "python" not in script.lower()
+
+
+def test_stable_launcher_rejects_tampered_target(tmp_path) -> None:
+    from quantmaster.runtime.activation import ActivationBlocked
+    from quantmaster.runtime.launcher import read_launcher_target
+
+    (tmp_path / "launcher.target").write_text("checkout\n", encoding="ascii")
+    with pytest.raises(ActivationBlocked, match="完整 lowercase SHA"):
+        read_launcher_target(tmp_path)
 
 
 def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
@@ -65,10 +97,6 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
         (("backtest",), True),
         (("app",), False),
         (("serve",), False),
-        (("serve", "--no-reload"), False),
-        (("serve", "--reload"), True),
-        (("serve", "--reload", "--no-reload"), False),
-        (("serve", "--no-reload", "--reload"), True),
     ),
 )
 def test_packaged_entry_closes_cli_splash_before_long_handler(

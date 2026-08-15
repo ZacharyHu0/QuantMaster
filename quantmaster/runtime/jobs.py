@@ -625,8 +625,8 @@ class UnifiedJobStore:
                     "id,type,spec_json,spec_hash,idempotency_key,business_key,input_fingerprint,"
                     "algorithm_version,status,progress,phase,detail,attempt,max_attempts,"
                     "next_retry_at,diagnostic_code,cancel_requested,deadline_seconds,"
-                    "created_at,updated_at,started_at,finished_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "llm_scope,llm_revision,created_at,updated_at,started_at,finished_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         job_id, job_type, spec_json, spec_hash,
                         str(record.get("idempotency_key") or "")[:200],
@@ -642,8 +642,11 @@ class UnifiedJobStore:
                         str(record.get("diagnostic_code") or "")[:80],
                         int(bool(record.get("cancel_requested"))),
                         max(1.0, min(3600.0, float(record.get("deadline_seconds") or 300))),
-                         created_at, updated_at,
-                         _legacy_iso(record.get("started_at")), _legacy_iso(record.get("finished_at")),
+                        str(record.get("llm_scope") or "")[:40],
+                        str(record.get("llm_revision") or "")[:120],
+                        created_at, updated_at,
+                        _legacy_iso(record.get("started_at")),
+                        _legacy_iso(record.get("finished_at")),
                     ),
                 )
             elif str(existing["type"]) != job_type or str(existing["spec_hash"]) != spec_hash:
@@ -805,7 +808,7 @@ class UnifiedJobStore:
         task_type = str(cls._field(job, "type") or "")
         if task_type in {
             "news.reanalyze", "settings.diagnostic", "market.stock_analysis",
-            "lab.discover_llm", "lab.cloud_suggestion",
+            "lab.discover_llm", "lab.discover_python", "lab.cloud_suggestion",
             "automation.contextual_chat", "automation.conversation_compaction",
             "automation.fast_news_scan", "automation.official_news_scan",
             "automation.periodic_news_scan", "automation.news_dead_letter_recovery",

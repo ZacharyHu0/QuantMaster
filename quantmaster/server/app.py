@@ -50,9 +50,7 @@ def create_lifespan(*, bootstrap_rotation: bool):
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        reload_worker = os.environ.get("QM_SERVER_RELOAD_WORKER") == "1"
         _stream_runtime()
-        _configure_reload_worker_logging()
         from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
         from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.logging_config import current_log_path
@@ -61,19 +59,14 @@ def create_lifespan(*, bootstrap_rotation: bool):
 
         register_worker_components()
         capture_runtime_baseline()
-        supervisor_state = "reload-attached"
-        previous_web_process = os.environ.get("QM_WEB_PROCESS")
-        if reload_worker:
-            free_stockdb_runtime.attach_to_supervisor()
+        free_stockdb_runtime.start()
+        supervisor_state = get_worker_supervisor().start(
+            bootstrap_rotation=bootstrap_rotation,
+        )
+        if supervisor_state == "disabled":
+            get_runtime_worker().start(bootstrap_rotation=bootstrap_rotation)
         else:
-            free_stockdb_runtime.start()
-            supervisor_state = get_worker_supervisor().start(
-                bootstrap_rotation=bootstrap_rotation,
-            )
-            if supervisor_state == "disabled":
-                get_runtime_worker().start(bootstrap_rotation=bootstrap_rotation)
-            else:
-                os.environ["QM_WEB_PROCESS"] = "1"
+            os.environ["QM_WEB_PROCESS"] = "1"
         cfg = get_config()
         log_path = current_log_path()
         logger.info(
@@ -81,28 +74,19 @@ def create_lifespan(*, bootstrap_rotation: bool):
             __version__, cfg.server.host, cfg.server.port,
         )
         logger.info(
-            "Web 代次 %s · 后台 runtime-worker %s · 完整日志 %s",
-            os.environ.get("QM_WEB_GENERATION", "0"),
-            "由重载监督器托管" if reload_worker else (
-                "本地测试/维护回退"
-                if supervisor_state == "disabled"
-                else "独立 Worker Supervisor 托管"
-            ),
+            "后台 runtime-worker %s · 完整日志 %s",
+            "本地测试/维护回退" if supervisor_state == "disabled" else "独立 Worker Supervisor 托管",
             str(log_path) if log_path else "仅终端",
         )
         try:
             yield
         finally:
-            if not reload_worker:
-                if supervisor_state == "disabled":
-                    get_runtime_worker().stop()
-                else:
-                    get_worker_supervisor().stop()
-                free_stockdb_runtime.stop()
-            if previous_web_process is None:
-                os.environ.pop("QM_WEB_PROCESS", None)
+            if supervisor_state == "disabled":
+                get_runtime_worker().stop()
             else:
-                os.environ["QM_WEB_PROCESS"] = previous_web_process
+                get_worker_supervisor().stop()
+            free_stockdb_runtime.stop()
+            os.environ.pop("QM_WEB_PROCESS", None)
             _shutdown_web_stream_executor()
             from quantmaster.ai.llm import close_llm_http_clients
 
@@ -299,6 +283,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
             "/api/v1/diagnostics",
             "/api/v1/release",
             "/api/v1/session",
+            "/api/v1/system/update",
             "/",
         }
         or path.startswith(("/static/", "/api/v1/data/migrations"))
@@ -443,7 +428,7 @@ app.include_router(capabilities_router)
 
 __all__ = ["_progress_stream", "app", "create_lifespan", "liveness", "serve"]
 
-def serve(*, reload: bool = False) -> None:  # pragma: no cover - 入口
+def serve() -> None:  # pragma: no cover - 入口
     from quantmaster.server.lifecycle import run_uvicorn_foreground
 
     cfg = get_config().server
@@ -452,5 +437,4 @@ def serve(*, reload: bool = False) -> None:  # pragma: no cover - 入口
         host=cfg.host,
         port=cfg.port,
         log_level="warning",
-        reload=reload,
     )

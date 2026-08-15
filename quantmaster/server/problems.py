@@ -276,6 +276,7 @@ def _health_automation() -> list[Problem]:
 
 def _health_lab() -> list[Problem]:
     from quantmaster.config import get_config
+    from quantmaster.lab.jobs import list_lab_jobs
     from quantmaster.lab.store import LabStore
     from quantmaster.lab.worker import get_worker
 
@@ -289,7 +290,7 @@ def _health_lab() -> list[Problem]:
             title="研究任务执行器未运行", message="Quant Lab 已启用，但后台执行器当前不可用。",
             action="重启本地服务；如仍失败，请查看服务端日志。", problem_id="lab:worker",
         ))
-    latest = (LabStore().jobs(1) or [None])[0]
+    latest = (list_lab_jobs(1) or [None])[0]
     if latest and latest.get("status") == "failed":
         issues.append(make_problem(
             "lab_job_failed", severity="warning", source="Quant Lab", title="最近的研究任务失败",

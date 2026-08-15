@@ -1,7 +1,7 @@
 {
-  "count": 129,
-  "reason": "Issue #79/#87 final audited ceiling after architecture and lifecycle integration",
-  "at": "2026-08-15T22:30:50+00:00",
+  "count": 130,
+  "reason": "Issue #79/#87 final audited ceiling after integrating main #171 Lab lifecycle",
+  "at": "2026-08-15T23:20:54+00:00",
   "findings": [
     {
       "file": "quantmaster/after_close/service.py",
@@ -149,7 +149,7 @@
     },
     {
       "file": "quantmaster/backtest/paper_market.py",
-      "line": 308,
+      "line": 309,
       "function": "select_next_open_bar",
       "complexity": 15
     },
@@ -478,6 +478,18 @@
       "complexity": 22
     },
     {
+      "file": "quantmaster/lab/job_migration.py",
+      "line": 307,
+      "function": "_content_conflicts",
+      "complexity": 20
+    },
+    {
+      "file": "quantmaster/lab/jobs.py",
+      "line": 224,
+      "function": "_handle",
+      "complexity": 13
+    },
+    {
       "file": "quantmaster/lab/ml.py",
       "line": 703,
       "function": "_train_indexed_torch",
@@ -533,25 +545,25 @@
     },
     {
       "file": "quantmaster/lab/store.py",
-      "line": 699,
+      "line": 691,
       "function": "deploy",
       "complexity": 16
     },
     {
       "file": "quantmaster/lab/store.py",
-      "line": 1579,
+      "line": 1460,
       "function": "deployments_as_of",
       "complexity": 16
     },
     {
       "file": "quantmaster/lab/store.py",
-      "line": 1673,
+      "line": 1554,
       "function": "champion_strategies_as_of",
       "complexity": 13
     },
     {
       "file": "quantmaster/lab/store.py",
-      "line": 2340,
+      "line": 1935,
       "function": "promote_strategy",
       "complexity": 20
     },
@@ -664,12 +676,6 @@
       "complexity": 14
     },
     {
-      "file": "quantmaster/runtime/llm.py",
-      "line": 202,
-      "function": "rotate",
-      "complexity": 13
-    },
-    {
       "file": "quantmaster/runtime/process.py",
       "line": 220,
       "function": "run_restricted_process",
@@ -677,7 +683,7 @@
     },
     {
       "file": "quantmaster/runtime/windows_app.py",
-      "line": 207,
+      "line": 208,
       "function": "_role_executable",
       "complexity": 11
     },

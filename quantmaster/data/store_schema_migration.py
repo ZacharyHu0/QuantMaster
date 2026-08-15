@@ -21,8 +21,10 @@ class _SchemaTarget:
 
 
 LAB = _SchemaTarget(
-    "lab", lambda root: root / "lab.sqlite", 11,
-    frozenset({"factor_definitions", "factor_versions", "lab_jobs", "deployments"}),
+    "lab", lambda root: root / "lab.sqlite", 12,
+    frozenset({
+        "factor_definitions", "factor_versions", "lab_worker_results", "deployments",
+    }),
 )
 ROTATION_CACHE = _SchemaTarget(
     "rotation-cache", lambda root: root / "rotation" / "cache.sqlite", 6,
@@ -47,19 +49,29 @@ def _probe(target: _SchemaTarget, path: Path) -> tuple[str, str, tuple[str, ...]
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         tables = _tables(connection)
         missing_columns: set[str] = set()
-        if target is LAB and "factor_definitions" in tables and "lab_jobs" in tables:
+        if target is LAB and "factor_definitions" in tables:
             definitions = {
                 str(row[1]) for row in connection.execute(
                     "PRAGMA table_info(factor_definitions)"
                 )
             }
-            jobs = {
-                str(row[1]) for row in connection.execute("PRAGMA table_info(lab_jobs)")
-            }
             missing_columns |= {"name_key"} - definitions
-            missing_columns |= {
-                "error_code", "error_json", "telemetry_json", "cancellation_reason",
-            } - jobs
+            if "lab_jobs" in tables:
+                jobs = {
+                    str(row[1]) for row in connection.execute("PRAGMA table_info(lab_jobs)")
+                }
+                missing_columns |= {
+                    "error_code", "error_json", "telemetry_json", "cancellation_reason",
+                } - jobs
+            if "lab_worker_results" in tables:
+                results = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(lab_worker_results)")
+                }
+                missing_columns |= {
+                    "job_id", "attempt", "kind", "outcome", "result_json", "error_json",
+                    "telemetry_json", "content_hash", "created_at",
+                } - results
         elif target is ROTATION_CACHE and "snapshot_items" in tables:
             items = {
                 str(row[1]) for row in connection.execute(

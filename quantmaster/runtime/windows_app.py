@@ -94,6 +94,7 @@ def _create_root_job() -> Any:
         limits.BasicLimitInformation.LimitFlags = (
             0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
             | 0x00000400  # JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION
+            | 0x00000800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
         )
         if not kernel32.SetInformationJobObject(
             handle,

@@ -244,7 +244,7 @@ def _run_launcher(
         "w", encoding="utf-8"
     ) as stderr:
         server = subprocess.Popen(
-            [str(executable), "serve", "--no-reload"],
+            [str(executable), "serve"],
             cwd=executable.parent,
             env=environment,
             stdin=subprocess.DEVNULL,

@@ -140,7 +140,7 @@ def test_serve_runs_registered_tasks_with_isolated_runtime(tmp_path, monkeypatch
     beta_dev = primary / ".artifacts/worktrees/beta/runtime/dev"
     alpha, beta = launches
     assert alpha["command"] == [
-        str(python), "-m", "quantmaster.cli", "serve", "--reload", "--open",
+        str(python), "-m", "quantmaster.cli", "serve", "--open",
     ]
     assert alpha["cwd"] == targets["alpha"]
     assert json.loads((alpha_dev / "config.yaml").read_text(encoding="utf-8")) == {

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import time
 import uuid
 from dataclasses import asdict
@@ -27,8 +28,9 @@ from quantmaster.lab.dataset import (
     load_local_dataset,
 )
 from quantmaster.lab.errors import LabError, classify_lab_error
-from quantmaster.lab.models import DataPolicy, FactorSpec
+from quantmaster.lab.models import DataPolicy, FactorSpec, content_hash
 from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
+from quantmaster.lab.service_access import register_lab_service_factory
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.strategy import (
     atomic_horizon_gate,
@@ -214,9 +216,12 @@ class LabService:
         return read_published_capabilities()
 
     def overview(self) -> dict[str, Any]:
+        from quantmaster.lab.jobs import lab_job_overview, list_lab_jobs
+
         cfg = get_config().lab
         return {
             **self.store.overview(),
+            **lab_job_overview(),
             "capabilities": self.capabilities(),
             "research": {
                 "universe": cfg.universe,
@@ -230,13 +235,15 @@ class LabService:
                 "ai_python_mining_enabled": cfg.ai_python_mining_enabled,
                 "allow_cloud_sample": cfg.allow_cloud_sample,
             },
-            "recent_jobs": self.store.jobs(8, summary=True),
+            "recent_jobs": list_lab_jobs(8, summary=True),
             "recent_experiments": self.store.list_experiments(6, summary=True),
             "recent_studies": self.store.studies(6, summary=True),
         }
 
     def dashboard(self) -> dict[str, Any]:
         """One compact first-paint payload; large results stay on detail routes."""
+        from quantmaster.lab.jobs import lab_job_overview, list_lab_jobs
+
         cfg = get_config().lab
         snapshot_record = self.store.latest_snapshot(cfg.universe) or {}
         snapshot_payload = dict(snapshot_record.get("payload") or {})
@@ -299,11 +306,11 @@ class LabService:
             },
         }
         return {
-            "summary": self.store.overview(),
+            "summary": {**self.store.overview(), **lab_job_overview()},
             "readiness": self.capabilities(),
             "preflight": compact_preflight(admission, sample_limit=3),
             "snapshot": snapshot,
-            "jobs": self.store.jobs(12, summary=True),
+            "jobs": list_lab_jobs(12, summary=True),
             "experiments": self.store.list_experiments(8, summary=True),
             "studies": self.store.studies(6, summary=True),
             "research": {
@@ -613,13 +620,16 @@ class LabService:
         return self.store.version(version["id"]) or version
 
     def enqueue(self, kind: str, params: dict[str, Any]) -> dict:
-        allowed = {
-            "prepare_data", "validate", "discover_genetic", "discover_llm",
-            "optimize", "bias_audit", "discover_python", "research_cycle", "shadow_score",
-        }
-        if kind not in allowed:
+        from quantmaster.lab.jobs import LAB_KINDS, get_lab_job_manager
+
+        if kind not in LAB_KINDS:
             raise ValueError(f"未知研究任务: {kind}")
         clean = dict(params)
+        schedule_key = str(clean.pop("_schedule_key", ""))
+        manager = getattr(self, "_job_manager", None) or get_lab_job_manager()
+        existing = manager.find_business(schedule_key)
+        if existing is not None:
+            return existing
         if kind == "prepare_data":
             clean.setdefault("data_policy", DataPolicy.REFRESH_MISSING.value)
         admission = self.preflight(kind, clean)
@@ -630,33 +640,30 @@ class LabService:
             clean["rounds"] = min(3, max(1, int(clean.get("rounds", 3))))
             clean["candidate_limit"] = min(24, max(1, int(clean.get("candidate_limit", 24))))
             clean["finalists"] = min(3, max(1, int(clean.get("finalists", 3))))
-            run = self.store.create_mining_run(clean)
+            run_id = (
+                content_hash({"kind": "discover_python", "schedule": schedule_key})[:32]
+                if schedule_key else ""
+            )
+            run = self.store.create_mining_run(clean, run_id=run_id)
             clean["run_id"] = run["id"]
-            job = self.store.enqueue(kind, clean, preflight=admission)
+            try:
+                job = manager.submit(
+                    kind, clean, preflight=admission, business_key=schedule_key,
+                )
+            except (OSError, RuntimeError, ValueError, KeyError, sqlite3.Error) as exc:
+                self.store.update_mining_run(
+                    run["id"], status="failed", result={"error": str(exc)[:1000]},
+                )
+                raise
             self.store.update_mining_run(run["id"], job_id=job["id"])
             return job
-        return self.store.enqueue(kind, clean, preflight=admission)
+        return manager.submit(kind, clean, preflight=admission, business_key=schedule_key)
 
     def retry_job(self, job_id: str) -> dict:
-        source = self.store.job(job_id)
-        if source is None:
-            raise KeyError("任务不存在")
-        if source["status"] not in {
-            "paused", "completed", "completed_with_warnings", "failed", "cancelled",
-        }:
-            raise ValueError("只能按相同参数重新运行已结束的任务")
-        params = dict(source.get("params") or {})
-        params.pop("_scheduled", None)
-        created = self.enqueue(str(source["kind"]), params)
-        self.store.append_event(created["id"], {
-            "type": "retry_of", "source_job_id": job_id,
-            "phase": "预检通过，按历史参数重新运行",
-        })
-        self.store.append_event(job_id, {
-            "type": "retried_as", "job_id": created["id"],
-            "phase": "已创建重新运行任务",
-        })
-        return self.store.job(created["id"]) or created
+        from quantmaster.lab.jobs import get_lab_job_manager
+
+        manager = getattr(self, "_job_manager", None) or get_lab_job_manager()
+        return manager.retry(job_id)
 
     def preview_python_mining(self, *, start: str, end: str, horizon: int = 3) -> dict:
         from quantmaster.lab.research import sealed_three_way_split
@@ -676,14 +683,31 @@ class LabService:
 
         config = dict(payload)
         scheduled = bool(config.pop("_scheduled", False))
+        schedule_key = str(config.pop("_schedule_key", ""))
+        if schedule_key:
+            from quantmaster.lab.jobs import get_lab_job_manager
+
+            manager = getattr(self, "_job_manager", None) or get_lab_job_manager()
+            existing = manager.find_business(schedule_key)
+            if existing is not None:
+                study_id = str((existing.get("params") or {}).get("study_id") or "")
+                study = self.store.study(study_id)
+                if study is None:
+                    raise RuntimeError("调度任务引用的 Optimization Study 不存在")
+                return study
         config["end"] = config.get("end") or market_date().isoformat()
         if not config.get("protocol"):
             config["protocol"] = WalkForwardSpec.from_lab_config(get_config().lab).to_dict()
         spec = OptimizationSpec.from_dict(config)
         require_runnable(self.preflight("optimize", spec.to_dict()))
-        study = self.store.create_study(spec.to_dict())
+        study_id = (
+            content_hash({"kind": "optimize", "schedule": schedule_key})[:32]
+            if schedule_key else ""
+        )
+        study = self.store.create_study(spec.to_dict(), study_id=study_id)
         job = self.enqueue("optimize", {
             "study_id": study["id"], **({"_scheduled": True} if scheduled else {}),
+            **({"_schedule_key": schedule_key} if schedule_key else {}),
         })
         return self.store.update_study(study["id"], job_id=job["id"], status="queued")
 
@@ -3148,6 +3172,9 @@ def get_lab_service(*, read_only: bool = False) -> LabService:
         _service = LabService()
         _service_path = expected
     return _service
+
+
+register_lab_service_factory(get_lab_service)
 
 
 def _expression_fields(expression: str) -> set[str]:
