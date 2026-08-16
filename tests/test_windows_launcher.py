@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing
 import os
 import runpy
+import shutil
 import struct
 import subprocess
 import sys
@@ -58,7 +59,14 @@ def test_stable_launcher_reads_only_the_validated_active_slot(tmp_path) -> None:
     assert stable_slot_executable(tmp_path) == executable.resolve()
     script = _launcher_script()
     assert "launcher.target" in script
-    assert "slots\\%QM_TARGET%" in script
+    assert (
+        "for /f \"delims=\" %%A in ('%SystemRoot%\\System32\\findstr.exe /r /x "
+        "\"[0-9a-f]*\" \"%QM_APP_ROOT%launcher.target\" 2^>nul')" in script
+    )
+    assert 'in (\"%QM_APP_ROOT%launcher.target\")' not in script
+    assert 'set "QM_SLOT=%QM_SLOTS%\\%QM_TARGET%"' in script
+    assert 'if not "%QM_LINES%"=="1" exit /b 3' in script
+    assert 'reparsepoint query "%QM_SLOT%"' in script
     assert '"%QM_EXE%" serve %*' in script
     assert "python" not in script.lower()
 
@@ -70,6 +78,173 @@ def test_stable_launcher_rejects_tampered_target(tmp_path) -> None:
     (tmp_path / "launcher.target").write_text("checkout\n", encoding="ascii")
     with pytest.raises(ActivationBlocked, match="完整 lowercase SHA"):
         read_launcher_target(tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows stable launcher contract")
+def test_stable_shortcut_starts_the_exact_single_line_slot(tmp_path, monkeypatch) -> None:
+    from quantmaster.runtime.launcher import create_stable_shortcut
+
+    root = tmp_path / "app"
+    sha = "a" * 40
+    slot = root / "slots" / sha
+    slot.mkdir(parents=True)
+    shutil.copy2(sys.executable, slot / "QuantMaster.exe")
+    shutil.copy2(os.path.join(sys.prefix, "pyvenv.cfg"), slot / "pyvenv.cfg")
+    (root / "launcher.target").write_text(f"{sha}\n", encoding="ascii")
+    run = subprocess.run
+    monkeypatch.setattr(
+        "quantmaster.runtime.launcher.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+    create_stable_shortcut(app_root=root, shortcut=tmp_path / "QuantMaster.lnk")
+
+    result = run(
+        ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
+        cwd=root,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 2  # copied Python host was invoked with the literal `serve`
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows stable launcher contract")
+@pytest.mark.parametrize(
+    "target",
+    (
+        f"{'a' * 40}\n\n",
+        f"{'a' * 40}\n..\\outside\n",
+        r"..\outside".ljust(40, "a") + "\n",
+        r"C:\outside".ljust(40, "a") + "\n",
+        "safe:stream".ljust(40, "a") + "\n",
+    ),
+)
+def test_stable_shortcut_rejects_unsafe_target_before_process_start(
+    tmp_path, monkeypatch, target: str,
+) -> None:
+    from quantmaster.runtime.launcher import create_stable_shortcut
+
+    root = tmp_path / "app"
+    root.mkdir()
+    run = subprocess.run
+    monkeypatch.setattr(
+        "quantmaster.runtime.launcher.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+    create_stable_shortcut(app_root=root, shortcut=tmp_path / "QuantMaster.lnk")
+    outside = root / "outside"
+    outside.mkdir()
+    shutil.copy2(sys.executable, outside / "QuantMaster.exe")
+    (root / "launcher.target").write_text(target, encoding="ascii")
+
+    result = run(
+        ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
+        cwd=root,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 3
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_stable_slot_executable_rejects_a_junction_candidate(tmp_path) -> None:
+    from quantmaster.runtime.activation import ActivationBlocked
+    from quantmaster.runtime.launcher import stable_slot_executable
+
+    root = tmp_path / "app"
+    slots = root / "slots"
+    outside = tmp_path / "outside"
+    slots.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "QuantMaster.exe").write_bytes(b"outside")
+    sha = "a" * 40
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(slots / sha), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    (root / "launcher.target").write_text(f"{sha}\n", encoding="ascii")
+
+    with pytest.raises(ActivationBlocked, match="不可变槽不可用"):
+        stable_slot_executable(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_stable_shortcut_rejects_a_junction_before_process_start(
+    tmp_path, monkeypatch,
+) -> None:
+    from quantmaster.runtime.launcher import create_stable_shortcut
+
+    root = tmp_path / "app"
+    slots = root / "slots"
+    outside = tmp_path / "outside"
+    slots.mkdir(parents=True)
+    outside.mkdir()
+    shutil.copy2(sys.executable, outside / "QuantMaster.exe")
+    shutil.copy2(os.path.join(sys.prefix, "pyvenv.cfg"), outside / "pyvenv.cfg")
+    sha = "a" * 40
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(slots / sha), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    (root / "launcher.target").write_text(f"{sha}\n", encoding="ascii")
+    run = subprocess.run
+    monkeypatch.setattr(
+        "quantmaster.runtime.launcher.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+    create_stable_shortcut(app_root=root, shortcut=tmp_path / "QuantMaster.lnk")
+
+    result = run(
+        ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
+        cwd=root,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 6
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
+def test_stable_shortcut_rejects_a_junction_application_root(
+    tmp_path, monkeypatch,
+) -> None:
+    from quantmaster.runtime.launcher import create_stable_shortcut
+
+    root = tmp_path / "app"
+    outside = tmp_path / "outside-app"
+    sha = "a" * 40
+    slot = outside / "slots" / sha
+    slot.mkdir(parents=True)
+    shutil.copy2(sys.executable, slot / "QuantMaster.exe")
+    shutil.copy2(os.path.join(sys.prefix, "pyvenv.cfg"), slot / "pyvenv.cfg")
+    (outside / "launcher.target").write_text(f"{sha}\n", encoding="ascii")
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root), str(outside)],
+        check=True,
+        capture_output=True,
+    )
+    run = subprocess.run
+    monkeypatch.setattr(
+        "quantmaster.runtime.launcher.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+    create_stable_shortcut(app_root=root, shortcut=tmp_path / "QuantMaster.lnk")
+
+    result = run(
+        ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
+        cwd=tmp_path,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 6
 
 
 def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
