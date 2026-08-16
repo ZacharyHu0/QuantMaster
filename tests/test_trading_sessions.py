@@ -99,6 +99,7 @@ def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_c
         "completion": "calendar_unavailable",
         "market_timezone": "Asia/Shanghai",
         "cutoff_at": "",
+        "coverage": {},
     }
 
     research = ResearchFallbackResolver([]).resolve(naive)
@@ -264,3 +265,96 @@ def test_explicit_verified_session_without_local_completion_fails_closed():
     assert result.ready is False
     assert result.source == "tushare:SSE"
     assert result.completion == "current_session_closed_waiting_provider"
+
+
+def test_resolve_reports_coverage_evidence_on_ready_stockdb_session(
+    isolated_config, monkeypatch,
+):
+    isolated_config.data.free_stockdb_root = str(isolated_config.data_root / "stockdb-runtime")
+    root = isolated_config.free_stockdb_root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": "2026-08-13",
+        "target_session": "2026-08-13",
+        "updated_at": "2026-08-13T18:33:49+08:00",
+        "validation": {
+            "accepted": True, "complete": True,
+            "target_session": "2026-08-13", "actual_session": "2026-08-13",
+        },
+    }), encoding="utf-8")
+    resolver = FixtureResolver(["2026-08-13"])
+
+    result = resolver.resolve(
+        datetime(2026, 8, 13, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is True
+    cov = result.coverage
+    assert cov is not None
+    assert cov["stockdb_session"] == "2026-08-13"
+    assert cov["stockdb_completion"] == "current_session_complete"
+    assert cov["official_dates"] == ["2026-08-13"]
+
+
+def test_resolve_reports_coverage_evidence_on_unavailable_source():
+    resolver = FixtureResolver([])
+    result = resolver.resolve(
+        datetime(2026, 8, 4, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is False
+    assert result.source == "unavailable"
+    cov = result.coverage
+    assert cov is not None
+    assert cov["official_dates"] == []
+    assert cov["research_dates"] == []
+    assert cov["stockdb_session"] == ""
+    assert cov["failures"] == []
+    assert "Tushare" in result.reason
+
+
+def test_resolve_reports_failure_reasons_when_provider_offline():
+    class OfflineResolver(FixtureResolver):
+        def _official_sessions(self, start, end):
+            raise RuntimeError("network timeout")
+
+        @staticmethod
+        def _research_sessions(start, end):
+            return []
+
+    resolver = OfflineResolver([])
+    result = resolver.resolve(
+        datetime(2026, 8, 4, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is False
+    cov = result.coverage
+    assert cov is not None
+    assert any("官方日历不可用" in f for f in cov["failures"])
+    assert "network timeout" in result.reason
+
+
+def test_resolve_reports_research_lake_fallback_when_official_unavailable():
+    resolver = ResearchFallbackResolver([])
+    result = resolver.resolve(
+        datetime(2026, 8, 4, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is True
+    assert result.source == "research_lake"
+    cov = result.coverage
+    assert cov is not None
+    assert "2026-08-04" in cov["research_dates"]
+    assert cov["official_dates"] == []
+
+
+def test_coverage_as_dict_includes_coverage_field():
+    cov = {"official_dates": ["2026-08-13"], "research_dates": ["2026-08-12"]}
+    exp = SessionExpectation("2026-08-13", "stockdb:validated", True, "verified",
+                              coverage=cov)
+    result = exp.as_dict()
+    assert result["coverage"] == cov
+    # coverage field is a proper dict, not a reference
+    result["coverage"]["tampered"] = True
+    assert "tampered" not in cov
