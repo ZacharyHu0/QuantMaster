@@ -179,27 +179,20 @@ fn weighted_zscore<'py>(
 fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) -> Vec<f64> {
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
     let minimum = std::cmp::max(2, window / 2);
-    // Column-major output: cols chunks of rows
-    let mut output = vec![f64::NAN; cols * rows];
+    let mut output = vec![f64::NAN; rows * cols];
     output
-        .par_chunks_mut(rows)
+        .par_chunks_mut(cols)
         .enumerate()
-        .for_each(|(col_idx, col_out)| {
-            for (stop, out) in col_out.iter_mut().enumerate() {
-                let start = stop.saturating_sub(window - 1);
-                let sample: Vec<f64> = (start..=stop)
+        .for_each(|(row_idx, out_row)| {
+            for (col_idx, out) in out_row.iter_mut().enumerate() {
+                let start = row_idx.saturating_sub(window - 1);
+                let sample: Vec<f64> = (start..=row_idx)
                     .filter_map(|r| {
                         let v = matrix[(r, col_idx)];
-                        if v.is_finite() {
-                            Some(v)
-                        } else {
-                            None
-                        }
+                        if v.is_finite() { Some(v) } else { None }
                     })
                     .collect();
-                if sample.len() < minimum {
-                    continue;
-                }
+                if sample.len() < minimum { continue; }
                 let mean = sample.iter().sum::<f64>() / sample.len() as f64;
                 if !std {
                     *out = mean;
@@ -224,15 +217,8 @@ fn rolling_mean<'py>(
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
-    let col_major = rolling_impl(matrix, window, false);
-    // Transpose column-major to row-major
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let flat = rolling_impl(matrix, window, false);
+    let result = ndarray::Array2::from_shape_vec((rows, cols), flat).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 
@@ -247,14 +233,8 @@ fn rolling_std<'py>(
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
-    let col_major = rolling_impl(matrix, window, true);
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let flat = rolling_impl(matrix, window, true);
+    let result = ndarray::Array2::from_shape_vec((rows, cols), flat).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 
@@ -274,34 +254,25 @@ fn rolling_corr<'py>(
     let r_arr = right.as_array();
     let (rows, cols) = (l_arr.shape()[0], l_arr.shape()[1]);
     let minimum = std::cmp::max(3, window / 2);
-    let mut col_major = vec![f64::NAN; cols * rows];
-    col_major
-        .par_chunks_mut(rows)
+    let mut output = vec![f64::NAN; rows * cols];
+    output
+        .par_chunks_mut(cols)
         .enumerate()
-        .for_each(|(col_idx, col_out)| {
-            for (stop, out) in col_out.iter_mut().enumerate() {
-                let start = stop.saturating_sub(window - 1);
-                let sample: Vec<(f64, f64)> = (start..=stop)
+        .for_each(|(row_idx, out_row)| {
+            for (col_idx, out) in out_row.iter_mut().enumerate() {
+                let start = row_idx.saturating_sub(window - 1);
+                let sample: Vec<(f64, f64)> = (start..=row_idx)
                     .filter_map(|r| {
                         let a = l_arr[(r, col_idx)];
                         let b = r_arr[(r, col_idx)];
-                        if a.is_finite() && b.is_finite() {
-                            Some((a, b))
-                        } else {
-                            None
-                        }
+                        if a.is_finite() && b.is_finite() { Some((a, b)) } else { None }
                     })
                     .collect();
-                if sample.len() < minimum {
-                    continue;
-                }
+                if sample.len() < minimum { continue; }
                 let n = sample.len() as f64;
                 let mean_a = sample.iter().map(|t| t.0).sum::<f64>() / n;
                 let mean_b = sample.iter().map(|t| t.1).sum::<f64>() / n;
-                let cov = sample
-                    .iter()
-                    .map(|t| (t.0 - mean_a) * (t.1 - mean_b))
-                    .sum::<f64>();
+                let cov = sample.iter().map(|t| (t.0 - mean_a) * (t.1 - mean_b)).sum::<f64>();
                 let var_a = sample.iter().map(|t| (t.0 - mean_a).powi(2)).sum::<f64>();
                 let var_b = sample.iter().map(|t| (t.1 - mean_b).powi(2)).sum::<f64>();
                 if var_a > 0.0 && var_b > 0.0 {
@@ -309,13 +280,7 @@ fn rolling_corr<'py>(
                 }
             }
         });
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 

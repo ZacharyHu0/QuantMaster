@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from operator import itemgetter
 
 import numpy as np
 import pandas as pd
@@ -328,7 +329,7 @@ def _build_orders(
             continue
         target_value = portfolio_value * target_weight
         orders.append((symbol, target_value - state.shares[symbol] * price))
-    orders.sort(key=lambda order: order[1])
+    orders.sort(key=itemgetter(1))
     return orders, retry_pending
 
 
