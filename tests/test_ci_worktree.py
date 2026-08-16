@@ -292,23 +292,16 @@ def test_cleanup_run_root_restores_acl_for_nested_permission_error(monkeypatch, 
 def test_cleanup_run_root_removes_nested_git_repository(tmp_path, monkeypatch):
     run_root = _task_run_root(tmp_path, monkeypatch)
     repository = run_root / "primary"
-    repository.mkdir(parents=True)
-
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", *args], cwd=repository, check=True,
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-        )
-
-    git("init", "-b", "main")
-    git("config", "user.name", "QuantMaster tests")
-    git("config", "user.email", "tests@example.invalid")
+    objects = repository / ".git" / "objects"
+    (objects / "info").mkdir(parents=True)
+    (repository / ".git" / "HEAD").write_text(
+        "ref: refs/heads/main\n", encoding="utf-8",
+    )
     for index in range(10):
-        fixture = repository / f"fixture-{index}.txt"
-        fixture.write_text(f"fixture {index}\n", encoding="utf-8")
-        git("add", fixture.name)
-        git("commit", "-m", f"fixture {index}")
-    git("commit-graph", "write", "--reachable")
+        fanout = objects / f"{index:02x}"
+        fanout.mkdir()
+        (fanout / ("a" * 38)).write_bytes(f"object {index}".encode())
+    (objects / "info" / "commit-graph").write_bytes(b"commit graph")
 
     run.cleanup_run_root(run_root)
 
