@@ -528,9 +528,9 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         _wait_for_document_fit(page)
         assert spark.bounding_box()["width"] <= 390
         assert page.locator(".app-header").bounding_box()["height"] <= 180
-        assert page.locator(".workspace-context-label").evaluate(
-            "node => getComputedStyle(node).display"
-        ) == "none"
+        assert page.locator(".workspace-context-label").evaluate_all(
+            "nodes => nodes.every(node => getComputedStyle(node).display === 'none')"
+        )
         assert errors == []
 
         classic = browser.new_page(viewport={"width": 1280, "height": 900})

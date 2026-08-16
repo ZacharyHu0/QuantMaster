@@ -138,13 +138,15 @@ html[data-qm-theme="ink"] .header-primary{gap:8px 10px;padding:8px 12px;}
 html[data-qm-theme="ink"] .brand-replay{width:30px;height:30px;border-radius:8px;}
 html[data-qm-theme="ink"] .brand-word{display:none;}
 html[data-qm-theme="ink"] .header-version-stack{
-order:0;flex:1 1 auto;min-width:0;flex-direction:row;gap:2px;overflow-x:auto;
+order:0;flex:1 1 0;min-width:0;flex-direction:row;justify-content:flex-start;gap:2px;overflow:hidden;
 margin-left:auto;padding-left:0;border-left:0;scrollbar-width:none;
 }
 html[data-qm-theme="ink"] .header-version-stack::-webkit-scrollbar{display:none;}
 html[data-qm-theme="ink"] .release-trigger,
-html[data-qm-theme="ink"] .stockdb-update-trigger{min-height:36px;padding:0 6px;}
+html[data-qm-theme="ink"] .stockdb-update-trigger{flex:0 1 auto;min-width:0;min-height:36px;padding:0 6px;}
 html[data-qm-theme="ink"] .release-date{display:none;}
+html[data-qm-theme="ink"] .stockdb-update-label{display:none;}
+html[data-qm-theme="ink"] .stockdb-update-trigger time{overflow:hidden;text-overflow:ellipsis;}
 html[data-qm-theme="ink"] nav.workspace-nav{margin:0 -12px;padding:2px 12px 4px;}
 html[data-qm-theme="ink"] nav.workspace-nav>button{padding:0 12px;font-size:13px;letter-spacing:.05em;}
 html[data-qm-theme="ink"] .header-actions{gap:6px;}
