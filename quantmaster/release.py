@@ -68,10 +68,6 @@ RELEASES = (
         "version": "1.16.0",
         "date": "2026-08-15",
         "sections": (
-    {
-        "version": VERSION,
-        "date": RELEASE_DATE,
-        "sections": (
             {
                 "title": "时间、身份与行情真实性",
                 "items": (
