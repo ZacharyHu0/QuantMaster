@@ -730,7 +730,7 @@ def _remove_verified_tree(
         )
 
     def checked_blocked(error: BaseException) -> Path:
-        blocked = Path(getattr(error, "filename", None) or root).resolve()
+        blocked = type(root)(getattr(error, "filename", None) or root).resolve()
         if blocked != root and root not in blocked.parents:
             raise SystemExit(
                 f"拒绝清理{scope}之外的路径：{redact_public_text(blocked)}"
