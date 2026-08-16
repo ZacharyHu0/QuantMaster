@@ -60,14 +60,16 @@ def test_stable_launcher_reads_only_the_validated_active_slot(tmp_path) -> None:
     script = _launcher_script()
     assert "launcher.target" in script
     assert (
-        "for /f \"delims=\" %%A in ('%SystemRoot%\\System32\\findstr.exe /r /x "
-        "\"[0-9a-f]*\" \"%QM_APP_ROOT%launcher.target\" 2^>nul')" in script
+        "for /f \"usebackq delims=\" %%A in (\"%QM_APP_ROOT%launcher.target\") "
+        "do set \"QM_TARGET=%%A\"" in script
     )
-    assert 'in (\"%QM_APP_ROOT%launcher.target\")' not in script
+    assert 'delims=0123456789abcdef' in script
     assert 'set "QM_SLOT=%QM_SLOTS%\\%QM_TARGET%"' in script
-    assert 'if not "%QM_LINES%"=="1" exit /b 3' in script
+    assert 'if not "%QM_LINES%"=="1" (' in script
     assert 'reparsepoint query "%QM_SLOT%"' in script
-    assert '"%QM_EXE%" serve %*' in script
+    assert '"%QM_EXE%" serve --open %*' in script
+    assert 'call :qm_fail 3' in script
+    assert 'if /i not "%QM_LAUNCHER_NO_PAUSE%"=="1" pause' in script
     assert "python" not in script.lower()
 
 
@@ -84,6 +86,7 @@ def test_stable_launcher_rejects_tampered_target(tmp_path) -> None:
 def test_stable_shortcut_starts_the_exact_single_line_slot(tmp_path, monkeypatch) -> None:
     from quantmaster.runtime.launcher import create_stable_shortcut
 
+    monkeypatch.setenv("QM_LAUNCHER_NO_PAUSE", "1")
     root = tmp_path / "app"
     sha = "a" * 40
     slot = root / "slots" / sha
@@ -102,11 +105,12 @@ def test_stable_shortcut_starts_the_exact_single_line_slot(tmp_path, monkeypatch
         ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
         cwd=root,
         capture_output=True,
+        text=True,
         timeout=10,
         check=False,
     )
 
-    assert result.returncode == 2  # copied Python host was invoked with the literal `serve`
+    assert result.returncode == 2  # copied Python host was invoked with `serve --open`
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows stable launcher contract")
@@ -125,6 +129,7 @@ def test_stable_shortcut_rejects_unsafe_target_before_process_start(
 ) -> None:
     from quantmaster.runtime.launcher import create_stable_shortcut
 
+    monkeypatch.setenv("QM_LAUNCHER_NO_PAUSE", "1")
     root = tmp_path / "app"
     root.mkdir()
     run = subprocess.run
@@ -142,11 +147,13 @@ def test_stable_shortcut_rejects_unsafe_target_before_process_start(
         ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
         cwd=root,
         capture_output=True,
+        text=True,
         timeout=10,
         check=False,
     )
 
     assert result.returncode == 3
+    assert "QuantMaster launcher error" in result.stdout
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction contract")
@@ -178,6 +185,7 @@ def test_stable_shortcut_rejects_a_junction_before_process_start(
 ) -> None:
     from quantmaster.runtime.launcher import create_stable_shortcut
 
+    monkeypatch.setenv("QM_LAUNCHER_NO_PAUSE", "1")
     root = tmp_path / "app"
     slots = root / "slots"
     outside = tmp_path / "outside"
@@ -216,6 +224,7 @@ def test_stable_shortcut_rejects_a_junction_application_root(
 ) -> None:
     from quantmaster.runtime.launcher import create_stable_shortcut
 
+    monkeypatch.setenv("QM_LAUNCHER_NO_PAUSE", "1")
     root = tmp_path / "app"
     outside = tmp_path / "outside-app"
     sha = "a" * 40
