@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.16.1（2026-08-16）
+
+### 启动时间预算门禁与零拷贝 Rust 内核
+- onedir 安装实例的 CLI --help 冷启动 ≤ 1.5s、Web core_ready ≤ 5s 硬门禁生效，采样为 1 次冷启动 + 2 次热启动中位数，测量证据写入 JSON
+- Rust 研究内核改用 PyO3 numpy crate 零拷贝传递 NumPy 数组，消除 _to_native/_from_native 转换开销；全市场 2500 标的 × 760 日基准净加速约 18x
+- 桌面发行包裁剪未使用的 Feishu SDK 家族（Sheets/Tasks/VC/Wiki/Workplace 等）和 PyArrow Flight/Substrait/CUDA 等可选后端；包体门禁同步更新
+
+### 任务生命周期与本地卫生
+- tasks.py remove/gc 在删除任务工件后自动清理对应的 .task-running.lock 标记；gc 额外清理孤儿锁标记，锁文件不再累积
+- CI 报告与 tasks.py 日志脱敏，不再包含本地绝对路径；新增路径安全测试
+- 复杂度 ratchet 审计支持 owner 授权的基线更新命令（--accept），机械增长不再阻塞整个质量门禁
+
+### A 股恐贪指数与 onedir 测量
+- 接入 FundDB A 股恐贪指数，支持上证指数/沪深300 口径切换，与 CNN 指数并行展示
+- Windows onedir ZIP 测量通道正式可用，安装/压缩/模块归因报告写入 artifact
+- accept-ci 在集成基线冻结后不再因 origin/main 前进而拒绝复用绿色 CI
+
 ## v1.16.0（2026-08-15）
 
 ### 产品、架构与协作基线
