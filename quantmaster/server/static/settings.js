@@ -243,7 +243,13 @@ const settingsFeature = (() => {
         ? ` · 第 ${stockdb.attempt}/${stockdb.max_attempts || 1} 次` : '';
       const retry = stockdb.next_retry_at
         ? ` · 下次 ${new Date(stockdb.next_retry_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}` : '';
-      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${sessions}${attempts}${retry}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
+      const serviceAttempt = stockdb.service_restart_attempt
+        ? ` · 服务重启第 ${stockdb.service_restart_attempt} 次` : '';
+      const serviceRetry = stockdb.service_restart_next_at
+        ? ` · 服务下次 ${new Date(stockdb.service_restart_next_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}`
+        : stockdb.service_restart_backoff_seconds
+          ? ` · 服务退避 ${stockdb.service_restart_backoff_seconds} 秒` : '';
+      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${sessions}${attempts}${retry}${serviceAttempt}${serviceRetry}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
       const failed = ['error', 'degraded'].includes(stockdb.state)
         || ['failed', 'manual_required'].includes(stockdb.update_result);
       const healthy = stockdb.state === 'running'
@@ -253,6 +259,8 @@ const settingsFeature = (() => {
       freeStockDbActive = active;
       const updateButton = document.getElementById('free-stockdb-update-now');
       if (updateButton) updateButton.disabled = active;
+      const resetButton = document.getElementById('free-stockdb-reset-retry');
+      if (resetButton) resetButton.disabled = active;
       if (mounted && active) scheduleFreeStockDbPoll();
     }
     const labels = {
@@ -1693,6 +1701,7 @@ const settingsFeature = (() => {
         );
       } else {
         document.getElementById('free-stockdb-update-now').disabled = false;
+        document.getElementById('free-stockdb-reset-retry').disabled = false;
       }
     }
   }
@@ -1711,6 +1720,22 @@ const settingsFeature = (() => {
       freeStockDbActive = false;
       document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
       event.target.disabled = false;
+    }
+  });
+
+  document.getElementById('free-stockdb-reset-retry').addEventListener('click', async event => {
+    const generation = lifecycleGeneration;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const status = await request('/api/v1/settings/free-stockdb/reset', {method: 'POST'});
+      if (!mounted || generation !== lifecycleGeneration) return;
+      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      scheduleFreeStockDbPoll(250, generation);
+    } catch (error) {
+      if (!mounted || generation !== lifecycleGeneration) return;
+      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      button.disabled = false;
     }
   });
 
