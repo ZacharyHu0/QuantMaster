@@ -142,34 +142,33 @@ fn weighted_zscore<'py>(
         .for_each(|(row_idx, out_row)| {
             let v_row = v_arr.row(row_idx);
             let w_row = w_arr.row(row_idx);
-            let valid: Vec<(usize, f64, f64)> = v_row
-                .iter()
-                .zip(w_row.iter())
-                .enumerate()
-                .filter_map(|(i, (&v, &w))| {
-                    if v.is_finite() && w.is_finite() && w > 0.0 {
-                        Some((i, v, w))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let total_w: f64 = valid.iter().map(|t| t.2).sum();
+            // Single-pass weighted mean
+            let mut total_w = 0.0;
+            let mut weighted_sum = 0.0;
+            for (&v, &w) in v_row.iter().zip(w_row.iter()) {
+                if v.is_finite() && w.is_finite() && w > 0.0 {
+                    total_w += w;
+                    weighted_sum += v * w;
+                }
+            }
             if total_w <= 0.0 {
                 return;
             }
-            let mean = valid.iter().map(|t| t.1 * t.2).sum::<f64>() / total_w;
-            let variance = valid
-                .iter()
-                .map(|t| (t.1 - mean).powi(2) * t.2)
-                .sum::<f64>()
-                / total_w;
-            for (i, v, _) in &valid {
-                out_row[*i] = if variance > 0.0 {
-                    (v - mean) / variance.sqrt()
-                } else {
-                    0.0
-                };
+            let mean = weighted_sum / total_w;
+            // Second pass: weighted variance
+            let mut weighted_var_sum = 0.0;
+            for (&v, &w) in v_row.iter().zip(w_row.iter()) {
+                if v.is_finite() && w.is_finite() && w > 0.0 {
+                    weighted_var_sum += (v - mean).powi(2) * w;
+                }
+            }
+            let variance = weighted_var_sum / total_w;
+            let std = variance.sqrt();
+            // Third pass: write output
+            for (col_idx, (&v, &w)) in v_row.iter().zip(w_row.iter()).enumerate() {
+                if v.is_finite() && w.is_finite() && w > 0.0 {
+                    out_row[col_idx] = if variance > 0.0 { (v - mean) / std } else { 0.0 };
+                }
             }
         });
     let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
