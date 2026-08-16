@@ -5,9 +5,18 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Mapping
+from typing import Any
+
 VERSION = "1.16.2"
 RELEASE_DATE = "2026-08-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
+
+_RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 RELEASES = (
     {
@@ -1812,3 +1821,75 @@ RELEASES = (
         ),
     },
 )
+
+
+def _entry_version(entry: Mapping[str, object]) -> str:
+    return str(entry.get("version") or "")
+
+
+def _entry_date(entry: Mapping[str, object]) -> str:
+    return str(entry.get("date") or "")
+
+
+def _entry_sections(entry: Mapping[str, object]) -> Iterable[Mapping[str, object]]:
+    sections = entry.get("sections")
+    return [s for s in (sections if isinstance(sections, Iterable) else ())
+            if isinstance(s, Mapping)]
+
+
+def _release_by_sha(sha: str) -> Mapping[str, object] | None:
+    """Return the release entry that owns an exact lowercase Git build SHA."""
+
+    if not isinstance(sha, str) or sha != sha.lower() or _FULL_SHA.fullmatch(sha) is None:
+        return None
+    for entry in RELEASES:
+        if not isinstance(entry, Mapping):
+            continue
+        if str(entry.get("build_sha") or "") == sha:
+            return entry
+    return None
+
+
+def _release_by_version(version: str) -> Mapping[str, object] | None:
+    target = str(version or "").strip()
+    if not target:
+        return None
+    for entry in RELEASES:
+        if not isinstance(entry, Mapping):
+            continue
+        if _entry_version(entry) == target:
+            return entry
+    return None
+
+
+def release_lookup(sha: str) -> dict[str, object]:
+    """Return stable version/date metadata for a build SHA, empty when unknown."""
+
+    entry = _release_by_sha(sha) or _release_by_version(sha)
+    if entry is None:
+        return {"version": "", "release_date": "", "sha": str(sha or "")}
+    return {
+        "version": _entry_version(entry),
+        "release_date": _entry_date(entry),
+        "sha": str(sha or ""),
+    }
+
+
+def release_sections(sha: str) -> list[dict[str, Any]]:
+    """Return changelog section summaries for a build SHA, empty when unknown."""
+
+    entry = _release_by_sha(sha) or _release_by_version(sha)
+    if entry is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for section in _entry_sections(entry):
+        items = section.get("items")
+        item_text = [
+            str(item) for item in (items if isinstance(items, Iterable) else ())
+            if isinstance(item, str) and bool(item.strip())
+        ]
+        out.append({
+            "title": str(section.get("title") or ""),
+            "summary": item_text[0] if item_text else "",
+        })
+    return out
