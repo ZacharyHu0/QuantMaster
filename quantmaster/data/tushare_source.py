@@ -37,7 +37,6 @@ from quantmaster.index_source_access import register_index_source
 from quantmaster.instrument_source_access import register_instrument_source
 from quantmaster.temporal import (
     ProviderDateFormat,
-    TemporalContractError,
     parse_provider_date,
 )
 from quantmaster.trading_session_sources import register_official_calendar
@@ -68,7 +67,7 @@ def _parse_tushare_dates(
     or raise ProviderContractChanged (allow_missing=False).
     """
     raw_str = values.astype(str).str.strip()
-    mask_empty = raw_str.isin(["", "nan", "None"]) | values.isna()
+    mask_empty = values.isna() | raw_str.eq("")
     parsed = pd.to_datetime(raw_str, format="%Y%m%d", errors="coerce")
     if not allow_missing and mask_empty.any():
         positions = list(values.index[mask_empty])[:5]
@@ -76,11 +75,12 @@ def _parse_tushare_dates(
             f"Tushare {field} \u5b58\u5728\u7f3a\u5931\u503c [missing_provider_date], "
             f"\u793a\u4f8b\u7d22\u5f15: {positions}"
         )
-    bad_mask = mask_empty & parsed.notna()
+    bad_mask = ~mask_empty & parsed.isna()
     if bad_mask.any():
         positions = list(values.index[bad_mask])[:5]
         raise ProviderContractChanged(
-            f"Tushare {field} \u5b58\u5728\u65e0\u6cd5\u89e3\u6790\u7684\u65e5\u671f [parse_error], "
+            f"Tushare {field} \u5b58\u5728\u65e0\u6cd5\u89e3\u6790\u7684\u65e5\u671f "
+            f"[invalid_provider_date], "
             f"\u793a\u4f8b\u7d22\u5f15: {positions}"
         )
     return parsed

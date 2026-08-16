@@ -181,7 +181,7 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
     let minimum = std::cmp::max(2, window / 2);
     let mut output = vec![f64::NAN; rows * cols];
     output
-        .par_chunks_mut(cols)
+        .par_chunks_mut(cols.max(1))
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             for (col_idx, out) in out_row.iter_mut().enumerate() {
@@ -189,10 +189,16 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
                 let sample: Vec<f64> = (start..=row_idx)
                     .filter_map(|r| {
                         let v = matrix[(r, col_idx)];
-                        if v.is_finite() { Some(v) } else { None }
+                        if v.is_finite() {
+                            Some(v)
+                        } else {
+                            None
+                        }
                     })
                     .collect();
-                if sample.len() < minimum { continue; }
+                if sample.len() < minimum {
+                    continue;
+                }
                 let mean = sample.iter().sum::<f64>() / sample.len() as f64;
                 if !std {
                     *out = mean;
@@ -256,7 +262,7 @@ fn rolling_corr<'py>(
     let minimum = std::cmp::max(3, window / 2);
     let mut output = vec![f64::NAN; rows * cols];
     output
-        .par_chunks_mut(cols)
+        .par_chunks_mut(cols.max(1))
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             for (col_idx, out) in out_row.iter_mut().enumerate() {
@@ -265,14 +271,23 @@ fn rolling_corr<'py>(
                     .filter_map(|r| {
                         let a = l_arr[(r, col_idx)];
                         let b = r_arr[(r, col_idx)];
-                        if a.is_finite() && b.is_finite() { Some((a, b)) } else { None }
+                        if a.is_finite() && b.is_finite() {
+                            Some((a, b))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
-                if sample.len() < minimum { continue; }
+                if sample.len() < minimum {
+                    continue;
+                }
                 let n = sample.len() as f64;
                 let mean_a = sample.iter().map(|t| t.0).sum::<f64>() / n;
                 let mean_b = sample.iter().map(|t| t.1).sum::<f64>() / n;
-                let cov = sample.iter().map(|t| (t.0 - mean_a) * (t.1 - mean_b)).sum::<f64>();
+                let cov = sample
+                    .iter()
+                    .map(|t| (t.0 - mean_a) * (t.1 - mean_b))
+                    .sum::<f64>();
                 let var_a = sample.iter().map(|t| (t.0 - mean_a).powi(2)).sum::<f64>();
                 let var_b = sample.iter().map(|t| (t.1 - mean_b).powi(2)).sum::<f64>();
                 if var_a > 0.0 && var_b > 0.0 {
