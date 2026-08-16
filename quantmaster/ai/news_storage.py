@@ -18,6 +18,7 @@ from typing import Any
 from quantmaster.ai.news_contracts import (
     article_evidence_binding_hash,
     news_content_hash,
+    normalize_news_text,
     read_raw_evidence,
 )
 
@@ -70,11 +71,16 @@ _NEWS_COLUMNS = {
 def news_fingerprint(
     source: str, title: str, url: str, published_at: str, provider_item_id: str = "",
 ) -> str:
-    normalized_title = re.sub(r"\W+", "", title.casefold())
-    identity = provider_item_id.strip() or (
-        f"{url.strip().lower()}|{normalized_title}|{published_at.strip()}"
+    source_text = normalize_news_text(source)
+    title_text = normalize_news_text(title)
+    url_text = normalize_news_text(url)
+    published_text = normalize_news_text(published_at)
+    provider_id_text = normalize_news_text(provider_item_id)
+    normalized_title = re.sub(r"\W+", "", title_text.casefold())
+    identity = provider_id_text.strip() or (
+        f"{url_text.strip().lower()}|{normalized_title}|{published_text.strip()}"
     )
-    return hashlib.sha256(f"{source}|{identity}".encode()).hexdigest()
+    return hashlib.sha256(f"{source_text}|{identity}".encode()).hexdigest()
 
 
 def _decode_list(value: Any) -> list[str]:

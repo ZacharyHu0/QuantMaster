@@ -49,6 +49,20 @@ class NewsContractError(NewsProviderError):
         )
 
 
+def normalize_news_text(value: Any) -> str:
+    """Normalize provider text without silently stringifying response bytes."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise NewsContractError(
+                "资讯文本不是有效 UTF-8", code="invalid_text_encoding",
+            ) from exc
+    return str(value)
+
+
 @dataclass(slots=True)
 class FetchedArticle:
     source: str
@@ -66,6 +80,10 @@ class FetchedArticle:
     evidence_binding_hash: str = ""
     ingest_window_id: str = ""
     ingest_batch_id: str = ""
+
+    def __post_init__(self) -> None:
+        self.title = normalize_news_text(self.title)
+        self.content = normalize_news_text(self.content)
 
 
 @dataclass(slots=True)
@@ -164,7 +182,9 @@ _RAW_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 def news_content_hash(content: str, title: str) -> str:
     """Return the canonical hash used by both parsed evidence and news rows."""
-    text = re.sub(r"\s+", "", (content or title).casefold())
+    content_text = normalize_news_text(content)
+    title_text = normalize_news_text(title)
+    text = re.sub(r"\s+", "", (content_text or title_text).casefold())
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 

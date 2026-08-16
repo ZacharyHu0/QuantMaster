@@ -33,6 +33,7 @@ from quantmaster.ai.news_contracts import (
     article_evidence_binding_hash,
     evaluate_freshness,
     news_content_hash,
+    normalize_news_text,
     normalize_published_at,
     read_raw_evidence,
 )
@@ -103,9 +104,7 @@ def _utc_iso() -> str:
 
 
 def _clean_text(value: Any) -> str:
-    if value is None:
-        return ""
-    soup = BeautifulSoup(str(value), "html.parser")
+    soup = BeautifulSoup(normalize_news_text(value), "html.parser")
     return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
 
