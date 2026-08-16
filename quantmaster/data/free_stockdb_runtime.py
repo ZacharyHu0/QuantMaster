@@ -49,6 +49,7 @@ _AUTO_RETRY_SECONDS = 15 * 60
 _UPDATER_TIMEOUT_SECONDS = 30 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
 _SERVICE_CHECK_SECONDS = 5
+_SERVICE_RESTART_COOLDOWN_SECONDS = 2 * 60
 _DATA_STABILITY_SECONDS = 10
 _DATA_QUIESCENCE_POLL_SECONDS = 5
 _OWNER_STALE_SECONDS = 120
@@ -249,6 +250,7 @@ class FreeStockDBRuntime:
         self._control: _RuntimeControl | None = None
         self._last_target_check = 0.0
         self._last_service_check = 0.0
+        self._last_restart_fail = 0.0
         self._last_vendor_force = 0.0
         self._next_retry_at = 0.0
         self._retry_target = ""
@@ -1399,9 +1401,25 @@ class FreeStockDBRuntime:
             return
         self._last_service_check = time.monotonic()
         if self._listening():
+            self._last_restart_fail = 0.0
             return
+        # Backoff: if the service crashed recently and keep failing, stop
+        # spamming restart attempts. 120s cooldown after a failed restart
+        # prevents infinite crash loops from corrupted binaries.
+        if self._last_restart_fail > 0.0:
+            if time.monotonic() - self._last_restart_fail < _SERVICE_RESTART_COOLDOWN_SECONDS:
+                return
+            self._set_status(
+                "degraded",
+                "free-stockdb 服务持续崩溃，冷却期后重试",
+                managed=True,
+            )
         logger.warning("free-stockdb 服务失联，监督器尝试重新启动")
-        self._start_service()
+        if not self._start_service():
+            self._last_restart_fail = time.monotonic()
+            self._set_status(
+                "degraded", "free-stockdb 服务启动失败，冷却后重试", managed=True,
+            )
 
     def _scheduler(self) -> None:
         while not self._stop.is_set():

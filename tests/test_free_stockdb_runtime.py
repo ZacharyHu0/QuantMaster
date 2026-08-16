@@ -717,6 +717,56 @@ def test_scheduler_restarts_unavailable_managed_service(
     assert starts == [True]
 
 
+def test_supervise_service_does_not_restart_running_service(
+    isolated_config, monkeypatch,
+) -> None:
+    isolated_config.data.free_stockdb_managed = True
+    isolated_config.data.free_stockdb_auto_update = False
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    starts: list[bool] = []
+
+    monkeypatch.setattr(runtime, "_listening", lambda: True)
+    monkeypatch.setattr(runtime, "_start_service", lambda: starts.append(True))
+    monkeypatch.setattr(runtime, "_process_command", lambda: False)
+    monkeypatch.setattr(runtime._stop, "wait", lambda _s: False)
+
+    runtime._scheduler()
+
+    assert starts == []
+
+
+def test_supervise_service_backoff_after_crash_loop(
+    isolated_config, monkeypatch,
+) -> None:
+    isolated_config.data.free_stockdb_managed = True
+    isolated_config.data.free_stockdb_auto_update = False
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    starts: list[bool] = []
+    cycles = 0
+
+    def process_command() -> bool:
+        nonlocal cycles
+        cycles += 1
+        if cycles > 3:
+            runtime._stop.set()
+        return False
+
+    monkeypatch.setattr(runtime, "_process_command", process_command)
+    monkeypatch.setattr(runtime, "_listening", lambda: False)
+    monkeypatch.setattr(
+        runtime, "_start_service", lambda: starts.append(True) or False,
+    )
+    monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
+
+    runtime._scheduler()
+
+    # First attempt succeeds the _last_restart_fail check, second
+    # falls into the cooldown and does NOT call _start_service again
+    assert starts == [True]
+
+
 def test_verified_quantmaster_orphan_can_be_reclaimed(tmp_path, monkeypatch) -> None:
     root = tmp_path / "free-stockdb"
     root.mkdir()
