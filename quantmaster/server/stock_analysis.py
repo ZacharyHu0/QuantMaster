@@ -33,7 +33,7 @@ def list_stock_analyses() -> dict:
     try:
         jobs = get_stock_analysis_jobs().history(limit=20)
         return {"items": jobs}
-    except Exception as exc:
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
         return {"items": [], "error": str(exc)}
 
 
