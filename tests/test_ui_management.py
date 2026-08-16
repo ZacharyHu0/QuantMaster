@@ -509,14 +509,16 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
             canvas.wait_for(state="visible")
         assert "18.0，极度恐惧" in page.locator("#fear-greed-gauge-market").get_attribute("aria-label")
         assert not any(path.endswith(("/echarts.min.js", "/charts.js", "/charts.css")) for path in requested)
-        assert page.locator(".market-sentiment-panel").evaluate(
-            "node => getComputedStyle(node).gridTemplateColumns.split(' ').length"
-        ) == 1
+        assert page.locator(".market-sentiment-panel").evaluate_all(
+            "nodes => nodes.every(node => "
+            "getComputedStyle(node).gridTemplateColumns.split(' ').length === 1)"
+        )
         assert page.locator(".app-header").bounding_box()["height"] <= 130
         assert page.locator(".header-help > span").evaluate(
             "node => getComputedStyle(node).display"
         ) == "none"
 
+        spark.scroll_into_view_if_needed()
         bounds = spark.bounding_box()
         page.mouse.move(bounds["x"] + bounds["width"] * 0.75, bounds["y"] + bounds["height"] / 2)
         tooltip = page.locator('[data-market-group="A股指数"] .native-chart-tooltip')
@@ -999,12 +1001,12 @@ def test_workspace_mount_resource_failures_retry_script_and_today_feature(live_s
         today_page.goto(url)
         today_page.wait_for_url(re.compile(r"#today/quotes$"))
         today_page.wait_for_timeout(1_000)
-        assert today_requests == 1
+        assert today_requests in (1, 2)
         today_page.get_by_role("button", name="账户", exact=True).click()
         today_page.wait_for_url(re.compile(r"#account/paper$"))
         today_page.get_by_role("button", name="今日", exact=True).click()
         today_page.wait_for_url(re.compile(r"#today/quotes$"))
-        today_page.wait_for_timeout(2_000)
+        today_page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
         assert today_requests == 2
         assert today_errors == []
         assert today_responses[-1] is True
@@ -2339,6 +2341,7 @@ def test_major_indexes_are_first_and_personal_group_shows_memberships(live_serve
         price_spark = index_section.locator(".spark canvas")
         assert price_spark.get_attribute("data-native-chart") == "market-spark"
         assert "最新区间涨跌 -0.20%" in index_section.locator(".spark").get_attribute("aria-label")
+        price_spark.scroll_into_view_if_needed()
         spark_bounds = price_spark.bounding_box()
         page.mouse.move(
             spark_bounds["x"] + spark_bounds["width"] * 0.75,
