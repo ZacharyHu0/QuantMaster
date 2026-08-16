@@ -42,7 +42,7 @@ tushare = ["tushare>=1.4"]
 ml = [
     "scikit-learn>=1.9.0",
     "torch>=2.2",
-    "optuna>=4.0,<5",
+    "optuna>=4.9.0,<5",
 ]
 # 事件驱动回测引擎（可选，内置引擎为向量化）
 backtrader = ["backtrader>=1.9"]
