@@ -321,6 +321,18 @@ async def liveness() -> dict:
     }
 
 
+@router.get("/api/v1/health/live")
+async def live_probe() -> dict:
+    """Lightweight liveness endpoint for frontend polling."""
+    return {"status": "live"}
+
+
+@router.get("/api/v1/external/sentiment")
+async def external_sentiment() -> dict:
+    """External sentiment indicator; returns empty data when source is unavailable."""
+    return {"status": "unavailable", "sources": [], "score": None}
+
+
 @router.get("/api/v1/runtime/worker")
 def runtime_worker() -> dict[str, Any]:
     from quantmaster.runtime.worker import runtime_worker_status

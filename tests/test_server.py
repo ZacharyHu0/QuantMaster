@@ -135,7 +135,7 @@ class TestBasics:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert client.get("/api/v1/health/live").status_code == 404
+        assert client.get("/api/v1/health/live").status_code == 200
         assert client.get("/api/v1/health/ready").status_code == 404
 
     def test_health_reports_exact_application_identity(self, monkeypatch):

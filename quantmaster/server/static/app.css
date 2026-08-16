@@ -247,6 +247,10 @@
     .market-sentiment-status { align-items:flex-start; flex-direction:column; gap:var(--space-xs); }
     .fear-greed-gauge { height:164px; }
   }
+  @media (max-width:400px) {
+    .market-sentiment-head { grid-template-columns:minmax(0,1fr); }
+    .market-sentiment-head > a { justify-self:start; }
+  }
   .market-detail-panel { margin-top:var(--space-2xl); scroll-margin-top:88px; }
   .asset-workbench { padding:14px 16px; }
   .asset-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }
