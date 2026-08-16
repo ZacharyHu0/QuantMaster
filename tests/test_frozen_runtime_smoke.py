@@ -43,6 +43,27 @@ def test_frozen_runtime_smoke_requires_one_exact_application_identity():
         _assert_same_identity({**identity, "slot_id": "slot-a"}, identity)
 
 
+def test_frozen_smoke_uses_installed_default_paths_without_runtime_overrides(
+    tmp_path, monkeypatch,
+):
+    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
+        monkeypatch.setenv(name, "polluted-by-caller")
+
+    environment, instance = smoke_frozen_runtime._isolated_environment(tmp_path, 18686)
+
+    assert instance == tmp_path / "instance"
+    assert environment["APPDATA"] == str(tmp_path / "appdata")
+    assert environment["LOCALAPPDATA"] == str(tmp_path / "localappdata")
+    assert all(
+        name not in environment
+        for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT")
+    )
+    config_path = tmp_path / "appdata" / "QuantMaster" / "config.yaml"
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "root" not in document["data"]
+    assert "free_stockdb_root" not in document["data"]
+
+
 def test_internal_launcher_exits_on_eof_without_signaling_child(tmp_path, monkeypatch):
     calls = []
 

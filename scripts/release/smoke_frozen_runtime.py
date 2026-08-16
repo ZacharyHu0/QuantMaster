@@ -317,16 +317,15 @@ def _run_deep_doctor(
 def _isolated_environment(root: Path, port: int) -> tuple[dict[str, str], Path]:
     instance = root / "instance"
     instance.mkdir()
-    data_root = instance / "data"
-    stockdb_root = instance / "stockdb"
-    config_path = instance / "config.yaml"
+    appdata = root / "appdata"
+    localappdata = root / "localappdata"
+    config_path = appdata / "QuantMaster" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
     config_path.write_text(
         json.dumps(
             {
                 "server": {"host": "127.0.0.1", "port": port},
                 "data": {
-                    "root": str(data_root),
-                    "free_stockdb_root": str(stockdb_root),
                     "free_stockdb_managed": False,
                     "free_stockdb_auto_update": False,
                     "free_stockdb_online_enabled": False,
@@ -345,13 +344,12 @@ def _isolated_environment(root: Path, port: int) -> tuple[dict[str, str], Path]:
     )
     environment = os.environ.copy()
     environment.pop("PYINSTALLER_SUPPRESS_SPLASH_SCREEN", None)
+    for name in ("QM_CONFIG_PATH", "QM_DATA_ROOT", "QM_FREE_STOCKDB_ROOT"):
+        environment.pop(name, None)
     environment.update(
         {
-            "APPDATA": str(root / "appdata"),
-            "LOCALAPPDATA": str(root / "localappdata"),
-            "QM_CONFIG_PATH": str(config_path),
-            "QM_DATA_ROOT": str(data_root),
-            "QM_FREE_STOCKDB_ROOT": str(stockdb_root),
+            "APPDATA": str(appdata),
+            "LOCALAPPDATA": str(localappdata),
             "QM_FREE_STOCKDB_MANAGED": "false",
             "QM_FREE_STOCKDB_AUTO_UPDATE": "false",
             "QM_FREE_STOCKDB_ONLINE_ENABLED": "false",
