@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -30,6 +33,27 @@ from quantmaster.rotation.analytics import (
     market_temperature_reference_dates,
 )
 from quantmaster.rotation.taxonomy import strict_l1_groups
+
+
+def test_quantmaster_has_no_scipy_dependency() -> None:
+    project_root = Path(__file__).parents[1]
+    imports = {
+        name
+        for source in (project_root / "quantmaster").rglob("*.py")
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8")))
+        for name in (
+            [alias.name for alias in node.names] if isinstance(node, ast.Import)
+            else [node.module or ""] if isinstance(node, ast.ImportFrom)
+            else []
+        )
+    }
+
+    assert not any(name == "scipy" or name.startswith("scipy.") for name in imports)
+    project = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert not any(
+        requirement.partition(";")[0].strip().lower().startswith("scipy")
+        for requirement in project["project"]["dependencies"]
+    )
 
 
 def _close(days: int = 100, symbols: int = 24) -> pd.DataFrame:
