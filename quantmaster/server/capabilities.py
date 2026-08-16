@@ -431,6 +431,14 @@ def refresh_market_fear_greed(request: Request) -> dict:
     return load_cnn_fear_greed(force=True)
 
 
+@router.get("/api/v1/market/ashare-fear-greed")
+def market_ashare_fear_greed(symbol: Literal["上证指数", "沪深300"]) -> dict:
+    """Read one local A-share FundDB snapshot; refresh is a background action."""
+    from quantmaster.market import read_ashare_fear_greed
+
+    return read_ashare_fear_greed(symbol)
+
+
 @router.get("/api/v1/market/history/{symbol}")
 def market_history(
     symbol: str, start: str | None = None, end: str | None = None, frequency: str = "1d"

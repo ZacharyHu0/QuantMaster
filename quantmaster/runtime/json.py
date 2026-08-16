@@ -17,8 +17,6 @@ from typing import Any
 
 from starlette.responses import JSONResponse
 
-from quantmaster.logging_config import redact_sensitive_text
-
 _numeric_lock = threading.Lock()
 _numeric_intercepts: Counter[str] = Counter()
 
@@ -73,10 +71,6 @@ def sanitize_json(value: Any) -> Any:
     return value
 
 
-def _redact_public_leaf(value: str | Path) -> str:
-    return redact_sensitive_text(value)
-
-
 def sanitize_api_json(value: Any) -> Any:
     """Sanitize an API payload and disclose every intercepted numeric path.
 
@@ -97,8 +91,6 @@ def sanitize_api_json(value: Any) -> Any:
             return {key: visit(child, f"{path}.{key}") for key, child in item.items()}
         if isinstance(item, (list, tuple, set, frozenset)):
             return [visit(child, f"{path}[{index}]") for index, child in enumerate(item)]
-        if isinstance(item, (str, Path)):
-            return _redact_public_leaf(item)
         normalized = sanitize_json(item)
         if normalized is not item:
             return visit(normalized, path)

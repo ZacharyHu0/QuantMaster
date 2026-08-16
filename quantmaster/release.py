@@ -5,7 +5,7 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.16.1"
+VERSION = "1.16.2"
 RELEASE_DATE = "2026-08-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -13,6 +13,29 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "A 股恐贪指数",
+                "items": (
+                    (
+                        "接入 FundDB A 股恐贪指数，支持上证指数/沪深300 口径切换，"
+                        "与 CNN 全球恐贪指数并行展示；页面新增独立 A 股面板、指标仪表盘和历史曲线。"
+                    ),
+                    (
+                        "适配器复用 FundDB 公开网页客户端的图表请求并校验 `date/fear/index` "
+                        "三列契约，响应加密变化时显式降级，不将未知响应静默解释为新数据。"
+                    ),
+                    (
+                        "两个口径分别以显式 `symbol` 刷新，日缓存优先、失败安全降级到最近成功值；"
+                        "RSI 机会逻辑和 CNN 指数保持原口径，不合并也不替换。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.16.1",
+        "date": "2026-08-16",
         "sections": (
             {
                 "title": "启动时间预算门禁与零拷贝 Rust 内核",
@@ -44,21 +67,6 @@ RELEASES = (
                     (
                         "复杂度 ratchet 审计支持 owner 授权的基线更新命令（--accept），"
                         "机械增长不再阻塞整个质量门禁。"
-                    ),
-                ),
-            },
-            {
-                "title": "A 股恐贪指数与 onedir 测量",
-                "items": (
-                    (
-                        "接入 FundDB A 股恐贪指数，支持上证指数/沪深300 口径切换，"
-                        "与 CNN 指数并行展示。"
-                    ),
-                    (
-                        "Windows onedir ZIP 测量通道正式可用，安装/压缩/模块归因报告写入 artifact。"
-                    ),
-                    (
-                        "accept-ci 在集成基线冻结后不再因 origin/main 前进而拒绝复用绿色 CI。"
                     ),
                 ),
             },

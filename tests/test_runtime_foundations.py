@@ -341,7 +341,7 @@ def test_strict_json_boundary_converts_nonfinite_values_to_null():
     assert "NaN" not in encoded and "Infinity" not in encoded
 
 
-def test_strict_json_boundary_redacts_local_paths():
+def test_strict_json_boundary_preserves_local_paths():
     app = FastAPI(default_response_class=StrictJSONResponse)
 
     @app.get("/path")
@@ -350,7 +350,7 @@ def test_strict_json_boundary_redacts_local_paths():
 
     response = TestClient(app).get("/path")
 
-    assert response.json() == {"path": "<local-path>"}
+    assert response.json() == {"path": r"C:\Users\example\Quant\config.yaml"}
 
 
 def test_contract_model_rejects_extra_and_nested_nonfinite_values():

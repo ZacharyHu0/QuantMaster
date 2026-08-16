@@ -1765,6 +1765,7 @@ let marketColdRetryCount = 0;
 let marketStreamCycle = 0;
 let marketFearGreed = null;
 let marketAfterCloseSyncing = false;
+let marketAshareFearGreed = null;
 const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
 let todayChartsRetry = 0;
@@ -1837,6 +1838,19 @@ function renderFearGreedVisuals(root = document) {
     });
     root.querySelectorAll('[data-fear-greed-history]').forEach(element => {
       module.renderFearGreedHistory(element, marketFearGreed);
+    });
+  }, () => {});
+}
+
+function renderAshareFearGreedVisuals(root = document) {
+  const generation = todayRenderGeneration;
+  void todayCharts().then(module => {
+    if (generation !== todayRenderGeneration) return;
+    root.querySelectorAll('[data-ashare-fear-greed-gauge]').forEach(element => {
+      module.renderFearGreedGauge(element, marketAshareFearGreed);
+    });
+    root.querySelectorAll('[data-ashare-fear-greed-history]').forEach(element => {
+      module.renderFearGreedHistory(element, marketAshareFearGreed);
     });
   }, () => {});
 }
@@ -2149,6 +2163,62 @@ async function runMarketAfterCloseSync() {
     document.getElementById('market-stale-sync')?.removeAttribute('disabled');
   }
 }
+function acceptAshareMarketFearGreed(data) {
+  marketAshareFearGreed = data || {
+    status:'unavailable', symbol:'上证指数', symbol_label:'上证指数',
+    score:null, rating_label:'暂不可用', history:[],
+  };
+  const symbol = document.getElementById('market-ashare-fear-greed-symbol');
+  const status = document.getElementById('market-ashare-fear-greed-status');
+  const timestamp = document.getElementById('market-ashare-fear-greed-time');
+  const benchmark = document.getElementById('market-ashare-fear-greed-benchmark');
+  const note = document.getElementById('market-ashare-fear-greed-note');
+  const label = marketAshareFearGreed.symbol_label || marketAshareFearGreed.symbol || '上证指数';
+  if (symbol && symbol.value !== label && Array.from(symbol.options).some(option => option.value === label)) {
+    symbol.value = label;
+  }
+  if (status) status.textContent = marketAshareFearGreed.status === 'stale'
+    ? '本地缓存 · FundDB 刷新失败' : marketAshareFearGreed.status === 'ready'
+      ? `${label}情绪` : 'A股指数暂不可用';
+  if (timestamp) {
+    const formatted = fearGreedAsOf(marketAshareFearGreed.as_of);
+    timestamp.textContent = formatted
+      ? `${marketAshareFearGreed.status === 'stale' ? '缓存于' : '更新于'} ${formatted}`
+      : marketAshareFearGreed.status === 'ready' ? '刚刚更新' : '等待更新';
+    if (marketAshareFearGreed.as_of) timestamp.dateTime = marketAshareFearGreed.as_of;
+    else timestamp.removeAttribute('datetime');
+  }
+  if (benchmark) {
+    const value = indicatorNumber(marketAshareFearGreed.benchmark_value);
+    benchmark.textContent = Number.isFinite(value)
+      ? `${marketAshareFearGreed.benchmark_label || '指数点位'} ${value.toFixed(2)}`
+      : '指数点位 —';
+  }
+  if (note) note.textContent = marketAshareFearGreed.warning ||
+    'FundDB A股恐贪指数；当前选择的指数点位作为历史曲线基准。';
+  document.querySelectorAll('[data-ashare-fear-greed-gauge]').forEach(node => {
+    const score = indicatorNumber(marketAshareFearGreed.score);
+    const scoreText = Number.isFinite(score) ? score.toFixed(1) : '—';
+    node.setAttribute('aria-label',`A股当日恐贪指数 ${scoreText}，${marketAshareFearGreed.rating_label || '暂不可用'}`);
+  });
+  renderAshareFearGreedVisuals();
+}
+
+async function loadAshareMarketFearGreed(generation = todayRenderGeneration, selectedSymbol) {
+  const selected = selectedSymbol
+    || document.getElementById('market-ashare-fear-greed-symbol')?.value || '上证指数';
+  try {
+    const data = await api(`/api/v1/market/ashare-fear-greed?symbol=${encodeURIComponent(selected)}`);
+    if (generation === todayRenderGeneration) acceptAshareMarketFearGreed(data);
+  } catch (error) {
+    if (generation !== todayRenderGeneration) return;
+    acceptAshareMarketFearGreed({
+      status:'unavailable', symbol:selected, symbol_label:selected, score:null,
+      rating_label:'暂不可用', history:[],
+      warning:`FundDB A股恐贪指数读取失败：${error.message}；CNN 指数与 RSI 仍可独立使用。`,
+    });
+  }
+}
 
 let marketSparkObserver = null;
 const marketSparkRenderers = new WeakMap();
@@ -2456,6 +2526,7 @@ async function loadMarket() {
   if (!hasExisting) beginRender();
   else document.getElementById('mkt-stamp').textContent = '正在刷新本地快照；当前内容仍可使用';
   void loadMarketFearGreed(generation);
+  void loadAshareMarketFearGreed(generation);
   try {
     const response = await api('/api/v1/market/overview');
     if (generation !== todayRenderGeneration) return;
@@ -2542,6 +2613,10 @@ document.getElementById('market-stale-open')?.addEventListener(
 document.getElementById('market-fear-greed-refresh')?.addEventListener(
   'click', () => void refreshMarketFearGreed(),
 );
+document.getElementById('market-ashare-fear-greed-symbol')?.addEventListener('change', event => {
+  const generation = todayRenderGeneration;
+  void loadAshareMarketFearGreed(generation, event.target.value);
+});
 function klineFrequencyName(frequency) {
   return frequency === '1d' ? '日线' : frequency.replace('m', ' 分钟');
 }
