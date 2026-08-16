@@ -336,6 +336,11 @@ def _worker_parity(
     if rust_kernel.backend_used != KernelBackend.RUST:
         raise RuntimeError(rust_kernel.fallback_reason or "Rust kernel fell back to Python")
     keys_equal = python[["trade_date", "symbol"]].equals(native[["trade_date", "symbol"]])
+    # Full output-column schema equality: columns must match exactly, including order.
+    schema_equal = list(python.columns) == list(native.columns)
+    if not schema_equal:
+        extra = set(native.columns) - set(python.columns)
+        raise RuntimeError(f"Rust kernel produced extra columns not in Python: {extra}")
     columns = [column for column in python if column not in {"trade_date", "symbol"}]
     expected = python[columns].to_numpy(dtype=float)
     actual = native[columns].to_numpy(dtype=float)
@@ -347,6 +352,7 @@ def _worker_parity(
     )
     return {
         "equivalent": bool(equivalent),
+        "schema_equal": schema_equal,
         "keys_equal": keys_equal,
         "nan_masks_equal": nan_masks_equal,
         "atol": 1e-6,
@@ -433,7 +439,7 @@ def _identity(data_root: Path, ingest_id: str) -> dict[str, Any]:
     )
     return {
         "source": "local-stockdb-ingest",
-        "network": "disabled",
+        "network": "unused_by_current_seams",
         "ingest_id": snapshot.ingest_id,
         "artifact_id": snapshot.artifact_id,
         "content_ids": {

@@ -19,7 +19,7 @@ The benchmark uses the real application seams rather than isolated operators:
 
 The fixed local StockDB ingest is `sdi_f45211392ab3079c823db962`: 983,296 market rows across 180
 sessions and 5,494 symbols, plus 1,337 groups and 93,514 memberships. Its existing StockDB content
-identities are recorded in the JSON evidence. No provider or network fallback is used.
+identities are recorded in the JSON evidence. The benchmark seams are local-only and do not call any provider or network endpoint in the measured paths. A process-local socket fence is not installed; the `network` field in the evidence JSON honestly reports `unused_by_current_seams`.
 
 Cold samples are the first seam invocation in a fresh process after input preparation. Warm samples
 run in one process after one untimed invocation. Each backend has three cold and three warm samples.

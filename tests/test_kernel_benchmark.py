@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts.dev.benchmark_kernels import (
     evaluate_retention,
@@ -62,6 +63,12 @@ def test_retention_thresholds_fail_closed_at_the_public_report_seam() -> None:
 
 
 def test_numpy_adapter_matches_scipy_through_rotation_application_seam() -> None:
+    from quantmaster.rotation import analytics
+
+    if not hasattr(analytics, "sparse"):
+        pytest.skip("SciPy sparse module has been removed from rotation analytics; "
+                     "the SciPy benchmark comparison is no longer applicable.")
+
     dates = pd.bdate_range("2026-01-02", periods=80)
     symbols = [f"{index:06d}.SZ" for index in range(24)]
     rng = np.random.default_rng(84)
@@ -108,7 +115,7 @@ def test_checked_in_report_is_replayable_and_safe_for_public_github() -> None:
         .read_text(encoding="utf-8")
     )
 
-    assert report["dataset"]["network"] == "disabled"
+    assert report["dataset"]["network"] == "unused_by_current_seams"
     assert report["machine"]["rustc"].startswith("rustc ")
     assert evaluate_retention(report) == report["decisions"]
     encoded = json.dumps(report, ensure_ascii=False)

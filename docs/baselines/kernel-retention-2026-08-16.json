@@ -20,7 +20,7 @@
   },
   "dataset": {
     "source": "local-stockdb-ingest",
-    "network": "disabled",
+    "network": "unused_by_current_seams",
     "ingest_id": "sdi_f45211392ab3079c823db962",
     "artifact_id": "6247d9b1659559802e66db3d49d1a17b4a34b2586e70592b44969c4e1fefa81f",
     "content_ids": {
