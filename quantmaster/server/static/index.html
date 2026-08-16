@@ -1334,7 +1334,7 @@
             <label class="field-wide">free-stockdb SDK 目录<input name="data.free_stockdb_sdk_path" placeholder="留空则自动使用本地目录下的 pybao"><small>显式路径优先；留空时自动发现 &lt;本地目录&gt;/pybao/stock_sdk.py。</small></label>
             <label class="field-wide">free-stockdb 服务地址<input name="data.free_stockdb_url" type="url" required placeholder="http://127.0.0.1:7899"><small>SDK 使用其中的主机和端口；也可改为自己的兼容服务。</small></label>
             <div class="field-wide check-result" id="free-stockdb-sidecar-status" aria-live="polite">free-stockdb sidecar 状态尚未读取</div>
-            <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">立即更新并验证</button></div>
+            <div class="field-wide button-pair"><button class="ghost" id="free-stockdb-update-now" type="button">立即更新并验证</button><button class="ghost" id="free-stockdb-reset-retry" type="button">重置退避并重试</button></div>
           </div>
           <div class="maintenance-box">
             <div><h4>手动增量同步行情</h4><p>已有标的只请求最后 5 个交易日的重叠区间，用于校准复权并补齐新行情；只有未缓存标的才会按起始日期初始化。</p></div>

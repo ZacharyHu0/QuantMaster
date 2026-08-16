@@ -748,32 +748,90 @@ def test_supervise_service_does_not_restart_running_service(
 def test_supervise_service_backoff_after_crash_loop(
     isolated_config, monkeypatch,
 ) -> None:
+    from quantmaster.data.free_stockdb_runtime import (
+        _SERVICE_CHECK_SECONDS,
+        _SERVICE_RESTART_BACKOFF_BASE_SECONDS,
+    )
+
     isolated_config.data.free_stockdb_managed = True
     isolated_config.data.free_stockdb_auto_update = False
     runtime = FreeStockDBRuntime()
     runtime._owner = True
     starts: list[bool] = []
-    cycles = 0
-
-    def process_command() -> bool:
-        nonlocal cycles
-        cycles += 1
-        if cycles > 3:
-            runtime._stop.set()
-        return False
-
-    monkeypatch.setattr(runtime, "_process_command", process_command)
+    clock = [1000.0]
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.time.monotonic",
+        lambda: clock[0],
+    )
     monkeypatch.setattr(runtime, "_listening", lambda: False)
     monkeypatch.setattr(
         runtime, "_start_service", lambda: starts.append(True) or False,
     )
-    monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
 
-    runtime._scheduler()
+    def check() -> None:
+        runtime._last_service_check = clock[0] - _SERVICE_CHECK_SECONDS
+        runtime._supervise_service(isolated_config.data)
 
-    # First attempt succeeds the _last_restart_fail check, second
-    # falls into the cooldown and does NOT call _start_service again
+    check()
     assert starts == [True]
+    assert runtime.status()["service_restart_backoff_seconds"] == (
+        _SERVICE_RESTART_BACKOFF_BASE_SECONDS
+    )
+
+    clock[0] += _SERVICE_RESTART_BACKOFF_BASE_SECONDS - 1
+    check()
+    assert starts == [True]
+
+    clock[0] += 1
+    check()
+    assert starts == [True, True]
+    assert runtime.status()["service_restart_backoff_seconds"] == (
+        _SERVICE_RESTART_BACKOFF_BASE_SECONDS * 2
+    )
+
+    clock[0] += _SERVICE_RESTART_BACKOFF_BASE_SECONDS * 2
+    check()
+    assert starts == [True, True, True]
+    assert runtime.status()["service_restart_backoff_seconds"] == (
+        _SERVICE_RESTART_BACKOFF_BASE_SECONDS * 4
+    )
+
+
+def test_manual_service_retry_reset_clears_backoff_and_retries(
+    isolated_config, monkeypatch,
+) -> None:
+    from quantmaster.data.free_stockdb_runtime import _SERVICE_CHECK_SECONDS
+
+    isolated_config.data.free_stockdb_managed = True
+    isolated_config.data.free_stockdb_auto_update = False
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    runtime._restart_failures = 3
+    clock = [1000.0]
+    runtime._last_restart_fail = clock[0] - 1
+    runtime._last_service_check = clock[0]
+    starts: list[bool] = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(runtime, "_listening", lambda: False)
+    monkeypatch.setattr(
+        runtime, "_start_service", lambda: starts.append(True) or False,
+    )
+
+    runtime._ensure_control().enqueue("reset_service_retry", "manual")
+    assert runtime._process_command() is True
+    assert runtime._restart_failures == 0
+    assert runtime.status()["service_restart_backoff_seconds"] == 0
+    assert runtime.status()["service_restart_next_at"] == ""
+
+    runtime._last_service_check = clock[0] - _SERVICE_CHECK_SECONDS
+    runtime._supervise_service(isolated_config.data)
+
+    assert starts == [True]
+    assert runtime._restart_failures == 1
 
 
 def test_verified_quantmaster_orphan_can_be_reclaimed(tmp_path, monkeypatch) -> None:

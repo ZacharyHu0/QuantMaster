@@ -49,7 +49,8 @@ _AUTO_RETRY_SECONDS = 15 * 60
 _UPDATER_TIMEOUT_SECONDS = 30 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
 _SERVICE_CHECK_SECONDS = 5
-_SERVICE_RESTART_COOLDOWN_SECONDS = 2 * 60
+_SERVICE_RESTART_BACKOFF_BASE_SECONDS = 2 * 60
+_SERVICE_RESTART_BACKOFF_MAX_SECONDS = 30 * 60
 _DATA_STABILITY_SECONDS = 10
 _DATA_QUIESCENCE_POLL_SECONDS = 5
 _OWNER_STALE_SECONDS = 120
@@ -251,6 +252,7 @@ class FreeStockDBRuntime:
         self._last_target_check = 0.0
         self._last_service_check = 0.0
         self._last_restart_fail = 0.0
+        self._restart_failures = 0
         self._last_vendor_force = 0.0
         self._next_retry_at = 0.0
         self._retry_target = ""
@@ -486,6 +488,9 @@ class FreeStockDBRuntime:
                 "max_attempts",
                 "next_retry_at",
                 "validation",
+                "service_restart_attempt",
+                "service_restart_backoff_seconds",
+                "service_restart_next_at",
             ):
                 if key not in extra and key in self._status:
                     extra[key] = self._status[key]
@@ -524,6 +529,41 @@ class FreeStockDBRuntime:
 
     def _is_managed(self) -> bool:
         return self._daemon_started or self._process is not None
+
+    def _service_restart_backoff_seconds(self) -> int:
+        if self._restart_failures <= 0:
+            return 0
+        exponent = min(self._restart_failures - 1, 20)
+        return min(
+            _SERVICE_RESTART_BACKOFF_BASE_SECONDS * (2 ** exponent),
+            _SERVICE_RESTART_BACKOFF_MAX_SECONDS,
+        )
+
+    def _service_restart_next_at(self) -> str:
+        if self._last_restart_fail <= 0.0 or self._restart_failures <= 0:
+            return ""
+        remaining = self._last_restart_fail + self._service_restart_backoff_seconds()
+        remaining -= time.monotonic()
+        if remaining <= 0:
+            return ""
+        return datetime.fromtimestamp(
+            time.time() + remaining, tz=ZoneInfo("Asia/Shanghai"),
+        ).isoformat()
+
+    def _service_restart_status(self) -> dict[str, Any]:
+        return {
+            "service_restart_attempt": self._restart_failures,
+            "service_restart_backoff_seconds": self._service_restart_backoff_seconds(),
+            "service_restart_next_at": self._service_restart_next_at(),
+        }
+
+    def _clear_service_restart_failure(self) -> None:
+        self._last_restart_fail = 0.0
+        self._restart_failures = 0
+
+    def _reset_service_retry_state(self) -> None:
+        self._clear_service_restart_failure()
+        self._last_service_check = 0.0
 
     @staticmethod
     def _launch_service_process(
@@ -1280,6 +1320,38 @@ class FreeStockDBRuntime:
             trigger=trigger, message=message,
         )
 
+    def _reset_service_retry(self) -> dict[str, Any]:
+        self._reset_service_retry_state()
+        managed = bool(get_config().data.free_stockdb_managed)
+        self._set_status(
+            "degraded" if managed else "disabled",
+            "已手动重置 free-stockdb 重试退避，监督器将立即重新检查",
+            managed=self._is_managed(),
+            **self._service_restart_status(),
+        )
+        return {"status": "reset", **self.status()}
+
+    def request_reset_service_retry(self, timeout: float = 5.0) -> dict[str, Any]:
+        """Queue a manual reset of service restart backoff for the owner."""
+        try:
+            command_id, _created = self._ensure_control().enqueue(
+                "reset_service_retry", "manual",
+            )
+        except (OSError, sqlite3.Error):
+            logger.warning("free-stockdb 重试退避重置入队失败", exc_info=True)
+            return {"status": "degraded", "message": "重试退避重置失败；详细信息已写入本机日志"}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            command = self._ensure_control().command(command_id)
+            if command and command.get("status") == "completed":
+                return dict(command.get("result") or {})
+            time.sleep(0.05)
+        return {
+            "status": "queued",
+            "message": "已请求重置 free-stockdb 重试退避，监督进程正在应用",
+            **self.status(),
+        }
+
     def request_update(self, trigger: str = "manual") -> bool:
         """Queue an owner-executed update; duplicate requests are coalesced."""
         if not self._owner and not self._supervised:
@@ -1384,6 +1456,8 @@ class FreeStockDBRuntime:
                 result = self._apply_config_command(
                     list(command.get("payload", {}).get("changed_fields") or []),
                 )
+            elif command["action"] == "reset_service_retry":
+                result = self._reset_service_retry()
             else:
                 result = {"status": "failed", "message": "未知控制命令"}
         except Exception as exc:
@@ -1399,27 +1473,45 @@ class FreeStockDBRuntime:
             or time.monotonic() - self._last_service_check < _SERVICE_CHECK_SECONDS
         ):
             return
-        self._last_service_check = time.monotonic()
+        now = time.monotonic()
+        self._last_service_check = now
         if self._listening():
-            self._last_restart_fail = 0.0
+            was_retrying = self._restart_failures > 0
+            self._clear_service_restart_failure()
+            if was_retrying:
+                self._set_status(
+                    "running", "free-stockdb 服务已恢复",
+                    managed=self._is_managed(), **self._service_restart_status(),
+                )
             return
-        # Backoff: if the service crashed recently and keep failing, stop
-        # spamming restart attempts. 120s cooldown after a failed restart
-        # prevents infinite crash loops from corrupted binaries.
-        if self._last_restart_fail > 0.0:
-            if time.monotonic() - self._last_restart_fail < _SERVICE_RESTART_COOLDOWN_SECONDS:
+        # Exponential backoff: keep increasing the delay for a persistent
+        # crash loop, but cap it so a fixed-up installation can recover soon.
+        if self._restart_failures:
+            backoff = self._service_restart_backoff_seconds()
+            if now - self._last_restart_fail < backoff:
                 return
             self._set_status(
                 "degraded",
                 "free-stockdb 服务持续崩溃，冷却期后重试",
-                managed=True,
+                managed=True, **self._service_restart_status(),
             )
         logger.warning("free-stockdb 服务失联，监督器尝试重新启动")
-        if not self._start_service():
-            self._last_restart_fail = time.monotonic()
-            self._set_status(
-                "degraded", "free-stockdb 服务启动失败，冷却后重试", managed=True,
-            )
+        if self._start_service():
+            if self._restart_failures:
+                self._clear_service_restart_failure()
+                self._set_status(
+                    "running", "free-stockdb 服务已恢复",
+                    managed=self._is_managed(), **self._service_restart_status(),
+                )
+            return
+        self._restart_failures += 1
+        self._last_restart_fail = time.monotonic()
+        backoff = self._service_restart_backoff_seconds()
+        self._set_status(
+            "degraded",
+            f"free-stockdb 服务启动失败，将在 {backoff} 秒后重试",
+            managed=True, **self._service_restart_status(),
+        )
 
     def _scheduler(self) -> None:
         while not self._stop.is_set():
