@@ -74,9 +74,9 @@ def default_close_data_end(as_of: str | None = None) -> str:
     expectation = resolve_session_target()
     if expectation.ready and expectation.session:
         return expectation.session
-    fallback = (market_date() - timedelta(days=1)).isoformat()
-    logger.warning("交易日历不可用，使用非当天探测日期 %s：%s", fallback, expectation.reason)
-    return fallback
+    raise RuntimeError(
+        f"交易日历不可用，无法确定数据截止日期：{expectation.reason}"
+    )
 
 
 def daily_signal_cutoff(value: date | str) -> datetime:
