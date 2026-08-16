@@ -508,6 +508,17 @@ def test_ready_for_review_event_escalates_the_pull_request_ci_matrix() -> None:
     }
 
 
+def test_core_workflow_uses_a_prepared_pytest_basetemp() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
+    )
+    steps = {step.get("name"): step for step in workflow["jobs"]["core"]["steps"]}
+
+    assert "prepare_pytest_directory" in steps["Prepare core pytest root"]["run"]
+    assert "--basetemp=.artifacts/pytest/core" in steps["Cross-platform core tests"]["run"]
+
+
 def test_documented_integration_order_has_no_ready_accept_ci_cycle() -> None:
     contracts = {
         "AGENTS.md": (

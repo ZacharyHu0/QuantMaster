@@ -61,6 +61,11 @@ jobs:
           enable-cache: true
       - name: Sync core environment
         run: uv sync --locked --extra dev
+      - name: Prepare core pytest root
+        run: >-
+          uv run python -c "from pathlib import Path;
+          from scripts.dev.pytest_windows_acl import prepare_pytest_directory;
+          prepare_pytest_directory(Path('.artifacts/pytest/core'))"
       - name: Cross-platform core tests
         shell: bash
         run: >-
@@ -69,6 +74,7 @@ jobs:
           tests/test_runtime_jobs.py tests/test_release_sync.py tests/test_settings.py
           tests/test_task_workflow.py::test_windows_pytest_fixture_tree_inherits_acl_and_is_removable
           --timeout=180
+          --basetemp=.artifacts/pytest/core
           --junitxml=.artifacts/reports/core-${{ matrix.os }}.xml
           --durations=30
       - name: Scrub local paths from test reports
