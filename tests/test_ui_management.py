@@ -509,6 +509,13 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
             canvas.wait_for(state="visible")
         assert "18.0，极度恐惧" in page.locator("#fear-greed-gauge-market").get_attribute("aria-label")
         assert not any(path.endswith(("/echarts.min.js", "/charts.js", "/charts.css")) for path in requested)
+        assert page.locator(".market-sentiment-panel").evaluate(
+            "node => getComputedStyle(node).gridTemplateColumns.split(' ').length"
+        ) == 1
+        assert page.locator(".app-header").bounding_box()["height"] <= 130
+        assert page.locator(".header-help > span").evaluate(
+            "node => getComputedStyle(node).display"
+        ) == "none"
 
         bounds = spark.bounding_box()
         page.mouse.move(bounds["x"] + bounds["width"] * 0.75, bounds["y"] + bounds["height"] / 2)
@@ -520,6 +527,10 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         page.set_viewport_size({"width": 390, "height": 844})
         _wait_for_document_fit(page)
         assert spark.bounding_box()["width"] <= 390
+        assert page.locator(".app-header").bounding_box()["height"] <= 180
+        assert page.locator(".workspace-context-label").evaluate(
+            "node => getComputedStyle(node).display"
+        ) == "none"
         assert errors == []
 
         classic = browser.new_page(viewport={"width": 1280, "height": 900})
@@ -731,6 +742,8 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
 
         page.get_by_role("button", name="研究", exact=True).click()
         page.get_by_role("button", name="今日", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/quotes$"))
+        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
         assert requested.count(f"{url}/static/workspaces/research.js") == 1
         assert requested.count(f"{url}/static/workspaces/today.js") == 1
 
@@ -748,9 +761,19 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         page.locator("#help-root .help-handbook").wait_for(state="visible")
         assert requested.count(f"{url}/static/help.js") == 1
         assert requested.count(f"{url}/static/help-content.html") == 1
+        assert page.evaluate("window.scrollY") == 0
+        assert page.locator(".app-header").bounding_box()["y"] == 0
 
         page.set_viewport_size({"width": 390, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.get_by_role("button", name="研究", exact=True).click()
+        page.wait_for_url(re.compile(r"#research/lab$"))
+        page.locator(".lab-head-actions .lab-button").first.wait_for(state="visible")
+        action_bounds = page.locator(".lab-head-actions .lab-button").evaluate_all(
+            "nodes => nodes.map(node => node.getBoundingClientRect().toJSON())"
+        )
+        assert len(action_bounds) == 3
+        assert all(bound["width"] >= 300 and bound["height"] >= 44 for bound in action_bounds)
         assert errors == []
         browser.close()
 

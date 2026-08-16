@@ -1854,6 +1854,14 @@ function renderAshareFearGreedVisuals(root = document) {
   }, () => {});
 }
 
+document.addEventListener('quantmaster:workspace-mounted', event => {
+  if (event.detail?.workspace !== 'today' || event.detail?.page !== 'quotes') return;
+  const root = document.getElementById('tab-market');
+  if (root && !root.querySelector('[data-fear-greed-gauge] canvas')) {
+    renderFearGreedVisuals(root);
+  }
+});
+
 function rsiSparkPoints(history) {
   const points = (Array.isArray(history) ? history : []).map(point => {
     const date = marketSparkParsedDate(point?.[0]);
