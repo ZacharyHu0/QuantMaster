@@ -30,6 +30,24 @@ def write_artifact(context, spec: dict) -> JobOutcome:
     return JobOutcome("completed", "isolated", artifact["id"])
 
 
+def raise_with_detail(_context, spec: dict) -> JobOutcome:
+    raise ValueError(str(spec["detail"]))
+
+
+def probe_rotation_provider(context, _spec: dict) -> JobOutcome:
+    from quantmaster.rotation.service import _ensure_rotation_provider_registered
+    from quantmaster.rotation_provider_access import rotation_provider
+
+    _ensure_rotation_provider_registered()
+    factory = rotation_provider()
+    artifact = context.write_artifact(
+        "test.rotation.provider.result",
+        {"factory": getattr(factory, "__name__", "")},
+        {"schema_version": "1.0", "lineage": {"fixture": "rotation-provider"}},
+    )
+    return JobOutcome("completed", "isolated", artifact["id"])
+
+
 def supervisor_probe(stop_event, bootstrap_rotation: bool) -> None:
     """Spawn-safe lightweight Supervisor target used by lifecycle tests."""
 

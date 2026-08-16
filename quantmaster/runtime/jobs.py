@@ -1776,14 +1776,18 @@ def _run_process_handler(
             "retry_delay_seconds": outcome.retry_delay_seconds,
         })
     except BaseException as exc:  # child must report before its process exits
+        if isinstance(exc, RuntimeIdentityMismatch):
+            detail = "runtime_identity_mismatch"
+        else:
+            from quantmaster.logging_config import redact_sensitive_text
+
+            detail = redact_sensitive_text(str(exc)).strip()[:1000]
+            if not detail:
+                detail = "计算子进程未完成；详情见诊断记录"
         result_queue.put({
             "kind": "error",
             "type": exc.__class__.__name__,
-            "detail": (
-                "runtime_identity_mismatch"
-                if isinstance(exc, RuntimeIdentityMismatch)
-                else "计算子进程未完成；详情见诊断记录"
-            ),
+            "detail": detail,
             "frames": [
                 {"file": frame.filename, "line": frame.lineno, "function": frame.name}
                 for frame in traceback.extract_tb(exc.__traceback__, limit=20)

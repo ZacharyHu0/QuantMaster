@@ -526,6 +526,24 @@ def test_unified_runtime_runs_registered_process_handler_outside_supervisor(tmp_
     runtime.stop()
 
 
+def test_spawn_child_bootstraps_rotation_provider(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    runtime.register(
+        "test.rotation-provider",
+        lambda _context, _spec: (_ for _ in ()).throw(AssertionError("must spawn")),
+        process_entrypoint="tests.process_handler:probe_rotation_provider",
+    )
+
+    job, created = runtime.submit("test.rotation-provider", {})
+    assert created is True
+    completed = _wait(store, job["id"], {"completed", "failed"}, timeout=15)
+    assert completed["status"] == "completed"
+    artifact = store.artifact(completed["result_artifact_id"])
+    assert artifact["payload"]["factory"] == "_rotation_provider_factory"
+    runtime.stop()
+
+
 def test_compute_child_rejects_runtime_identity_before_handler_import(
     monkeypatch, tmp_path,
 ):
@@ -555,3 +573,22 @@ def test_compute_child_rejects_runtime_identity_before_handler_import(
     assert messages[0]["kind"] == "error"
     assert messages[0]["type"] == "RuntimeIdentityMismatch"
     assert messages[0]["detail"] == "runtime_identity_mismatch"
+
+
+def test_compute_child_reports_sanitized_failure_detail(tmp_path):
+    detail = "正式研究复权因子链不完整：2 只证券缺口；000001.SZ、600000.SH"
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    runtime.register(
+        "test.failure-detail",
+        lambda _context, _spec: (_ for _ in ()).throw(AssertionError("must spawn")),
+        process_entrypoint="tests.process_handler:raise_with_detail",
+    )
+
+    job, created = runtime.submit(
+        "test.failure-detail", {"detail": detail}, max_attempts=1,
+    )
+    assert created is True
+    failed = _wait(store, job["id"], {"failed"}, timeout=15)
+    assert failed["detail"].startswith(f"{detail}; child_frames=")
+    runtime.stop()

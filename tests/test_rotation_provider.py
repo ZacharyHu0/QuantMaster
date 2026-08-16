@@ -140,7 +140,7 @@ def test_market_history_stops_at_latest_completed_session(tmp_path, monkeypatch)
             return FakePlan()
 
     monkeypatch.setattr(
-        "quantmaster.rotation.service._expected_market_session",
+        "quantmaster.rotation.provider.expected_market_session",
         lambda: "2026-08-03",
     )
     monkeypatch.setattr(
@@ -201,7 +201,7 @@ def test_market_history_bootstraps_next_day_catalog_before_planning(tmp_path, mo
         return {"snapshot_id": "catalog-current"}
 
     monkeypatch.setattr(
-        "quantmaster.rotation.service._expected_market_session", lambda: target,
+        "quantmaster.rotation.provider.expected_market_session", lambda: target,
     )
     monkeypatch.setattr(
         "quantmaster.rotation.provider.market_now",

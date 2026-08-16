@@ -26,6 +26,7 @@ from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.rotation.session import expected_market_session
 from quantmaster.rotation.store import ETF_OBSERVATION_COLUMNS, RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
 from quantmaster.rotation_provider_access import register_rotation_provider
@@ -729,9 +730,7 @@ class RotationProvider:
         # the daily endpoint legitimately has no completed bar yet.  Planning to
         # the same completed-session boundary used by snapshot freshness avoids
         # turning that expected empty response into a provider circuit failure.
-        from quantmaster.rotation.service import _expected_market_session
-
-        end = _expected_market_session(as_of=as_of) if as_of else _expected_market_session()
+        end = expected_market_session(as_of=as_of) if as_of else expected_market_session()
         if not end:
             raise RuntimeError("无法确认最近完成交易日；请配置 Tushare 日历或先同步全市场日线")
         catalog_snapshot_id = ""
@@ -1555,9 +1554,7 @@ class RotationProvider:
                 ) from ths_error
 
     def _completed_etf_session(self, as_of: str) -> tuple[str, BaseException | None]:
-        from quantmaster.rotation.service import _expected_market_session
-
-        end_value = as_of or _expected_market_session()
+        end_value = as_of or expected_market_session()
         if end_value:
             return end_value, None
         probe_end = market_date().isoformat()
