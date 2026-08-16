@@ -261,8 +261,37 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
     stage = entry.index('update_splash("正在加载本地配置")')
     close = entry.index("close_splash()")
 
-    assert freeze < stdout < stage < configure < cli_import < close
+    assert configure < freeze < stdout < stage < cli_import < close
     assert all("%" not in line for line in entry.splitlines() if "update_splash" in line)
+
+
+def test_packaged_child_binds_installed_instance_before_multiprocessing_dispatch(
+    monkeypatch,
+) -> None:
+    from pathlib import Path
+
+    calls: list[str] = []
+
+    class ChildDispatched(RuntimeError):
+        pass
+
+    config = ModuleType("quantmaster.config")
+    config.configure_installed_instance = lambda: calls.append("configure")
+    monkeypatch.setitem(sys.modules, "quantmaster.config", config)
+
+    def dispatch_child() -> None:
+        calls.append("freeze")
+        raise ChildDispatched
+
+    monkeypatch.setattr(multiprocessing, "freeze_support", dispatch_child)
+
+    with pytest.raises(ChildDispatched):
+        runpy.run_path(
+            Path(__file__).parents[1] / "packaging" / "entry.py",
+            run_name="__main__",
+        )
+
+    assert calls == ["configure", "freeze"]
 
 
 @pytest.mark.parametrize(

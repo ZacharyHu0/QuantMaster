@@ -4,9 +4,12 @@ import multiprocessing
 import sys
 
 if __name__ == "__main__":
+    from quantmaster.config import configure_installed_instance
+
+    configure_installed_instance()
     # Frozen multiprocessing children re-enter this executable with
-    # ``--multiprocessing-fork``. Dispatch them before importing application
-    # modules, otherwise a renamed worker can start another desktop server.
+    # ``--multiprocessing-fork``. Bind the installed instance before dispatch,
+    # but still dispatch before importing the application command surface.
     multiprocessing.freeze_support()
     sys.stdout.reconfigure(encoding="utf-8")
 
@@ -14,9 +17,6 @@ if __name__ == "__main__":
 
     try:
         update_splash("正在加载本地配置")
-        from quantmaster.config import configure_installed_instance
-
-        configure_installed_instance()
         update_splash("正在装配命令入口")
 
         from quantmaster.cli import main
