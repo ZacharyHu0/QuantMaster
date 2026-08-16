@@ -287,6 +287,35 @@ class TestBasics:
         assert live.json()["core_ready"] is True
         assert live.json()["readiness_status"] == "ready"
 
+    def test_retry_settings_apply_ignores_scalar_document_sections(self, monkeypatch):
+        from quantmaster.server import management
+        from quantmaster.settings import SettingsDocument
+
+        class SettingsProjection:
+            path = Path("settings.yaml")
+
+            @staticmethod
+            def public():
+                return {**SettingsDocument().model_dump(), "config_revision": 1}
+
+        monkeypatch.setattr(management, "settings_manager", SettingsProjection())
+        monkeypatch.setattr(management, "_require_csrf", lambda _request: None)
+
+        captured = {}
+
+        def queue(saved):
+            captured.update(saved)
+            saved["generation"] = 9
+            return {"status": "queued"}
+
+        monkeypatch.setattr(management, "_queue_runtime_apply", queue)
+        monkeypatch.setattr(management, "_runtime_status", lambda: {"worker": {}})
+
+        response = client.post("/api/v1/settings/apply", headers={"X-CSRF-Token": _csrf})
+
+        assert response.status_code == 202
+        assert "config_version" not in captured["changed_fields"]
+
     def test_diagnostics_expose_sanitized_runtime_status_and_core_storage_problem(self, monkeypatch):
         from quantmaster.server import diagnostics as diagnostics_module
 
@@ -532,6 +561,12 @@ class TestBasics:
         assert "createLoadProgress" in app_script
         assert "createMarketStreamRenderer" in app_script
         assert "/api/v1/market/fear-greed" in app_script
+        assert "/api/v1/market/fear-greed/refresh" in app_script
+        assert "/api/v1/settings/free-stockdb/update" in app_script
+        assert "/api/v1/after-close/scan" in app_script
+        assert 'id="market-after-close-sync"' in resp.text
+        assert 'id="market-stale-banner"' in resp.text
+        assert 'id="market-fear-greed-refresh"' in resp.text
         assert "/api/v1/market/ashare-fear-greed?symbol=" in app_script
         assert 'id="market-fear-greed-time"' in resp.text
         assert 'id="market-ashare-fear-greed"' in resp.text
@@ -792,6 +827,7 @@ class TestBasics:
         assert settings_script.status_code == 200
         assert after_close_script.status_code == 200
         assert after_close_styles.status_code == 200
+        assert "/api/v1/after-close/diagnostics?limit=500" in after_close_script.text
         assert "function motionProfile(kind, count)" in chart_script.text
         assert "count > 1000" in chart_script.text
         assert "count > 240" in chart_script.text
@@ -1330,11 +1366,27 @@ class TestBasics:
 
         result = market_overview.build_market_overview_data("2026-07-01")
 
-        assert result["groups"]["商品与汇率"] == []
+        assert result["groups"]["商品与汇率"][0]["state"] == "unavailable"
+        assert result["groups"]["商品与汇率"][0]["message"] == "Yahoo 正在限流"
         assert result["group_statuses"]["商品与汇率"]["unavailable"] == 1
         assert result["group_statuses"]["商品与汇率"]["issues"][0]["symbol"] == symbol
         assert result["unavailable_items"][0]["symbol"] == symbol
         assert result["unavailable_items"][0]["message"] == "Yahoo 正在限流"
+
+    def test_market_fear_greed_refresh_is_explicit_and_forced(self, monkeypatch):
+        calls = []
+
+        def refresh(*, force):
+            calls.append(force)
+            return {"status": "ready", "score": 12.5}
+
+        monkeypatch.setattr("quantmaster.market.load_cnn_fear_greed", refresh)
+
+        response = client.post("/api/v1/market/fear-greed/refresh", json={})
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {"status": "ready", "score": 12.5}
+        assert calls == [True]
 
     def test_decision_dashboard_contract(self, panel, monkeypatch):
         symbols = list(panel["close"].columns)

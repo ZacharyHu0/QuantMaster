@@ -1764,6 +1764,7 @@ let marketColdRetryTimer = null;
 let marketColdRetryCount = 0;
 let marketStreamCycle = 0;
 let marketFearGreed = null;
+let marketAfterCloseSyncing = false;
 let marketAshareFearGreed = null;
 const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
@@ -1773,7 +1774,6 @@ function todayCharts() {
   if (!todayChartsPromise) {
     const retry = todayChartsRetry;
     const pending = import(`./today-charts.js${retry ? `?retry=${retry}` : ''}`).catch(error => {
-      if (todayChartsPromise === pending) todayChartsPromise = null;
       todayChartsRetry = retry + 1;
       throw error;
     });
@@ -2007,6 +2007,161 @@ async function loadMarketFearGreed(generation = todayRenderGeneration) {
   }
 }
 
+async function refreshMarketFearGreed() {
+  const button = document.getElementById('market-fear-greed-refresh');
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.textContent = '刷新中…';
+  try {
+    acceptMarketFearGreed(await post('/api/v1/market/fear-greed/refresh', {}));
+  } catch (error) {
+    acceptMarketFearGreed({
+      ...(marketFearGreed || {score: null, rating_label: '暂不可用'}),
+      status: marketFearGreed?.score == null ? 'unavailable' : 'stale',
+      warning: `CNN 指数刷新失败：${error.message}；仍展示最近一次本地结果。`,
+    });
+  } finally {
+    button.disabled = false;
+    button.textContent = '刷新 CNN';
+  }
+}
+
+function marketGroupCount(data, key) {
+  return Object.values(data?.group_statuses || {}).reduce(
+    (total, group) => total + Number(group?.[key] || 0), 0,
+  );
+}
+
+function renderMarketStaleBanner(data, snapshot) {
+  const banner = document.getElementById('market-stale-banner');
+  if (!banner) return;
+  const quality = data?.data_quality || {};
+  const stale = snapshot?.state === 'stale' || snapshot?.stale === true
+    || data?.meta?.stale === true || quality.stale === true;
+  const unavailable = marketGroupCount(data, 'unavailable');
+  const staleCount = marketGroupCount(data, 'stale');
+  const partial = quality.partial === true
+    || ['partial', 'degraded', 'unavailable'].includes(String(quality.status || ''));
+  if (!stale && !unavailable && !staleCount && !partial && !marketAfterCloseSyncing) {
+    banner.hidden = true;
+    return;
+  }
+  const asOf = snapshot?.as_of || data?.meta?.as_of || '';
+  const title = document.getElementById('market-stale-title');
+  const detail = document.getElementById('market-stale-detail');
+  if (title) title.textContent = marketAfterCloseSyncing
+    ? '正在更新盘后行情与研究快照'
+    : stale ? '当前行情来自陈旧快照' : '当前行情证据不完整';
+  const parts = [];
+  if (marketAfterCloseSyncing) parts.push('正在执行 free-stockdb 更新，完成后自动运行盘后扫描。');
+  if (asOf) parts.push(`当前数据截至 ${asOf}`);
+  if (staleCount) parts.push(`${staleCount} 只使用陈旧缓存`);
+  if (unavailable) parts.push(`${unavailable} 只暂不可用`);
+  if (!parts.length && partial) parts.push('部分数据源尚未完成，暂不应据此形成正式判断。');
+  if (!marketAfterCloseSyncing) parts.push('点击“同步盘后数据”更新全市场行情。');
+  if (detail) detail.textContent = parts.join('；');
+  banner.hidden = false;
+  ['market-after-close-sync', 'market-stale-sync'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = marketAfterCloseSyncing;
+  });
+}
+
+function showMarketAfterCloseProgress(message) {
+  const stamp = document.getElementById('mkt-stamp');
+  if (stamp) stamp.textContent = message;
+  const banner = document.getElementById('market-stale-banner');
+  const title = document.getElementById('market-stale-title');
+  const detail = document.getElementById('market-stale-detail');
+  if (banner) banner.hidden = false;
+  if (title) title.textContent = '正在更新盘后行情与研究快照';
+  if (detail) detail.textContent = message;
+}
+
+function marketStockdbIsActive(status) {
+  return ['queued', 'updating', 'restarting'].includes(status?.state)
+    || ['queued', 'stopping', 'syncing', 'restarting', 'validating', 'retry_wait']
+      .includes(status?.phase)
+    || ['queued', 'running', 'validating', 'retry_wait'].includes(status?.update_result);
+}
+
+function marketStockdbFailure(status) {
+  return ['error', 'degraded'].includes(status?.state)
+    || ['failed', 'manual_required'].includes(status?.update_result);
+}
+
+function waitMs(milliseconds) {
+  return new Promise(resolve => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForMarketStockdbUpdate(initial) {
+  let status = initial;
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    if (marketStockdbFailure(status)) {
+      throw new Error(status.message || 'free-stockdb 更新未完成');
+    }
+    if (!marketStockdbIsActive(status)) {
+      if (status.update_result === 'success') return status;
+      throw new Error(status.message || 'free-stockdb 更新未启动或未完成');
+    }
+    const session = status.target_session ? ` · 目标 ${status.target_session}` : '';
+    showMarketAfterCloseProgress(
+      `正在更新全市场 free-stockdb${session} · 第 ${attempt + 1} 次检查`,
+    );
+    await waitMs(800);
+    status = await api('/api/v1/settings/free-stockdb');
+  }
+  throw new Error('free-stockdb 更新等待超时；可到盘后扫描查看详细状态。');
+}
+
+function waitForMarketAfterCloseScan(job) {
+  return new Promise(resolve => {
+    let unwatch = () => {};
+    unwatch = globalJobPoller.watch(job, {
+      onUpdate: current => showMarketAfterCloseProgress(
+        `正在运行盘后扫描 · ${current.phase || '扫描中'} · ${current.progress || 0}%`,
+      ),
+      onTerminal: current => { unwatch(); resolve(current); },
+    });
+  });
+}
+
+function openAfterCloseWorkspace() {
+  document.dispatchEvent(new CustomEvent('quantmaster:navigate', {
+    detail: {tab: 'after-close'},
+  }));
+}
+
+async function runMarketAfterCloseSync() {
+  if (marketAfterCloseSyncing) return;
+  marketAfterCloseSyncing = true;
+  ['market-after-close-sync', 'market-stale-sync'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = true;
+  });
+  showMarketAfterCloseProgress('正在提交全市场 free-stockdb 更新…');
+  try {
+    const status = await post('/api/v1/settings/free-stockdb/update', {});
+    await waitForMarketStockdbUpdate(status);
+    showMarketAfterCloseProgress('全市场行情已更新，正在运行盘后扫描…');
+    const job = await post('/api/v1/after-close/scan', {as_of: '', force: false});
+    const current = await waitForMarketAfterCloseScan(job);
+    if (!String(current?.status || '').startsWith('completed')) {
+      throw new Error(current?.message || '盘后扫描未完成');
+    }
+    invalidateKlineSeriesCache();
+    marketAfterCloseSyncing = false;
+    await loadMarket();
+  } catch (error) {
+    showMarketAfterCloseProgress(`盘后同步失败：${error.message}`);
+    const title = document.getElementById('market-stale-title');
+    if (title) title.textContent = '盘后同步失败';
+  } finally {
+    marketAfterCloseSyncing = false;
+    document.getElementById('market-after-close-sync')?.removeAttribute('disabled');
+    document.getElementById('market-stale-sync')?.removeAttribute('disabled');
+  }
+}
 function acceptAshareMarketFearGreed(data) {
   marketAshareFearGreed = data || {
     status:'unavailable', symbol:'上证指数', symbol_label:'上证指数',
@@ -2130,6 +2285,7 @@ function disposeMarketSparks() {
   if (todayChartsPromise) void todayChartsPromise
     .then(module => module.disposeTodayCharts(document.getElementById('tab-decision')))
     .catch(() => {});
+  todayChartsPromise = null;
 }
 
 function marketChangeSeries(nav) {
@@ -2190,27 +2346,32 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
   }
   function draw(entry, item) {
     entry.item = item;
+    const unavailable = item.state === 'unavailable' || item.freshness === 'unavailable';
     const changeSeries = marketChangeSeries(item.nav);
     const sparkSummary = marketSparkSummary(changeSeries);
     const sparkTone = sparkSummary.last > 0 ? MARKET_TONES.up
       : sparkSummary.last < 0 ? MARKET_TONES.down : MARKET_TONES.neutral;
     const periodTone = sparkSummary.last > 0 ? 'up' : sparkSummary.last < 0 ? 'down' : '';
     const periodReturn = `${sparkSummary.last > 0 ? '+' : ''}${sparkSummary.last.toFixed(2)}%`;
+    entry.element.classList.toggle('mkt-item-unavailable', unavailable);
+    entry.element.disabled = unavailable;
     entry.element.style.setProperty('--market-tone',sparkTone);
     entry.element.querySelector('.nm').innerHTML =
       `${esc(item.name)} <span class="badge">${esc(item.symbol)}</span>`;
-    entry.element.querySelector('.mkt-window').textContent = `${changeSeries.length}D`;
-    entry.element.querySelector('.px').className = `px ${cls(item.change_pct)}`;
-    entry.element.querySelector('.px').innerHTML =
-      `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
+    entry.element.querySelector('.mkt-window').textContent = unavailable ? '暂无' : `${changeSeries.length}D`;
+    entry.element.querySelector('.px').className = `px ${unavailable ? 'unavailable' : cls(item.change_pct)}`;
+    entry.element.querySelector('.px').innerHTML = unavailable
+      ? '暂无行情'
+      : `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
     const memberships = (item.memberships || []).map(value => assetMembershipLabels[value]).filter(Boolean);
     const membership = entry.element.querySelector('.mkt-memberships');
     membership.textContent = memberships.join(' · ');
     membership.hidden = memberships.length === 0;
-    const status = item.cache_status === 'stale' || item.cache_status === 'refresh_failed'
-      ? '本地缓存 · 数据源暂不可用' : '数据截至';
+    const status = unavailable ? '行情暂不可用'
+      : item.cache_status === 'stale' || item.cache_status === 'refresh_failed'
+        ? '本地缓存 · 数据源暂不可用' : '数据截至';
     entry.element.querySelector('.mkt-meta').textContent =
-      `${status}${item.as_of ? ` ${item.as_of}` : ''}${item.source ? ` · ${item.source}` : ''}`;
+      `${status}${item.as_of ? ` ${item.as_of}` : ''}${item.source ? ` · ${item.source}` : ''}${item.message ? ` · ${item.message}` : ''}`;
     const rsi = entry.element.querySelector('.mkt-rsi');
     rsi.textContent = fixed(item.rsi_14, 1);
     rsi.classList.toggle('oversold',rsiVisualClass(item.rsi_14) === 'oversold');
@@ -2227,9 +2388,11 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     const period = entry.element.querySelector('.mkt-period-return');
     period.className = `mkt-period-return ${periodTone}`;
     period.textContent = `区间 ${periodReturn}`;
-    entry.element.setAttribute('aria-label',
-      `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
-    entry.element.onclick = () => showKline(item.symbol, item.name);
+    entry.element.setAttribute('aria-label', unavailable
+      ? `${item.name} ${item.symbol}，当前行情暂不可用${item.message ? `：${item.message}` : ''}`
+      : `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
+    entry.element.onclick = unavailable ? null : () => showKline(item.symbol, item.name);
+    if (unavailable) return;
     const generation = todayRenderGeneration;
     const renderSpark = () => {
       if (generation !== todayRenderGeneration) return;
@@ -2383,6 +2546,7 @@ async function loadMarket() {
     const requested = Number(quality.requested_count ?? completed);
     const completion = requested ? ` · 已完成 ${completed} / ${requested}` : '';
     const asOf = snapshot?.as_of || data?.meta?.as_of || '';
+    renderMarketStaleBanner(data, snapshot);
     document.getElementById('mkt-stamp').textContent = snapshot?.state === 'stale'
       ? `正在展示陈旧快照${asOf ? ` · 数据截至 ${asOf}` : ''}${completion}`
       : `${asOf ? `数据截至 ${asOf}` : `检查于 ${new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'})}`}${completion}`;
@@ -2434,6 +2598,21 @@ document.getElementById('mkt-refresh').onsubmit = async e => {
     throw error;
   }
 };
+document.getElementById('market-after-close-sync')?.addEventListener(
+  'click', () => void runMarketAfterCloseSync(),
+);
+document.getElementById('market-stale-sync')?.addEventListener(
+  'click', () => void runMarketAfterCloseSync(),
+);
+document.getElementById('market-after-close-open')?.addEventListener(
+  'click', openAfterCloseWorkspace,
+);
+document.getElementById('market-stale-open')?.addEventListener(
+  'click', openAfterCloseWorkspace,
+);
+document.getElementById('market-fear-greed-refresh')?.addEventListener(
+  'click', () => void refreshMarketFearGreed(),
+);
 document.getElementById('market-ashare-fear-greed-symbol')?.addEventListener('change', event => {
   const generation = todayRenderGeneration;
   void loadAshareMarketFearGreed(generation, event.target.value);

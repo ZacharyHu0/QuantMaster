@@ -177,9 +177,15 @@
   <div id="market-quotes-view" data-market-view="quotes" role="tabpanel" aria-labelledby="market-quotes-tab">
   <form class="controls" id="mkt-refresh">
     <button class="primary" type="submit">同步观察行情</button>
+    <button class="ghost" id="market-after-close-sync" type="button">同步盘后数据</button>
+    <button class="text-button" id="market-after-close-open" type="button">查看盘后扫描</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
-    <span class="hint">仅刷新本页、自选及参考标的缓存，不更新全市场 free-stockdb。</span>
+    <span class="hint">同步观察行情仅刷新本页、自选及参考标的缓存，不更新全市场 free-stockdb；CNN 需单独刷新，盘后数据使用“同步盘后数据”。</span>
   </form>
+  <aside class="market-stale-banner" id="market-stale-banner" role="status" aria-live="polite" hidden>
+    <div class="market-stale-copy"><strong id="market-stale-title">当前行情证据不完整</strong><p id="market-stale-detail"></p></div>
+    <div class="market-stale-actions"><button class="ghost" id="market-stale-sync" type="button">同步盘后数据</button><button class="text-button" id="market-stale-open" type="button">查看盘后扫描</button></div>
+  </aside>
   <section class="panel market-sentiment-panel" id="market-fear-greed" aria-live="polite">
     <div class="market-sentiment-head">
       <span class="eyebrow market-sentiment-title">CNN FEAR &amp; GREED</span>
@@ -190,7 +196,7 @@
         </div>
         <p id="market-fear-greed-note">CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。</p>
       </div>
-      <a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a>
+      <div class="market-sentiment-actions"><button class="text-button" id="market-fear-greed-refresh" type="button">刷新 CNN</button><a href="https://edition.cnn.com/markets/fear-and-greed" target="_blank" rel="noreferrer">查看 CNN 来源</a></div>
     </div>
     <div class="market-sentiment-visuals">
       <div class="fear-greed-gauge" id="fear-greed-gauge-market" data-fear-greed-gauge role="img" aria-label="CNN 当日恐贪指数仪表盘"></div>
