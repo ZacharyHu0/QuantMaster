@@ -48,6 +48,7 @@ TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
 REMOVE_INTENT_SCHEMA = 1
 TASK_ARTIFACT_ACL_UNRECOVERABLE = "TASK_ARTIFACT_ACL_UNRECOVERABLE"
+TASK_CHECKOUT_ACL_UNRECOVERABLE = "TASK_CHECKOUT_ACL_UNRECOVERABLE"
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 
 
@@ -704,84 +705,65 @@ def residual_checkout_clean(primary: Path, target: Path, branch: str) -> bool:
         index.unlink(missing_ok=True)
 
 
-def remove_verified_residual(primary: Path, target: Path, branch: str) -> None:
-    if not target.exists():
-        return
-    remove_primary_venv_link(target, primary)
-    clean_checkout = residual_checkout_clean(primary, target, branch)
-    if not clean_checkout and not valid_task_remove_intent(primary, target, branch):
-        raise SystemExit("worktree 登记已移除，但残留 checkout 无法证明干净，拒绝删除")
-    resolved = target.resolve()
-    expected_parent = (primary / ".worktrees").resolve()
-    if resolved.parent != expected_parent:
-        raise SystemExit("拒绝删除预期目录之外的残留 worktree")
-    try:
-        shutil.rmtree(resolved, onexc=make_writable)
-    except PermissionError as exc:
-        blocked = Path(exc.filename or resolved)
-        raise SystemExit(
-            "已证明残留 checkout 干净，但 Windows ACL 阻止删除："
-            f"{blocked}；修复该路径权限后重新运行 remove"
-        ) from None
-
-
-def remove_task_artifacts(
-    primary: Path, slug: str, *, retry_command: str | None = None,
+def _remove_verified_tree(
+    root: Path,
+    *,
+    expected_parent: Path,
+    scope: str,
+    error_code: str,
+    retry: str,
+    retained: str,
 ) -> None:
-    artifact_root = (primary / ".artifacts" / "worktrees" / slug).resolve()
-    expected_parent = (primary / ".artifacts" / "worktrees").resolve()
-    if artifact_root.parent != expected_parent:
-        raise SystemExit("拒绝删除预期目录之外的任务工件")
-    if not artifact_root.exists():
+    if root.parent != expected_parent:
+        raise SystemExit(f"拒绝删除预期目录之外的{scope}")
+    if not root.exists():
         return
-    retry = retry_command or (
-        f".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove {slug}"
-    )
 
     def residual_message(blocked: Path, *, kind: str, reason: object) -> str:
-        relative_blocked = blocked.relative_to(artifact_root).as_posix()
+        relative_blocked = blocked.relative_to(root).as_posix()
         return (
-            f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: kind={kind}; "
-            f"root={redact_public_text(artifact_root)}; "
+            f"{error_code}: kind={kind}; "
+            f"root={redact_public_text(root)}; "
             f"blocked={redact_public_text(relative_blocked)}; "
             f"reason={redact_public_text(reason)}; "
-            f"retry={retry}；工件和任务分支已保留"
+            f"retry={retry}；{retained}"
         )
 
-    try:
-        shutil.rmtree(artifact_root, onexc=make_writable)
-    except PermissionError as exc:
-        blocked = type(artifact_root)(exc.filename or artifact_root).resolve()
-        if blocked != artifact_root and artifact_root not in blocked.parents:
-            raise SystemExit(f"拒绝恢复任务工件之外的 ACL：{blocked}") from None
-        if getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+    def checked_blocked(error: BaseException) -> Path:
+        blocked = Path(getattr(error, "filename", None) or root).resolve()
+        if blocked != root and root not in blocked.parents:
             raise SystemExit(
-                residual_message(
-                    blocked,
-                    kind="transient_lock",
-                    reason=f"winerror={exc.winerror}: {exc}",
-                )
+                f"拒绝清理{scope}之外的路径：{redact_public_text(blocked)}"
             ) from None
+        return blocked
+
+    def raise_residual(blocked: Path, *, kind: str, reason: object) -> None:
+        raise SystemExit(
+            residual_message(blocked, kind=kind, reason=reason)
+        ) from None
+
+    try:
+        shutil.rmtree(root, onexc=make_writable)
+    except PermissionError as exc:
+        blocked = checked_blocked(exc)
+        winerror = getattr(exc, "winerror", None)
+        if winerror in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            raise_residual(
+                blocked,
+                kind="transient_lock",
+                reason=f"winerror={winerror}: {exc}",
+            )
         try:
             restore_acl_inheritance(blocked)
         except AclRecoveryError as acl_error:
-            raise SystemExit(
-                residual_message(blocked, kind=acl_error.kind, reason=acl_error)
-            ) from None
+            raise_residual(blocked, kind=acl_error.kind, reason=acl_error)
         except OSError as acl_error:
-            raise SystemExit(
-                f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: 无法在当前身份检查或恢复任务工件 ACL："
-                f"{acl_error}；工件和任务分支已保留，请获得该路径权限后重新运行 tasks.py remove {slug}"
-            ) from None
+            raise_residual(blocked, kind="transient", reason=acl_error)
         try:
-            shutil.rmtree(artifact_root, onexc=make_writable)
+            shutil.rmtree(root, onexc=make_writable)
             return
         except OSError as retry_error:
-            blocked = type(artifact_root)(
-                retry_error.filename or artifact_root
-            ).resolve()
-            if blocked != artifact_root and artifact_root not in blocked.parents:
-                raise SystemExit(f"拒绝清理任务工件之外的路径：{blocked}") from None
+            blocked = checked_blocked(retry_error)
             winerror = getattr(retry_error, "winerror", None)
             if winerror in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
                 kind = "transient_lock"
@@ -791,25 +773,65 @@ def remove_task_artifacts(
                 reason = retry_error
             else:
                 raise
-            raise SystemExit(
-                residual_message(blocked, kind=kind, reason=reason)
-            ) from None
+            raise_residual(blocked, kind=kind, reason=reason)
     except OSError as exc:
-        blocked = type(artifact_root)(exc.filename or artifact_root)
-        if blocked != artifact_root and artifact_root not in blocked.parents:
-            raise SystemExit(f"拒绝清理任务工件之外的路径：{blocked}") from None
-        if getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
-            raise SystemExit(
-                residual_message(
-                    blocked.resolve(),
-                    kind="transient_lock",
-                    reason=f"winerror={exc.winerror}: {exc}",
-                )
-            ) from None
-        raise SystemExit(
-            "Windows ACL 阻止删除任务工件："
-            f"{blocked}；{exc}"
-        ) from None
+        blocked = checked_blocked(exc)
+        winerror = getattr(exc, "winerror", None)
+        if winerror in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
+            raise_residual(
+                blocked,
+                kind="transient_lock",
+                reason=f"winerror={winerror}: {exc}",
+            )
+        raise
+
+
+def remove_verified_residual(
+    primary: Path,
+    target: Path,
+    branch: str,
+    *,
+    retry_command: str | None = None,
+) -> None:
+    if not target.exists():
+        return
+    remove_primary_venv_link(target, primary)
+    clean_checkout = residual_checkout_clean(primary, target, branch)
+    if not clean_checkout and not valid_task_remove_intent(primary, target, branch):
+        raise SystemExit("worktree 登记已移除，但残留 checkout 无法证明干净，拒绝删除")
+    resolved = target.resolve()
+    retry = retry_command or (
+        f".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove "
+        f"{branch.removeprefix('codex/')}"
+    )
+    _remove_verified_tree(
+        resolved,
+        expected_parent=(primary / ".worktrees").resolve(),
+        scope="残留 checkout",
+        error_code=TASK_CHECKOUT_ACL_UNRECOVERABLE,
+        retry=retry,
+        retained="残留 checkout 和任务分支已保留",
+    )
+
+
+def remove_task_artifacts(
+    primary: Path, slug: str, *, retry_command: str | None = None,
+) -> None:
+    artifact_root = (primary / ".artifacts" / "worktrees" / slug).resolve()
+    expected_parent = (primary / ".artifacts" / "worktrees").resolve()
+    if artifact_root.parent != expected_parent:
+        raise SystemExit("拒绝删除预期目录之外的任务工件")
+    retry = retry_command or (
+        f".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove {slug}"
+    )
+    _remove_verified_tree(
+        artifact_root,
+        expected_parent=expected_parent,
+        scope="任务工件",
+        error_code=TASK_ARTIFACT_ACL_UNRECOVERABLE,
+        retry=retry,
+        retained="工件和任务分支已保留",
+    )
 
 
 DISPOSABLE_ARTIFACT_NAMES = frozenset({"cache", "pytest", "uv-cache", "runtime"})
@@ -1080,9 +1102,13 @@ def _remove_locked(
             detail = result.stderr.strip() or result.stdout.strip() or "unknown Git error"
             raise RuntimeError(f"Git worktree 移除失败：{detail}")
         if target.exists():
-            remove_verified_residual(primary, target, branch)
+            remove_verified_residual(
+                primary, target, branch, retry_command=retry_command,
+            )
     else:
-        remove_verified_residual(primary, target, branch)
+        remove_verified_residual(
+            primary, target, branch, retry_command=retry_command,
+        )
     record_task_completion(
         primary, slug, branch=branch, superseded_by=replacement,
     )
