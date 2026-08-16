@@ -40,7 +40,7 @@ data = [
 tushare = ["tushare>=1.4"]
 # AI Quant Lab：Ridge + MLP/TCN/GRU/Transformer/DAE（可选，核心安装保持轻量）
 ml = [
-    "scikit-learn>=1.3",
+    "scikit-learn>=1.9.0",
     "torch>=2.2",
     "optuna>=4.0,<5",
 ]
@@ -56,7 +56,7 @@ dev = [
     "ruff>=0.16.2",
     # The full test suite exercises Ridge and Spearman contracts even when the
     # heavyweight deep-learning extra is intentionally not installed.
-    "scikit-learn>=1.3",
+    "scikit-learn>=1.9.0",
 ]
 quality = [
     "build>=1.5.0",
@@ -161,3 +161,4 @@ ignore = ["RUF001", "RUF002", "RUF003"]  # 全角标点误报（中文注释）
 
 [tool.uv]
 required-version = ">=0.11.0,<0.12"
+
