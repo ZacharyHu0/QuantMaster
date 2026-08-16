@@ -226,12 +226,6 @@
       "complexity": 14
     },
     {
-      "file": "quantmaster/backtest/workbench.py",
-      "line": 512,
-      "function": "run_one",
-      "complexity": 12
-    },
-    {
       "file": "quantmaster/cli.py",
       "line": 146,
       "function": "cmd_lab",
