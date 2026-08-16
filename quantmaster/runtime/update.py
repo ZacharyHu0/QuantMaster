@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
+from quantmaster.release import release_lookup, release_sections
 from quantmaster.runtime.activation import (
     FULL_SHA,
     ActivationBlocked,
@@ -51,8 +52,22 @@ def _read_json(path: Path) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-def _identity(build_sha: str, role: str) -> dict[str, str]:
-    return {"build_sha": build_sha, "slot_id": build_sha, "role": role}
+def _identity(registry: SlotRegistry, build_sha: str, role: str) -> dict[str, str]:
+    meta = _slot_metadata(registry, build_sha)
+    if meta and str(meta.get("version") or ""):
+        version = str(meta.get("version") or "")
+        date = str(meta.get("release_date") or "")
+    else:
+        release = release_lookup(build_sha)
+        version = release.get("version", "")
+        date = release.get("release_date", "")
+    return {
+        "build_sha": build_sha,
+        "slot_id": build_sha,
+        "role": role,
+        "version": version,
+        "release_date": date,
+    }
 
 
 def _blocker(exc: ActivationBlocked, *, build_sha: str = "") -> dict[str, str]:
@@ -60,6 +75,46 @@ def _blocker(exc: ActivationBlocked, *, build_sha: str = "") -> dict[str, str]:
     if build_sha:
         result["build_sha"] = build_sha
     return result
+
+
+def _slot_metadata(registry: SlotRegistry, build_sha: str) -> dict[str, object] | None:
+    """Read stable, path-free version metadata written next to a slot's marker.
+
+    The file is written at staging time (immutable) and never exposes local paths
+    on the public update surface.
+    """
+
+    try:
+        marker = registry.slot(build_sha) / "slot_meta.json"
+    except ActivationBlocked:
+        return None
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    meta_version = str(payload.get("version") or "")
+    meta_date = str(payload.get("release_date") or "")
+    if meta_version or meta_date:
+        return {"version": meta_version, "release_date": meta_date}
+    return None
+
+
+def _candidate_release_metadata(registry: SlotRegistry, build_sha: str) -> dict[str, object]:
+    """Version/date/changelog for one slot: staging meta, then the release registry."""
+
+    meta = _slot_metadata(registry, build_sha)
+    if meta and str(meta.get("version") or ""):
+        pass
+    else:
+        meta = release_lookup(build_sha)
+    sections = release_sections(build_sha)
+    return {
+        "version": str(meta.get("version") or ""),
+        "release_date": str(meta.get("release_date") or ""),
+        "changelog": sections[:3],
+    }
 
 
 def _pointer_blocker(registry: SlotRegistry, active: str) -> dict[str, str] | None:
@@ -134,6 +189,7 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
         if local_main_blocker is not None:
             blockers.append(local_main_blocker)
     eligible = not blockers and build_sha != active
+    metadata = _candidate_release_metadata(registry, build_sha)
     return {
         "build_sha": build_sha,
         "slot_id": build_sha,
@@ -141,6 +197,9 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
         "current": build_sha == active,
         "previous": build_sha == previous,
         "blockers": blockers,
+        "version": metadata["version"],
+        "release_date": metadata["release_date"],
+        "changelog": metadata["changelog"],
     }
 
 
@@ -209,9 +268,9 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
     eligibility_status = "eligible" if eligible else "blocked" if blockers else "none_staged"
     return {
         "status": str(state.get("status") or "empty"),
-        "active": _identity(active, "active") if active else None,
-        "previous": _identity(previous, "previous") if previous else None,
-        "pending": _identity(pending, "pending") if pending else None,
+        "active": _identity(registry, active, "active") if active else None,
+        "previous": _identity(registry, previous, "previous") if previous else None,
+        "pending": _identity(registry, pending, "pending") if pending else None,
         "active_build_sha": active,
         "previous_build_sha": previous,
         "staged": staged,
