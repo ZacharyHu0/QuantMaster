@@ -111,6 +111,11 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
             },
             "partial": True,
         }
+    freshness = (
+        "stale"
+        if str((meta or {}).get("last_status") or "ready") in {"stale", "refresh_failed"}
+        else "ready"
+    )
     return {
         "symbol": symbol,
         "name": name,
@@ -125,11 +130,8 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         "rsi_history": rsi_history,
         "opportunity": classify_opportunity(rsi),
         "data_quality": quality,
-        "freshness": (
-            "stale"
-            if str((meta or {}).get("last_status") or "ready") in {"stale", "refresh_failed"}
-            else "ready"
-        ),
+        "freshness": freshness,
+        "state": freshness,
     }
 
 
@@ -159,23 +161,47 @@ def _market_overview_response(
             missing_issue = failures.get((group, symbol), {})
             meta = store.metadata(symbol) or {}
             checked_at = float(meta.get("checked_at") or 0)
-            unavailable.append(
-                {
-                    "group": group,
-                    "symbol": symbol,
-                    "name": symbols[symbol],
-                    "status": "unavailable",
-                    "error_code": missing_issue.get("error_code", "no_usable_data"),
-                    "message": missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情"),
-                    "source_attempts": missing_issue.get("source_attempts", []),
-                    "last_success_at": (
-                        pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
-                    ),
-                }
+            error_code = missing_issue.get("error_code", "no_usable_data")
+            message = missing_issue.get("message", "没有本地缓存，且数据源未返回可用行情")
+            last_success_at = (
+                pd.Timestamp.fromtimestamp(checked_at).isoformat() if checked_at else ""
             )
+            unavailable_item = {
+                "group": group,
+                "symbol": symbol,
+                "name": symbols[symbol],
+                "state": "unavailable",
+                "status": "unavailable",
+                "error_code": error_code,
+                "message": message,
+                "source_attempts": missing_issue.get("source_attempts", []),
+                "last_success_at": last_success_at,
+            }
+            unavailable.append(unavailable_item)
+            result[group].append({
+                **unavailable_item,
+                "last": None,
+                "change_pct": None,
+                "nav": [],
+                "as_of": "",
+                "checked_at": last_success_at,
+                "cache_status": "unavailable",
+                "source": "",
+                "rsi_14": None,
+                "rsi_history": [],
+                "opportunity": {"code": "unavailable", "label": "行情暂缺"},
+                "data_quality": {
+                    "status": "unavailable",
+                    "sources": [],
+                    "issues": [message],
+                    "stale": False,
+                    "partial": True,
+                },
+                "freshness": "unavailable",
+            })
         group_statuses[group] = {
             "configured": len(symbols),
-            "ready": len(result[group]) - stale,
+            "ready": len(result[group]) - stale - len(missing),
             "stale": stale,
             "unavailable": len(missing),
             "issues": [
@@ -201,9 +227,10 @@ def _market_overview_response(
         for value in item_qualities
     )
     missing_total = len(unavailable)
-    ready_total = sum(len(value) for value in result.values())
+    ready_total = sum(int(value["ready"]) for value in group_statuses.values())
+    observed_total = ready_total + stale_total
     quality_status = (
-        "unavailable" if total and not ready_total
+        "unavailable" if total and not observed_total
         else "degraded" if degraded_total or stale_total or missing_total
         else "verified"
     )
@@ -260,7 +287,7 @@ def _market_overview_response(
                 f"{degraded_total} 个标的证据未完全验证" if degraded_total else "",
             ] if item],
             "requested_count": total,
-            "observed_count": ready_total,
+            "observed_count": observed_total,
         },
     }
 
@@ -365,6 +392,7 @@ def build_market_overview_data(
                                     **item,
                                     "cache_status": "stale",
                                     "freshness": "stale",
+                                    "state": "stale",
                                 }
                         if item is not None and batch_group == PERSONAL_MARKET_GROUP:
                             item["memberships"] = personal_memberships.get(batch_symbol, [])

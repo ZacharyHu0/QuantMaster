@@ -321,6 +321,13 @@ async def liveness() -> dict:
     }
 
 
+@router.get("/api/v1/runtime/worker")
+def runtime_worker() -> dict[str, Any]:
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    return runtime_worker_status()
+
+
 @router.get("/api/v1/diagnostics")
 def diagnostic_report() -> dict:
     from quantmaster.server.diagnostics import diagnostics
@@ -411,6 +418,17 @@ def market_fear_greed() -> dict:
     from quantmaster.market import read_cnn_fear_greed
 
     return read_cnn_fear_greed()
+
+
+@router.post("/api/v1/market/fear-greed/refresh")
+def refresh_market_fear_greed(request: Request) -> dict:
+    """Refresh CNN once on explicit operator request; the GET stays local-only."""
+    from quantmaster.server.security import require_csrf
+
+    require_csrf(request)
+    from quantmaster.market import load_cnn_fear_greed
+
+    return load_cnn_fear_greed(force=True)
 
 
 @router.get("/api/v1/market/history/{symbol}")

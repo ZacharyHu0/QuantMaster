@@ -146,7 +146,14 @@
   .market-sentiment-status strong { color:var(--ink-2); font-size:13px; font-weight:600; }
   .market-sentiment-status time { color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .market-sentiment-copy p { overflow:hidden; margin:0; color:var(--muted); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
-  .market-sentiment-head > a { color:var(--s1); font-size:11px; white-space:nowrap; }
+  .market-sentiment-actions { display:flex; align-items:center; gap:var(--space-sm); white-space:nowrap; }
+  .market-sentiment-actions > a { color:var(--s1); font-size:11px; }
+  .market-stale-banner { display:flex; align-items:center; justify-content:space-between; gap:var(--space-lg); margin:0 0 var(--space-lg); padding:12px 14px; border:1px solid color-mix(in oklch,var(--s4) 48%,var(--axis)); border-radius:8px; background:color-mix(in oklch,var(--s4) 8%,var(--surface)); }
+  .market-stale-banner[hidden] { display:none; }
+  .market-stale-copy { display:grid; gap:3px; min-width:0; }
+  .market-stale-copy strong { color:var(--s4); font-size:12px; font-weight:650; }
+  .market-stale-copy p { color:var(--ink-2); font-size:11px; line-height:1.5; }
+  .market-stale-actions { display:flex; align-items:center; gap:var(--space-sm); flex:0 0 auto; white-space:nowrap; }
   .market-sentiment-visuals { display:grid; grid-template-columns:minmax(220px,.72fr) minmax(0,2fr); gap:var(--space-lg); padding-top:var(--space-sm); border-top:1px solid var(--border); }
   .fear-greed-gauge { position:relative; width:100%; height:156px; min-width:0; border-radius:8px; background:color-mix(in oklch,var(--page) 32%,transparent); }
   .fear-greed-history-wrap { display:grid; grid-template-rows:auto minmax(0,1fr); min-width:0; }
@@ -175,6 +182,8 @@
   }
   .mkt-item:hover { border-color:color-mix(in oklch,var(--market-tone,var(--s1)) 58%,var(--axis)); background:color-mix(in oklch,var(--market-tone,var(--s1)) 3%,var(--surface)); }
   .mkt-item:active { transform:translateY(1px); }
+  .mkt-item.mkt-item-unavailable { --market-tone:var(--muted); cursor:default; opacity:.78; }
+  .mkt-item.mkt-item-unavailable:hover { border-color:var(--axis); background:var(--surface); }
   .mkt-item:focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
   .mkt-item.stream-enter { animation:market-card-in 360ms var(--ease-out-expo) both; animation-delay:min(calc(var(--market-order,0) * 34ms),272ms); }
   .mkt-item > span { display:block; }
@@ -226,6 +235,8 @@
   }
   @media (max-width:680px) {
     .market-sentiment-head { grid-template-columns:1fr auto; gap:var(--space-md); }
+    .market-stale-banner { align-items:flex-start; flex-direction:column; gap:var(--space-md); }
+    .market-stale-actions { align-self:flex-start; }
     .market-sentiment-copy { display:grid; grid-column:1 / -1; grid-row:2; gap:var(--space-xs); }
     .market-sentiment-copy p { white-space:normal; }
     .market-sentiment-visuals { grid-template-columns:1fr; }
