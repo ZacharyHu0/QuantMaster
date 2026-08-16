@@ -10,8 +10,13 @@ from fastapi import APIRouter, HTTPException, Query
 
 from quantmaster.analysis.stock_jobs import get_stock_analysis_jobs
 from quantmaster.automation.runtime import get_runtime
-from quantmaster.backtest.spec import BacktestSpec
-from quantmaster.backtest.workbench import BacktestStore, get_backtest_worker
+from quantmaster.backtest.jobs import (
+    BACKTEST_TASK_TYPE,
+    backtest_job_events,
+    get_backtest_job_manager,
+    list_backtest_jobs,
+    read_backtest_job,
+)
 from quantmaster.config import get_config
 from quantmaster.data.maintenance import data_refresh_manager
 from quantmaster.data.repair import DataRepairManager
@@ -53,6 +58,7 @@ _UNIFIED_DOMAIN_TYPES: dict[str, frozenset[str]] = {
     "settings": frozenset({"settings.apply", "settings.diagnostic"}),
     "lab": LAB_JOB_TYPES | frozenset({"lab.cloud_suggestion"}),
     "rotation": frozenset({"rotation.refresh", "rotation.etf.scan"}),
+    "backtests": frozenset({BACKTEST_TASK_TYPE}),
 }
 
 
@@ -145,10 +151,6 @@ def _read_unified_artifact(artifact_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _read_backtest_store() -> BacktestStore:
-    return BacktestStore(read_only=True)
-
-
 def _read_repair_manager() -> DataRepairManager:
     return DataRepairManager(read_only=True)
 
@@ -216,6 +218,16 @@ def _apply_artifact_projection(
 
 
 def _apply_domain_projection(public: dict[str, Any], domain: str, value: dict[str, Any]) -> None:
+    if domain == "backtests":
+        public.update({
+            key: value.get(key)
+            for key in (
+                "name", "config", "config_hash", "manifest", "result", "error",
+                "diagnostic", "worker", "legacy_read_only", "outcome",
+            )
+            if key in value
+        })
+        return
     if domain == "data":
         public.update({
             key: value.get(key)
@@ -314,17 +326,14 @@ def _get_lab(job_id: str) -> dict[str, Any]:
 
 def _get_backtest(job_id: str) -> dict[str, Any]:
     try:
-        raw_value = _read_backtest_store().get(job_id)
+        return read_backtest_job(job_id)
     except (FileNotFoundError, sqlite3.Error) as exc:
         raise KeyError(job_id) from exc
-    if raw_value is None:
-        raise KeyError(job_id)
-    return dict(raw_value)
 
 
 def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
     unified = _UNIFIED_DOMAIN_TYPES.get(domain)
-    if unified is not None and domain != "lab":
+    if unified is not None and domain not in {"lab", "backtests"}:
         return _read_unified_job(job_id, types=unified)
     if domain == "automation":
         return _read_unified_job(job_id, prefix="automation.")
@@ -361,15 +370,12 @@ def _list_lab(limit: int) -> list[dict[str, Any]]:
 
 
 def _list_backtests(limit: int) -> list[dict[str, Any]]:
-    try:
-        return _read_backtest_store().list(limit)
-    except (FileNotFoundError, sqlite3.Error):
-        return []
+    return list_backtest_jobs(limit)
 
 
 def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
     unified = _UNIFIED_DOMAIN_TYPES.get(domain)
-    if unified is not None and domain != "lab":
+    if unified is not None and domain not in {"lab", "backtests"}:
         return _list_unified_jobs(limit, types=unified)
     if domain == "automation":
         return _list_unified_jobs(limit, prefix="automation.")
@@ -409,14 +415,15 @@ def _events_lab(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
 
 def _events_backtests(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
     try:
-        _get("backtests", job_id)
-        return _read_backtest_store().events(job_id, after, limit)
+        return backtest_job_events(job_id, after, limit)
     except (FileNotFoundError, sqlite3.Error) as exc:
         raise KeyError(job_id) from exc
 
 
 def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
-    if (domain in _UNIFIED_DOMAIN_TYPES and domain != "lab") or domain == "automation":
+    if (
+        domain in _UNIFIED_DOMAIN_TYPES and domain not in {"lab", "backtests"}
+    ) or domain == "automation":
         _get(domain, job_id)
         return _read_unified_events(job_id, after, limit)
     handlers = {
@@ -505,7 +512,7 @@ def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
         "data": lambda task_id: _data_worker_command("data.refresh.cancel", task_id),
         "rotation": _cancel_rotation,
         "lab": _cancel_lab,
-        "backtests": lambda task_id: get_backtest_worker().service.store.cancel(task_id),
+        "backtests": lambda task_id: get_backtest_job_manager().cancel(task_id),
     }
     handler = handlers.get(domain)
     if handler is None:
@@ -571,24 +578,7 @@ def _retry_lab(job_id: str) -> dict[str, Any]:
 
 
 def _retry_backtest(job_id: str) -> dict[str, Any]:
-    worker = get_backtest_worker()
-    source = worker.service.store.get(job_id)
-    if source is None:
-        raise KeyError(job_id)
-    if source.get("legacy_read_only"):
-        raise ValueError("旧 Swing 回测仅供历史查看，不能重试")
-    if str(source.get("status")) not in _RETRYABLE:
-        raise ValueError("当前回测不能重试")
-    spec = BacktestSpec.model_validate(source["config"])
-    created = worker.service.store.create(spec)
-    worker.service.store.append_event(created["id"], {
-        "type": "retry_of", "source_job_id": job_id,
-    })
-    worker.service.store.append_event(job_id, {
-        "type": "retried_as", "job_id": created["id"],
-    })
-    worker.start()
-    return created
+    return get_backtest_job_manager().retry(job_id)
 
 
 def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:

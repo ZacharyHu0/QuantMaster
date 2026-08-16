@@ -9,10 +9,6 @@ from quantmaster.backtest.paper_accounts import (
     PaperSchemaMigrationRequired,
     PaperStore,
 )
-from quantmaster.backtest.workbench import (
-    BacktestSchemaMigrationRequired,
-    BacktestStore,
-)
 from quantmaster.data.startup_schema_migration import StartupSchemaMigrator
 from quantmaster.runtime.jobs import JobSchemaMigrationRequired, UnifiedJobStore
 
@@ -20,15 +16,12 @@ from quantmaster.runtime.jobs import JobSchemaMigrationRequired, UnifiedJobStore
 def _strip_current_markers(root):
     with sqlite3.connect(root / "jobs.sqlite") as connection:
         connection.execute("DROP TABLE runtime_store_meta")
-    with sqlite3.connect(root / "backtests.sqlite") as connection:
-        connection.execute("DROP TABLE backtest_store_meta")
     with sqlite3.connect(root / "paper.sqlite") as connection:
         connection.execute("PRAGMA user_version=4")
 
 
 def _legacy_databases(root):
     UnifiedJobStore(root / "jobs.sqlite")
-    BacktestStore(root / "backtests.sqlite", root / "backtests")
     PaperStore(root / "paper.sqlite", root / "paper_accounts")
     _strip_current_markers(root)
 
@@ -38,8 +31,6 @@ def test_existing_store_constructors_are_read_only_strict(tmp_path):
 
     with pytest.raises(JobSchemaMigrationRequired):
         UnifiedJobStore(tmp_path / "jobs.sqlite")
-    with pytest.raises(BacktestSchemaMigrationRequired):
-        BacktestStore(tmp_path / "backtests.sqlite", tmp_path / "backtests")
     with pytest.raises(PaperSchemaMigrationRequired):
         PaperStore(tmp_path / "paper.sqlite", tmp_path / "paper_accounts")
 
@@ -59,26 +50,20 @@ def test_startup_schema_migrator_inspects_applies_and_is_idempotent(tmp_path):
 
     inspected = list(migrator.inspect(tmp_path))
     assert [record.record_key for record in inspected] == [
-        "schema:backtests", "schema:jobs", "schema:paper",
+        "schema:jobs", "schema:paper",
     ]
     assert {record.outcome for record in inspected} == {"review"}
     assert {record.diagnostic_code for record in inspected} == {
         "startup_schema_upgrade_required"
     }
     first = list(migrator.migrate_batch(tmp_path, after_key="", limit=2))
-    second = list(migrator.migrate_batch(
-        tmp_path, after_key=first[-1].record_key, limit=2,
-    ))
-    assert [record.outcome for record in [*first, *second]] == [
-        "converted", "converted", "converted",
-    ]
+    assert [record.outcome for record in first] == ["converted", "converted"]
     assert list(migrator.migrate_batch(
-        tmp_path, after_key=second[-1].record_key, limit=2,
+        tmp_path, after_key=first[-1].record_key, limit=2,
     )) == []
     assert list(migrator.inspect(tmp_path)) == []
 
     UnifiedJobStore(tmp_path / "jobs.sqlite")
-    BacktestStore(tmp_path / "backtests.sqlite", tmp_path / "backtests")
     PaperStore(tmp_path / "paper.sqlite", tmp_path / "paper_accounts")
 
 
@@ -96,8 +81,6 @@ def test_startup_schema_rollback_restores_pre_migration_versions(tmp_path):
 
     with pytest.raises(JobSchemaMigrationRequired):
         UnifiedJobStore(tmp_path / "jobs.sqlite")
-    with pytest.raises(BacktestSchemaMigrationRequired):
-        BacktestStore(tmp_path / "backtests.sqlite", tmp_path / "backtests")
     with pytest.raises(PaperSchemaMigrationRequired):
         PaperStore(tmp_path / "paper.sqlite", tmp_path / "paper_accounts")
 

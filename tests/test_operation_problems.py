@@ -9,7 +9,6 @@ from quantmaster.server.problems import (
     assess_panel_quality,
     assess_signal_quality,
     collect_health_report,
-    make_problem,
 )
 
 
@@ -172,40 +171,3 @@ def test_intentional_flat_signal_is_valid_cash_period():
     assert [item["code"] for item in warnings] == ["intentional_cash_backtest"]
     assert quality["intentional_flat_signal_dates"] == 1
     assert quality["selected_signals"] == 0
-
-
-def test_async_backtest_worker_persists_structured_problem(tmp_path, monkeypatch):
-    from quantmaster.backtest.spec import BacktestSpec
-    from quantmaster.backtest.workbench import BacktestService, BacktestStore, BacktestWorker
-
-    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    service = BacktestService(store)
-    spec = BacktestSpec.model_validate({
-        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
-        "universe": "demo", "start": "2026-01-01", "end": "2026-07-01",
-        "benchmark": None,
-    })
-    queued = store.create(spec)
-    worker = BacktestWorker(service)
-    run = store.claim_next(worker.worker_id)
-    problem = make_problem(
-        "partial_market_data",
-        severity="warning",
-        source="策略回测",
-        title="回测数据不完整",
-        message="一只候选缺少行情。",
-        action="补齐数据，或确认后仅用可用数据继续。",
-        blocking=True,
-        can_continue=True,
-    )
-
-    def blocked(*args, **kwargs):
-        raise OperationProblem(409, problem, data_quality={"status": "needs_confirmation"})
-
-    monkeypatch.setattr(service, "run", blocked)
-    worker.run_one(run)
-
-    failed = store.get(queued["id"])
-    assert failed["status"] == "needs_confirmation"
-    assert failed["result"]["problem"]["can_continue"] is True
-    assert failed["result"]["data_quality"]["status"] == "needs_confirmation"

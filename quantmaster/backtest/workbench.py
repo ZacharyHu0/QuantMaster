@@ -1,16 +1,12 @@
-"""可恢复的异步回测工作台。"""
+"""Backtest execution and immutable domain-result storage."""
 
 from __future__ import annotations
 
-import builtins
+import hashlib
 import json
-import logging
 import os
-import socket
 import sqlite3
 import tempfile
-import threading
-import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,20 +20,23 @@ from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.schema_access import register_backtest_store
 
-logger = logging.getLogger(__name__)
-BACKTEST_SCHEMA_VERSION = 1
+BACKTEST_SCHEMA_VERSION = 2
 
 
 class BacktestSchemaMigrationRequired(RuntimeError):
-    """The backtest ledger needs the explicit startup-schema migrator."""
+    """The backtest domain ledger needs its explicit lifecycle migrator."""
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _content_hash(value: Any) -> str:
+    return hashlib.sha256(strict_json_dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 class BacktestStore:
-    """SQLite 保存任务元数据，JSON 文件保存可导出的完整结果。"""
+    """Persist immutable backtest outcomes; never own task lifecycle state."""
 
     def __init__(
         self,
@@ -51,8 +50,7 @@ class BacktestStore:
             Path(artifact_root) if artifact_root else get_config().data_root / "backtests"
         )
         self.read_only = bool(read_only)
-        database_exists = self.path.is_file()
-        if not database_exists:
+        if not self.path.is_file():
             if self.read_only:
                 raise FileNotFoundError(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,336 +70,84 @@ class BacktestStore:
         )
 
     def _initialize_current(self) -> None:
-        self._migrate_legacy_schema()
+        with self._conn() as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1"
+            ).fetchone():
+                raise BacktestSchemaMigrationRequired(
+                    "backtests.sqlite 非空，拒绝按新领域结果库解释"
+                )
+            connection.executescript("""
+                CREATE TABLE backtest_results (
+                    job_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    spec_json TEXT NOT NULL,
+                    spec_hash TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    summary_json TEXT NOT NULL,
+                    diagnostic_json TEXT NOT NULL,
+                    artifact_path TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(job_id,attempt));
+                CREATE INDEX idx_backtest_results_created
+                    ON backtest_results(created_at DESC,job_id,attempt);
+                CREATE TABLE backtest_store_meta (
+                    key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            """)
+            connection.execute(
+                "INSERT INTO backtest_store_meta(key,value) VALUES ('schema_version',?)",
+                (str(BACKTEST_SCHEMA_VERSION),),
+            )
 
     def _require_current(self) -> None:
         with self._conn() as connection:
             tables = {
-                str(row[0]) for row in connection.execute(
+                str(row[0])
+                for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            required = {"backtest_runs", "backtest_events", "backtest_store_meta"}
+            required = {"backtest_results", "backtest_store_meta"}
             row = connection.execute(
                 "SELECT value FROM backtest_store_meta WHERE key='schema_version'"
             ).fetchone() if "backtest_store_meta" in tables else None
             if required - tables or row is None or str(row[0]) != str(BACKTEST_SCHEMA_VERSION):
                 raise BacktestSchemaMigrationRequired(
-                    "backtests.sqlite 不是当前 schema，需执行 startup-schemas 一次性迁移"
+                    "backtests.sqlite 含旧 lifecycle；需执行 backtest-jobs 一次性迁移"
                 )
+            columns = {
+                str(value[1]) for value in connection.execute(
+                    "PRAGMA table_info(backtest_results)"
+                )
+            }
+            expected = {
+                "job_id", "attempt", "name", "spec_json", "spec_hash", "outcome",
+                "manifest_json", "summary_json", "diagnostic_json", "artifact_path",
+                "content_hash", "created_at",
+            }
+            if columns != expected:
+                raise BacktestSchemaMigrationRequired("backtest_results schema 未分类")
 
-    def _migrate_legacy_schema(self) -> None:
-        with self._conn() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS backtest_runs (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
-                    config_json TEXT NOT NULL, config_hash TEXT NOT NULL,
-                    manifest_json TEXT NOT NULL DEFAULT '{}', result_json TEXT NOT NULL DEFAULT '{}',
-                    artifact_path TEXT NOT NULL DEFAULT '', progress INTEGER NOT NULL DEFAULT 0,
-                    phase TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '',
-                    error TEXT NOT NULL DEFAULT '', cancel_requested INTEGER NOT NULL DEFAULT 0,
-                    worker TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
-                    started_at TEXT NOT NULL DEFAULT '', heartbeat_at TEXT NOT NULL DEFAULT '',
-                    finished_at TEXT NOT NULL DEFAULT '');
-                CREATE TABLE IF NOT EXISTS backtest_events (
-                    seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
-                    event_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                    FOREIGN KEY(run_id) REFERENCES backtest_runs(id));
-                CREATE INDEX IF NOT EXISTS idx_backtest_status
-                    ON backtest_runs(status,created_at);
-                CREATE INDEX IF NOT EXISTS idx_backtest_events
-                    ON backtest_events(run_id,seq);
-                CREATE TABLE IF NOT EXISTS backtest_store_meta (
-                    key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            """)
-            now = utc_now()
-            active = conn.execute(
-                "SELECT id,config_json,progress FROM backtest_runs "
-                "WHERE status IN ('queued','running','interrupted')"
-            ).fetchall()
-            for row in active:
-                try:
-                    config = json.loads(row["config_json"] or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if config.get("strategy", {}).get("kind") != "swing":
-                    continue
-                detail = "旧 Swing 执行器已移除；任务保留为只读历史记录。"
-                conn.execute(
-                    "UPDATE backtest_runs SET status='cancelled',cancel_requested=1,worker='',"
-                    "phase='旧策略已归档',detail=?,heartbeat_at=?,finished_at=? WHERE id=?",
-                    (detail, now, now, row["id"]),
-                )
-                conn.execute(
-                    "INSERT INTO backtest_events(run_id,event_json,created_at) VALUES (?,?,?)",
-                    (
-                        row["id"],
-                        canonical_json({
-                            "type": "cancelled",
-                            "progress": int(row["progress"] or 0),
-                            "phase": "旧策略已归档",
-                            "detail": detail,
-                        }),
-                        now,
-                    ),
-                )
-            conn.execute(
-                "INSERT INTO backtest_store_meta(key,value) VALUES ('schema_version',?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(BACKTEST_SCHEMA_VERSION),),
-            )
+    def _relative_artifact(self, job_id: str, attempt: int, digest: str) -> Path:
+        safe_job = str(job_id).strip()
+        if not safe_job or any(char in safe_job for char in ("/", "\\", "..")):
+            raise ValueError("回测 job_id 不能用于结果路径")
+        return Path(safe_job) / f"attempt-{max(1, int(attempt))}-{digest}.json"
 
-    @staticmethod
-    def _decode(row: sqlite3.Row | None) -> dict | None:
-        if row is None:
-            return None
-        value = dict(row)
-        for field in ("config_json", "manifest_json", "result_json"):
-            value[field.removesuffix("_json")] = json.loads(value.pop(field) or "{}")
-        value["cancel_requested"] = bool(value["cancel_requested"])
-        value["legacy_read_only"] = (
-            value.get("config", {}).get("strategy", {}).get("kind") == "swing"
+    def _write_artifact(self, relative: Path, payload: dict[str, Any]) -> None:
+        destination = self.artifact_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_file():
+            existing = json.loads(destination.read_text(encoding="utf-8"))
+            if _content_hash(existing) != _content_hash(payload):
+                raise ValueError("回测结果文件与内容哈希冲突")
+            return
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".backtest-result.", suffix=".tmp", dir=destination.parent,
         )
-        return value
-
-    def create(self, spec: BacktestSpec) -> dict:
-        run_id, now = uuid.uuid4().hex, utc_now()
-        config = spec.model_dump(mode="json")
-        name = spec.name.strip() or f"{spec.strategy.kind} · {spec.universe} · {spec.start}"
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO backtest_runs "
-                "(id,name,status,config_json,config_hash,created_at) VALUES (?,?,?,?,?,?)",
-                (run_id, name, "queued", canonical_json(config), spec.snapshot_hash, now),
-            )
-        self.append_event(run_id, {"type": "queued", "progress": 0, "phase": "等待执行"})
-        return self.get(run_id) or {}
-
-    def append_event(self, run_id: str, event: dict) -> int:
-        with self._conn() as conn:
-            cursor = conn.execute(
-                "INSERT INTO backtest_events(run_id,event_json,created_at) VALUES (?,?,?)",
-                (run_id, canonical_json(event), utc_now()),
-            )
-        return int(cursor.lastrowid or 0)
-
-    def claim_next(self, worker: str) -> dict | None:
-        now = utc_now()
-        with self._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT id FROM backtest_runs WHERE status IN ('queued','interrupted') "
-                "AND cancel_requested=0 ORDER BY created_at LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            changed = conn.execute(
-                "UPDATE backtest_runs SET status='running',worker=?,started_at=CASE "
-                "WHEN started_at='' THEN ? ELSE started_at END,heartbeat_at=? "
-                "WHERE id=? AND status IN ('queued','interrupted')",
-                (worker, now, now, row["id"]),
-            ).rowcount
-            if not changed:
-                return None
-        return self.get(row["id"])
-
-    def update(
-        self,
-        run_id: str,
-        progress: int,
-        phase: str,
-        detail: str = "",
-        *,
-        expected_worker: str = "",
-    ) -> bool:
-        value = max(0, min(100, int(progress)))
-        with self._conn() as conn:
-            where = "id=? AND status='running'"
-            params: list[Any] = [value, phase, detail[:500], utc_now(), run_id]
-            if expected_worker:
-                where += " AND worker=?"
-                params.append(expected_worker)
-            changed = conn.execute(
-                "UPDATE backtest_runs SET progress=?,phase=?,detail=?,heartbeat_at=? "
-                f"WHERE {where}", params,
-            ).rowcount
-        if not changed:
-            return False
-        self.append_event(run_id, {
-            "type": "progress", "progress": value, "phase": phase, "detail": detail[:300],
-        })
-        return True
-
-    def heartbeat(self, run_id: str, worker: str) -> bool:
-        with self._conn() as conn:
-            changed = conn.execute(
-                "UPDATE backtest_runs SET heartbeat_at=? "
-                "WHERE id=? AND worker=? AND status='running'",
-                (utc_now(), run_id, worker),
-            ).rowcount
-        return bool(changed)
-
-    def finish(
-        self,
-        run_id: str,
-        *,
-        manifest: dict | None = None,
-        result: dict | None = None,
-        artifact_path: str = "",
-        error: str = "",
-        expected_worker: str = "",
-    ) -> bool:
-        current = self.get(run_id)
-        if current is None:
-            raise KeyError("回测不存在")
-        cancelled = current["cancel_requested"]
-        status = "cancelled" if cancelled else "failed" if error else "completed"
-        progress = current["progress"] if cancelled or error else 100
-        now = utc_now()
-        with self._conn() as conn:
-            where = "id=?"
-            params: list[Any] = [
-                status, progress, canonical_json(manifest or {}), canonical_json(result or {}),
-                artifact_path, error[:1500], now, now, run_id,
-            ]
-            if expected_worker:
-                where += " AND worker=? AND status='running'"
-                params.append(expected_worker)
-            changed = conn.execute(
-                "UPDATE backtest_runs SET status=?,progress=?,manifest_json=?,result_json=?,"
-                f"artifact_path=?,error=?,finished_at=?,heartbeat_at=? WHERE {where}", params,
-            ).rowcount
-        if not changed:
-            return False
-        self.append_event(run_id, {
-            "type": status,
-            "progress": progress,
-            "phase": "已取消" if cancelled else "执行失败" if error else "执行完成",
-            "detail": error[:300],
-        })
-        return True
-
-    def needs_confirmation(
-        self,
-        run_id: str,
-        *,
-        problem: dict,
-        data_quality: dict | None = None,
-        expected_worker: str = "",
-    ) -> bool:
-        now = utc_now()
-        with self._conn() as conn:
-            where = "id=? AND status='running'"
-            params: list[Any] = [
-                canonical_json({
-                    "problem": problem,
-                    "data_quality": data_quality or {},
-                }),
-                str(problem.get("message") or "需要用户确认")[:500],
-                now,
-                now,
-                run_id,
-            ]
-            if expected_worker:
-                where += " AND worker=?"
-                params.append(expected_worker)
-            changed = conn.execute(
-                "UPDATE backtest_runs SET status='needs_confirmation',result_json=?,"
-                "phase='等待用户确认',detail=?,heartbeat_at=?,finished_at=?,worker='' "
-                f"WHERE {where}",
-                params,
-            ).rowcount
-        if changed:
-            self.append_event(run_id, {
-                "type": "needs_confirmation",
-                "progress": 0,
-                "phase": "等待用户确认",
-                "problem": problem,
-            })
-        return bool(changed)
-
-    def cancel(self, run_id: str) -> dict:
-        with self._conn() as conn:
-            row = conn.execute("SELECT status FROM backtest_runs WHERE id=?", (run_id,)).fetchone()
-            if row is None:
-                raise KeyError("回测不存在")
-            if row["status"] in {"completed", "failed", "cancelled", "needs_confirmation"}:
-                return self.get(run_id) or {}
-            status = "cancelled" if row["status"] in {"queued", "interrupted"} else row["status"]
-            conn.execute(
-                "UPDATE backtest_runs SET cancel_requested=1,status=?,finished_at=CASE "
-                "WHEN ?='cancelled' THEN ? ELSE finished_at END WHERE id=?",
-                (status, status, utc_now(), run_id),
-            )
-        self.append_event(run_id, {"type": "cancel_requested", "phase": "正在安全停止"})
-        return self.get(run_id) or {}
-
-    def is_cancelled(self, run_id: str) -> bool:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT cancel_requested FROM backtest_runs WHERE id=?", (run_id,),
-            ).fetchone()
-        return bool(row and row[0])
-
-    def interrupt_stale(self, worker: str = "", stale_after_seconds: int = 30) -> int:
-        with self._conn() as conn:
-            if worker:
-                cursor = conn.execute(
-                    "UPDATE backtest_runs SET status='interrupted',worker='' "
-                    "WHERE status='running' AND worker=?", (worker,),
-                )
-            else:
-                cursor = conn.execute(
-                    "UPDATE backtest_runs SET status='interrupted',worker='' "
-                    "WHERE status='running' AND (heartbeat_at='' OR "
-                    "julianday(heartbeat_at)<julianday('now',?))",
-                    (f"-{max(1, int(stale_after_seconds))} seconds",),
-                )
-        return cursor.rowcount
-
-    def interrupt_running(self, worker: str = "") -> int:
-        """Backward-compatible name; never interrupts another live worker."""
-        return self.interrupt_stale(worker)
-
-    def get(self, run_id: str, *, include_artifact: bool = False) -> dict | None:
-        with self._conn() as conn:
-            row = conn.execute("SELECT * FROM backtest_runs WHERE id=?", (run_id,)).fetchone()
-        value = self._decode(row)
-        if value and include_artifact and value["artifact_path"]:
-            path = Path(value["artifact_path"])
-            if path.is_file():
-                value["artifact"] = json.loads(path.read_text(encoding="utf-8"))
-        return value
-
-    def list(self, limit: int = 50) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM backtest_runs ORDER BY created_at DESC LIMIT ?",
-                (max(1, min(limit, 200)),),
-            ).fetchall()
-        return [self._decode(row) or {} for row in rows]
-
-    def events(
-        self, run_id: str, after: int = 0, limit: int = 500,
-    ) -> builtins.list[dict]:
-        if self.get(run_id) is None:
-            raise KeyError("回测不存在")
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT seq,event_json,created_at FROM backtest_events "
-                "WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?",
-                (run_id, max(0, after), max(1, min(limit, 2000))),
-            ).fetchall()
-        return [
-            {"seq": row["seq"], "created_at": row["created_at"], **json.loads(row["event_json"])}
-            for row in rows
-        ]
-
-    def write_artifact(self, run_id: str, payload: dict) -> Path:
-        directory = self.artifact_root / run_id
-        directory.mkdir(parents=True, exist_ok=True)
-        destination = directory / "result.json"
-        descriptor, temp_name = tempfile.mkstemp(prefix=".result.", suffix=".tmp", dir=directory)
         temp = Path(temp_name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
@@ -411,199 +157,149 @@ class BacktestStore:
             os.replace(temp, destination)
         finally:
             temp.unlink(missing_ok=True)
-        return destination
+
+    def save_result(
+        self,
+        job_id: str,
+        attempt: int,
+        *,
+        name: str,
+        spec: dict[str, Any],
+        outcome: str,
+        manifest: dict[str, Any] | None = None,
+        summary: dict[str, Any] | None = None,
+        artifact: dict[str, Any] | None = None,
+        diagnostic: dict[str, Any] | None = None,
+        created_at: str = "",
+    ) -> dict[str, Any]:
+        if self.read_only:
+            raise PermissionError("只读 BacktestStore 不能写入结果")
+        normalized = {
+            "schema_version": "1.0",
+            "job_id": str(job_id),
+            "attempt": max(1, int(attempt)),
+            "name": str(name),
+            "spec": dict(spec),
+            "outcome": str(outcome),
+            "manifest": dict(manifest or {}),
+            "summary": dict(summary or {}),
+            "artifact": dict(artifact or {}),
+            "diagnostic": dict(diagnostic or {}),
+        }
+        digest = _content_hash(normalized)
+        relative = self._relative_artifact(job_id, attempt, digest)
+        self._write_artifact(relative, normalized["artifact"])
+        spec_json = canonical_json(normalized["spec"])
+        spec_hash = hashlib.sha256(spec_json.encode("utf-8")).hexdigest()
+        with self._conn() as connection:
+            existing = connection.execute(
+                "SELECT content_hash FROM backtest_results WHERE job_id=? AND attempt=?",
+                (str(job_id), max(1, int(attempt))),
+            ).fetchone()
+            if existing is not None and str(existing["content_hash"]) != digest:
+                raise ValueError("回测 job/attempt 已绑定不同领域结果")
+            connection.execute(
+                "INSERT OR IGNORE INTO backtest_results "
+                "(job_id,attempt,name,spec_json,spec_hash,outcome,manifest_json,summary_json,"
+                "diagnostic_json,artifact_path,content_hash,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    str(job_id), max(1, int(attempt)), str(name), spec_json, spec_hash,
+                    str(outcome), canonical_json(normalized["manifest"]),
+                    canonical_json(normalized["summary"]),
+                    canonical_json(normalized["diagnostic"]), relative.as_posix(), digest,
+                    str(created_at or utc_now()),
+                ),
+            )
+        return self.result(str(job_id), attempt=max(1, int(attempt)), include_artifact=True) or {}
+
+    def _decode(self, row: sqlite3.Row, *, include_artifact: bool) -> dict[str, Any]:
+        value = dict(row)
+        for field in ("spec_json", "manifest_json", "summary_json", "diagnostic_json"):
+            value[field.removesuffix("_json")] = json.loads(value.pop(field) or "{}")
+        value["id"] = value["job_id"]
+        if include_artifact:
+            relative = Path(str(value["artifact_path"]))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("回测领域结果路径越界")
+            path = (self.artifact_root / relative).resolve()
+            if not path.is_relative_to(self.artifact_root.resolve()) or not path.is_file():
+                raise FileNotFoundError(str(relative))
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            envelope = {
+                "schema_version": "1.0",
+                "job_id": value["job_id"],
+                "attempt": value["attempt"],
+                "name": value["name"],
+                "spec": value["spec"],
+                "outcome": value["outcome"],
+                "manifest": value["manifest"],
+                "summary": value["summary"],
+                "artifact": artifact,
+                "diagnostic": value["diagnostic"],
+            }
+            if _content_hash(envelope) != value["content_hash"]:
+                raise ValueError("回测领域结果内容哈希不匹配")
+            value["artifact"] = artifact
+        return value
+
+    def result(
+        self,
+        job_id: str,
+        *,
+        attempt: int | None = None,
+        include_artifact: bool = False,
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM backtest_results WHERE job_id=?"
+        params: tuple[Any, ...] = (str(job_id),)
+        if attempt is not None:
+            query += " AND attempt=?"
+            params = (str(job_id), max(1, int(attempt)))
+        query += " ORDER BY attempt DESC LIMIT 1"
+        with self._conn() as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._decode(row, include_artifact=include_artifact) if row is not None else None
+
+    def results(self, job_id: str) -> list[dict[str, Any]]:
+        with self._conn() as connection:
+            rows = connection.execute(
+                "SELECT * FROM backtest_results WHERE job_id=? ORDER BY attempt",
+                (str(job_id),),
+            ).fetchall()
+        return [self._decode(row, include_artifact=False) for row in rows]
 
 
 class BacktestService:
-    def __init__(self, store: BacktestStore | None = None):
-        self.store = store or BacktestStore()
-
-    def enqueue(self, spec: BacktestSpec) -> dict:
-        from quantmaster.backtest.spec import pin_decision_strategy, preflight_strategy
-
-        preflight_strategy(spec)
-        strategy = pin_decision_strategy(spec.strategy, spec.universe)
-        if strategy is not spec.strategy:
-            spec = spec.model_copy(update={"strategy": strategy})
-        return self.store.create(spec)
+    """Execute a validated immutable backtest specification."""
 
     def run(
         self,
-        run: dict,
+        job_id: str,
+        name: str,
+        spec: BacktestSpec,
         *,
         progress: Callable[[int, str, str], None],
         cancelled: Callable[[], bool],
         panel: dict[str, pd.DataFrame] | None = None,
         membership: pd.DataFrame | None = None,
         benchmark_close: pd.Series | None = None,
-    ) -> tuple[dict, dict]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         from quantmaster.backtest.application import execute_backtest
 
         execution = execute_backtest(
-            BacktestSpec.model_validate(run["config"]),
+            spec,
             progress=progress,
             cancelled=cancelled,
             panel=panel,
             membership=membership,
             benchmark_close=benchmark_close,
-            artifact_id=run["id"],
-            artifact_name=run["name"],
+            artifact_id=str(job_id),
+            artifact_name=str(name),
         )
         return execution["manifest"], {
             "summary": execution["summary"],
             "artifact": execution["artifact"],
         }
-
-    def compare(self, run_ids: list[str]) -> dict:
-        unique = list(dict.fromkeys(run_ids))
-        if not 2 <= len(unique) <= 4:
-            raise ValueError("请选择 2–4 个回测进行比较")
-        runs = []
-        for run_id in unique:
-            run = self.store.get(run_id, include_artifact=True)
-            if run is None:
-                raise KeyError(f"回测不存在: {run_id}")
-            if run["status"] != "completed" or "artifact" not in run:
-                raise ValueError(f"回测 {run['name']} 尚未完成")
-            artifact = run["artifact"]
-            runs.append({
-                "id": run_id, "name": run["name"], "config": run["config"],
-                "metrics": artifact["metrics"], "nav": artifact["nav"],
-                "warnings": artifact["manifest"].get("warnings", []),
-            })
-        return {"runs": runs}
-
-
-class BacktestWorker:
-    def __init__(self, service: BacktestService | None = None, poll_seconds: float = 0.4):
-        self.service = service or BacktestService()
-        self.poll_seconds = poll_seconds
-        self.worker_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.RLock()
-
-    def start(self) -> None:
-        with self._lock:
-            if self._thread and self._thread.is_alive():
-                return
-            self._stop.clear()
-            self.service.store.interrupt_stale()
-            self._thread = threading.Thread(
-                target=self.run_forever, name="backtest-worker", daemon=True,
-            )
-            self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-        self.service.store.interrupt_stale(self.worker_id)
-        self._thread = None
-
-    def run_forever(self) -> None:
-        while not self._stop.is_set():
-            self.service.store.interrupt_stale()
-            run = self.service.store.claim_next(self.worker_id)
-            if run is None:
-                self._stop.wait(self.poll_seconds)
-                continue
-            self.run_one(run)
-
-    def run_one(self, run: dict) -> None:
-        from quantmaster.runtime.problems import OperationProblem
-
-        run_id = run["id"]
-        heartbeat_stop = threading.Event()
-        lease_alive = threading.Event()
-        lease_alive.set()
-
-        def heartbeat() -> None:
-            while not heartbeat_stop.wait(5.0):
-                if self.service.store.heartbeat(run_id, self.worker_id):
-                    continue
-                lease_alive.clear()
-                return
-
-        heartbeat_thread = threading.Thread(
-            target=heartbeat, name=f"backtest-heartbeat-{run_id[:8]}", daemon=True,
-        )
-        heartbeat_thread.start()
-
-        def report_progress(value: int, phase: str, detail: str = "") -> None:
-            self.service.store.update(
-                run_id, value, phase, detail, expected_worker=self.worker_id,
-            )
-
-        try:
-            manifest, payload = self.service.run(
-                run,
-                progress=report_progress,
-                cancelled=lambda: (
-                    self._stop.is_set() or not lease_alive.is_set()
-                    or self.service.store.is_cancelled(run_id)
-                ),
-            )
-            if not lease_alive.is_set():
-                return
-            path = self.service.store.write_artifact(run_id, payload["artifact"])
-            self.service.store.finish(
-                run_id, manifest=manifest, result=payload["summary"], artifact_path=str(path),
-                expected_worker=self.worker_id,
-            )
-        except InterruptedError:
-            if not lease_alive.is_set():
-                return
-            if self._stop.is_set() and not self.service.store.is_cancelled(run_id):
-                self.service.store.interrupt_stale(self.worker_id)
-                return
-            self.service.store.cancel(run_id)
-            self.service.store.finish(run_id, expected_worker=self.worker_id)
-        except OperationProblem as exc:
-            logger.warning(
-                "回测任务被数据门禁阻止 run=%s code=%s",
-                run_id, exc.problem.get("code"),
-            )
-            if exc.problem.get("can_continue"):
-                self.service.store.needs_confirmation(
-                    run_id,
-                    problem=exc.problem,
-                    data_quality=exc.data_quality,
-                    expected_worker=self.worker_id,
-                )
-            else:
-                self.service.store.finish(
-                    run_id,
-                    result={
-                        "problem": exc.problem,
-                        "data_quality": exc.data_quality or {},
-                    },
-                    error=exc.problem["message"],
-                    expected_worker=self.worker_id,
-                )
-        except Exception as exc:
-            logger.exception("回测任务失败 run=%s", run_id)
-            self.service.store.finish(
-                run_id, error=str(exc), expected_worker=self.worker_id,
-            )
-        finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=1.0)
-
-
-_worker: BacktestWorker | None = None
-_worker_root = ""
-
-
-def get_backtest_worker() -> BacktestWorker:
-    global _worker, _worker_root
-    root = str(get_config().data_root.resolve())
-    if _worker is None or root != _worker_root:
-        if _worker is not None:
-            _worker.stop()
-        _worker = BacktestWorker()
-        _worker_root = root
-    return _worker
 
 
 register_backtest_store(BacktestStore)

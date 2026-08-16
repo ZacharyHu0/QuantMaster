@@ -22,7 +22,6 @@ BASELINE = {
     "quantmaster/backtest/paper_accounts.py": 1,
     "quantmaster/backtest/spec.py": 1,
     "quantmaster/backtest/validation.py": 1,
-    "quantmaster/backtest/workbench.py": 1,
     "quantmaster/cli.py": 7,
     "quantmaster/credentials.py": 4,
     "quantmaster/data/akshare_source.py": 2,

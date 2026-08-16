@@ -322,9 +322,9 @@ def _health_lab() -> list[Problem]:
 
 
 def _health_backtest() -> list[Problem]:
-    from quantmaster.backtest.workbench import get_backtest_worker
+    from quantmaster.backtest.jobs import list_backtest_jobs
 
-    latest = (get_backtest_worker().service.store.list(1) or [None])[0]
+    latest = (list_backtest_jobs(1) or [None])[0]
     if not latest:
         return []
     if latest.get("status") in {"queued", "running", "interrupted"}:

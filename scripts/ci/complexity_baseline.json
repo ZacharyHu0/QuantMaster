@@ -160,12 +160,6 @@
       "complexity": 14
     },
     {
-      "file": "quantmaster/backtest/workbench.py",
-      "line": 513,
-      "function": "run_one",
-      "complexity": 12
-    },
-    {
       "file": "quantmaster/data/free_stockdb_ingest.py",
       "line": 919,
       "function": "cross_validation_sample",

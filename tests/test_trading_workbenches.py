@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.backtest import BacktestConfig, run_backtest
+from quantmaster.backtest.jobs import BacktestJobManager, get_backtest_job_manager
 from quantmaster.backtest.paper_accounts import (
     PaperService,
     PaperStore,
@@ -27,15 +28,11 @@ from quantmaster.backtest.spec import (
     split_factor_references,
 )
 from quantmaster.backtest.workbench import (
-    BacktestSchemaMigrationRequired,
-    BacktestService,
     BacktestStore,
-    BacktestWorker,
-    get_backtest_worker,
 )
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
-from quantmaster.data.startup_schema_migration import StartupSchemaMigrator
 from quantmaster.portfolio import TradeRecord
+from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
 from quantmaster.trading_sessions import SessionExpectation
@@ -117,14 +114,31 @@ class _RouteBacktestStore:
         return {"id": run_id, "status": "cancelled"}
 
 
-class _RouteBacktestService:
+class _RouteBacktestManager:
     def __init__(self):
         self.store = _RouteBacktestStore()
+        self.queue = _RouteQueueService()
+        self.started = 0
+
+    def enqueue(self, spec):
+        return self.queue.enqueue(spec)
+
+    def start(self):
+        self.started += 1
 
     def compare(self, run_ids):
         if "broken" in run_ids:
             raise ValueError("比较失败")
         return {"run_ids": run_ids}
+
+    def get(self, run_id, include_artifact=False):
+        value = self.store.get(run_id, include_artifact=include_artifact)
+        if value is None:
+            raise KeyError(run_id)
+        return value
+
+    def cancel(self, run_id):
+        return self.store.cancel(run_id)
 
 
 class _RouteQueueService:
@@ -135,15 +149,6 @@ class _RouteQueueService:
         if self.fail:
             raise ValueError("未知字段")
         return {"id": "new-run", "status": "queued", "name": spec.name}
-
-
-class _RouteBacktestWorker:
-    def __init__(self):
-        self.service = _RouteQueueService()
-        self.started = 0
-
-    def start(self):
-        self.started += 1
 
 
 class _RoutePaperStore:
@@ -238,18 +243,15 @@ class _RoutePaperService:
 def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatch):
     from quantmaster.server import trading
 
-    class Store:
-        @staticmethod
-        def get(run_id, include_artifact=False):
-            return {
-                "id": run_id,
-                "status": "completed",
-                "artifact": {"metric": float("nan"), "values": [float("inf")]},
-            }
-
-    service = type("Service", (), {"store": Store()})()
-    monkeypatch.setattr(trading, "_service", lambda: service)
-    monkeypatch.setattr(trading, "_read_backtests", lambda: service.store)
+    monkeypatch.setattr(
+        trading,
+        "read_backtest_job",
+        lambda run_id, include_artifact=False: {
+            "id": run_id,
+            "status": "completed",
+            "artifact": {"metric": float("nan"), "values": [float("inf")]},
+        },
+    )
 
     response = TestClient(app).get("/api/v1/backtests/export-strict/export")
 
@@ -1034,151 +1036,6 @@ def test_success_clears_runtime_warning_but_keeps_strategy_warning(tmp_path):
     assert restored["warning"] == "策略来源待批准"
 
 
-def test_backtest_store_persists_artifact_events_compare_and_cancel(tmp_path, panel):
-    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    service = BacktestService(store)
-    spec = BacktestSpec.model_validate(
-        {
-            "name": "合成行情",
-            "strategy": {
-                "kind": "factor",
-                "factor": "rank(close)",
-                "top_n": 2,
-                "rebalance": "D",
-                "weighting": "equal",
-                "cap_weight": 0.35,
-            },
-            "universe": "demo",
-            "start": "2023-01-02",
-            "end": "2023-08-01",
-            "benchmark": None,
-            "initial_capital": 100_000,
-        }
-    )
-    run = store.create(spec)
-    manifest, payload = service.run(
-        run,
-        panel=panel,
-        progress=lambda value, phase, detail: store.update(
-            run["id"],
-            value,
-            phase,
-            detail,
-        ),
-        cancelled=lambda: False,
-    )
-    path = store.write_artifact(run["id"], payload["artifact"])
-    store.finish(
-        run["id"],
-        manifest=manifest,
-        result=payload["summary"],
-        artifact_path=str(path),
-    )
-    completed = store.get(run["id"], include_artifact=True)
-    assert completed["status"] == "completed"
-    assert completed["artifact"]["manifest"]["config_hash"] == spec.snapshot_hash
-    assert completed["artifact"]["manifest"]["formal_eligible"] is False
-    assert store.events(run["id"])[-1]["type"] == "completed"
-
-    strict_path = store.write_artifact(
-        "strict-json",
-        {"nan": float("nan"), "infinity": [float("inf")]},
-    )
-    assert json.loads(strict_path.read_text(encoding="utf-8")) == {
-        "nan": None,
-        "infinity": [None],
-    }
-    assert "NaN" not in strict_path.read_text(encoding="utf-8")
-    assert "Infinity" not in strict_path.read_text(encoding="utf-8")
-
-    second = store.create(spec.model_copy(update={"name": "对照"}))
-    path2 = store.write_artifact(second["id"], payload["artifact"])
-    store.finish(second["id"], manifest=manifest, result=payload["summary"], artifact_path=str(path2))
-    assert len(service.compare([run["id"], second["id"]])["runs"]) == 2
-
-    queued = store.create(spec.model_copy(update={"name": "待取消"}))
-    cancelled = store.cancel(queued["id"])
-    assert cancelled["status"] == "cancelled"
-    assert cancelled["cancel_requested"] is True
-
-
-def test_backtest_service_is_only_a_web_lifecycle_adapter(tmp_path, monkeypatch):
-    from quantmaster.backtest import application
-
-    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    spec = BacktestSpec.model_validate({
-        "name": "adapter",
-        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
-        "universe": "demo",
-        "start": "2023-01-02",
-        "end": "2023-02-01",
-        "benchmark": None,
-    })
-    run = store.create(spec)
-    observed = []
-
-    def execute_backtest(received, **kwargs):
-        observed.append((received, kwargs))
-        return {"manifest": {"formal_eligible": False}, "summary": {}, "artifact": {}}
-
-    monkeypatch.setattr(application, "execute_backtest", execute_backtest)
-    result = BacktestService(store).run(
-        run, progress=lambda *_args: None, cancelled=lambda: False,
-    )
-
-    assert result == ({"formal_eligible": False}, {"summary": {}, "artifact": {}})
-    received, kwargs = observed[0]
-    assert received == spec
-    assert kwargs["artifact_id"] == run["id"]
-    assert kwargs["artifact_name"] == run["name"]
-    assert store.get(run["id"])["status"] == "queued"
-
-
-def test_shared_execution_keeps_web_worker_persistence_and_cancellation(
-    tmp_path, monkeypatch,
-) -> None:
-    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    spec = BacktestSpec.model_validate({
-        "name": "worker adapter",
-        "strategy": {"kind": "factor", "factor": "mom_20d", "top_n": 1},
-        "universe": "demo",
-        "start": "2023-01-02",
-        "end": "2023-02-01",
-        "benchmark": None,
-    })
-    run = store.create(spec)
-    claimed = store.claim_next("worker-test")
-    service = BacktestService(store)
-    calls = []
-
-    def run_execution(received, **kwargs):
-        calls.append((received, kwargs))
-        return (
-            {"formal_eligible": False},
-            {"summary": {"formal_eligible": False}, "artifact": {"result": "complete"}},
-        )
-
-    monkeypatch.setattr(service, "run", run_execution)
-    worker = BacktestWorker(service)
-    worker.worker_id = "worker-test"
-    worker.run_one(claimed)
-
-    completed = store.get(run["id"], include_artifact=True)
-    assert completed["status"] == "completed"
-    assert completed["artifact"] == {"result": "complete"}
-    assert len(calls) == 1
-    assert callable(calls[0][1]["progress"])
-    assert callable(calls[0][1]["cancelled"])
-
-    cancelled_run = store.create(spec.model_copy(update={"name": "cancelled"}))
-    with pytest.raises(InterruptedError, match="用户取消回测"):
-        BacktestService(store).run(
-            cancelled_run,
-            progress=lambda *_args: None,
-            cancelled=lambda: True,
-        )
-
-
 def test_backtest_formal_eligibility_is_explicit_and_fail_closed() -> None:
     from quantmaster.backtest.application import _formal_eligibility
 
@@ -1316,45 +1173,6 @@ def test_injected_benchmark_without_provenance_blocks_formal_eligibility(panel) 
     ]
 
 
-def test_backtest_worker_reclaims_only_stale_lease_and_rejects_old_owner(tmp_path):
-    store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    spec = BacktestSpec.model_validate(
-        {
-            "name": "租约测试",
-            "strategy": {"kind": "factor", "factor": "rank(close)", "top_n": 1},
-            "universe": "demo",
-            "start": "2023-01-02",
-            "end": "2023-02-01",
-            "benchmark": None,
-        }
-    )
-    created = store.create(spec)
-    assert store.claim_next("worker-a")["id"] == created["id"]
-    assert store.heartbeat(created["id"], "worker-a")
-    assert store.interrupt_stale(stale_after_seconds=30) == 0
-
-    with store._conn() as connection:
-        connection.execute(
-            "UPDATE backtest_runs SET heartbeat_at='2000-01-01T00:00:00+00:00' WHERE id=?",
-            (created["id"],),
-        )
-    assert store.interrupt_stale(stale_after_seconds=30) == 1
-    assert store.claim_next("worker-b")["id"] == created["id"]
-    assert not store.update(
-        created["id"],
-        50,
-        "旧 worker",
-        expected_worker="worker-a",
-    )
-    assert not store.finish(
-        created["id"],
-        error="stale result",
-        expected_worker="worker-a",
-    )
-    assert store.get(created["id"])["worker"] == "worker-b"
-    assert store.get(created["id"])["status"] == "running"
-
-
 def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
     tmp_path,
     panel,
@@ -1392,8 +1210,14 @@ def test_hybrid_decision_snapshot_is_shared_by_backtest_and_paper(
     assert not weights.dropna(how="all").empty
     assert weights.fillna(0).sum(axis=1).max() <= 0.65 + 1e-9
 
-    backtest_store = BacktestStore(tmp_path / "runs.sqlite", tmp_path / "artifacts")
-    run = BacktestService(backtest_store).enqueue(
+    runtime = UnifiedJobRuntime(
+        UnifiedJobStore(tmp_path / "jobs.sqlite"), dispatch=False,
+    )
+    backtest_jobs = BacktestJobManager(
+        BacktestStore(tmp_path / "backtests.sqlite", tmp_path / "artifacts"),
+        runtime=runtime,
+    )
+    run = backtest_jobs.enqueue(
         BacktestSpec.model_validate(
             {
                 "name": "Hybrid 快照",
@@ -1521,49 +1345,11 @@ def test_old_hybrid_paper_account_requires_explicit_migration_without_mutating_h
     assert len(store.ledger(account["id"]).cashflows()) == before_cashflows
 
 
-def test_swing_backtests_become_read_only_and_active_runs_are_cancelled(tmp_path):
-    path = tmp_path / "backtests.sqlite"
-    artifacts = tmp_path / "artifacts"
-    store = BacktestStore(path, artifacts)
-    config = json.dumps({
-        "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3},
-        "universe": "demo", "start": "2023-01-01", "end": "2023-12-31",
-    })
-    with store._conn() as conn:
-        for run_id, status in (("legacy-queued", "queued"), ("legacy-completed", "completed")):
-            conn.execute(
-                "INSERT INTO backtest_runs "
-                "(id,name,status,config_json,config_hash,created_at,finished_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (
-                    run_id, run_id, status, config, "legacy-hash", "2026-08-01",
-                    "2026-08-02" if status == "completed" else "",
-                ),
-            )
-        conn.execute("DROP TABLE backtest_store_meta")
-
-    with pytest.raises(BacktestSchemaMigrationRequired):
-        BacktestStore(path, artifacts)
-    assert [record.outcome for record in StartupSchemaMigrator().migrate_batch(
-        tmp_path, after_key="", limit=1,
-    )] == ["converted"]
-    migrated = BacktestStore(path, artifacts)
-
-    assert migrated.get("legacy-queued")["status"] == "cancelled"
-    assert migrated.get("legacy-queued")["legacy_read_only"] is True
-    completed = migrated.get("legacy-completed")
-    assert completed["status"] == "completed"
-    assert completed["config"]["strategy"]["kind"] == "swing"
-    assert completed["legacy_read_only"] is True
-    assert [event["type"] for event in migrated.events("legacy-queued")].count("cancelled") == 1
-    BacktestStore(path, artifacts)
-    assert [event["type"] for event in migrated.events("legacy-queued")].count("cancelled") == 1
-
-
 def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch):
     client = TestClient(app)
-    worker = get_backtest_worker()
-    monkeypatch.setattr(worker, "start", lambda: None)
+    manager = get_backtest_job_manager()
+    monkeypatch.setattr(manager, "_owns_runtime", lambda: False)
+    monkeypatch.setattr(manager, "start", lambda: None)
     payload = {
         "name": "接口回测",
         "strategy": {
@@ -1586,7 +1372,7 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     )
     assert created.status_code == 202
     assert created.json()["status"] == "queued"
-    worker.service.store.cancel(created.json()["id"])
+    manager.cancel(created.json()["id"])
     legacy = {**payload, "strategy": {"kind": "swing", "top_n": 3, "holding_days": 3}}
     assert client.post(
         "/api/v1/backtests", json=legacy, headers={"X-CSRF-Token": token},
@@ -1741,8 +1527,9 @@ def test_management_snapshot_and_migration_errors_are_redacted(monkeypatch) -> N
 
 def test_backtest_api_rejects_invalid_factor_before_queue(monkeypatch):
     client = TestClient(app)
-    worker = get_backtest_worker()
-    monkeypatch.setattr(worker, "start", lambda: None)
+    manager = get_backtest_job_manager()
+    monkeypatch.setattr(manager, "_owns_runtime", lambda: False)
+    monkeypatch.setattr(manager, "start", lambda: None)
     token = _issue_csrf()
     client.cookies.set("qm_csrf", token)
     response = client.post(
@@ -1771,11 +1558,26 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
         lambda: _RouteAutoWorker(wake_count),
     )
     strategy = _ROUTE_STRATEGY
-    backtest_service = _RouteBacktestService()
-    monkeypatch.setattr(trading, "_service", lambda: backtest_service)
-    monkeypatch.setattr(trading, "_read_backtests", lambda: backtest_service.store)
-    worker = _RouteBacktestWorker()
-    monkeypatch.setattr(trading, "get_backtest_worker", lambda: worker)
+    backtest_manager = _RouteBacktestManager()
+    monkeypatch.setattr(trading, "_manager", lambda: backtest_manager)
+    monkeypatch.setattr(
+        trading,
+        "list_backtest_jobs",
+        lambda limit: backtest_manager.store.list(limit),
+    )
+    monkeypatch.setattr(
+        trading,
+        "read_backtest_job",
+        lambda run_id, include_artifact=False: backtest_manager.get(
+            run_id, include_artifact=include_artifact,
+        ),
+    )
+    monkeypatch.setattr(
+        trading,
+        "backtest_job_events",
+        lambda run_id, after=0: backtest_manager.store.events(run_id, after=after),
+    )
+    monkeypatch.setattr(trading, "_require_backtest_snapshot", lambda: None)
     request = object()
     spec = BacktestSpec.model_validate(
         {
@@ -1790,8 +1592,8 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     )
 
     assert trading.create_backtest(spec, request)["id"] == "new-run"
-    assert worker.started == 1
-    worker.service.fail = True
+    assert backtest_manager.started == 1
+    backtest_manager.queue.fail = True
     with pytest.raises(trading.HTTPException) as invalid_run:
         trading.create_backtest(spec, request)
     assert invalid_run.value.status_code == 422

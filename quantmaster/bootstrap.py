@@ -173,8 +173,11 @@ class _DefaultWorkerPlan:
             shutdown_stock_analysis_jobs,
         )
         from quantmaster.automation.runtime import get_runtime
+        from quantmaster.backtest.jobs import (
+            get_backtest_job_manager,
+            shutdown_backtest_job_managers,
+        )
         from quantmaster.backtest.paper_automation import get_paper_automation_worker
-        from quantmaster.backtest.workbench import get_backtest_worker
         from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.data.instruments import InstrumentStore
         from quantmaster.data.maintenance import data_refresh_manager
@@ -207,7 +210,7 @@ class _DefaultWorkerPlan:
         InstrumentStore()
         self.runtime = get_runtime()
         self.lab_worker = get_worker()
-        self.backtest_worker = get_backtest_worker()
+        self.backtest_jobs = get_backtest_job_manager()
         self.research_worker = get_research_job_manager()
         self.rotation_worker = get_rotation_worker()
         self.repair_worker = get_data_repair_manager()
@@ -241,6 +244,7 @@ class _DefaultWorkerPlan:
         self._shutdown_news_jobs = shutdown_news_jobs
         self._shutdown_settings_jobs = shutdown_settings_jobs
         self._shutdown_lab_llm_jobs = shutdown_lab_llm_jobs
+        self._shutdown_backtest_jobs = shutdown_backtest_job_managers
 
     def settings_projection(self) -> tuple[int, int]:
         from quantmaster.settings_runtime import public_state
@@ -276,7 +280,7 @@ class _DefaultWorkerPlan:
         self.stockdb_event_delivery.start()
         self.data_refresh_manager.start()
         self.repair_worker.start()
-        self.backtest_worker.start()
+        self.backtest_jobs.start()
         self.paper_automation_worker.start()
         self.rotation_worker.start(bootstrap_local=bootstrap_rotation)
         self.cnn_fear_greed_refresher.start()
@@ -296,7 +300,7 @@ class _DefaultWorkerPlan:
         self.repair_worker.shutdown()
         self.data_refresh_manager.shutdown()
         self.research_worker.shutdown()
-        self.backtest_worker.stop()
+        self.backtest_jobs.shutdown()
         self.lab_worker.stop()
         self.runtime.stop()
         self.stock_analysis_worker.pause()
@@ -318,7 +322,7 @@ class _DefaultWorkerPlan:
         self.research_worker.start()
         self.data_refresh_manager.start()
         self.repair_worker.start()
-        self.backtest_worker.start()
+        self.backtest_jobs.start()
         self.paper_automation_worker.start()
         self.rotation_worker.start()
         if get_config().lab.enabled:
@@ -338,6 +342,7 @@ class _DefaultWorkerPlan:
             and self.news_worker.idle
             and self.settings_worker.idle
             and self.lab_llm_worker.runtime.idle
+            and self.backtest_jobs.idle
         )
 
     def _apply_latest_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -410,7 +415,7 @@ class _DefaultWorkerPlan:
         self.repair_worker.shutdown()
         self.data_refresh_manager.shutdown()
         self.research_worker.shutdown()
-        self.backtest_worker.stop()
+        self._shutdown_backtest_jobs()
         self.lab_worker.stop()
         enter_phase("persist_and_release", 10.0)
         self._shutdown_stock_analysis_jobs()

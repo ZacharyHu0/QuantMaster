@@ -10,10 +10,16 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import ConfigDict, Field
 
+from quantmaster.backtest.jobs import (
+    BacktestJobManager,
+    backtest_job_events,
+    get_backtest_job_manager,
+    list_backtest_jobs,
+    read_backtest_job,
+)
 from quantmaster.backtest.paper_accounts import get_paper_service
 from quantmaster.backtest.paper_automation import get_paper_automation_worker
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec, StrategySpec
-from quantmaster.backtest.workbench import BacktestService, BacktestStore, get_backtest_worker
 from quantmaster.config import get_config
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
@@ -24,13 +30,12 @@ router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger(__name__)
 
 
-def _service() -> BacktestService:
-    return get_backtest_worker().service
+def _manager() -> BacktestJobManager:
+    return get_backtest_job_manager()
 
 
-def _read_backtests() -> BacktestStore:
-    path = get_config().data_root / "backtests.sqlite"
-    if not path.is_file():
+def _require_backtest_snapshot() -> None:
+    if not (get_config().data_root / "jobs.sqlite").is_file():
         raise OperationProblem(
             503,
             make_problem(
@@ -44,7 +49,6 @@ def _read_backtests() -> BacktestStore:
                 can_continue=True,
             ),
         )
-    return BacktestStore(path=path, read_only=True)
 
 
 def _read_paper_service():
@@ -92,36 +96,37 @@ def _error(exc: Exception) -> HTTPException:
 @router.post("/backtests", status_code=202)
 def create_backtest(spec: BacktestSpec, request: Request) -> dict:
     _require_csrf(request)
-    worker = get_backtest_worker()
+    manager = _manager()
     try:
-        run = worker.service.enqueue(spec)
+        run = manager.enqueue(spec)
     except ValueError:
         logger.info(
             "回测入队参数校验未通过",
             extra={"event": "backtest_rejected", "error_code": "validation_error"},
         )
         raise HTTPException(422, "回测参数无效，请检查策略、标的池和日期范围") from None
-    worker.start()
+    manager.start()
     return run
 
 
 @router.get("/backtests")
 def list_backtests(limit: int = Query(50, ge=1, le=200)) -> dict:
-    return {"items": _read_backtests().list(limit)}
+    return {"items": list_backtest_jobs(limit)}
 
 
 @router.get("/backtests/{run_id}")
 def get_backtest(run_id: str) -> dict:
-    run = _read_backtests().get(run_id, include_artifact=True)
-    if run is None:
-        raise HTTPException(404, "回测不存在")
-    return run
+    try:
+        _require_backtest_snapshot()
+        return read_backtest_job(run_id, include_artifact=True)
+    except KeyError:
+        raise HTTPException(404, "回测不存在") from None
 
 
 @router.get("/backtests/{run_id}/events")
 def backtest_events(run_id: str, after: int = Query(0, ge=0)) -> dict:
     try:
-        return {"items": _read_backtests().events(run_id, after=after)}
+        return {"items": backtest_job_events(run_id, after=after)}
     except Exception as exc:
         raise _error(exc) from None
 
@@ -130,7 +135,7 @@ def backtest_events(run_id: str, after: int = Query(0, ge=0)) -> dict:
 def cancel_backtest(run_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return _service().store.cancel(run_id)
+        return _manager().cancel(run_id)
     except Exception as exc:
         raise _error(exc) from None
 
@@ -144,16 +149,17 @@ class CompareRequest(ContractModel):
 def compare_backtests(payload: CompareRequest, request: Request) -> dict:
     _require_csrf(request)
     try:
-        return _service().compare(payload.run_ids)
+        return _manager().compare(payload.run_ids)
     except Exception as exc:
         raise _error(exc) from None
 
 
 @router.get("/backtests/{run_id}/export")
 def export_backtest(run_id: str, format: Literal["json", "trades_csv"] = "json") -> Response:
-    run = _read_backtests().get(run_id, include_artifact=True)
-    if run is None:
-        raise HTTPException(404, "回测不存在")
+    try:
+        run = read_backtest_job(run_id, include_artifact=True)
+    except (FileNotFoundError, KeyError):
+        raise HTTPException(404, "回测不存在") from None
     artifact = run.get("artifact")
     if run["status"] != "completed" or not artifact:
         raise HTTPException(409, "回测尚未完成，不能导出")
@@ -186,9 +192,10 @@ class PromoteRequest(ContractModel):
 @router.post("/backtests/{run_id}/paper-account", status_code=201)
 def promote_backtest(run_id: str, payload: PromoteRequest, request: Request) -> dict:
     _require_csrf(request)
-    run = _service().store.get(run_id)
-    if run is None:
-        raise HTTPException(404, "回测不存在")
+    try:
+        run = _manager().get(run_id)
+    except (FileNotFoundError, KeyError):
+        raise HTTPException(404, "回测不存在") from None
     if run["status"] != "completed":
         raise HTTPException(409, "只有已完成回测才能创建模拟账户")
     if run.get("legacy_read_only"):

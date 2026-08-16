@@ -73,6 +73,7 @@ _BUILTINS = (
     ("automation-contract-v9", "quantmaster.automation.migration", "automation_contract_migrator"),
     ("paper-ledger", "quantmaster.backtest.paper_legacy_migration", "PaperLegacyMigrator", True),
     ("startup-schema", "quantmaster.data.startup_schema_migration", "startup_schema_migrator"),
+    ("backtest-jobs", "quantmaster.backtest.job_migration", "backtest_job_legacy_migrator"),
     ("store-schema", "quantmaster.data.store_schema_migration", "store_schema_migrator"),
     ("data-jobs", "quantmaster.data.job_migration", "data_job_legacy_migrator"),
     ("lab-jobs", "quantmaster.lab.job_migration", "lab_job_legacy_migrator"),
