@@ -157,9 +157,20 @@ def _safe_name(symbol: str) -> str:
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _batch_file_sha256(paths: list[Path]) -> dict[Path, str]:
+    """Compute SHA-256 for multiple files in parallel via ThreadPoolExecutor."""
+    results: dict[Path, str] = {}
+    if len(paths) <= 1:
+        return {p: _file_sha256(p) for p in paths}
+    with ThreadPoolExecutor(max_workers=min(8, max(2, len(paths)))) as executor:
+        for p, d in executor.map(_file_sha256, paths):
+            results[p] = d
+    return results
 
 
 def _sync_directory(path: Path) -> None:
@@ -635,6 +646,28 @@ class BarStore:
         if clear_intent:
             connection.execute(
                 "DELETE FROM bar_write_intents WHERE symbol=?", (metadata["symbol"],),
+            )
+
+    def _batch_commit_metadata(
+        self, connection: sqlite3.Connection, metadata_list: list[dict],
+    ) -> None:
+        """Commit metadata for multiple symbols in a single SQLite transaction.
+
+        Uses executemany for O(n) performance instead of O(n) individual execute calls.
+        """
+        placeholders = ",".join("?" for _ in _META_COLUMNS)
+        column_list = ",".join(_META_COLUMNS)
+        rows = [self._metadata_values(md) for md in metadata_list]
+        connection.executemany(
+            f"INSERT OR REPLACE INTO bar_meta ({column_list}) VALUES ({placeholders})",
+            rows,
+        )
+        symbols = tuple(md["symbol"] for md in metadata_list)
+        if len(symbols) >= 1:
+            placeholders_sym = ",".join("?" for _ in symbols)
+            connection.execute(
+                f"DELETE FROM bar_write_intents WHERE symbol IN ({placeholders_sym})",
+                symbols,
             )
 
     def _backfill_file_identity(
