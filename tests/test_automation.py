@@ -1121,9 +1121,7 @@ def test_feishu_sync_bridges_reject_a_running_loop_without_creating_coroutines(
 
 def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
     import asyncio
-    import sys
     import threading
-    from types import SimpleNamespace
 
     from quantmaster.automation.channels import feishu as feishu_module
 
@@ -1147,9 +1145,9 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
         async def stop_background(self):
             stop_calls.append(threading.current_thread().name)
 
-    monkeypatch.setitem(
-        sys.modules, "lark_oapi.channel",
-        SimpleNamespace(FeishuChannel=FakeFeishuChannel),
+    monkeypatch.setattr(
+        feishu_module, "_feishu_channel_types",
+        lambda: (FakeFeishuChannel, None, None),
     )
     monkeypatch.setattr(feishu_module, "_track_lark_ws_tasks", lambda _channel: None)
     stop_event = threading.Event()
