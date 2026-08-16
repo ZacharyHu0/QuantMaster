@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from quantmaster.bootstrap_hooks import server_worker_hooks
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
+from quantmaster.lab.store import LabSchemaMigrationRequired
 from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.supervisor import (
     WorkerSupervisor,
@@ -23,6 +24,12 @@ from quantmaster.runtime.worker import RuntimeWorker, WorkerPlan
 from quantmaster.runtime.worker_ipc import WorkerCommandError
 
 logger = logging.getLogger(__name__)
+
+
+def _strict_schema_requested() -> bool:
+    return os.environ.get("QM_STRICT_SCHEMA", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 class _StopEvent(Protocol):
@@ -212,7 +219,19 @@ class _DefaultWorkerPlan:
         # trigger a remote catalogue refresh at worker startup.
         InstrumentStore()
         self.runtime = get_runtime()
-        self.lab_worker = get_worker()
+        self.lab_worker = None
+        self.schema_migration = "ready"
+        self.schema_migration_detail = ""
+        try:
+            self.lab_worker = get_worker()
+        except LabSchemaMigrationRequired as exc:
+            if _strict_schema_requested():
+                raise
+            self.schema_migration = "schema-migration-blocked"
+            self.schema_migration_detail = str(exc)[:800]
+            logger.warning(
+                "Quant Lab schema 需要显式迁移，跳过 Lab worker：%s", exc,
+            )
         self.backtest_jobs = get_backtest_job_manager()
         self.research_worker = get_research_job_manager()
         self.rotation_worker = get_rotation_worker()
@@ -292,7 +311,7 @@ class _DefaultWorkerPlan:
         self._publish_async(
             self._publish_market_overview, "quant-market-overview-publish",
         )
-        if get_config().lab.enabled:
+        if self.lab_worker is not None:
             self.lab_worker.start()
             self._publish_async(
                 self._publish_lab_capabilities, "quant-lab-capabilities-publish",
@@ -307,7 +326,8 @@ class _DefaultWorkerPlan:
         self.data_refresh_manager.shutdown()
         self.research_worker.shutdown()
         self.backtest_jobs.shutdown()
-        self.lab_worker.stop()
+        if self.lab_worker is not None:
+            self.lab_worker.stop()
         self.runtime.stop()
         self.stock_analysis_worker.pause()
         self.after_close_worker.pause()
@@ -332,7 +352,7 @@ class _DefaultWorkerPlan:
         self.backtest_jobs.start()
         self.paper_automation_worker.start()
         self.rotation_worker.start()
-        if get_config().lab.enabled:
+        if self.lab_worker is not None:
             self.lab_worker.start()
         self._publish_async(
             self._publish_market_overview, "quant-market-overview-publish",
@@ -424,7 +444,8 @@ class _DefaultWorkerPlan:
         self.data_refresh_manager.shutdown()
         self.research_worker.shutdown()
         self._shutdown_backtest_jobs()
-        self.lab_worker.stop()
+        if self.lab_worker is not None:
+            self.lab_worker.stop()
         enter_phase("persist_and_release", 10.0)
         self._shutdown_stock_analysis_jobs()
         self._shutdown_after_close_jobs()

@@ -66,6 +66,16 @@ def history(request: Request, limit: int = Query(30, ge=1, le=500)) -> dict:
     return {"items": _published_service().store.history(limit)}
 
 
+@router.get("/health")
+def health(request: Request) -> dict:
+    require_local(request)
+    try:
+        service = _published_service()
+        return {"status": "ok", "has_snapshots": service.store.public_latest() is not None}
+    except OperationProblem as exc:
+        return {"status": "unavailable", "detail": exc.problem.title}
+
+
 @router.get("/diagnostics")
 def strategy_diagnostics(request: Request, limit: int = Query(100, ge=1, le=500)) -> dict:
     require_local(request)
