@@ -2307,6 +2307,12 @@ async function loadMarket() {
     document.getElementById('mkt-stamp').textContent = snapshot?.state === 'stale'
       ? `正在展示陈旧快照${asOf ? ` · 数据截至 ${asOf}` : ''}${completion}`
       : `${asOf ? `数据截至 ${asOf}` : `检查于 ${new Date().toLocaleTimeString('zh-CN', {hour: '2-digit', minute: '2-digit'})}`}${completion}`;
+    if (window.DataState) {
+      const stateLabel = DataState.formatLabel(snapshot?.state || 'ready', {
+        asOf, coverage: completed, formalEligible: snapshot?.state === 'ready',
+      });
+      document.getElementById('mkt-stamp').title = stateLabel;
+    }
   } catch (e) {
     const snapshotUnavailable = e?.problem?.code === 'snapshot_unavailable';
     if (renderer && tracker) {
