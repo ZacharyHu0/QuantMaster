@@ -444,6 +444,32 @@ class TestBasics:
             json={"build_sha": "0" * 40},
         ).status_code == 409
 
+    def test_ashare_fear_greed_route_reads_local_snapshot(self, monkeypatch):
+        from quantmaster import market
+
+        monkeypatch.setattr(
+            market,
+            "read_ashare_fear_greed",
+            lambda symbol: {
+                "status": "ready",
+                "symbol": symbol,
+                "score": 33.39,
+                "history": [],
+            },
+        )
+        response = client.get(
+            "/api/v1/market/ashare-fear-greed",
+            params={"symbol": "沪深300"},
+        )
+        assert response.status_code == 200
+        assert response.json()["symbol"] == "沪深300"
+        assert response.json()["score"] == 33.39
+        assert client.get("/api/v1/market/ashare-fear-greed").status_code == 422
+        assert client.get(
+            "/api/v1/market/ashare-fear-greed",
+            params={"symbol": "不存在"},
+        ).status_code == 422
+
     def test_index_serves_html(self):
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
@@ -506,7 +532,16 @@ class TestBasics:
         assert "createLoadProgress" in app_script
         assert "createMarketStreamRenderer" in app_script
         assert "/api/v1/market/fear-greed" in app_script
+        assert "/api/v1/market/ashare-fear-greed?symbol=" in app_script
         assert 'id="market-fear-greed-time"' in resp.text
+        assert 'id="market-ashare-fear-greed"' in resp.text
+        assert 'id="market-ashare-fear-greed-symbol"' in resp.text
+        assert 'value="沪深300"' in resp.text
+        assert 'id="market-ashare-fear-greed-benchmark"' in resp.text
+        assert "encodeURIComponent(selected)" in app_script
+        assert "function loadAshareMarketFearGreed" in app_script
+        assert "FundDB A股恐贪指数" in resp.text
+        assert "function renderAshareFearGreedVisuals" in app_script
         assert "function fearGreedAsOf" in app_script
         assert ".formatToParts(parsed)" in app_script
         assert "`${year}${Number(parts.month)}月${Number(parts.day)}日" in app_script
@@ -524,6 +559,7 @@ class TestBasics:
         assert "new ResizeObserver" in today_charts
         assert "prefers-reduced-motion: reduce" in today_charts
         assert "黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
+        assert "黄色虚线：A股恐贪 ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
         assert "黄色虚线表示 10 分罕见恐惧参考阈值" in resp.text
         assert "requestAnimationFrame" in today_charts
         assert "disposeTodayCharts" in today_charts
