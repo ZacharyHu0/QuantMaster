@@ -77,7 +77,11 @@ fn robust_standardize<'py>(
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             let input_row = matrix.row(row_idx);
-            let clean: Vec<f64> = input_row.iter().filter(|&&v| v.is_finite()).copied().collect();
+            let clean: Vec<f64> = input_row
+                .iter()
+                .filter(|&&v| v.is_finite())
+                .copied()
+                .collect();
             if clean.is_empty() {
                 return;
             }
@@ -95,8 +99,7 @@ fn robust_standardize<'py>(
                 .collect();
             let mean = clipped.iter().sum::<f64>() / clipped.len() as f64;
             let variance = if clipped.len() > 1 {
-                clipped.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                    / (clipped.len() - 1) as f64
+                clipped.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (clipped.len() - 1) as f64
             } else {
                 0.0
             };
@@ -156,7 +159,11 @@ fn weighted_zscore<'py>(
                 return;
             }
             let mean = valid.iter().map(|t| t.1 * t.2).sum::<f64>() / total_w;
-            let variance = valid.iter().map(|t| (t.1 - mean).powi(2) * t.2).sum::<f64>() / total_w;
+            let variance = valid
+                .iter()
+                .map(|t| (t.1 - mean).powi(2) * t.2)
+                .sum::<f64>()
+                / total_w;
             for (i, v, _) in &valid {
                 out_row[*i] = if variance > 0.0 {
                     (v - mean) / variance.sqrt()
@@ -183,7 +190,11 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
                 let sample: Vec<f64> = (start..=stop)
                     .filter_map(|r| {
                         let v = matrix[(r, col_idx)];
-                        if v.is_finite() { Some(v) } else { None }
+                        if v.is_finite() {
+                            Some(v)
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 if sample.len() < minimum {
@@ -274,7 +285,11 @@ fn rolling_corr<'py>(
                     .filter_map(|r| {
                         let a = l_arr[(r, col_idx)];
                         let b = r_arr[(r, col_idx)];
-                        if a.is_finite() && b.is_finite() { Some((a, b)) } else { None }
+                        if a.is_finite() && b.is_finite() {
+                            Some((a, b))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
                 if sample.len() < minimum {
@@ -283,7 +298,10 @@ fn rolling_corr<'py>(
                 let n = sample.len() as f64;
                 let mean_a = sample.iter().map(|t| t.0).sum::<f64>() / n;
                 let mean_b = sample.iter().map(|t| t.1).sum::<f64>() / n;
-                let cov = sample.iter().map(|t| (t.0 - mean_a) * (t.1 - mean_b)).sum::<f64>();
+                let cov = sample
+                    .iter()
+                    .map(|t| (t.0 - mean_a) * (t.1 - mean_b))
+                    .sum::<f64>();
                 let var_a = sample.iter().map(|t| (t.0 - mean_a).powi(2)).sum::<f64>();
                 let var_b = sample.iter().map(|t| (t.1 - mean_b).powi(2)).sum::<f64>();
                 if var_a > 0.0 && var_b > 0.0 {
