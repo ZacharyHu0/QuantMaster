@@ -877,11 +877,17 @@ def _permanent_failure(exc: BaseException) -> bool:
 
 
 def _retryable_failure(exc: BaseException) -> bool:
-    """Only network/DNS/TLS and upstream 5xx failures earn another request."""
+    """Only network/DNS/TLS and upstream 5xx failures earn another request.
+
+    Empty responses are also retried: free providers like AKShare frequently
+    return zero-row DataFrames on transient 5xx or page-structure glitches.
+    Without retrying empty responses, the circuit breaker opens immediately
+    after one transient empty response, blocking all subsequent symbols.
+    """
     value = classify_provider_failure(exc)
-    return value in {"transient_network", "transient_upstream", "upstream_5xx"} or (
-        value.startswith("http_") and value.endswith("_upstream")
-    )
+    return value in {
+        "transient_network", "transient_upstream", "upstream_5xx", "empty_response",
+    } or (value.startswith("http_") and value.endswith("_upstream"))
 
 
 def _retry_delay(attempt: int) -> float:
@@ -976,11 +982,11 @@ def provider_call[T](
                 retry_after = _retry_after_seconds(exc)
                 immediate = (
                     _hard_connectivity_error(exc) or _rate_limited(exc)
-                    or isinstance(exc, EmptyProviderResponse) or _permanent_failure(exc)
+                    or _permanent_failure(exc)
                 )
-                # 429 requires an upstream-directed pause, and 401/403 must
-                # never burn retry budget.  Only transient transport/5xx
-                # failures retry, bounded by the shared provider contract.
+                # Empty responses from free providers (AKShare) are retried
+                # as transient failures — they are common on transient 5xx
+                # and should not immediately open the circuit breaker.
                 if immediate or not _retryable_failure(exc) or attempt >= attempts:
                     PROVIDER_HEALTH.failure(
                         lane, exc, immediate=immediate, retry_after=retry_after,
@@ -990,9 +996,10 @@ def provider_call[T](
                     max(0.0, float(get_config().data.provider_retry_max_backoff)),
                     max(0.0, float(retry_backoff)) * (2 ** (attempt - 1)),
                 )
+                label = "空数据" if isinstance(exc, EmptyProviderResponse) else "瞬态失败"
                 logger.debug(
-                    "%s 瞬态失败（%s/%s），%.2f 秒后在同一 provider 预算内重试: %s",
-                    lane, attempt, attempts, delay, exc,
+                    "%s %s（%s/%s），%.2f 秒后重试: %s",
+                    lane, label, attempt, attempts, delay, exc,
                 )
                 if delay:
                     retry_sleep(delay)
@@ -1007,23 +1014,94 @@ def akshare_call[T](
     *args,
     lane: str = "akshare:eastmoney",
     probe: bool = False,
+    empty_opens: bool = True,
     **kwargs,
 ) -> T:
-    """AKShare adapter; retry/circuit/singleflight are owned by provider_call."""
+    """AKShare adapter; retry/circuit/singleflight are owned by provider_call.
+
+    ``empty_opens=True`` treats zero-row DataFrame responses as transient
+    failures (AKShare frequently returns empty frames on transient 5xx).
+    The provider will retry them before opening a circuit breaker.
+    """
     key = label + ":" + hashlib.sha256(
         json.dumps(
             {"args": args, "kwargs": kwargs}, sort_keys=True,
             ensure_ascii=False, default=str,
         ).encode("utf-8")
     ).hexdigest()[:16]
-    # Keep the former AKShare knobs as an explicit per-provider overlay while
-    # preserving the one implementation of the retry contract.
     cfg = get_config().data
     return provider_call(
         lane, key, lambda: func(*args, **kwargs), probe=probe,
+        empty_opens=empty_opens,
         retry_attempts=max(1, int(cfg.akshare_retries)),
         retry_backoff=max(0.0, float(cfg.akshare_retry_backoff)),
     )
+
+
+class BatchProgressStore:
+    """SQLite-backed per-symbol progress tracker for resumable batch refreshes.
+
+    When refreshing hundreds of symbols, a single transient failure should not
+    discard all previously-fetched data. Each successful symbol write is
+    checkpointed here; on crash/restart, consumers can skip already-completed
+    symbols and resume from the last checkpoint.
+    """
+
+    def __init__(self, batch_id: str, root: Path | None = None) -> None:
+        self.batch_id = batch_id
+        self.root = Path(root) if root else get_config().data_root
+        self.path = self.root / "batch_progress.sqlite"
+
+    def _conn(self) -> sqlite3.Connection:
+        conn = connect_sqlite(self.path, policy="cache")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS batch_progress ("
+            "batch_id TEXT NOT NULL, symbol TEXT NOT NULL, status TEXT NOT NULL,"
+            "updated_at REAL NOT NULL, error TEXT NOT NULL DEFAULT '',"
+            "PRIMARY KEY (batch_id, symbol))"
+        )
+        conn.execute("PRAGMA user_version=1")
+        return conn
+
+    def mark(self, symbol: str, status: str, *, error: str = "") -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO batch_progress (batch_id, symbol, status, updated_at, error)"
+                " VALUES (?,?,?,strftime('%s','now'),?) "
+                "ON CONFLICT(batch_id,symbol) DO UPDATE SET "
+                "status=excluded.status, updated_at=excluded.updated_at, error=excluded.error",
+                (self.batch_id, symbol, status, error),
+            )
+
+    def completed(self, symbol: str) -> None:
+        self.mark(symbol, "completed")
+
+    def failed(self, symbol: str, error: str = "") -> None:
+        self.mark(symbol, "failed", error=str(error)[:200])
+
+    def is_done(self, symbol: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT status FROM batch_progress WHERE batch_id=? AND symbol=?",
+                (self.batch_id, symbol),
+            ).fetchone()
+            return row is not None and row[0] == "completed"
+
+    def reset(self) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM batch_progress WHERE batch_id=?", (self.batch_id,))
+
+    def status(self) -> dict[str, str]:
+        with self._conn() as conn:
+            return dict(
+                conn.execute(
+                    "SELECT symbol, status FROM batch_progress WHERE batch_id=? ORDER BY symbol",
+                    (self.batch_id,),
+                ).fetchall()
+            )
+
+
+BATCH_PROGRESS = BatchProgressStore  # alias for import convenience
 
 
 class TushareRateLimiter:
