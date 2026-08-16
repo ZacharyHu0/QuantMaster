@@ -62,6 +62,9 @@ def _git(cwd: Path, *args: str) -> str:
 
 
 def _verified_repository(tmp_path: Path, monkeypatch) -> tuple[Path, Path, str]:
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.longpaths")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
     source = Path(__file__).resolve().parents[1]
     sha = _git(source, "rev-parse", "HEAD~1")
     task_sha = _git(source, "rev-parse", "HEAD")
