@@ -2,7 +2,7 @@ use numpy::{PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-fn median(values: &mut Vec<f64>) -> f64 {
+fn median(values: &mut [f64]) -> f64 {
     let n = values.len();
     if n == 0 {
         return f64::NAN;
@@ -13,8 +13,13 @@ fn median(values: &mut Vec<f64>) -> f64 {
     let mid = n / 2;
     if n.is_multiple_of(2) {
         values.select_nth_unstable_by(mid - 1, |a, b| a.total_cmp(b));
-        values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
-        (values[mid - 1] + values[mid]) / 2.0
+        let lower = values[mid - 1];
+        let upper = values[mid..]
+            .iter()
+            .copied()
+            .min_by(|a, b| a.total_cmp(b))
+            .unwrap();
+        (lower + upper) / 2.0
     } else {
         values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
         values[mid]
@@ -43,7 +48,9 @@ fn cross_section_rank<'py>(
             let input_row = matrix.row(row_idx);
             let mut indexed: Vec<(usize, f64)> = Vec::with_capacity(input_row.len());
             for (i, &v) in input_row.iter().enumerate() {
-                if v.is_finite() { indexed.push((i, v)); }
+                if v.is_finite() {
+                    indexed.push((i, v));
+                }
             }
             if indexed.is_empty() {
                 return;
@@ -75,7 +82,7 @@ fn robust_standardize<'py>(
     k: f64,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     if !k.is_finite() || k <= 0.0 {
-        return Err(pyo3::exceptions::        return Err(pyo3::exceptions::PyValueError::new_err("k 必须是有限正数")););
+        return Err(pyo3::exceptions::PyValueError::new_err("k 必须是有限正数"));
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
@@ -85,7 +92,7 @@ fn robust_standardize<'py>(
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             let input_row = matrix.row(row_idx);
-            let clean: Vec<f64> = input_row
+            let mut clean: Vec<f64> = input_row
                 .iter()
                 .filter(|&&v| v.is_finite())
                 .copied()
@@ -94,7 +101,7 @@ fn robust_standardize<'py>(
                 return;
             }
             let center = median(&mut clean);
-            let mad_input: Vec<f64> = clean.iter().map(|v| (v - center).abs()).collect();
+            let mut mad_input: Vec<f64> = clean.iter().map(|v| (v - center).abs()).collect();
             let mad = median(&mut mad_input) * 1.4826;
             let lower = center - k * mad;
             let upper = center + k * mad;
@@ -105,7 +112,11 @@ fn robust_standardize<'py>(
             };
             let variance = if clean.len() > 1 {
                 if mad > 0.0 {
-                    clean.iter().map(|v| (v.clamp(lower, upper) - mean).powi(2)).sum::<f64>() / (clean.len() - 1) as f64
+                    clean
+                        .iter()
+                        .map(|v| (v.clamp(lower, upper) - mean).powi(2))
+                        .sum::<f64>()
+                        / (clean.len() - 1) as f64
                 } else {
                     clean.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (clean.len() - 1) as f64
                 }
@@ -113,12 +124,14 @@ fn robust_standardize<'py>(
                 0.0
             };
             let std = variance.sqrt();
-            let mut ci = 0;
             for (col_idx, &v) in input_row.iter().enumerate() {
                 if v.is_finite() {
-                    let clipped_v = if mad > 0.0 { clean[ci].clamp(lower, upper) } else { clean[ci] };
-                    out_row[col_idx] = if std > 0.0 { (clipped_v - mean) / std } else { 0.0 };
-                    ci += 1;
+                    let clipped_v = if mad > 0.0 { v.clamp(lower, upper) } else { v };
+                    out_row[col_idx] = if std > 0.0 {
+                        (clipped_v - mean) / std
+                    } else {
+                        0.0
+                    };
                 }
             }
         });
@@ -195,10 +208,16 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
                 let sample: Vec<f64> = (start..=row_idx)
                     .filter_map(|r| {
                         let v = matrix[(r, col_idx)];
-                        if v.is_finite() { Some(v) } else { None }
+                        if v.is_finite() {
+                            Some(v)
+                        } else {
+                            None
+                        }
                     })
                     .collect();
-                if sample.len() < minimum { continue; }
+                if sample.len() < minimum {
+                    continue;
+                }
                 let mean = sample.iter().sum::<f64>() / sample.len() as f64;
                 if !std {
                     *out = mean;
@@ -271,14 +290,23 @@ fn rolling_corr<'py>(
                     .filter_map(|r| {
                         let a = l_arr[(r, col_idx)];
                         let b = r_arr[(r, col_idx)];
-                        if a.is_finite() && b.is_finite() { Some((a, b)) } else { None }
+                        if a.is_finite() && b.is_finite() {
+                            Some((a, b))
+                        } else {
+                            None
+                        }
                     })
                     .collect();
-                if sample.len() < minimum { continue; }
+                if sample.len() < minimum {
+                    continue;
+                }
                 let n = sample.len() as f64;
                 let mean_a = sample.iter().map(|t| t.0).sum::<f64>() / n;
                 let mean_b = sample.iter().map(|t| t.1).sum::<f64>() / n;
-                let cov = sample.iter().map(|t| (t.0 - mean_a) * (t.1 - mean_b)).sum::<f64>();
+                let cov = sample
+                    .iter()
+                    .map(|t| (t.0 - mean_a) * (t.1 - mean_b))
+                    .sum::<f64>();
                 let var_a = sample.iter().map(|t| (t.0 - mean_a).powi(2)).sum::<f64>();
                 let var_b = sample.iter().map(|t| (t.1 - mean_b).powi(2)).sum::<f64>();
                 if var_a > 0.0 && var_b > 0.0 {

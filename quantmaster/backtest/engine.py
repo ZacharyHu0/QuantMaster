@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from operator import itemgetter
 
 import numpy as np
 import pandas as pd
@@ -340,7 +339,7 @@ def _build_orders(
     differences = target_values - current_values
     valid_indices = np.where(valid_mask)[0]
     valid_diffs = differences[valid_indices]
-    sorted_indices = valid_indices[np.argsort(valid_diffs)]
+    sorted_indices = valid_indices[np.argsort(valid_diffs, kind="stable")]
 
     orders = [(symbols[i], float(differences[i])) for i in sorted_indices]
     return orders, retry_pending

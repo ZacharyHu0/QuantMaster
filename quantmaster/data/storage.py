@@ -168,7 +168,7 @@ def _batch_file_sha256(paths: list[Path]) -> dict[Path, str]:
     if len(paths) <= 1:
         return {p: _file_sha256(p) for p in paths}
     with ThreadPoolExecutor(max_workers=min(8, max(2, len(paths)))) as executor:
-        for p, d in executor.map(_file_sha256, paths):
+        for p, d in zip(paths, executor.map(_file_sha256, paths), strict=True):
             results[p] = d
     return results
 

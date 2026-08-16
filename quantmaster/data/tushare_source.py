@@ -61,29 +61,35 @@ def _parse_tushare_dates(
     field: str,
     allow_missing: bool = False,
 ) -> pd.Series:
-    """Parse Tushare's documented YYYYMMDD fields with vectorized conversion.
-
-    Replaces the per-row Python loop with pd.to_datetime(format=...) for 10-20x speedup
-    on large tables (5000+ rows). Missing/empty values produce NaT (allow_missing=True)
-    or raise ProviderContractChanged (allow_missing=False).
-    """
+    """Parse Tushare's documented YYYYMMDD fields with vectorized conversion."""
     raw_str = values.astype(str).str.strip()
-    mask_empty = raw_str.isin(["", "nan", "None"]) | values.isna()
+    missing_mask = values.isna() | raw_str.eq("")
     parsed = pd.to_datetime(raw_str, format="%Y%m%d", errors="coerce")
-    if not allow_missing and mask_empty.any():
-        positions = list(values.index[mask_empty])[:5]
+    invalid_mask = ~missing_mask & parsed.isna()
+    issue_mask = invalid_mask if allow_missing else invalid_mask | missing_mask
+    if not issue_mask.any():
+        return parsed
+
+    position = next(i for i, issue in enumerate(issue_mask.tolist()) if issue)
+    if missing_mask.iloc[position]:
         raise ProviderContractChanged(
-            f"Tushare {field} \u5b58\u5728\u7f3a\u5931\u503c [missing_provider_date], "
-            f"\u793a\u4f8b\u7d22\u5f15: {positions}"
+            f"Tushare {field}[{position}] \u7f3a\u5931 [missing_provider_date]"
         )
-    bad_mask = mask_empty & parsed.notna()
-    if bad_mask.any():
-        positions = list(values.index[bad_mask])[:5]
+    raw = values.iloc[position]
+    try:
+        parse_provider_date(
+            raw,
+            field=f"Tushare.{field}[{position}]",
+            provider_format=ProviderDateFormat.YYYYMMDD,
+        )
+    except TemporalContractError as exc:
+        code = exc.code
         raise ProviderContractChanged(
-            f"Tushare {field} \u5b58\u5728\u65e0\u6cd5\u89e3\u6790\u7684\u65e5\u671f [parse_error], "
-            f"\u793a\u4f8b\u7d22\u5f15: {positions}"
-        )
-    return parsed
+            f"Tushare {field}[{position}] \u65e0\u6cd5\u6309 YYYYMMDD \u89e3\u6790 [{code}]: {exc}"
+        ) from exc
+    raise ProviderContractChanged(
+        f"Tushare {field}[{position}] \u65e0\u6cd5\u6309 YYYYMMDD \u89e3\u6790 [invalid_provider_date]"
+    )
 
 
 
