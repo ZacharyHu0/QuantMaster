@@ -13,18 +13,20 @@ import time
 import uuid
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
+from pydantic import Field
 
 from quantmaster import __version__
 from quantmaster.config import get_config
 from quantmaster.data.base import DataEvidenceNotReady, MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
 from quantmaster.runtime.json import StrictJSONResponse as JSONResponse
+from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.capabilities import _progress_stream, _stream_runtime
 from quantmaster.server.capabilities import (
