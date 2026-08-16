@@ -2404,7 +2404,7 @@ requires-dist = [
     { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "backtrader", marker = "extra == 'backtrader'", specifier = ">=1.9" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
-    { name = "build", marker = "extra == 'quality'", specifier = ">=1.2" },
+    { name = "build", marker = "extra == 'quality'", specifier = ">=1.5.0" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'quality'", specifier = ">=7.6" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "feedparser", specifier = ">=6.0,<7" },
