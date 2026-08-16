@@ -666,6 +666,7 @@ def test_scheduler_survives_unexpected_cycle_failure(
         pass
 
     isolated_config.data.free_stockdb_auto_update = False
+    isolated_config.data.free_stockdb_managed = False
     monkeypatch.setenv(
         "QM_FREE_STOCKDB_CONTROL_PATH", str(tmp_path / "control.sqlite"),
     )
@@ -725,10 +726,18 @@ def test_supervise_service_does_not_restart_running_service(
     runtime = FreeStockDBRuntime()
     runtime._owner = True
     starts: list[bool] = []
+    cycles = 0
+
+    def process_command() -> bool:
+        nonlocal cycles
+        cycles += 1
+        if cycles > 1:
+            runtime._stop.set()
+        return False
 
     monkeypatch.setattr(runtime, "_listening", lambda: True)
     monkeypatch.setattr(runtime, "_start_service", lambda: starts.append(True))
-    monkeypatch.setattr(runtime, "_process_command", lambda: False)
+    monkeypatch.setattr(runtime, "_process_command", process_command)
     monkeypatch.setattr(runtime._stop, "wait", lambda _s: False)
 
     runtime._scheduler()
