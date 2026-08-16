@@ -139,18 +139,28 @@ class _FrameInfo:
 _state = LoggingState(level=logging.INFO, verbose=False, log_path=None)
 
 
-def redact_sensitive_text(value: object) -> str:
-    """遮蔽凭据与本地绝对路径，避免诊断文本越过公开边界。"""
+def _redact_text(value: object, *, include_local_paths: bool) -> str:
     text = str(value)
-    text = _LOCAL_PATH_PATTERN.sub("<local-path>", text)
-    text = _LOCAL_REFERENCE_PATTERN.sub("<local-path>", text)
+    if include_local_paths:
+        text = _LOCAL_PATH_PATTERN.sub("<local-path>", text)
+        text = _LOCAL_REFERENCE_PATTERN.sub("<local-path>", text)
     for pattern, replacement in _SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
 
 
+def redact_sensitive_text(value: object) -> str:
+    """遮蔽凭据，同时保留本地运行时路径供诊断和界面展示。"""
+    return _redact_text(value, include_local_paths=False)
+
+
+def redact_public_text(value: object) -> str:
+    """遮蔽凭据与本地路径，供 GitHub/CI 公共边界使用。"""
+    return _redact_text(value, include_local_paths=True)
+
+
 def redact_sensitive_value(value: object, *, key: str = "", depth: int = 0) -> object:
-    """Recursively redact values before any QuantMaster handler sees them."""
+    """Recursively redact credentials while preserving local runtime paths."""
     if _SECRET_FIELD.search(key):
         return "***"
     if depth >= 8:
@@ -180,7 +190,8 @@ def _install_redacting_record_factory() -> None:
 
     def factory(*args, **kwargs):
         record = _RECORD_FACTORY(*args, **kwargs)
-        record.msg = redact_sensitive_value(record.msg)
+        # Keep the format string intact; redacting it before interpolation can
+        # remove ``%s`` placeholders when a field name resembles a secret.
         record.args = redact_sensitive_value(record.args)
         return record
 

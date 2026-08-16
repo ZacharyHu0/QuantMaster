@@ -38,7 +38,7 @@ except ModuleNotFoundError:
         restore_acl_inheritance,
     )
 
-from quantmaster.logging_config import redact_sensitive_text  # noqa: E402
+from quantmaster.logging_config import redact_public_text  # noqa: E402
 
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -309,7 +309,7 @@ def valid_task_remove_intent(primary: Path, target: Path, branch: str) -> bool:
 
 
 def run(command: list[str], *, cwd: Path) -> None:
-    print(f"[task] {redact_sensitive_text(' '.join(command))}", flush=True)
+    print(f"[task] {redact_public_text(' '.join(command))}", flush=True)
     primary = primary_root(cwd)
     artifacts = primary / ".artifacts" / "worktrees" / cwd.name
     env = os.environ.copy()
@@ -742,9 +742,9 @@ def remove_task_artifacts(
         relative_blocked = blocked.relative_to(artifact_root).as_posix()
         return (
             f"{TASK_ARTIFACT_ACL_UNRECOVERABLE}: kind={kind}; "
-            f"root={redact_sensitive_text(artifact_root)}; "
-            f"blocked={redact_sensitive_text(relative_blocked)}; "
-            f"reason={redact_sensitive_text(reason)}; "
+            f"root={redact_public_text(artifact_root)}; "
+            f"blocked={redact_public_text(relative_blocked)}; "
+            f"reason={redact_public_text(reason)}; "
             f"retry={retry}；工件和任务分支已保留"
         )
 
@@ -1173,7 +1173,7 @@ def main(argv: list[str] | None = None) -> int:
                 adopt_legacy_orphans=args.adopt_legacy_orphans,
             )
     except (RuntimeError, subprocess.CalledProcessError) as exc:
-        print(f"[task] FAILED: {redact_sensitive_text(exc)}", file=sys.stderr)
+        print(f"[task] FAILED: {redact_public_text(exc)}", file=sys.stderr)
         return 1
     return 0
 
