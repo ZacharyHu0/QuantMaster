@@ -53,7 +53,7 @@ dev = [
     "httpx2>=2.10.0,<3",
     "pytest-split>=0.10,<1",
     "pytest-timeout>=2.3,<3",
-    "ruff>=0.4",
+    "ruff>=0.16.2",
     # The full test suite exercises Ridge and Spearman contracts even when the
     # heavyweight deep-learning extra is intentionally not installed.
     "scikit-learn>=1.3",
