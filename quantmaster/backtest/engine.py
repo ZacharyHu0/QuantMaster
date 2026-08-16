@@ -285,7 +285,7 @@ def _execute_risk_exits(
         reason = _risk_exit_reason(change, config)
         if reason is None:
             continue
-        prev_close = float(day_previous_close.get(symbol, np.nan)) if pd.notna(day_previous_close.get(symbol, np.nan)) else None
+        prev_close = _previous_close_value(day_previous_close, symbol)
         blocked = _execution_reason_from_series(
             symbol, "sell", float(price), prev_close,
             suspended=suspended_series,

@@ -214,7 +214,7 @@ class AkshareSource(DataSource):
             "深圳证券交易所": "SZ", "深交所": "SZ", "SZSE": "SZ", "SZ": "SZ",
             "北京证券交易所": "BJ", "北交所": "BJ", "BSE": "BJ", "BJ": "BJ",
         }
-        for code, ex in zip(codes[valid_mask], exchange_series[valid_mask]):
+        for code, ex in zip(codes[valid_mask], exchange_series[valid_mask], strict=True):
             if code in seen:
                 continue
             suffix = exchanges.get(ex)
