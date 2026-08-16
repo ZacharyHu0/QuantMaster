@@ -2416,7 +2416,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'quality'", specifier = ">=1.11" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "optuna", marker = "extra == 'ml'", specifier = ">=4.0,<5" },
-    { name = "pandas", specifier = ">=2.0" },
+    { name = "pandas", specifier = ">=3.0.5" },
     { name = "pip-audit", marker = "extra == 'quality'", specifier = "==2.10.1" },
     { name = "playwright", marker = "extra == 'ui'", specifier = ">=1.46" },
     { name = "pyarrow", specifier = ">=15.0" },
