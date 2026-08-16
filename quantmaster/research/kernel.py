@@ -111,16 +111,6 @@ def _python_rolling_corr(left: np.ndarray, right: np.ndarray, window: int) -> np
     return output
 
 
-def _to_native(values: np.ndarray) -> list[list[float | None]]:
-    return [[float(item) if np.isfinite(item) else None for item in row] for row in values]
-
-
-def _from_native(values: Any) -> np.ndarray:
-    return np.asarray([
-        [np.nan if item is None else float(item) for item in row] for row in values
-    ], dtype="float64")
-
-
 @dataclass
 class Kernel:
     requested: KernelBackend = KernelBackend.AUTO
@@ -157,7 +147,7 @@ class Kernel:
         if self._native is None:
             return fallback()
         try:
-            return _from_native(getattr(self._native, native_name)(*native_args))
+            return np.asarray(getattr(self._native, native_name)(*native_args), dtype="float64")
         except Exception as exc:
             self.fallback_reason = f"Rust {native_name} 失败: {exc}"
             self.backend_used = KernelBackend.PYTHON
@@ -167,7 +157,7 @@ class Kernel:
 
     def cross_section_rank(self, values: Any) -> np.ndarray:
         matrix = _matrix(values)
-        return self._call("cross_section_rank", (_to_native(matrix),), lambda: _python_rank(matrix))
+        return self._call("cross_section_rank", (matrix,), lambda: _python_rank(matrix))
 
     def robust_standardize(self, values: Any, k: float = 5.0) -> np.ndarray:
         matrix = _matrix(values)
@@ -175,35 +165,35 @@ class Kernel:
         if not np.isfinite(normalized_k) or normalized_k <= 0:
             raise ValueError("k 必须是有限正数")
         return self._call(
-            "robust_standardize", (_to_native(matrix), normalized_k),
+            "robust_standardize", (matrix, normalized_k),
             lambda: _python_robust_standardize(matrix, normalized_k),
         )
 
     def weighted_zscore(self, values: Any, weights: Any) -> np.ndarray:
         matrix, weight_matrix = _matrix(values), _matrix(weights)
         return self._call(
-            "weighted_zscore", (_to_native(matrix), _to_native(weight_matrix)),
+            "weighted_zscore", (matrix, weight_matrix),
             lambda: _python_weighted_zscore(matrix, weight_matrix),
         )
 
     def rolling_mean(self, values: Any, window: int) -> np.ndarray:
         matrix = _matrix(values)
         return self._call(
-            "rolling_mean", (_to_native(matrix), int(window)),
+            "rolling_mean", (matrix, int(window)),
             lambda: _python_rolling(matrix, int(window), "mean"),
         )
 
     def rolling_std(self, values: Any, window: int) -> np.ndarray:
         matrix = _matrix(values)
         return self._call(
-            "rolling_std", (_to_native(matrix), int(window)),
+            "rolling_std", (matrix, int(window)),
             lambda: _python_rolling(matrix, int(window), "std"),
         )
 
     def rolling_corr(self, left: Any, right: Any, window: int) -> np.ndarray:
         a, b = _matrix(left), _matrix(right)
         return self._call(
-            "rolling_corr", (_to_native(a), _to_native(b), int(window)),
+            "rolling_corr", (a, b, int(window)),
             lambda: _python_rolling_corr(a, b, int(window)),
         )
 

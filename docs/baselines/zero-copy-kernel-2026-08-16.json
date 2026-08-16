@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-08-16T00:00:00+00:00",
+  "machine": {
+    "platform": "win32",
+    "python": "3.12.13",
+    "processor": "local development machine",
+    "rust_kernel_version": "0.2.0"
+  },
+  "dataset": {
+    "kind": "real-market-stockdb",
+    "source": "free-stockdb at 127.0.0.1:7899",
+    "symbols": 2500,
+    "trading_days": 758,
+    "rows": 1872264,
+    "period": "2023-07-01..2026-08-15",
+    "identity": "stockdb daily qfq"
+  },
+  "method": {
+    "seam": "quantmaster.research.providers.compute_core_factors",
+    "warm_cold": "1 untimed warmup + 1 measured sample (cold)",
+    "runs": 1,
+    "memory_method": "not measured"
+  },
+  "results": {
+    "python_kernel_cold_ms": 95896.6,
+    "python_kernel_warm_p50_ms": 97399.4,
+    "python_kernel_warm_samples_ms": [97399.4],
+    "rust_zero_copy_cold_ms": 5351.5,
+    "rust_zero_copy_warm_p50_ms": 5454.9,
+    "rust_zero_copy_warm_samples_ms": [5454.9],
+    "net_speedup": 17.855
+  },
+  "correctness": {
+    "parity_test": "passed",
+    "test": "test_rust_kernel_matches_python_when_extension_is_available",
+    "threshold": "atol=1e-6, rtol=1e-6, equal_nan=True"
+  },
+  "decision": {
+    "status": "keep",
+    "threshold_met": true,
+    "threshold_speedup_min": 1.2,
+    "measured_speedup": 17.855,
+    "note": "Zero-copy Rust kernel achieves ~18x speedup on real market data. Full-core 5000-symbol scale is expected to maintain similar margin. Restore native-parity CI lane and packaging on merge."
+  }
+}
