@@ -34,7 +34,7 @@ dependencies = [
 # 免费数据源（推荐安装）
 data = [
     "akshare>=1.18.81",
-    "yfinance>=0.2.40",
+    "yfinance>=1.6.0",
 ]
 # 可选数据源
 tushare = ["tushare>=1.4"]
