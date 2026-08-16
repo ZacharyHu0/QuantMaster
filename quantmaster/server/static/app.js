@@ -1777,6 +1777,7 @@ const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
 let todayChartsRetry = 0;
 let todayRenderGeneration = 0;
+let todayVisualsNeedRemount = false;
 function todayCharts() {
   if (!todayChartsPromise) {
     const retry = todayChartsRetry;
@@ -1860,6 +1861,16 @@ function renderAshareFearGreedVisuals(root = document) {
     });
   }, () => {});
 }
+
+document.addEventListener('quantmaster:workspace-mounted', event => {
+  if (event.detail?.workspace !== 'today' || event.detail?.page !== 'quotes') return;
+  if (!todayVisualsNeedRemount) return;
+  todayVisualsNeedRemount = false;
+  const root = document.getElementById('tab-market');
+  if (root && !root.querySelector('[data-fear-greed-gauge] canvas')) {
+    renderFearGreedVisuals(root);
+  }
+});
 
 function rsiSparkPoints(history) {
   const points = (Array.isArray(history) ? history : []).map(point => {
@@ -2283,6 +2294,7 @@ function clearMarketSparks() {
 
 function disposeMarketSparks() {
   todayRenderGeneration += 1;
+  todayVisualsNeedRemount = true;
   marketReloadPending = false;
   if (marketColdRetryTimer !== null) {
     window.clearTimeout(marketColdRetryTimer);

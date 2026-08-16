@@ -66,7 +66,11 @@ const helpFeature = (() => {
     if (actualTopic !== current.topic) setRoute(actualTopic, '', {replace: true});
     selectTopic(actualTopic);
     requestAnimationFrame(() => {
-      target.scrollIntoView({behavior, block: 'start'});
+      if (current.topic === 'start' && !current.anchor) {
+        window.scrollTo({top: 0, left: 0, behavior});
+      } else {
+        target.scrollIntoView({behavior, block: 'start'});
+      }
       if (focus) {
         const heading = target.querySelector('h1, h2, h3');
         if (heading) {

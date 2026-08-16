@@ -138,6 +138,7 @@ function showRoute(workspace, page) {
     section.classList.toggle('active', section.id === `tab-${tab}`);
   });
   control?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  window.scrollTo({top: 0, left: 0, behavior: 'auto'});
 }
 
 function showError(error) {
