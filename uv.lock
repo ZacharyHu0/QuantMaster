@@ -2410,7 +2410,7 @@ requires-dist = [
     { name = "feedparser", specifier = ">=6.0,<7" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.10.0,<3" },
-    { name = "keyring", specifier = ">=25.0" },
+    { name = "keyring", specifier = ">=25.7.0" },
     { name = "lark-oapi", specifier = ">=1.7.1,<2" },
     { name = "maturin", marker = "extra == 'rust'", specifier = "==1.14.1" },
     { name = "mypy", marker = "extra == 'quality'", specifier = ">=1.11" },
