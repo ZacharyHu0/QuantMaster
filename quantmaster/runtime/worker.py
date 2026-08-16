@@ -92,6 +92,12 @@ def runtime_worker_status() -> dict[str, Any]:
         "age_seconds": round(age_seconds, 3),
         "heartbeat_path": str(path),
         "reason": reason,
+        "schema_migration_blocked": value.get("schema_migration") == "schema-migration-blocked",
+        "worker_state": (
+            "schema-migration-blocked"
+            if value.get("schema_migration") == "schema-migration-blocked"
+            else "running" if available else "unavailable"
+        ),
     }
 
 
@@ -153,6 +159,14 @@ class RuntimeWorker:
             "slot_id": identity.slot_id,
             "runtime_generation": identity.runtime_generation,
         }
+        plan = self._plan
+        value["schema_migration"] = str(
+            getattr(plan, "schema_migration", "ready")
+            if plan is not None else "ready"
+        )
+        detail = str(getattr(plan, "schema_migration_detail", "") or "")
+        if detail:
+            value["schema_migration_detail"] = detail[:800]
         command_server = self._command_server
         value["commands_available"] = bool(
             command_server is not None and command_server.running,

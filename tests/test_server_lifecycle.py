@@ -374,3 +374,27 @@ def test_runtime_worker_status_reports_a_persisted_bootstrap_failure(isolated_co
     assert status["available"] is False
     assert status["supervisor"]["status"] == "failed"
     assert "startup failed" in status["reason"]
+
+
+def test_runtime_worker_status_exposes_schema_migration_block(isolated_config):
+    from quantmaster.runtime.worker import RuntimeWorker, runtime_worker_status
+
+    worker = RuntimeWorker()
+    worker._plan = type(
+        "SchemaBlockedPlan",
+        (),
+        {
+            "schema_migration": "schema-migration-blocked",
+            "schema_migration_detail": "lab schema 需显式迁移",
+        },
+    )()
+    worker._started = True
+    worker._write_heartbeat()
+
+    status = runtime_worker_status()
+
+    assert status["status"] == "running"
+    assert status["available"] is True
+    assert status["schema_migration_blocked"] is True
+    assert status["worker_state"] == "schema-migration-blocked"
+    assert status["schema_migration_detail"] == "lab schema 需显式迁移"

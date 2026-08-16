@@ -331,29 +331,13 @@ async def live_probe() -> dict:
 async def external_sentiment() -> dict:
     """External sentiment indicator; returns empty data when source is unavailable."""
     return {"status": "unavailable", "sources": [], "score": None}
-    """Sole constant-time health probe; it deliberately performs no store access.
 
-    Optional provider/worker state is reported separately by ``/diagnostics``.
-    """
-    identity = get_application_identity()
-    from quantmaster.server.readiness import readiness_status
 
-    readiness = readiness_status(include_optional_services=False)
-    threads = threading.active_count()
-    return {
-        "status": "ok",
-        "core_ready": bool(readiness["core_ready"]),
-        "readiness_status": str(readiness["status"]),
-        "version": __version__,
-        "release_date": RELEASE_DATE,
-        "process_pid": os.getpid(),
-        "generation": os.environ.get("QM_WEB_GENERATION", "0"),
-        "build_sha": identity.build_sha,
-        "slot_id": identity.slot_id,
-        "runtime_generation": identity.runtime_generation,
-        "web_threads": threads,
-        "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
-    }
+@router.get("/api/v1/runtime/worker")
+def runtime_worker() -> dict[str, Any]:
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    return runtime_worker_status()
 
 
 @router.get("/api/v1/diagnostics")
@@ -446,6 +430,17 @@ def market_fear_greed() -> dict:
     from quantmaster.market import read_cnn_fear_greed
 
     return read_cnn_fear_greed()
+
+
+@router.post("/api/v1/market/fear-greed/refresh")
+def refresh_market_fear_greed(request: Request) -> dict:
+    """Refresh CNN once on explicit operator request; the GET stays local-only."""
+    from quantmaster.server.security import require_csrf
+
+    require_csrf(request)
+    from quantmaster.market import load_cnn_fear_greed
+
+    return load_cnn_fear_greed(force=True)
 
 
 @router.get("/api/v1/market/ashare-fear-greed")

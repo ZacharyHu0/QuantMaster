@@ -73,6 +73,8 @@ def _load_panel(universe: str, start: str, end: str):
 
 
 def cmd_serve(args) -> None:
+    if getattr(args, "strict_schema", False):
+        os.environ["QM_STRICT_SCHEMA"] = "1"
     from quantmaster.runtime.windows_app import initialize_windows_app_process
     from quantmaster.server.app import serve
 
@@ -269,6 +271,8 @@ def cmd_lab(args) -> None:
     from quantmaster.lab.service import LabService
 
     if args.lab_cmd == "worker":
+        if getattr(args, "strict_schema", False):
+            os.environ["QM_STRICT_SCHEMA"] = "1"
         from quantmaster.lab.worker import run_standalone
 
         run_standalone()
@@ -1211,6 +1215,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="启动 Web 界面")
     p.add_argument("--open", dest="open_browser", action="store_true", help="启动后自动打开浏览器")
+    p.add_argument("--strict-schema", action="store_true", help="schema 不完整时让后台 worker fail-fast")
     p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("setup-shortcut", help="创建或刷新稳定槽用户快捷方式")
@@ -1260,7 +1265,8 @@ def build_parser() -> argparse.ArgumentParser:
     lbenchmark.add_argument("--start", default="2015-01-01")
     lbenchmark.add_argument("--end", default=None)
     lbenchmark.add_argument("--runs", type=int, default=2)
-    lq.add_parser("worker", help="启动独立研究 Worker")
+    lworker = lq.add_parser("worker", help="启动独立研究 Worker")
+    lworker.add_argument("--strict-schema", action="store_true", help="schema 不完整时 fail-fast")
     llist = lq.add_parser("list", help="列出版本化因子目录")
     llist.add_argument("--status", default=None)
     llist.add_argument("--search", default="")

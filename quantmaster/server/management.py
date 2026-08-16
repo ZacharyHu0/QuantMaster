@@ -505,6 +505,7 @@ def retry_settings_apply(request: Request) -> dict:
     changed_fields = [
         f"{group}.{field}"
         for group, section in current.model_dump().items()
+        if isinstance(section, dict)
         for field in section
     ]
     saved = {
