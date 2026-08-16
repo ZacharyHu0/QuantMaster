@@ -368,8 +368,6 @@ async def request_context_and_migration_lock(request: Request, call_next):
             blocking=True,
         )
         response = _problem_response(request_id, problem, status_code=exc.status_code)
-    except SessionTargetUnavailable as exc:
-        response = _session_target_response(request_id, exc)
     except OperationProblem as exc:
         # Starlette's exception handlers sit inside this request middleware.
         # Preserve a deliberate cold/degraded operation contract instead of
