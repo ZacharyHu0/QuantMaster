@@ -2,13 +2,22 @@ use numpy::{PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(|left, right| left.total_cmp(right));
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) / 2.0
+fn median(values: &mut Vec<f64>) -> f64 {
+    let n = values.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n == 1 {
+        return values[0];
+    }
+    let mid = n / 2;
+    if n.is_multiple_of(2) {
+        values.select_nth_unstable_by(mid - 1, |a, b| a.total_cmp(b));
+        values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+        (values[mid - 1] + values[mid]) / 2.0
     } else {
-        values[middle]
+        values.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+        values[mid]
     }
 }
 
@@ -32,11 +41,10 @@ fn cross_section_rank<'py>(
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             let input_row = matrix.row(row_idx);
-            let mut indexed: Vec<(usize, f64)> = input_row
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &v)| if v.is_finite() { Some((i, v)) } else { None })
-                .collect();
+            let mut indexed: Vec<(usize, f64)> = Vec::with_capacity(input_row.len());
+            for (i, &v) in input_row.iter().enumerate() {
+                if v.is_finite() { indexed.push((i, v)); }
+            }
             if indexed.is_empty() {
                 return;
             }
@@ -67,7 +75,7 @@ fn robust_standardize<'py>(
     k: f64,
 ) -> PyResult<Bound<'py, PyArray2<f64>>> {
     if !k.is_finite() || k <= 0.0 {
-        return Err(pyo3::exceptions::PyValueError::new_err("k 必须是有限正数"));
+        return Err(pyo3::exceptions::        return Err(pyo3::exceptions::PyValueError::new_err("k 必须是有限正数")););
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
@@ -85,21 +93,22 @@ fn robust_standardize<'py>(
             if clean.is_empty() {
                 return;
             }
-            let center = median(clean.clone());
-            let mad = median(clean.iter().map(|v| (v - center).abs()).collect()) * 1.4826;
-            let clipped: Vec<f64> = clean
-                .iter()
-                .map(|v| {
-                    if mad > 0.0 {
-                        v.clamp(center - k * mad, center + k * mad)
-                    } else {
-                        *v
-                    }
-                })
-                .collect();
-            let mean = clipped.iter().sum::<f64>() / clipped.len() as f64;
-            let variance = if clipped.len() > 1 {
-                clipped.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (clipped.len() - 1) as f64
+            let center = median(&mut clean);
+            let mad_input: Vec<f64> = clean.iter().map(|v| (v - center).abs()).collect();
+            let mad = median(&mut mad_input) * 1.4826;
+            let lower = center - k * mad;
+            let upper = center + k * mad;
+            let mean = if mad > 0.0 {
+                clean.iter().map(|v| v.clamp(lower, upper)).sum::<f64>() / clean.len() as f64
+            } else {
+                clean.iter().sum::<f64>() / clean.len() as f64
+            };
+            let variance = if clean.len() > 1 {
+                if mad > 0.0 {
+                    clean.iter().map(|v| (v.clamp(lower, upper) - mean).powi(2)).sum::<f64>() / (clean.len() - 1) as f64
+                } else {
+                    clean.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (clean.len() - 1) as f64
+                }
             } else {
                 0.0
             };
@@ -107,11 +116,8 @@ fn robust_standardize<'py>(
             let mut ci = 0;
             for (col_idx, &v) in input_row.iter().enumerate() {
                 if v.is_finite() {
-                    out_row[col_idx] = if std > 0.0 {
-                        (clipped[ci] - mean) / std
-                    } else {
-                        0.0
-                    };
+                    let clipped_v = if mad > 0.0 { clean[ci].clamp(lower, upper) } else { clean[ci] };
+                    out_row[col_idx] = if std > 0.0 { (clipped_v - mean) / std } else { 0.0 };
                     ci += 1;
                 }
             }
