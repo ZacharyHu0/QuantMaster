@@ -14,7 +14,6 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from scipy import sparse
 
 ALGORITHM_VERSION = "QM_ROTATION_V7"
 ROTATION_WINDOWS = (1, 3, 5, 20)
@@ -816,8 +815,8 @@ class _GroupAggregation:
     The previous implementation repeatedly selected ``date × member`` DataFrame
     slices inside each group/window/history loop.  For a ~1,000-theme catalog
     that converts one market matrix into hundreds of thousands of pandas
-    index operations.  This kernel builds a CSR membership matrix once and
-    performs all count/ratio/amount reductions as dense NumPy outputs.
+    index operations.  This kernel builds one compact membership matrix and
+    performs all count/ratio/amount reductions as NumPy outputs.
     """
 
     rows: dict[str, _GroupRow]
@@ -831,15 +830,6 @@ class _GroupAggregation:
     returns_current: np.ndarray
     liquidity_current: np.ndarray
     close_observations: np.ndarray
-
-
-def _dense_sparse_product(matrix: sparse.csr_matrix, values: np.ndarray) -> np.ndarray:
-    """Return date × group counts without leaking sparse implementation types."""
-
-    result = matrix @ values.T
-    if sparse.issparse(result):
-        result = result.toarray()
-    return np.asarray(result, dtype=float).T
 
 
 def _group_median_and_advance(
@@ -929,7 +919,7 @@ def _build_group_aggregation(
     minimum_members: int,
     minimum_coverage: float,
 ) -> _GroupAggregation:
-    """Build one CSR group×symbol matrix and all reusable endpoint arrays."""
+    """Build one group×symbol matrix and all reusable endpoint arrays."""
 
     columns = [str(value) for value in trend.close.columns]
     positions = {symbol: index for index, symbol in enumerate(columns)}
@@ -957,11 +947,10 @@ def _build_group_aggregation(
             score_current=np.asarray([], dtype=float), returns_current=np.asarray([], dtype=float),
             liquidity_current=np.asarray([], dtype=float), close_observations=np.asarray([], dtype=int),
         )
-    membership_csr = sparse.csr_matrix(
-        (np.ones(len(sparse_rows), dtype=np.int8), (sparse_rows, sparse_columns)),
-        shape=(group_count, symbol_count),
-    )
-    membership = membership_csr.toarray().astype(bool, copy=False)
+    membership = np.zeros((group_count, symbol_count), dtype=bool)
+    membership[
+        np.asarray(sparse_rows, dtype=int), np.asarray(sparse_columns, dtype=int)
+    ] = True
     member_counts = np.asarray([row[3] for row in raw_rows], dtype=float)
     eligible_values = trend.eligible.to_numpy(dtype=bool)
     strong_values = masks["strong_up"].to_numpy(dtype=bool)
@@ -969,10 +958,13 @@ def _build_group_aggregation(
         masks["strong_up"].to_numpy(dtype=bool) | masks["up"].to_numpy(dtype=bool)
     )
     weak_values = masks["weak"].to_numpy(dtype=bool)
-    eligible = _dense_sparse_product(membership_csr, eligible_values.astype(np.int16))
-    strong_counts = _dense_sparse_product(membership_csr, strong_values.astype(np.int16))
-    positive_counts = _dense_sparse_product(membership_csr, positive_values.astype(np.int16))
-    weak_counts = _dense_sparse_product(membership_csr, weak_values.astype(np.int16))
+    states = np.stack(
+        (eligible_values, strong_values, positive_values, weak_values), axis=-1,
+    )
+    state_counts = np.empty((len(eligible_values), group_count, 4), dtype=float)
+    for group_index, row in enumerate(raw_rows):
+        state_counts[:, group_index, :] = states[:, row[4], :].sum(axis=1, dtype=np.int32)
+    eligible, strong_counts, positive_counts, weak_counts = np.moveaxis(state_counts, 2, 0)
 
     def ratios(values: np.ndarray) -> np.ndarray:
         return np.divide(

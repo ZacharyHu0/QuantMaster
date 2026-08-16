@@ -76,10 +76,6 @@ lark_oapi_hidden = [
     "lark_oapi.ws",
     "lark_oapi.ws.client",
 ]
-scipy_array_api_hidden = [
-    "scipy._external.array_api_compat.common._fft",
-    "scipy._external.array_api_compat.numpy.fft",
-]
 pyarrow_unused_hidden = [
     "pyarrow.acero",
     "pyarrow.cuda",
@@ -100,9 +96,9 @@ a = Analysis(
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
         "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on", "_quantmaster_kernel",
-    ] + optional_hidden + lark_oapi_hidden + scipy_array_api_hidden,
+    ] + optional_hidden + lark_oapi_hidden,
     excludes=[
-        "tkinter", "matplotlib", "torch", "dask", "pytest", "_pytest",
+        "tkinter", "matplotlib", "torch", "sklearn", "scipy", "dask", "pytest", "_pytest",
         "qrcode.tests", "lark_oapi.adapter",
         *pyarrow_unused_hidden,
     ],
