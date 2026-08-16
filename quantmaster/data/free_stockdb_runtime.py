@@ -1390,6 +1390,19 @@ class FreeStockDBRuntime:
         self._ensure_control().complete_command(str(command["id"]), result)
         return True
 
+    def _supervise_service(self, cfg: Any) -> None:
+        if (
+            not cfg.free_stockdb_managed
+            or self._update_lock.locked()
+            or time.monotonic() - self._last_service_check < _SERVICE_CHECK_SECONDS
+        ):
+            return
+        self._last_service_check = time.monotonic()
+        if self._listening():
+            return
+        logger.warning("free-stockdb 服务失联，监督器尝试重新启动")
+        self._start_service()
+
     def _scheduler(self) -> None:
         while not self._stop.is_set():
             try:
@@ -1402,16 +1415,7 @@ class FreeStockDBRuntime:
                     self.update_now("retry", target_session=target, attempt=attempt)
                     continue
                 cfg = get_config().data
-                service_check_due = (
-                    cfg.free_stockdb_managed
-                    and not self._update_lock.locked()
-                    and time.monotonic() - self._last_service_check >= _SERVICE_CHECK_SECONDS
-                )
-                if service_check_due:
-                    self._last_service_check = time.monotonic()
-                    if not self._listening():
-                        logger.warning("free-stockdb 服务失联，监督器尝试重新启动")
-                        self._start_service()
+                self._supervise_service(cfg)
                 scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
                 due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
                 if (
