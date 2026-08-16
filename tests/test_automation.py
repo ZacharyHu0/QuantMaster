@@ -1129,7 +1129,6 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
     client = FeishuBotClient(store, MemoryCredentials())
     client.configure("cli_app", "secret")
     stop_calls = []
-    started = threading.Event()
 
     class FakeFeishuChannel:
         def __init__(self, **_kwargs):
@@ -1140,7 +1139,6 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
 
         async def start_background(self, *, timeout):
             assert timeout == 30
-            started.set()
 
         async def stop_background(self):
             stop_calls.append(threading.current_thread().name)
@@ -1150,23 +1148,26 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
         lambda: (FakeFeishuChannel, None, None),
     )
     monkeypatch.setattr(feishu_module, "_track_lark_ws_tasks", lambda _channel: None)
-    stop_event = threading.Event()
-    owner = threading.Thread(
-        target=client.listen_forever,
-        args=(lambda *_: None, stop_event),
-        name="feishu-owner",
-    )
-    owner.start()
-    assert started.wait(5)
 
-    async def close_twice():
-        await asyncio.gather(client.aclose(), client.aclose())
+    async def exercise():
+        stop_event = threading.Event()
+        listener = asyncio.create_task(client.listen(lambda *_: None, stop_event))
 
-    asyncio.run(close_twice())
-    owner.join(timeout=1)
+        async def wait_for_active_channel():
+            while client._active_channel is None:
+                await asyncio.sleep(0)
 
-    assert not owner.is_alive()
-    assert stop_calls == ["feishu-owner"]
+        await asyncio.wait_for(wait_for_active_channel(), timeout=5)
+        await asyncio.gather(
+            asyncio.to_thread(asyncio.run, client.aclose()),
+            asyncio.to_thread(asyncio.run, client.aclose()),
+        )
+        await listener
+        return threading.current_thread().name
+
+    owner_thread = asyncio.run(exercise())
+
+    assert stop_calls == [owner_thread]
     assert client._active_channel is None
 
 
