@@ -12,7 +12,22 @@ function text(value) {
 }
 
 function identityValue(identity) {
-  return text(identity?.build_sha) || '—';
+  const version = text(identity?.version);
+  const build = text(identity?.build_sha);
+  return version || build || '—';
+}
+
+function identityDetail(identity) {
+  const version = text(identity?.version);
+  const date = text(identity?.release_date);
+  const parts = [];
+  if (version) parts.push(`v${version}`);
+  if (date) parts.push(date);
+  return parts.join(parts.length === 1 ? '' : ' · ');
+}
+
+function identitySha(identity) {
+  return text(identity?.build_sha) || '';
 }
 
 function statusLabel(value) {
@@ -40,7 +55,9 @@ function operationState(data) {
 
 function renderIdentity(id, value) {
   id.textContent = identityValue(value);
-  id.title = identityValue(value);
+  const detail = identityDetail(value);
+  const sha = identitySha(value);
+  id.title = `${detail}${sha ? ` · ${sha}` : ''}`.trim() || identityValue(value);
 }
 
 function renderBlockers(data) {
@@ -57,6 +74,16 @@ function renderBlockers(data) {
   panel.hidden = blockers.length === 0;
 }
 
+function changelogText(changelog) {
+  const entries = Array.isArray(changelog) ? changelog : [];
+  const parts = entries.map(entry => {
+    const section = text(entry?.title);
+    const summary = text(entry?.summary);
+    return section || summary || '';
+  }).filter(Boolean);
+  return parts.join('；');
+}
+
 function renderCandidates(data) {
   const list = document.getElementById('operations-staged-list');
   const candidates = Array.isArray(data?.staged) ? data.staged : [];
@@ -69,25 +96,47 @@ function renderCandidates(data) {
     item.className = 'operations-candidate';
     const heading = document.createElement('div');
     heading.className = 'operations-candidate-heading';
-    const sha = document.createElement('code');
-    sha.textContent = text(candidate?.build_sha) || '未知 SHA';
-    heading.appendChild(sha);
+    const version = document.createElement('strong');
+    const versionLabel = text(candidate?.version);
+    version.textContent = versionLabel ? `v${versionLabel}` : (text(candidate?.build_sha) || '未知版本');
+    heading.appendChild(version);
+    const date = document.createElement('span');
+    date.textContent = text(candidate?.release_date);
+    if (date.textContent) heading.appendChild(date);
     const state = document.createElement('span');
     state.textContent = candidate?.current ? '当前 active'
       : candidate?.eligible ? '可激活' : '不可激活';
     heading.appendChild(state);
+    const build = document.createElement('code');
+    build.className = 'operations-build-sha';
+    build.textContent = text(candidate?.build_sha) || '未知 SHA';
+    const meta = document.createElement('div');
+    meta.className = 'operations-candidate-meta';
+    if (versionLabel || text(candidate?.release_date)) {
+      const metaLine = document.createElement('span');
+      const metaParts = [];
+      if (versionLabel) metaParts.push(`v${versionLabel}`);
+      if (text(candidate?.release_date)) metaParts.push(text(candidate?.release_date));
+      metaLine.textContent = metaParts.join(' · ');
+      meta.appendChild(metaLine);
+    }
+    meta.appendChild(build);
     const detail = document.createElement('p');
     const reasons = Array.isArray(candidate?.blockers) ? candidate.blockers : [];
     detail.textContent = reasons.length
       ? reasons.map(reason => `${text(reason?.code) || 'blocked'}：${text(reason?.message) || '证据不足'}`).join('；')
       : candidate?.current ? '当前稳定槽，无需重复激活。' : '完整 local-main package/smoke 证据已通过。';
+    const summary = document.createElement('p');
+    summary.className = 'operations-candidate-changelog';
+    summary.textContent = changelogText(candidate?.changelog);
+    summary.hidden = !summary.textContent;
     const button = document.createElement('button');
     button.className = 'primary operations-activate';
     button.type = 'button';
     button.dataset.operationActivate = text(candidate?.build_sha);
     button.textContent = candidate?.current ? '当前版本' : '激活此槽';
     button.disabled = !candidate?.eligible || !text(candidate?.build_sha);
-    item.append(heading, detail, button);
+    item.append(heading, meta, detail, summary, button);
     return item;
   }));
 }
@@ -105,7 +154,7 @@ function render(data) {
   const operation = data?.operation;
   const result = operation?.result;
   document.getElementById('operations-result').textContent = result
-    ? `${statusLabel(result.status)} · active ${identityValue(result.active ? {build_sha:result.active} : data?.active)}${result.last_error ? ` · ${text(result.last_error)}` : ''}`
+    ? `${statusLabel(result.status)} · active ${identityValue(result.active || data?.active)}${result.last_error ? ` · ${text(result.last_error)}` : ''}`
     : '尚无切换记录。';
   const progress = document.getElementById('operations-progress');
   const currentStatus = operationState(data);
@@ -152,8 +201,6 @@ async function activate(buildSha) {
       body:JSON.stringify({build_sha:buildSha}),
     });
   } catch (error) {
-    // The old Web process may disappear before the response reaches the
-    // browser. The durable operation file remains the source of truth.
     document.getElementById('operations-progress').textContent =
       '旧服务连接已断开，正在等待新版本或回滚结果…';
   }

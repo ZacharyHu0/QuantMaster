@@ -1627,18 +1627,25 @@ async function streamJson(path, opts, onProgress) {
   }).catch(() => {
     list.innerHTML = '<div class="msg">更新日志暂不可用，版本信息仍可正常查看。</div>';
   });
+  let stockdbPollFailures = 0;
   function refreshStockdbStatus() {
     api('/api/v1/settings/free-stockdb').then(renderStockdbStatus).catch(() => {
       stockdbPopoverState.textContent = '暂时无法读取本地库状态';
+      stockdbPollFailures++;
     });
   }
+  function scheduleStockdbPoll() {
+    const delay = Math.min(60_000 * Math.pow(2, Math.min(stockdbPollFailures, 5)), 300_000);
+    stockdbTimer = setTimeout(() => { refreshStockdbStatus(); scheduleStockdbPoll(); }, delay);
+  }
+  let stockdbTimer = null;
 
   refreshStockdbStatus();
+  scheduleStockdbPoll();
   api('/api/v1/settings/free-stockdb/vendor-notice').then(renderVendorNotice).catch(() => {
     vendorState.textContent = '暂不可用';
     vendorSummary.textContent = '暂时无法读取 free-stockdb 官方动态，可前往官网查看。';
   });
-  setInterval(refreshStockdbStatus, 60_000);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refreshStockdbStatus();
   });
@@ -2542,7 +2549,7 @@ async function loadMarket() {
       marketColdRetryTimer = null;
     }
     const quality = data?.data_quality || {};
-    const completed = Number(quality.observed_count ?? renderer.count);
+    const completed = Number(quality.observed_count ?? renderer.count ?? 0);
     const requested = Number(quality.requested_count ?? completed);
     const completion = requested ? ` · 已完成 ${completed} / ${requested}` : '';
     const asOf = snapshot?.as_of || data?.meta?.as_of || '';

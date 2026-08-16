@@ -28,6 +28,7 @@ FULL_SHA = re.compile(r"[0-9a-f]{40}")
 STAGE_SCHEMA = 1
 ACTIVE_STATE_SCHEMA = 1
 STAGE_MARKER = ".quantmaster-stage.json"
+SLOT_META_FILE = "slot_meta.json"
 LIFECYCLE_LOCK = ".lifecycle.lock"
 MAX_EXTRACTED_BYTES = check_desktop_artifact.ONEDIR_MAX_MIB * 1024 * 1024
 
@@ -44,6 +45,39 @@ class StageBlocked(RuntimeError):
 
 def _block(reason: str, detail: str, **context: object) -> None:
     raise StageBlocked(reason, detail, **context)
+
+
+def _release_metadata(snapshot: Path) -> tuple[str, str]:
+    """Read version/date constants from the exact snapshot's release metadata.
+
+    We compile-and-const-eval only the two scalar constants from the snapshot's
+    release.py, keeping its large RELEASES changelog table out of the staging
+    import path so an older or partially-built snapshot cannot delay staging.
+    """
+
+    source_path = snapshot / "quantmaster" / "release.py"
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        _block("release_metadata_unreadable", f"无法读取快照发布元数据：{source_path}: {exc}")
+    try:
+        tree = __import__("ast").parse(source, filename=str(source_path))
+    except SyntaxError as exc:
+        _block("release_metadata_unreadable", f"快照 release.py 语法无效：{exc}")
+    consts: dict[str, object] = {}
+    for node in tree.body:
+        if isinstance(node, __import__("ast").Assign):
+            for target in node.targets:
+                if isinstance(target, __import__("ast").Name) and target.id in {"VERSION", "RELEASE_DATE"}:
+                    if isinstance(node.value, (__import__("ast").Constant,)):
+                        consts[target.id] = node.value.value
+    version = consts.get("VERSION", "")
+    date = consts.get("RELEASE_DATE", "")
+    if not isinstance(version, str) or not version.strip():
+        _block("release_metadata_invalid", "快照 release.py 缺少有效 VERSION")
+    if not isinstance(date, str) or not date.strip():
+        _block("release_metadata_invalid", "快照 release.py 缺少有效 RELEASE_DATE")
+    return version.strip(), date.strip()
 
 
 def _full_sha(value: object, *, label: str) -> str:
@@ -450,6 +484,45 @@ def _write_marker(slot: Path, payload: dict[str, object]) -> None:
     os.replace(temporary, marker)
 
 
+def _read_slot_meta(slot: Path, main_sha: str) -> dict[str, object] | None:
+    """Optionally read an existing version metadata file for an already-staged slot."""
+
+    meta_path = slot / SLOT_META_FILE
+    if not meta_path.is_file() or _is_link(meta_path):
+        return None
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema") != 1 or payload.get("build_sha") != main_sha:
+        return None
+    version = str(payload.get("version") or "")
+    date = str(payload.get("release_date") or "")
+    if version or date:
+        return {"version": version, "release_date": date}
+    return None
+
+
+def _write_slot_meta(
+    slot: Path, main_sha: str, *, version: str, release_date: str,
+) -> None:
+    """Write immutable version metadata next to the slot marker."""
+
+    payload = {
+        "schema": 1,
+        "build_sha": main_sha,
+        "version": version,
+        "release_date": release_date,
+    }
+    meta_path = slot / SLOT_META_FILE
+    temporary = slot / f".{SLOT_META_FILE}.{uuid.uuid4().hex}.tmp"
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    os.replace(temporary, meta_path)
+
+
 def _remove_owned_slot(slot: Path) -> None:
     if slot.exists() and not _is_link(slot) and slot.is_dir():
         shutil.rmtree(slot)
@@ -498,10 +571,11 @@ def _stage_candidate(
     with application_lifecycle_lock(app_root):
         active_snapshot = _active_snapshot(active, main_sha)
         existing = _read_marker(slot, main_sha)
+        existing_meta = None if existing is None else _read_slot_meta(slot, main_sha)
         if existing is not None:
             smoke = _run_packaged_smoke(slot, main_sha)
             _assert_active_unchanged(active, active_snapshot)
-            return {**existing, "smoke": smoke, "idempotent": True}
+            return {**existing, "smoke": smoke, "idempotent": True, **(existing_meta or {})}
 
         slots.mkdir(parents=True, exist_ok=True)
         owned_slot = False
@@ -511,6 +585,7 @@ def _stage_candidate(
             ) as raw_build:
                 build_root = Path(raw_build)
                 snapshot = _snapshot_main(primary, main_sha, build_root)
+                slot_version, slot_date = _release_metadata(snapshot)
                 archive, size_report = _build_onedir(
                     snapshot,
                     tasks.project_python(primary),
@@ -541,9 +616,11 @@ def _stage_candidate(
                     "staged_at": datetime.now(UTC).isoformat(),
                 }
                 _write_marker(slot, payload)
+                _write_slot_meta(slot, main_sha, version=slot_version, release_date=slot_date)
+                slot_meta = _read_slot_meta(slot, main_sha)
                 owned_slot = False
                 _assert_active_unchanged(active, active_snapshot)
-                return payload
+                return {**payload, **(slot_meta or {})}
         finally:
             if owned_slot:
                 _remove_owned_slot(slot)
