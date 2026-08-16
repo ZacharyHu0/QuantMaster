@@ -321,6 +321,41 @@ async def liveness() -> dict:
     }
 
 
+@router.get("/api/v1/health/live")
+async def live_probe() -> dict:
+    """Lightweight liveness endpoint for frontend polling."""
+    return {"status": "live"}
+
+
+@router.get("/api/v1/external/sentiment")
+async def external_sentiment() -> dict:
+    """External sentiment indicator; returns empty data when source is unavailable."""
+    return {"status": "unavailable", "sources": [], "score": None}
+    """Sole constant-time health probe; it deliberately performs no store access.
+
+    Optional provider/worker state is reported separately by ``/diagnostics``.
+    """
+    identity = get_application_identity()
+    from quantmaster.server.readiness import readiness_status
+
+    readiness = readiness_status(include_optional_services=False)
+    threads = threading.active_count()
+    return {
+        "status": "ok",
+        "core_ready": bool(readiness["core_ready"]),
+        "readiness_status": str(readiness["status"]),
+        "version": __version__,
+        "release_date": RELEASE_DATE,
+        "process_pid": os.getpid(),
+        "generation": os.environ.get("QM_WEB_GENERATION", "0"),
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
+        "web_threads": threads,
+        "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
+    }
+
+
 @router.get("/api/v1/diagnostics")
 def diagnostic_report() -> dict:
     from quantmaster.server.diagnostics import diagnostics

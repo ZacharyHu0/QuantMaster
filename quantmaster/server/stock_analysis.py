@@ -27,6 +27,16 @@ class StockAnalysisCreate(ContractModel):
         return normalized
 
 
+@router.get("")
+def list_stock_analyses() -> dict:
+    """List recent stock analysis runs."""
+    try:
+        jobs = get_stock_analysis_jobs().history(limit=20)
+        return {"items": jobs}
+    except Exception as exc:
+        return {"items": [], "error": str(exc)}
+
+
 @router.post("", status_code=202)
 def create_stock_analysis(
     value: StockAnalysisCreate,
