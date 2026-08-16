@@ -103,6 +103,14 @@ function routeFromHash() {
   return match && PAGES[match[1]][match[2]] ? {workspace: match[1], page: match[2]} : null;
 }
 
+/* #30: 从路由参数中提取深链接上下文（板块、快照时间等）。 */
+function routeContext() {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const board = params.get('board') || '';
+  const asOf = params.get('as-of') || '';
+  return {board, asOf};
+}
+
 function pageControl(workspace, page) {
   const tab = PAGES[workspace][page];
   return Array.from(document.querySelectorAll(`[data-workspace-pages="${workspace}"] [data-tab]`))
