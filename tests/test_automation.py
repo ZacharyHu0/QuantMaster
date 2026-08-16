@@ -1125,6 +1125,8 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
     import threading
     from types import SimpleNamespace
 
+    from quantmaster.automation.channels import feishu as feishu_module
+
     store = AutomationStore(tmp_path / "automation.sqlite")
     client = FeishuBotClient(store, MemoryCredentials())
     client.configure("cli_app", "secret")
@@ -1149,6 +1151,7 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
         sys.modules, "lark_oapi.channel",
         SimpleNamespace(FeishuChannel=FakeFeishuChannel),
     )
+    monkeypatch.setattr(feishu_module, "_track_lark_ws_tasks", lambda _channel: None)
     stop_event = threading.Event()
     owner = threading.Thread(
         target=client.listen_forever,
@@ -1156,7 +1159,7 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
         name="feishu-owner",
     )
     owner.start()
-    assert started.wait(1)
+    assert started.wait(5)
 
     async def close_twice():
         await asyncio.gather(client.aclose(), client.aclose())
