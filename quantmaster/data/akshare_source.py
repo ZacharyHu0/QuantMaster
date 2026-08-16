@@ -194,8 +194,6 @@ class AkshareSource(DataSource):
         )
         if member_column is None:
             raise RuntimeError(f"{index_symbol} 成分响应缺少证券代码列")
-        result = []
-        seen = set()
         exchange_column = next(
             (column for column in ("交易所", "所属交易所") if column in raw), None,
         )
@@ -208,15 +206,25 @@ class AkshareSource(DataSource):
             "深圳证券交易所": "SZ", "深交所": "SZ", "SZSE": "SZ", "SZ": "SZ",
             "北京证券交易所": "BJ", "北交所": "BJ", "BSE": "BJ", "BJ": "BJ",
         }
-        for _, row in raw[[member_column, exchange_column]].dropna().iterrows():
-            c = str(row[member_column]).strip().split(".", 1)[0].zfill(6)
-            if not c.isdigit() or len(c) != 6 or c in seen:
+        subset = raw[[member_column, exchange_column]].dropna().copy()
+        codes = (
+            subset[member_column].astype(str).str.strip()
+            .str.split(".", n=1).str[0].str.zfill(6)
+        )
+        valid = codes.str.fullmatch(r"\d{6}")
+        exchanges_for_rows = subset[exchange_column].astype(str).str.strip().str.upper()
+        result: list[str] = []
+        seen: set[str] = set()
+        for code, exchange in zip(
+            codes[valid], exchanges_for_rows[valid], strict=True,
+        ):
+            if code in seen:
                 continue
-            suffix = exchanges.get(str(row[exchange_column]).strip().upper())
+            suffix = exchanges.get(exchange)
             if suffix is None:
-                raise RuntimeError(f"{index_symbol} 成分包含未识别交易所: {row[exchange_column]}")
-            seen.add(c)
-            result.append(f"{c}.{suffix}")
+                raise RuntimeError(f"{index_symbol} 成分包含未识别交易所: {exchange}")
+            seen.add(code)
+            result.append(f"{code}.{suffix}")
         if not result:
             raise RuntimeError(f"{index_symbol} 没有可用成分")
         return result

@@ -2,13 +2,28 @@ use numpy::{PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
-fn median(mut values: Vec<f64>) -> f64 {
-    values.sort_by(|left, right| left.total_cmp(right));
-    let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
-        (values[middle - 1] + values[middle]) / 2.0
+fn median(values: &mut [f64]) -> f64 {
+    let length = values.len();
+    if length == 0 {
+        return f64::NAN;
+    }
+    let middle = length / 2;
+    if length.is_multiple_of(2) {
+        let upper = {
+            let (_, pivot, _) =
+                values.select_nth_unstable_by(middle, |left, right| left.total_cmp(right));
+            *pivot
+        };
+        let lower = values[..middle]
+            .iter()
+            .copied()
+            .max_by(|left, right| left.total_cmp(right))
+            .expect("even median has a lower half");
+        (lower + upper) / 2.0
     } else {
-        values[middle]
+        let (_, pivot, _) =
+            values.select_nth_unstable_by(middle, |left, right| left.total_cmp(right));
+        *pivot
     }
 }
 
@@ -27,20 +42,20 @@ fn cross_section_rank<'py>(
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
     let mut output = vec![f64::NAN; rows * cols];
-    output
-        .par_chunks_mut(cols)
-        .enumerate()
-        .for_each(|(row_idx, out_row)| {
+    output.par_chunks_mut(cols).enumerate().for_each_init(
+        || Vec::<(usize, f64)>::with_capacity(cols),
+        |indexed, (row_idx, out_row)| {
+            indexed.clear();
             let input_row = matrix.row(row_idx);
-            let mut indexed: Vec<(usize, f64)> = input_row
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &v)| if v.is_finite() { Some((i, v)) } else { None })
-                .collect();
+            for (index, &value) in input_row.iter().enumerate() {
+                if value.is_finite() {
+                    indexed.push((index, value));
+                }
+            }
             if indexed.is_empty() {
                 return;
             }
-            indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
+            indexed.sort_by(|left, right| left.1.total_cmp(&right.1));
             let count = indexed.len();
             let mut start = 0;
             while start < count {
@@ -54,7 +69,8 @@ fn cross_section_rank<'py>(
                 }
                 start = stop;
             }
-        });
+        },
+    );
     let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
     PyArray2::from_owned_array(py, result)
 }
@@ -77,7 +93,7 @@ fn robust_standardize<'py>(
         .enumerate()
         .for_each(|(row_idx, out_row)| {
             let input_row = matrix.row(row_idx);
-            let clean: Vec<f64> = input_row
+            let mut clean: Vec<f64> = input_row
                 .iter()
                 .filter(|&&v| v.is_finite())
                 .copied()
@@ -85,34 +101,43 @@ fn robust_standardize<'py>(
             if clean.is_empty() {
                 return;
             }
-            let center = median(clean.clone());
-            let mad = median(clean.iter().map(|v| (v - center).abs()).collect()) * 1.4826;
-            let clipped: Vec<f64> = clean
+            let center = median(&mut clean);
+            let mut deviations: Vec<f64> = input_row
                 .iter()
-                .map(|v| {
-                    if mad > 0.0 {
-                        v.clamp(center - k * mad, center + k * mad)
-                    } else {
-                        *v
-                    }
-                })
+                .filter_map(|&value| value.is_finite().then_some((value - center).abs()))
                 .collect();
-            let mean = clipped.iter().sum::<f64>() / clipped.len() as f64;
-            let variance = if clipped.len() > 1 {
-                clipped.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (clipped.len() - 1) as f64
+            let mad = median(&mut deviations) * 1.4826;
+            let lower = center - k * mad;
+            let upper = center + k * mad;
+            let clip = |value: f64| {
+                if mad > 0.0 {
+                    value.clamp(lower, upper)
+                } else {
+                    value
+                }
+            };
+            let mean = input_row
+                .iter()
+                .filter_map(|&value| value.is_finite().then_some(clip(value)))
+                .sum::<f64>()
+                / clean.len() as f64;
+            let variance = if clean.len() > 1 {
+                input_row
+                    .iter()
+                    .filter_map(|&value| value.is_finite().then_some((clip(value) - mean).powi(2)))
+                    .sum::<f64>()
+                    / (clean.len() - 1) as f64
             } else {
                 0.0
             };
             let std = variance.sqrt();
-            let mut ci = 0;
             for (col_idx, &v) in input_row.iter().enumerate() {
                 if v.is_finite() {
                     out_row[col_idx] = if std > 0.0 {
-                        (clipped[ci] - mean) / std
+                        (clip(v) - mean) / std
                     } else {
                         0.0
                     };
-                    ci += 1;
                 }
             }
         });
@@ -142,34 +167,34 @@ fn weighted_zscore<'py>(
         .for_each(|(row_idx, out_row)| {
             let v_row = v_arr.row(row_idx);
             let w_row = w_arr.row(row_idx);
-            let valid: Vec<(usize, f64, f64)> = v_row
-                .iter()
-                .zip(w_row.iter())
-                .enumerate()
-                .filter_map(|(i, (&v, &w))| {
-                    if v.is_finite() && w.is_finite() && w > 0.0 {
-                        Some((i, v, w))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            let total_w: f64 = valid.iter().map(|t| t.2).sum();
+            let mut total_w = 0.0;
+            let mut weighted_sum = 0.0;
+            for (&value, &weight) in v_row.iter().zip(w_row.iter()) {
+                if value.is_finite() && weight.is_finite() && weight > 0.0 {
+                    total_w += weight;
+                    weighted_sum += value * weight;
+                }
+            }
             if total_w <= 0.0 {
                 return;
             }
-            let mean = valid.iter().map(|t| t.1 * t.2).sum::<f64>() / total_w;
-            let variance = valid
-                .iter()
-                .map(|t| (t.1 - mean).powi(2) * t.2)
-                .sum::<f64>()
-                / total_w;
-            for (i, v, _) in &valid {
-                out_row[*i] = if variance > 0.0 {
-                    (v - mean) / variance.sqrt()
-                } else {
-                    0.0
-                };
+            let mean = weighted_sum / total_w;
+            let mut weighted_variance = 0.0;
+            for (&value, &weight) in v_row.iter().zip(w_row.iter()) {
+                if value.is_finite() && weight.is_finite() && weight > 0.0 {
+                    weighted_variance += (value - mean).powi(2) * weight;
+                }
+            }
+            let variance = weighted_variance / total_w;
+            let std = variance.sqrt();
+            for (col_idx, (&value, &weight)) in v_row.iter().zip(w_row.iter()).enumerate() {
+                if value.is_finite() && weight.is_finite() && weight > 0.0 {
+                    out_row[col_idx] = if variance > 0.0 {
+                        (value - mean) / std
+                    } else {
+                        0.0
+                    };
+                }
             }
         });
     let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
@@ -179,15 +204,14 @@ fn weighted_zscore<'py>(
 fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) -> Vec<f64> {
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
     let minimum = std::cmp::max(2, window / 2);
-    // Column-major output: cols chunks of rows
     let mut output = vec![f64::NAN; cols * rows];
     output
-        .par_chunks_mut(rows)
+        .par_chunks_mut(cols)
         .enumerate()
-        .for_each(|(col_idx, col_out)| {
-            for (stop, out) in col_out.iter_mut().enumerate() {
-                let start = stop.saturating_sub(window - 1);
-                let sample: Vec<f64> = (start..=stop)
+        .for_each(|(row_idx, out_row)| {
+            for (col_idx, out) in out_row.iter_mut().enumerate() {
+                let start = row_idx.saturating_sub(window - 1);
+                let sample: Vec<f64> = (start..=row_idx)
                     .filter_map(|r| {
                         let v = matrix[(r, col_idx)];
                         if v.is_finite() {
@@ -224,15 +248,8 @@ fn rolling_mean<'py>(
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
-    let col_major = rolling_impl(matrix, window, false);
-    // Transpose column-major to row-major
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let output = rolling_impl(matrix, window, false);
+    let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 
@@ -247,14 +264,8 @@ fn rolling_std<'py>(
     }
     let matrix = values.as_array();
     let (rows, cols) = (matrix.shape()[0], matrix.shape()[1]);
-    let col_major = rolling_impl(matrix, window, true);
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let output = rolling_impl(matrix, window, true);
+    let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 
@@ -274,14 +285,14 @@ fn rolling_corr<'py>(
     let r_arr = right.as_array();
     let (rows, cols) = (l_arr.shape()[0], l_arr.shape()[1]);
     let minimum = std::cmp::max(3, window / 2);
-    let mut col_major = vec![f64::NAN; cols * rows];
-    col_major
-        .par_chunks_mut(rows)
+    let mut output = vec![f64::NAN; rows * cols];
+    output
+        .par_chunks_mut(cols)
         .enumerate()
-        .for_each(|(col_idx, col_out)| {
-            for (stop, out) in col_out.iter_mut().enumerate() {
-                let start = stop.saturating_sub(window - 1);
-                let sample: Vec<(f64, f64)> = (start..=stop)
+        .for_each(|(row_idx, out_row)| {
+            for (col_idx, out) in out_row.iter_mut().enumerate() {
+                let start = row_idx.saturating_sub(window - 1);
+                let sample: Vec<(f64, f64)> = (start..=row_idx)
                     .filter_map(|r| {
                         let a = l_arr[(r, col_idx)];
                         let b = r_arr[(r, col_idx)];
@@ -309,13 +320,7 @@ fn rolling_corr<'py>(
                 }
             }
         });
-    let mut row_major = vec![f64::NAN; rows * cols];
-    for c in 0..cols {
-        for r in 0..rows {
-            row_major[r * cols + c] = col_major[c * rows + r];
-        }
-    }
-    let result = ndarray::Array2::from_shape_vec((rows, cols), row_major).unwrap();
+    let result = ndarray::Array2::from_shape_vec((rows, cols), output).unwrap();
     Ok(PyArray2::from_owned_array(py, result))
 }
 

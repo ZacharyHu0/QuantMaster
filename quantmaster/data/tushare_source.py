@@ -37,7 +37,6 @@ from quantmaster.index_source_access import register_index_source
 from quantmaster.instrument_source_access import register_instrument_source
 from quantmaster.temporal import (
     ProviderDateFormat,
-    TemporalContractError,
     parse_provider_date,
 )
 from quantmaster.trading_session_sources import register_official_calendar
@@ -61,28 +60,27 @@ def _parse_tushare_dates(
     field: str,
     allow_missing: bool = False,
 ) -> pd.Series:
-    """Parse Tushare's documented YYYYMMDD fields without pandas inference."""
-    parsed: list[object] = []
-    for position, raw in enumerate(values.tolist()):
-        if pd.isna(raw) or str(raw).strip() == "":
-            if allow_missing:
-                parsed.append(pd.NaT)
-                continue
-            raise ProviderContractChanged(
-                f"Tushare {field}[{position}] 缺失 [missing_provider_date]"
-            )
-        try:
-            parsed.append(pd.Timestamp(parse_provider_date(
-                raw,
-                field=f"Tushare.{field}[{position}]",
-                provider_format=ProviderDateFormat.YYYYMMDD,
-            )))
-        except TemporalContractError as exc:
-            raise ProviderContractChanged(
-                f"Tushare {field}[{position}] 无法按 YYYYMMDD 解析 "
-                f"[{exc.code}]: {exc}"
-            ) from exc
-    return pd.Series(parsed, index=values.index, dtype="datetime64[ns]")
+    """Parse strict YYYYMMDD fields with vectorized conversion and validation."""
+    raw_text = values.astype("string").str.strip()
+    missing = values.isna() | raw_text.eq("")
+    if not allow_missing and missing.any():
+        positions = [position for position, flag in enumerate(missing) if flag][:5]
+        raise ProviderContractChanged(
+            f"Tushare {field} 存在缺失值 [missing_provider_date]，示例索引: {positions}"
+        )
+
+    strict_format = raw_text.str.fullmatch(r"\d{8}", na=False)
+    parsed = pd.to_datetime(
+        raw_text.where(strict_format), format="%Y%m%d", errors="coerce",
+    )
+    invalid = ~missing & parsed.isna()
+    if invalid.any():
+        positions = [position for position, flag in enumerate(invalid) if flag][:5]
+        raise ProviderContractChanged(
+            f"Tushare {field} 无法按 YYYYMMDD 解析 "
+            f"[invalid_provider_date, parse_error]，示例索引: {positions}"
+        )
+    return parsed
 
 
 def _require_tushare():
