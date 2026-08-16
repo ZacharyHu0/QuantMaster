@@ -272,14 +272,67 @@ def _execute_risk_exits(
         return set()
     day_open = market.open_px.loc[date]
     day_previous_close = previous_close.loc[date]
-    return {
-        symbol
-        for symbol in market.symbols
-        if _try_risk_exit(
-            state, market, config, date, date_str, symbol,
-            day_open, day_previous_close,
+    suspended_series = market.suspended.loc[date] if market.suspended is not None else None
+    down_limit_series = market.down_limit.loc[date] if market.down_limit is not None else None
+    exited: set[str] = set()
+    for symbol in market.symbols:
+        if state.shares[symbol] <= 0 or state.entry_cost[symbol] <= 0:
+            continue
+        price = day_open.get(symbol, np.nan)
+        if np.isnan(price) or price <= 0:
+            continue
+        change = float(price) / state.entry_cost[symbol] - 1.0
+        reason = _risk_exit_reason(change, config)
+        if reason is None:
+            continue
+        prev_close = float(day_previous_close.get(symbol, np.nan)) if pd.notna(day_previous_close.get(symbol, np.nan)) else None
+        blocked = _execution_reason_from_series(
+            symbol, "sell", float(price), prev_close,
+            suspended=suspended_series,
+            down_limit=down_limit_series,
+            config=config,
         )
-    }
+        if blocked:
+            state.blocked_orders.append(
+                BlockedOrder(date_str, symbol, "sell", blocked, note=reason)
+            )
+            exited.add(symbol)
+            continue
+        execution_price = float(price) * (1 - config.trade.slippage)
+        amount = state.shares[symbol] * execution_price
+        cost = _sell_cost(amount, config.trade)
+        state.cash += amount - cost
+        state.trades.append(Trade(
+            date_str, symbol, "sell", round(execution_price, 4),
+            state.shares[symbol], round(amount, 2), round(cost, 2), note=reason,
+        ))
+        state.shares[symbol] = 0.0
+        state.entry_cost[symbol] = 0.0
+        exited.add(symbol)
+    return exited
+
+
+def _execution_reason_from_series(
+    symbol: str, side: str, price: float, previous_close: float | None,
+    *, suspended: pd.Series | None, down_limit: pd.Series | None,
+    config: BacktestConfig,
+) -> str | None:
+    if suspended is not None:
+        value = suspended.get(symbol, np.nan)
+        if pd.notna(value) and bool(value):
+            return "suspended"
+    if down_limit is not None:
+        limit_value = down_limit.get(symbol, np.nan)
+        if pd.notna(limit_value) and float(limit_value) > 0:
+            tolerance = max(1e-6, abs(float(limit_value)) * 1e-6)
+            if side == "sell" and price <= float(limit_value) + tolerance:
+                return "limit_down"
+            return None
+    if config.research_tier == "production":
+        return "missing_actual_limit"
+    return limit_reason(
+        symbol, side, price, previous_close, enabled=config.limit_check,
+    )
 
 
 def _portfolio_value_at_open(
