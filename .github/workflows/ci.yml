@@ -92,9 +92,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12.13"
+          enable-cache: true
       - uses: dtolnay/rust-toolchain@35d8a35b823d6c20db516f5c35eb0a9640942c17 # 1.94.0
         with:
           components: rustfmt, clippy
+      - name: Install Python development headers
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - name: Bind PyO3 to the locked Python
+        shell: bash
+        run: echo "PYO3_PYTHON=$(uv run python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
       - run: |
           cargo fmt --manifest-path rust/quantmaster-kernel/Cargo.toml --check
           cargo check --manifest-path rust/quantmaster-kernel/Cargo.toml --locked
