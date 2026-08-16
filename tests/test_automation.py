@@ -1334,6 +1334,56 @@ def test_feishu_check_does_not_restart_channel(tmp_path, monkeypatch):
     assert response.status_code == 200
 
 
+@pytest.mark.parametrize(("worker_available", "expected_status"), [
+    (True, "success"), (False, "warning"),
+])
+def test_feishu_check_uses_worker_health_and_listening_status(
+        tmp_path, monkeypatch, isolated_config, worker_available, expected_status,
+):
+    from quantmaster.server import automation as automation_api
+
+    isolated_config.automation.enabled = True
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    local_service = AutomationService(
+        store, OutboxDispatcher(store, RecordingGateway()),
+    )
+    local_service.feishu = FeishuBotClient(store, credentials)
+    local_service.feishu.configure("cli_app", "secret")
+    store.set_bot_status("feishu", "cli_app", "listening")
+    monkeypatch.setattr(store, "set_bot_validation", lambda *_args: None)
+    monkeypatch.setattr(
+        local_service.feishu, "verify",
+        lambda *_args: {"status": "success", "state": "connected", "message": "有效"},
+    )
+    monkeypatch.setattr(automation_api, "service", lambda: local_service)
+    monkeypatch.setattr(
+        automation_api, "get_runtime",
+        lambda: pytest.fail("diagnostic must not read the Web-local runtime"),
+    )
+    monkeypatch.setattr(
+        automation_api, "runtime_worker_status",
+        lambda: {"available": worker_available, "status": "running" if worker_available else "unavailable"},
+    )
+
+    client = TestClient(app)
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    response = client.post(
+        "/api/v1/automation/channels/feishu/check",
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 200
+    stages = response.json()["stages"]
+    assert stages["runtime"]["status"] == expected_status
+    assert stages["websocket"]["status"] == expected_status
+    assert stages["websocket"]["state"] == "listening"
+    if worker_available:
+        assert stages["websocket"]["message"] == "飞书长连接监听中"
+    else:
+        assert "不能确认" in stages["websocket"]["message"]
+
+
 def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):
     import apscheduler.schedulers.background as scheduler_module
 
