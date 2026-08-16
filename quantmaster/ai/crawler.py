@@ -40,6 +40,7 @@ from quantmaster.ai.news_contracts import (
     FetchBatch,
     FetchedArticle,
     NewsProviderError,
+    normalize_news_text,
 )
 from quantmaster.ai.news_pipeline_lock import NewsPipelineLock
 from quantmaster.ai.news_providers import fetch_builtin_source
@@ -500,6 +501,8 @@ class NewsStore:
         }
         with self._conn() as conn:
             for item in items:
+                item.title = normalize_news_text(item.title)
+                item.content = normalize_news_text(item.content)
                 item.sectors = _normalize_sectors(item.sectors)
                 item.fingerprint = item.fingerprint or self.fingerprint(item)
                 content_hash = self.content_hash(item)

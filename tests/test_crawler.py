@@ -1,7 +1,9 @@
 """爬虫存储与舆情聚合测试（不触网）。"""
 
+import pytest
+
 from quantmaster.ai.crawler import AICrawler, NewsItem, NewsStore
-from quantmaster.ai.news_contracts import FetchBatch, FetchedArticle
+from quantmaster.ai.news_contracts import FetchBatch, FetchedArticle, NewsContractError
 from quantmaster.ai.sentiment import sentiment_panel
 
 
@@ -11,6 +13,15 @@ def _item(title: str, published: str = "2024-05-06 09:30:00", **kw) -> NewsItem:
 
 
 class TestNewsStore:
+    def test_news_identity_accepts_utf8_bytes(self):
+        text_item = NewsItem(source="test", title="标题", content="正文")
+        bytes_item = NewsItem(
+            source="test", title="标题".encode(), content="正文".encode(),
+        )
+
+        assert NewsStore.fingerprint(bytes_item) == NewsStore.fingerprint(text_item)
+        assert NewsStore.content_hash(bytes_item) == NewsStore.content_hash(text_item)
+
     def test_save_and_dedup(self, tmp_path):
         store = NewsStore(path=tmp_path / "news.sqlite")
         items = [_item("新闻A"), _item("新闻B")]
@@ -29,6 +40,40 @@ class TestNewsStore:
 
 
 class TestCrawlerSkipLLM:
+    def test_fetched_bytes_are_decoded_before_storage(self, tmp_path, monkeypatch):
+        from quantmaster.ai import crawler as crawler_mod
+
+        c = AICrawler(store=NewsStore(path=tmp_path / "news.sqlite"))
+        source = c.source_store.create({
+            "name": "字节来源", "kind": "rss", "group_name": "periodic",
+            "url": "https://example.test/feed", "max_age_hours": 24,
+        })
+        monkeypatch.setattr(
+            crawler_mod,
+            "fetch_declarative_source",
+            lambda *args, **kwargs: FetchBatch(
+                source_id=source["id"], articles=[FetchedArticle(
+                    source=source["id"], title="字节标题".encode(),
+                    content="字节正文".encode(), provider_item_id="bytes-1",
+                )], watermark="bytes-1",
+            ),
+        )
+
+        result = c.run(sources=[source["id"]], skip_llm=True)
+
+        assert result["errors"] == {}
+        row = c.store.recent()[0]
+        assert row["title"] == "字节标题"
+        assert row["content"] == "字节正文"
+
+    def test_invalid_fetched_bytes_fail_with_contract_error(self):
+        with pytest.raises(NewsContractError) as error:
+            FetchedArticle(
+                source="test", title=b"\xff", content="正文", provider_item_id="bad-1",
+            )
+
+        assert error.value.code == "invalid_text_encoding"
+
     def test_run_with_fake_source(self, tmp_path, monkeypatch):
         from quantmaster.ai import crawler as crawler_mod
 
