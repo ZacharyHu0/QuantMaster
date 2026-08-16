@@ -914,7 +914,10 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {primary})
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: True)
     monkeypatch.setattr(tasks, "record_task_remove_intent", lambda *args, **kwargs: None)
-    monkeypatch.setattr(tasks, "remove_verified_residual", lambda root, path, branch: path.rmdir())
+    monkeypatch.setattr(
+        tasks, "remove_verified_residual",
+        lambda root, path, branch, **_kwargs: path.rmdir(),
+    )
     monkeypatch.setattr(tasks, "git", fake_git)
     remove("recovery")
     assert not target.exists()
@@ -1443,7 +1446,9 @@ def test_remove_accepts_explicit_superseding_main_commit(monkeypatch, tmp_path):
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: {target})
     monkeypatch.setattr(tasks, "task_integrated", lambda root, branch: False)
     monkeypatch.setattr(tasks, "superseding_main_commit", lambda root, commit: commit)
-    monkeypatch.setattr(tasks, "remove_verified_residual", lambda *args: None)
+    monkeypatch.setattr(
+        tasks, "remove_verified_residual", lambda *args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         tasks, "remove_task_artifacts",
         lambda *args, **kwargs: artifact_calls.append(kwargs),
@@ -1504,17 +1509,65 @@ def test_remove_verified_residual_clears_readonly_files(monkeypatch, tmp_path):
 def test_remove_verified_residual_reports_acl_block(monkeypatch, tmp_path):
     import pytest
 
-    from scripts.dev import tasks
+    from scripts.dev import pytest_windows_acl, tasks
 
     primary = tmp_path / "primary"
     target = primary / ".worktrees" / "recovery"
     target.mkdir(parents=True)
-    blocked = target / ".artifacts" / "pytest" / "cache"
+    blocked = target / "pytest" / "cache"
     monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
     monkeypatch.setattr(
         tasks.shutil, "rmtree",
         lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError(13, "denied", blocked)),
     )
-    with pytest.raises(SystemExit, match=r"Windows ACL.*pytest[\\/]cache"):
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+    monkeypatch.setattr(
+        tasks.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="access denied",
+        ),
+    )
+    with pytest.raises(SystemExit) as captured:
         remove_verified_residual(primary, target, "codex/recovery")
+    message = str(captured.value)
+    assert "TASK_CHECKOUT_ACL_UNRECOVERABLE" in message
+    assert "blocked=pytest/cache" in message
+    assert str(target) not in message
     assert target.exists()
+
+
+def test_remove_verified_residual_retries_after_restoring_acl_inheritance(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "recovery"
+    target.mkdir(parents=True)
+    calls: list[str] = []
+
+    def remove(path, **_kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", path)
+        path.rmdir()
+
+    monkeypatch.setattr(tasks, "residual_checkout_clean", lambda *args: True)
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+
+    def restore(command, **_kwargs):
+        assert "$ErrorActionPreference='Stop'" in command[-1]
+        calls.append("restore")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    remove_verified_residual(primary, target, "codex/recovery")
+
+    assert calls == ["remove", "restore", "remove"]
+    assert not target.exists()
