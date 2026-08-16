@@ -233,9 +233,19 @@ def _wait_for_ui_runtime(url) -> None:
     with httpx.Client(trust_env=False, timeout=1) as client:
         while time.monotonic() < deadline:
             statuses = {}
+            allowed_degraded = set()
             for path in ("/api/v1/market/overview", "/api/v1/backtests", "/api/v1/paper/accounts"):
                 try:
-                    statuses[path] = client.get(f"{url}{path}").status_code
+                    response = client.get(f"{url}{path}")
+                    statuses[path] = response.status_code
+                    if path == "/api/v1/market/overview" and response.status_code == 503:
+                        try:
+                            if response.json()["problem"]["code"] in {
+                                "calendar_unavailable", "snapshot_unavailable",
+                            }:
+                                allowed_degraded.add(path)
+                        except (KeyError, TypeError, ValueError):
+                            pass
                 except httpx.HTTPError:
                     statuses[path] = 599
             worker = runtime_worker_status()
@@ -244,7 +254,10 @@ def _wait_for_ui_runtime(url) -> None:
                 worker.get("available")
                 and worker.get("status") == "running"
                 and int(worker.get("pid") or 0) == os.getpid()
-                and all(status < 500 for status in statuses.values())
+                and all(
+                    status < 500 or path in allowed_degraded
+                    for path, status in statuses.items()
+                )
             ):
                 return
             time.sleep(0.1)
@@ -3630,10 +3643,24 @@ def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
         page_errors = []
         console_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
-        page.on(
-            "console",
-            lambda message: console_errors.append(message.text) if message.type == "error" else None,
-        )
+
+        def record_console_error(message) -> None:
+            if message.type != "error":
+                return
+            location = message.location or {}
+            expected_status_error = (
+                "Failed to load resource: the server responded with a status of 503 "
+                "(Service Unavailable)"
+            )
+            if (
+                message.text == expected_status_error
+                and urlsplit(str(location.get("url") or "")).path
+                == "/api/v1/market/overview"
+            ):
+                return
+            console_errors.append(message.text)
+
+        page.on("console", record_console_error)
         page.goto(f"{url}/#today/temperature")
 
         page.locator("#market-temperature-view").wait_for(state="visible")

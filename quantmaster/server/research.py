@@ -25,7 +25,7 @@ from quantmaster.research.jobs import (
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf, _require_local
-from quantmaster.trading_sessions import default_close_data_end
+from quantmaster.trading_sessions import SessionTargetUnavailable, default_close_data_end
 
 router = APIRouter(prefix="/api/v1/research/data", tags=["research-data"])
 
@@ -173,6 +173,8 @@ def create_research_plan(request: Request, value: ResearchPlanRequest) -> dict:
     _require_csrf(request)
     try:
         return value.make_plan(ResearchEngine()).to_dict()
+    except SessionTargetUnavailable:
+        raise
     except (ValueError, RuntimeError, KeyError) as exc:
         raise HTTPException(400, str(exc)) from None
 
@@ -183,6 +185,8 @@ def create_research_job(request: Request, value: ResearchPlanRequest) -> dict:
     try:
         manager = get_research_job_manager()
         return manager.public(manager.create(value.make_plan(manager.engine), value.mode))
+    except SessionTargetUnavailable:
+        raise
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
     except (RuntimeError, KeyError) as exc:
@@ -263,6 +267,8 @@ def materialize_bar_store(request: Request, value: MaterializeRequest) -> dict:
             value.symbols or None, value.start, value.end or default_close_data_end(),
             asset_class=AssetClass(value.asset),
         )
+    except SessionTargetUnavailable:
+        raise
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(400, str(exc)) from None
     return {

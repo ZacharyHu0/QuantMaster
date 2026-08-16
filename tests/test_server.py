@@ -201,10 +201,31 @@ class TestBasics:
 
         monkeypatch.setattr("quantmaster.data.read_bars", fail_load)
 
-        response = client.get("/api/v1/market/history/DX-Y.NYB.US")
+        response = client.get(
+            "/api/v1/market/history/DX-Y.NYB.US", params={"end": "2026-08-08"},
+        )
 
         assert response.status_code == 503
         assert "行情暂不可用" in response.json()["detail"]
+
+    def test_calendar_unavailable_is_a_structured_block(self, monkeypatch):
+        from quantmaster.server import capabilities
+        from quantmaster.trading_sessions import SessionExpectation, SessionTargetUnavailable
+
+        def unavailable(_as_of=None):
+            raise SessionTargetUnavailable(
+                SessionExpectation(reason="缺少已验证交易日历"),
+            )
+
+        monkeypatch.setattr(capabilities, "default_close_data_end", unavailable)
+        response = client.get("/api/v1/market/history/600519.SH")
+
+        assert response.status_code == 503
+        payload = response.json()
+        assert payload["problem"]["code"] == "calendar_unavailable"
+        assert payload["problem"]["blocking"] is True
+        assert payload["data_quality"]["completion"] == "calendar_unavailable"
+        assert payload["data_quality"]["calendar"]["ready"] is False
 
     def test_market_history_uses_rolling_default_and_stable_wire_shape(self, monkeypatch):
         calls = []
@@ -502,7 +523,10 @@ class TestBasics:
     def test_index_serves_html(self):
         resp = client.get("/")
         app_script = client.get("/static/app.js").text
+        candidates_script = client.get("/static/candidates.js").text
         charts_script = client.get("/static/charts.js").text
+        news_script = client.get("/static/news.js").text
+        stock_analysis_script = client.get("/static/stock-analysis.js").text
         today_charts = client.get("/static/today-charts.js").text
         app_styles = client.get("/static/app.css").text
         settings_script = client.get("/static/settings.js").text
@@ -724,7 +748,23 @@ class TestBasics:
         assert "runtimeInfo.begin(source, '正在加载数据'" in app_script
         assert "if (safeLevel === 'error') setExpanded(true)" not in app_script
         assert "window.QuantMasterAPI" in app_script
+        assert "function responseError(" in app_script
+        assert "runtimeInfo.add(problem.severity" in app_script
+        assert "const apiFlights = new Map()" in app_script
+        assert "if (canDedupe && apiFlights.has(flightKey))" in app_script
+        assert "/api/v1/research/selection/history" in app_script
+        assert "/api/v1/decisions" not in app_script
+        assert "/api/v1/settings/universes" in candidates_script
+        assert "/api/v1/candidates" not in candidates_script
+        assert "/api/v1/market/stock-analyses" in stock_analysis_script
+        assert "/api/v1/stock-analyses" not in stock_analysis_script
+        assert "/api/v1/news?" in news_script
+        assert "/api/v1/news/headlines" not in news_script
         assert "/api/v1/data/contract-migrations" in settings_script
+        assert (
+            "const initialSection = document.querySelector('[data-settings-section].active')"
+            in settings_script
+        )
         assert '<option value="apply">' not in resp.text
         assert "离线停写已验证" in settings_script
         assert "estimated_remaining_seconds" in settings_script
@@ -971,6 +1011,14 @@ class TestBasics:
             "quantmaster.data.universe.load_universe_analysis_snapshot",
             fail_with_secret,
         )
+        monkeypatch.setattr(
+            "quantmaster.server.capabilities.default_close_data_end",
+            lambda _as_of=None: "2026-08-08",
+        )
+        monkeypatch.setattr(
+            "quantmaster.trading_sessions.default_close_data_end",
+            lambda _as_of=None: "2026-08-08",
+        )
         cases = (
             ("/api/v1/market/regime", {}, "市场状态分析失败，请检查请求参数后重试。"),
             (
@@ -1213,6 +1261,7 @@ class TestBasics:
     def test_market_overview_emits_each_completed_item(self, monkeypatch):
         from quantmaster.market import overview as market_overview
 
+        monkeypatch.setattr(market_overview, "default_close_data_end", lambda: "2026-07-22")
         dates = pd.bdate_range("2026-07-20", periods=3)
         frame = pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates)
         monkeypatch.setattr(
@@ -1315,6 +1364,7 @@ class TestBasics:
         from quantmaster.data.storage import BarStore
         from quantmaster.market import overview as market_overview
 
+        monkeypatch.setattr(market_overview, "default_close_data_end", lambda: "2026-07-22")
         symbol = "SPX.INDEX"
         dates = pd.bdate_range("2026-07-20", periods=3)
         BarStore().put(symbol, pd.DataFrame({"close": [100.0, 101.0, 102.0]}, index=dates))
@@ -1348,6 +1398,7 @@ class TestBasics:
     def test_market_overview_exposes_unavailable_reference_details(self, monkeypatch):
         from quantmaster.market import overview as market_overview
 
+        monkeypatch.setattr(market_overview, "default_close_data_end", lambda: "2026-07-22")
         symbol = "DXY.INDEX"
         monkeypatch.setattr(market_overview, "_personal_market_symbols", lambda: ({}, {}))
         monkeypatch.setattr(market_overview, "_market_groups", lambda: {
@@ -1390,6 +1441,10 @@ class TestBasics:
 
     def test_decision_dashboard_contract(self, panel, monkeypatch):
         symbols = list(panel["close"].columns)
+        monkeypatch.setattr(
+            "quantmaster.server.capabilities.default_close_data_end",
+            lambda _as_of=None: "2023-12-29",
+        )
         mapping = {symbol: "行业A" if i < 4 else "行业B"
                    for i, symbol in enumerate(symbols)}
         names = {symbol: f"股票{i}" for i, symbol in enumerate(symbols)}
@@ -1515,6 +1570,10 @@ class TestBasics:
     ):
         from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 
+        monkeypatch.setattr(
+            "quantmaster.server.capabilities.default_close_data_end",
+            lambda _as_of=None: "2023-12-29",
+        )
         symbols = list(panel["close"].columns)
         missing = symbols[-1]
         local_panel = {
@@ -1576,6 +1635,10 @@ class TestBasics:
     ):
         from quantmaster.data.base import BarDataEnvelope, BarDataQuality
 
+        monkeypatch.setattr(
+            "quantmaster.server.capabilities.default_close_data_end",
+            lambda _as_of=None: "2023-12-29",
+        )
         symbols = list(panel["close"].columns)
         quality = BarDataQuality(
             "degraded", "2023-01-01", "2023-12-31",
@@ -1623,6 +1686,10 @@ class TestBasics:
 
     def test_decision_stream_unavailable_preserves_truth_contract(self, monkeypatch):
         symbols = ["600000.SH", "000001.SZ"]
+        monkeypatch.setattr(
+            "quantmaster.server.capabilities.default_close_data_end",
+            lambda _as_of=None: "2026-08-08",
+        )
         monkeypatch.setattr(
             "quantmaster.data.universe.load_universe_analysis_snapshot",
             lambda _name, **_kwargs: UniverseSnapshot(
@@ -1683,13 +1750,21 @@ class TestLedgerAPI:
         assert resp.status_code == 422
 
     def test_bad_factor_expression_400(self):
-        resp = client.post("/api/v1/research/factors/test",
-                           json={"expression": "__import__('os')", "universe": "demo"})
+        resp = client.post(
+            "/api/v1/research/factors/test",
+            json={
+                "expression": "__import__('os')",
+                "universe": "demo",
+                "end": "2026-08-08",
+            },
+        )
         assert resp.status_code == 400
 
     def test_validate_bad_expression_400(self):
-        resp = client.post("/api/v1/research/factors/validate",
-                           json={"expression": "eval(close)", "split": "2024-01-01"})
+        resp = client.post(
+            "/api/v1/research/factors/validate",
+            json={"expression": "eval(close)", "split": "2024-01-01", "end": "2026-08-08"},
+        )
         assert resp.status_code == 400
 
     def test_ledger_nav_empty(self):

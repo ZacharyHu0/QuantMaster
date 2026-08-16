@@ -1759,14 +1759,9 @@ class PaperService:
 
             expectation = resolve_session_target()
             if not expectation.ready or not expectation.session:
-                # Offline/read-only installations still use a date before the
-                # wall clock; the formal envelope below remains authoritative.
-                fallback = (pd.Timestamp(market_date()) - pd.Timedelta(days=1)).date().isoformat()
-                expectation = expectation.__class__(
-                    session=fallback,
-                    source="bounded-probe",
-                    ready=True,
-                    reason="交易日历不可用，使用非当天探测日期并继续通过行情门禁校验",
+                raise ValueError(
+                    "无法确认最近完成交易日："
+                    + (expectation.reason or "交易日历证据不可用")
                 )
             end = pd.Timestamp(expectation.session)
             start = end - pd.Timedelta(days=lookback_days)

@@ -45,6 +45,14 @@ class SessionExpectation:
         }
 
 
+class SessionTargetUnavailable(RuntimeError):
+    """A close-data consumer cannot safely choose a business-date target."""
+
+    def __init__(self, expectation: SessionExpectation) -> None:
+        self.expectation = expectation
+        super().__init__(expectation.reason or "无法确认最近完成交易日")
+
+
 def _normalize_now(value: datetime | None) -> datetime:
     current = value or datetime.now(SHANGHAI)
     if current.tzinfo is None:
@@ -74,9 +82,8 @@ def default_close_data_end(as_of: str | None = None) -> str:
     expectation = resolve_session_target()
     if expectation.ready and expectation.session:
         return expectation.session
-    raise RuntimeError(
-        f"交易日历不可用，无法确定数据截止日期：{expectation.reason}"
-    )
+    logger.warning("交易日历目标不可用，阻断默认收盘数据请求：%s", expectation.reason)
+    raise SessionTargetUnavailable(expectation)
 
 
 def daily_signal_cutoff(value: date | str) -> datetime:
