@@ -9,6 +9,7 @@ import pytest
 from quantmaster.trading_sessions import (
     SessionExpectation,
     SessionExpectationResolver,
+    SessionTargetUnavailable,
     _latest_not_after,
     _normalize_now,
 )
@@ -112,7 +113,7 @@ def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_c
     ) == []
 
 
-def test_default_close_data_end_uses_verified_session_or_previous_market_date(monkeypatch):
+def test_default_close_data_end_requires_verified_session(monkeypatch):
     from quantmaster import trading_sessions
 
     monkeypatch.setattr(
@@ -129,7 +130,23 @@ def test_default_close_data_end_uses_verified_session_or_previous_market_date(mo
         lambda: SessionExpectation(reason="calendar offline"),
     )
     monkeypatch.setattr(trading_sessions, "market_date", lambda: date(2026, 8, 15))
-    assert trading_sessions.default_close_data_end() == "2026-08-14"
+    with pytest.raises(SessionTargetUnavailable, match="calendar offline"):
+        trading_sessions.default_close_data_end()
+
+
+def test_default_close_data_end_rejects_published_but_unverified_session(monkeypatch):
+    from quantmaster import trading_sessions
+
+    monkeypatch.setattr(
+        trading_sessions,
+        "resolve_session_target",
+        lambda: SessionExpectation(
+            "2026-08-14", "stockdb:validated", False,
+            "provider 已发布但本地覆盖尚未完整",
+        ),
+    )
+    with pytest.raises(SessionTargetUnavailable, match="本地覆盖尚未完整"):
+        trading_sessions.default_close_data_end()
 
 
 def test_unverified_bar_majority_cannot_invent_a_holiday_session():

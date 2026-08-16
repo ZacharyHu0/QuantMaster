@@ -1736,6 +1736,9 @@ const settingsFeature = (() => {
     const resume = state.loaded;
     const generation = ++lifecycleGeneration;
     mounted = true;
+    const initialSection = document.querySelector('[data-settings-section].active')
+      ?.dataset.settingsSection || 'llm';
+    switchSection(initialSection);
     await loadSettings();
     if (resume && mounted && generation === lifecycleGeneration) resumeActiveWork();
   }

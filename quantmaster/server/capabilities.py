@@ -34,7 +34,11 @@ from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
-from quantmaster.trading_sessions import default_close_data_end, market_date
+from quantmaster.trading_sessions import (
+    SessionTargetUnavailable,
+    default_close_data_end,
+    market_date,
+)
 
 logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
@@ -121,6 +125,36 @@ def _stream_emit(
     events.put(event)
 
 
+def _calendar_error_event(exc: SessionTargetUnavailable, request_id: str) -> dict[str, Any]:
+    expectation = exc.expectation
+    problem = make_problem(
+        "calendar_unavailable",
+        severity="warning",
+        source="交易日历",
+        title="无法确认最近完成交易日",
+        message=expectation.reason or "交易日历证据不可用。",
+        action="配置已验证的交易日历并完成本地日线同步后重试。",
+        blocking=True,
+        can_continue=False,
+        retryable=False,
+    )
+    quality = {
+        "status": "unavailable",
+        "formal_eligible": False,
+        "completion": expectation.completion,
+        "issues": [expectation.reason or "交易日历证据不可用"],
+        "calendar": expectation.as_dict(),
+    }
+    return {
+        "type": "error",
+        "message": problem["message"],
+        "problem": problem,
+        "data_quality": quality,
+        "error_id": request_id,
+        "request_id": request_id,
+    }
+
+
 def _run_stream_task(
     task: Callable[[ProgressEmitter], dict], emit: ProgressEmitter,
     events: queue.Queue[dict | None], request_id: str,
@@ -139,6 +173,12 @@ def _run_stream_task(
         if exc.data_quality is not None:
             event["data_quality"] = exc.data_quality
         events.put(event)
+    except SessionTargetUnavailable as exc:
+        logger.warning(
+            "流式数据任务因交易日历证据不足而阻断 request_id=%s",
+            request_id,
+        )
+        events.put(_calendar_error_event(exc, request_id))
     except MarketDataUnavailable as exc:
         problem = make_problem(
             "market_data_unavailable", source="行情数据", title="行情证据不可用",
@@ -564,6 +604,8 @@ def market_regime(req: RegimeRequest) -> dict:
         return report
     except MarketDataUnavailable:
         raise
+    except SessionTargetUnavailable:
+        raise
     except Exception:
         raise _logged_bad_request("市场状态分析") from None
 
@@ -668,6 +710,8 @@ def selection_daily(req: SelectionRequest) -> dict:
         report["persistence"] = persistence
         return report
     except MarketDataUnavailable:
+        raise
+    except SessionTargetUnavailable:
         raise
     except Exception:
         raise _logged_bad_request("每日选股分析") from None
@@ -786,6 +830,8 @@ def decision_dashboard(req: DecisionDashboardRequest) -> dict:
     try:
         return _decision_dashboard_data(req)
     except MarketDataUnavailable:
+        raise
+    except SessionTargetUnavailable:
         raise
     except Exception:
         raise _logged_bad_request("决策工作台计算") from None
@@ -1085,6 +1131,8 @@ def factors_test(req: FactorTestRequest) -> dict:
             refresh=False,
         )
     except MarketDataUnavailable:
+        raise
+    except SessionTargetUnavailable:
         raise
     except Exception:
         raise _logged_bad_request("因子检验") from None

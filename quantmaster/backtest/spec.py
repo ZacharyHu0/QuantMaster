@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, timedelta
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from pydantic import ConfigDict, Field, model_validator
 
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
-from quantmaster.trading_sessions import market_date, resolve_session_target
+from quantmaster.trading_sessions import resolve_session_target
 
 
 def canonical_json(value: object) -> str:
@@ -137,17 +137,17 @@ class BacktestSpec(ContractModel):
     def validate_dates(self):
         try:
             start = date.fromisoformat(self.start)
-            if self.end:
-                end = date.fromisoformat(self.end)
-            else:
-                expectation = resolve_session_target()
-                end = (
-                    date.fromisoformat(expectation.session)
-                    if expectation.ready and expectation.session
-                    else market_date() - timedelta(days=1)
-                )
+            end = date.fromisoformat(self.end) if self.end else None
         except ValueError as exc:
             raise ValueError("开始和结束日期必须使用 YYYY-MM-DD 格式") from exc
+        if end is None:
+            expectation = resolve_session_target()
+            if not expectation.ready or not expectation.session:
+                raise ValueError(
+                    "无法确认最近完成交易日："
+                    + (expectation.reason or "交易日历证据不可用")
+                )
+            end = date.fromisoformat(expectation.session)
         if start >= end:
             raise ValueError("结束日期必须晚于开始日期")
         return self

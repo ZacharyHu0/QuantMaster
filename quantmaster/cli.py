@@ -41,7 +41,10 @@ def _close_day() -> str:
     expectation = resolve_session_target()
     if expectation.ready and expectation.session:
         return expectation.session
-    return (market_date() - pd.Timedelta(days=1)).date().isoformat()
+    raise RuntimeError(
+        "无法确认最近完成交易日："
+        + (expectation.reason or "交易日历证据不可用")
+    )
 
 
 def _print_json(data) -> None:

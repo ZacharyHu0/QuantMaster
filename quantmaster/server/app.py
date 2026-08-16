@@ -30,6 +30,7 @@ from quantmaster.server.capabilities import _progress_stream, _stream_runtime
 from quantmaster.server.capabilities import (
     shutdown_stream_runtime as _shutdown_web_stream_executor,
 )
+from quantmaster.trading_sessions import SessionTargetUnavailable
 
 logger = logging.getLogger(__name__)
 _web_stream_runtime = None
@@ -180,6 +181,33 @@ def _http_exception_response(request_id: str, exc: HTTPException) -> JSONRespons
     return _problem_response(request_id, problem, status_code=status)
 
 
+def _session_target_response(request_id: str, exc: SessionTargetUnavailable) -> JSONResponse:
+    expectation = exc.expectation
+    problem = make_problem(
+        "calendar_unavailable",
+        severity="warning",
+        source="交易日历",
+        title="无法确认最近完成交易日",
+        message=expectation.reason or "交易日历证据不可用。",
+        action="配置已验证的交易日历并完成本地日线同步后重试。",
+        blocking=True,
+        can_continue=False,
+        retryable=False,
+    )
+    return _problem_response(
+        request_id,
+        problem,
+        status_code=503,
+        data_quality={
+            "status": "unavailable",
+            "formal_eligible": False,
+            "completion": expectation.completion,
+            "issues": [expectation.reason or "交易日历证据不可用"],
+            "calendar": expectation.as_dict(),
+        },
+    )
+
+
 def _logged_bad_request(operation: str) -> HTTPException:
     """记录完整内部异常，但只向客户端返回稳定的操作级错误。"""
     logger.exception("%s失败", operation)
@@ -217,6 +245,11 @@ async def operation_problem(request: Request, exc: OperationProblem):
         _request_id(request), exc.problem, status_code=exc.status_code,
         data_quality=exc.data_quality,
     )
+
+
+@app.exception_handler(SessionTargetUnavailable)
+async def session_target_unavailable(request: Request, exc: SessionTargetUnavailable):
+    return _session_target_response(_request_id(request), exc)
 
 
 @app.exception_handler(MarketDataUnavailable)
@@ -335,6 +368,8 @@ async def request_context_and_migration_lock(request: Request, call_next):
             blocking=True,
         )
         response = _problem_response(request_id, problem, status_code=exc.status_code)
+    except SessionTargetUnavailable as exc:
+        response = _session_target_response(request_id, exc)
     except OperationProblem as exc:
         # Starlette's exception handlers sit inside this request middleware.
         # Preserve a deliberate cold/degraded operation contract instead of

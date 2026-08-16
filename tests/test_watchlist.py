@@ -53,6 +53,7 @@ def test_asset_lists_api_includes_cached_quotes_and_holdings():
 def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
     from quantmaster.market import overview as market_overview
 
+    monkeypatch.setattr(market_overview, "default_close_data_end", lambda: "2026-07-22")
     AssetListStore().add("favorites", "600519", "贵州茅台")
     AssetListStore().add("following", "600519", "贵州茅台")
     Ledger().add_trade(TradeRecord(
