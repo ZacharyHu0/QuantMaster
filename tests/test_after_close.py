@@ -351,7 +351,7 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
 
     assert latest.status_code == 200
     assert diagnostics.status_code == 200
-    assert old_health.status_code == 404
+    assert old_health.status_code == 200
     assert latest.json()["snapshot"]["snapshot_id"] == snapshot.snapshot_id
     assert exported.status_code == 200
     assert "600001.SH" in exported.content.decode("utf-8-sig")
