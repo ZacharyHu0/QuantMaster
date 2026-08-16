@@ -18,7 +18,7 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
-from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.logging_config import redact_public_text
 
 _IDENTITY_FIELDS = ("build_sha", "slot_id", "runtime_generation")
 _HELP_MAX_SECONDS = {"onefile": 20.0, "onedir": 1.5}
@@ -535,10 +535,10 @@ def smoke(executable: Path, *, layout: str = "onefile") -> dict[str, Any]:
                         _terminate_exact_process(pid, executable)
                     except RuntimeError as cleanup_exc:
                         cleanup_errors.append(str(cleanup_exc))
-                detail = redact_sensitive_text(
+                detail = redact_public_text(
                     stderr_path.read_text(encoding="utf-8", errors="replace")[-4000:]
                 )
-                cleanup = redact_sensitive_text("\n".join(cleanup_errors))
+                cleanup = redact_public_text("\n".join(cleanup_errors))
                 raise RuntimeError(
                     f"{exc}\n--- frozen server stderr ---\n{detail}"
                     + (f"\n--- cleanup errors ---\n{cleanup}" if cleanup else "")

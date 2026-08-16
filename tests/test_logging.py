@@ -43,14 +43,24 @@ def _isolated_logger(name: str, handler: logging.Handler) -> logging.Logger:
     return logger
 
 
-def test_redact_sensitive_text_removes_local_absolute_paths():
-    text = qm_logging.redact_sensitive_text(
+def test_redact_public_text_removes_local_absolute_paths():
+    text = qm_logging.redact_public_text(
         r"failure C:\Users\example\Quant\worker.py /home/runner/work/project/project/tests/test.py"
     )
 
     assert "<local-path>" in text
     assert "Users" not in text
     assert "/home/runner" not in text
+
+
+def test_redact_sensitive_text_keeps_local_paths_and_hides_secrets():
+    text = qm_logging.redact_sensitive_text(
+        r"config C:\Users\example\Quant\config.yaml token=private-value"
+    )
+
+    assert r"C:\Users\example\Quant\config.yaml" in text
+    assert "token=***" in text
+    assert "private-value" not in text
 
 
 def test_console_shows_key_frame_then_folds_repeated_traceback(tmp_path):
@@ -121,6 +131,20 @@ def test_configured_logging_separates_stdout_and_writes_full_file(tmp_path, caps
     assert '"thread":"MainThread"' in content
     assert "token=***" in content
     assert "very-secret-value" not in content
+
+
+def test_local_file_log_keeps_paths_but_hides_secrets(tmp_path):
+    qm_logging.configure_logging(data_root=tmp_path)
+    path = tmp_path / "project" / "config.yaml"
+    logging.getLogger("quantmaster.settings").warning(
+        "配置路径 %s token=%s", path, "private-value",
+    )
+    qm_logging.shutdown_logging()
+
+    document = json.loads(next((tmp_path / "logs").glob("quantmaster-*.log")).read_text(encoding="utf-8"))
+    assert str(path) in document["message"]
+    assert "token=***" in document["message"]
+    assert "private-value" not in document["message"]
 
 
 def test_log_file_rotates_and_configuration_is_idempotent(tmp_path, monkeypatch):

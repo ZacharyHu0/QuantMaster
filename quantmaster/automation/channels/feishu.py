@@ -12,7 +12,7 @@ from typing import Any, Literal, get_args
 
 from quantmaster.actor_context import ActorContext
 from quantmaster.credentials import CredentialError, CredentialStore
-from quantmaster.logging_config import normalize_third_party_logger, redact_sensitive_text
+from quantmaster.logging_config import normalize_third_party_logger, redact_public_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def feishu_connection_error(exc: BaseException) -> dict[str, object]:
     else:
         kind, retryable = "unknown", False
 
-    summary = redact_sensitive_text(" | ".join(
+    summary = redact_public_text(" | ".join(
         f"{type(item).__name__}: {item}" for item in chain
     ))
     summary = " ".join(summary.split())
