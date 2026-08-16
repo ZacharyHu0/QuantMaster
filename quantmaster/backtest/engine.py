@@ -92,19 +92,25 @@ def _sell_cost(amount: float, t: TradeConfig) -> float:
     return sell_cost(amount, t)
 
 
-def _execution_reason(
-    symbol: str, side: str, date, price: float, previous_close: float | None,
-    *, up_limit: pd.DataFrame | None, down_limit: pd.DataFrame | None,
-    suspended: pd.DataFrame | None, config: BacktestConfig,
+def _series_at(
+    frame: pd.DataFrame | None, date, symbols: list[str],
+) -> pd.Series | None:
+    if frame is None:
+        return None
+    return frame.reindex(index=[date], columns=symbols).iloc[0]
+
+
+def _execution_reason_from_series(
+    symbol: str, side: str, price: float, previous_close: float | None,
+    *, up_limit: pd.Series | None, down_limit: pd.Series | None,
+    suspended: pd.Series | None, config: BacktestConfig,
 ) -> str | None:
     if suspended is not None:
-        value = suspended.reindex(index=[date], columns=[symbol]).iloc[0, 0]
+        value = suspended.get(symbol, np.nan)
         if pd.notna(value) and bool(value):
             return "suspended"
     frame = up_limit if side == "buy" else down_limit
-    limit_value = np.nan
-    if frame is not None:
-        limit_value = frame.reindex(index=[date], columns=[symbol]).iloc[0, 0]
+    limit_value = frame.get(symbol, np.nan) if frame is not None else np.nan
     if pd.notna(limit_value) and float(limit_value) > 0:
         tolerance = max(1e-6, abs(float(limit_value)) * 1e-6)
         if side == "buy" and price >= float(limit_value) - tolerance:
@@ -116,6 +122,21 @@ def _execution_reason(
         return "missing_actual_limit"
     return limit_reason(
         symbol, side, price, previous_close, enabled=config.limit_check,
+    )
+
+
+def _execution_reason(
+    symbol: str, side: str, date, price: float, previous_close: float | None,
+    *, up_limit: pd.DataFrame | None, down_limit: pd.DataFrame | None,
+    suspended: pd.DataFrame | None, config: BacktestConfig,
+) -> str | None:
+    symbols = [symbol]
+    return _execution_reason_from_series(
+        symbol, side, price, previous_close,
+        up_limit=_series_at(up_limit, date, symbols),
+        down_limit=_series_at(down_limit, date, symbols),
+        suspended=_series_at(suspended, date, symbols),
+        config=config,
     )
 
 
@@ -218,13 +239,13 @@ def _previous_close_value(row: pd.Series, symbol: str) -> float | None:
 
 def _try_risk_exit(
     state: _BacktestState,
-    market: _MarketData,
     config: BacktestConfig,
-    date,
     date_str: str,
     symbol: str,
     day_open: pd.Series,
     day_previous_close: pd.Series,
+    day_suspended: pd.Series | None,
+    day_down_limit: pd.Series | None,
 ) -> bool:
     if state.shares[symbol] <= 0 or state.entry_cost[symbol] <= 0:
         return False
@@ -234,12 +255,12 @@ def _try_risk_exit(
     reason = _risk_exit_reason(price / state.entry_cost[symbol] - 1.0, config)
     if reason is None:
         return False
-    blocked = _execution_reason(
-        symbol, "sell", date, float(price),
+    blocked = _execution_reason_from_series(
+        symbol, "sell", float(price),
         _previous_close_value(day_previous_close, symbol),
-        up_limit=market.up_limit,
-        down_limit=market.down_limit,
-        suspended=market.suspended,
+        up_limit=None,
+        down_limit=day_down_limit,
+        suspended=day_suspended,
         config=config,
     )
     if blocked:
@@ -272,12 +293,14 @@ def _execute_risk_exits(
         return set()
     day_open = market.open_px.loc[date]
     day_previous_close = previous_close.loc[date]
+    day_suspended = _series_at(market.suspended, date, market.symbols)
+    day_down_limit = _series_at(market.down_limit, date, market.symbols)
     return {
         symbol
         for symbol in market.symbols
         if _try_risk_exit(
-            state, market, config, date, date_str, symbol,
-            day_open, day_previous_close,
+            state, config, date_str, symbol, day_open, day_previous_close,
+            day_suspended, day_down_limit,
         )
     }
 
@@ -287,15 +310,21 @@ def _portfolio_value_at_open(
     symbols: list[str],
     day_open: pd.Series,
 ) -> float:
-    position_value = sum(
-        state.shares[symbol] * (
-            float(day_open.get(symbol))
-            if pd.notna(day_open.get(symbol)) and float(day_open.get(symbol)) > 0
-            else state.last_close.get(symbol, 0.0)
-        )
-        for symbol in symbols
-        if state.shares[symbol] > 0
+    shares = np.array([state.shares[symbol] for symbol in symbols], dtype=np.float64)
+    opens = np.array(
+        [
+            float(day_open.get(symbol, np.nan))
+            if pd.notna(day_open.get(symbol, np.nan))
+            else 0.0
+            for symbol in symbols
+        ],
+        dtype=np.float64,
     )
+    fallbacks = np.array(
+        [state.last_close.get(symbol, 0.0) for symbol in symbols], dtype=np.float64,
+    )
+    prices = np.where(opens > 0, opens, fallbacks)
+    position_value = float(np.sum(np.where(shares > 0, shares * prices, 0.0)))
     return state.cash + position_value
 
 
@@ -313,22 +342,32 @@ def _build_orders(
     portfolio_value: float,
     date_str: str,
 ) -> tuple[list[tuple[str, float]], bool]:
-    orders: list[tuple[str, float]] = []
+    count = len(symbols)
+    target_values = np.zeros(count, dtype=np.float64)
+    current_values = np.zeros(count, dtype=np.float64)
+    valid = np.ones(count, dtype=bool)
     retry_pending = False
-    for symbol in symbols:
+    for index, symbol in enumerate(symbols):
         price = day_open.get(symbol, np.nan)
         target_weight = float(weights.get(symbol, 0.0))
         if np.isnan(price) or price <= 0:
+            valid[index] = False
             if state.shares[symbol] > 0 or target_weight > 0:
                 side = "sell" if target_weight <= 0 else "rebalance"
                 state.blocked_orders.append(
                     BlockedOrder(date_str, symbol, side, "missing_open")
                 )
-                retry_pending = True
+            retry_pending = True
             continue
         target_value = portfolio_value * target_weight
-        orders.append((symbol, target_value - state.shares[symbol] * price))
-    orders.sort(key=lambda order: order[1])
+        target_values[index] = target_value
+        current_values[index] = state.shares[symbol] * price
+    differences = target_values - current_values
+    valid_indices = np.flatnonzero(valid)
+    sorted_indices = valid_indices[np.argsort(
+        differences[valid_indices], kind="stable",
+    )]
+    orders = [(symbols[index], float(differences[index])) for index in sorted_indices]
     return orders, retry_pending
 
 

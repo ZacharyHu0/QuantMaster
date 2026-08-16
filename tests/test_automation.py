@@ -1121,15 +1121,14 @@ def test_feishu_sync_bridges_reject_a_running_loop_without_creating_coroutines(
 
 def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
     import asyncio
-    import sys
     import threading
-    from types import SimpleNamespace
+
+    from quantmaster.automation.channels import feishu as feishu_module
 
     store = AutomationStore(tmp_path / "automation.sqlite")
     client = FeishuBotClient(store, MemoryCredentials())
     client.configure("cli_app", "secret")
     stop_calls = []
-    started = threading.Event()
 
     class FakeFeishuChannel:
         def __init__(self, **_kwargs):
@@ -1140,32 +1139,35 @@ def test_feishu_cross_loop_close_is_owned_once(tmp_path, monkeypatch):
 
         async def start_background(self, *, timeout):
             assert timeout == 30
-            started.set()
 
         async def stop_background(self):
             stop_calls.append(threading.current_thread().name)
 
-    monkeypatch.setitem(
-        sys.modules, "lark_oapi.channel",
-        SimpleNamespace(FeishuChannel=FakeFeishuChannel),
+    monkeypatch.setattr(
+        feishu_module, "_feishu_channel_types",
+        lambda: (FakeFeishuChannel, None, None),
     )
-    stop_event = threading.Event()
-    owner = threading.Thread(
-        target=client.listen_forever,
-        args=(lambda *_: None, stop_event),
-        name="feishu-owner",
-    )
-    owner.start()
-    assert started.wait(1)
+    monkeypatch.setattr(feishu_module, "_track_lark_ws_tasks", lambda _channel: None)
 
-    async def close_twice():
-        await asyncio.gather(client.aclose(), client.aclose())
+    async def exercise():
+        stop_event = threading.Event()
+        listener = asyncio.create_task(client.listen(lambda *_: None, stop_event))
 
-    asyncio.run(close_twice())
-    owner.join(timeout=1)
+        async def wait_for_active_channel():
+            while client._active_channel is None:
+                await asyncio.sleep(0)
 
-    assert not owner.is_alive()
-    assert stop_calls == ["feishu-owner"]
+        await asyncio.wait_for(wait_for_active_channel(), timeout=5)
+        await asyncio.gather(
+            asyncio.to_thread(asyncio.run, client.aclose()),
+            asyncio.to_thread(asyncio.run, client.aclose()),
+        )
+        await listener
+        return threading.current_thread().name
+
+    owner_thread = asyncio.run(exercise())
+
+    assert stop_calls == [owner_thread]
     assert client._active_channel is None
 
 
@@ -1332,6 +1334,56 @@ def test_feishu_check_does_not_restart_channel(tmp_path, monkeypatch):
         headers={"X-CSRF-Token": token},
     )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(("worker_available", "expected_status"), [
+    (True, "success"), (False, "warning"),
+])
+def test_feishu_check_uses_worker_health_and_listening_status(
+        tmp_path, monkeypatch, isolated_config, worker_available, expected_status,
+):
+    from quantmaster.server import automation as automation_api
+
+    isolated_config.automation.enabled = True
+    store = AutomationStore(tmp_path / "automation.sqlite")
+    credentials = MemoryCredentials()
+    local_service = AutomationService(
+        store, OutboxDispatcher(store, RecordingGateway()),
+    )
+    local_service.feishu = FeishuBotClient(store, credentials)
+    local_service.feishu.configure("cli_app", "secret")
+    store.set_bot_status("feishu", "cli_app", "listening")
+    monkeypatch.setattr(store, "set_bot_validation", lambda *_args: None)
+    monkeypatch.setattr(
+        local_service.feishu, "verify",
+        lambda *_args: {"status": "success", "state": "connected", "message": "有效"},
+    )
+    monkeypatch.setattr(automation_api, "service", lambda: local_service)
+    monkeypatch.setattr(
+        automation_api, "get_runtime",
+        lambda: pytest.fail("diagnostic must not read the Web-local runtime"),
+    )
+    monkeypatch.setattr(
+        automation_api, "runtime_worker_status",
+        lambda: {"available": worker_available, "status": "running" if worker_available else "unavailable"},
+    )
+
+    client = TestClient(app)
+    token = client.get("/api/v1/session").json()["csrf_token"]
+    response = client.post(
+        "/api/v1/automation/channels/feishu/check",
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 200
+    stages = response.json()["stages"]
+    assert stages["runtime"]["status"] == expected_status
+    assert stages["websocket"]["status"] == expected_status
+    assert stages["websocket"]["state"] == "listening"
+    if worker_available:
+        assert stages["websocket"]["message"] == "飞书长连接监听中"
+    else:
+        assert "不能确认" in stages["websocket"]["message"]
 
 
 def test_feishu_missing_credentials_never_starts_listener_or_dispatcher(tmp_path, monkeypatch):

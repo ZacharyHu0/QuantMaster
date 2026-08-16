@@ -548,7 +548,6 @@ def feishu_config(value: FeishuConfigIn, request: Request) -> dict:
 def feishu_check(request: Request) -> dict:
     """返回实际凭据、运行时、长连接、入站事件与绑定五阶段状态。"""
     _require_csrf(request)
-    runtime = get_runtime()
     account = service().store.bot_account("feishu")
     stages: dict[str, dict[str, Any]] = {}
     if not account:
@@ -570,43 +569,51 @@ def feishu_check(request: Request) -> dict:
                 "status": "warning", "state": "not_configured",
                 "message": "飞书凭据不可读取；不会启动 Bot 或重试。",
             }
-    runtime_detail = runtime.status()
+    worker = runtime_worker_status()
+    runtime_state = (
+        "disabled" if not get_config().automation.enabled
+        else "running" if worker.get("available") else "degraded"
+    )
     stages["runtime"] = {
-        "status": "success" if runtime_detail["status"] == "running" else "warning",
+        "status": "success" if runtime_state == "running" else "warning",
         "message": {
             "running": "自动化运行时已启动",
             "disabled": "自动化总开关关闭",
-            "standby": "当前进程正在等待调度租约",
-        }.get(runtime_detail["status"], "自动化运行时异常"),
+        }.get(runtime_state, "自动化运行时异常"),
     }
-    channel_alive = bool(runtime_detail["channels"].get("feishu"))
     credential_ready = stages["credential"].get("state") in {
         "connected", "network_error", "tls_error", "rate_limited",
     }
     refreshed = service().store.bot_account("feishu") or account or {}
     websocket_status = str(refreshed.get("status") or "")
+    listener_ready = websocket_status in {"connected", "listening", "healthy"}
     if not account or not credential_ready:
         connection_status = "warning"
-    elif websocket_status == "connected" and channel_alive:
+    elif runtime_state == "running" and listener_ready:
         connection_status = "success"
-    elif account and runtime_detail["status"] != "running":
+    elif runtime_state != "running":
         connection_status = "warning"
-    elif websocket_status == "connecting" and channel_alive:
+    elif websocket_status == "connecting":
         connection_status = "warning"
     else:
         connection_status = "error"
+    websocket_message = {
+        "connecting": "飞书长连接正在建立",
+        "connected": "飞书长连接监听中",
+        "listening": "飞书长连接监听中",
+        "healthy": "飞书长连接监听中",
+        "invalid_credentials": "凭据无效；请更新 App ID / App Secret",
+        "tls_error": "TLS 连接失败；请检查系统时间、证书和网络",
+        "network_error": "飞书网络不可达；请检查网络后重试",
+        "rate_limited": "飞书连接受限；请稍后重试",
+    }.get(websocket_status, "飞书长连接尚未启动" if runtime_state == "running"
+          else "凭据已配置；启用自动化后才会建立长连接")
+    if listener_ready and runtime_state != "running":
+        websocket_message = "自动化运行时不可用；暂不能确认飞书长连接监听状态"
     stages["websocket"] = {
         "status": connection_status,
         "state": websocket_status or "not_configured",
-        "message": {
-            "connecting": "飞书长连接正在建立",
-            "connected": "飞书长连接监听中",
-            "invalid_credentials": "凭据无效；请更新 App ID / App Secret",
-            "tls_error": "TLS 连接失败；请检查系统时间、证书和网络",
-            "network_error": "飞书网络不可达；请检查网络后重试",
-            "rate_limited": "飞书连接受限；请稍后重试",
-        }.get(websocket_status, "飞书长连接尚未启动" if runtime_detail["status"] == "running"
-              else "凭据已配置；启用自动化后才会建立长连接"),
+        "message": websocket_message,
     }
     inbound = service().store.inbound_status("feishu")
     stages["event"] = {

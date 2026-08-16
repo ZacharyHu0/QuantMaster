@@ -283,6 +283,22 @@ class TestStopLoss:
         suspended_nav = result.nav.iloc[6:9]
         assert (suspended_nav > 0.9).all(), "停牌期间净值不应按 0 估值塌陷"
 
+    def test_sparse_optional_risk_frames_are_treated_as_missing(self):
+        panel = self._panel_with_drop()
+        dates = panel["close"].index
+        panel["suspended"] = pd.DataFrame(
+            {"600000.SH": [False]}, index=[dates[0]],
+        )
+        panel["down_limit"] = pd.DataFrame(
+            {"600000.SH": [9.0]}, index=[dates[0]],
+        )
+        weights = pd.DataFrame(np.nan, index=dates, columns=["600000.SH"])
+        weights.iloc[0] = 1.0
+
+        result = run_backtest(panel, weights, BacktestConfig(stop_loss=0.10))
+
+        assert [trade.note for trade in result.trades].count("stop_loss") == 1
+
     def test_stopped_symbol_not_rebought_same_day(self):
         """止损当日即使信号仍要求持有，也不回补。"""
         panel = self._panel_with_drop()

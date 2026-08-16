@@ -37,7 +37,11 @@ from quantmaster.data.resilience import (
     provider_failure_result,
 )
 from quantmaster.data.storage import BarStore
-from quantmaster.data.tushare_source import TushareSource, _current_session_cache_floor
+from quantmaster.data.tushare_source import (
+    TushareSource,
+    _current_session_cache_floor,
+    _parse_tushare_dates,
+)
 
 
 def test_default_daily_bar_store_is_reused_per_root(tmp_path, monkeypatch):
@@ -284,6 +288,27 @@ def test_akshare_exponential_retry(isolated_config, monkeypatch):
     assert sleeps == [0.25, 0.5]
 
 
+def test_akshare_empty_response_retries_before_returning_data(isolated_config, monkeypatch):
+    isolated_config.data.akshare_retries = 3
+    isolated_config.data.akshare_retry_backoff = 0.25
+    sleeps: list[float] = []
+    attempts = 0
+
+    def flaky():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return pd.DataFrame()
+        return pd.DataFrame({"value": [1]})
+
+    monkeypatch.setattr("quantmaster.data.resilience._retry_sleep", sleeps.append)
+    result = akshare_call("empty-then-data", flaky)
+
+    assert not result.empty
+    assert attempts == 3
+    assert sleeps == [0.25, 0.5]
+
+
 def test_scheduled_provider_captures_retry_hook_before_foreign_test_patch(
     isolated_config, monkeypatch,
 ):
@@ -358,6 +383,21 @@ def test_tushare_rate_limit_is_shared_in_data_root(isolated_config, monkeypatch)
     limiter.wait()
     assert sleeps == [pytest.approx(0.1)]
     assert (isolated_config.data_root / "tushare_rate.sqlite").exists()
+
+
+def test_tushare_date_parser_is_vectorized_but_keeps_strict_contract():
+    values = pd.Series(["20240102", "", None], index=[10, 20, 30])
+
+    parsed = _parse_tushare_dates(values, field="trade_date", allow_missing=True)
+
+    assert parsed.iloc[0] == pd.Timestamp("2024-01-02")
+    assert parsed.iloc[1:].isna().all()
+    with pytest.raises(ProviderContractChanged, match="missing_provider_date"):
+        _parse_tushare_dates(values, field="trade_date")
+    with pytest.raises(ProviderContractChanged, match="invalid_provider_date"):
+        _parse_tushare_dates(pd.Series(["20240132"]), field="trade_date")
+    with pytest.raises(ProviderContractChanged, match="invalid_provider_date"):
+        _parse_tushare_dates(pd.Series(["nan"]), field="trade_date", allow_missing=True)
 
 
 def test_provider_fixture_drains_late_failure_before_config_switch(

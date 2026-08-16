@@ -877,9 +877,11 @@ def _permanent_failure(exc: BaseException) -> bool:
 
 
 def _retryable_failure(exc: BaseException) -> bool:
-    """Only network/DNS/TLS and upstream 5xx failures earn another request."""
+    """Retry transient transport, upstream, and empty-provider failures."""
     value = classify_provider_failure(exc)
-    return value in {"transient_network", "transient_upstream", "upstream_5xx"} or (
+    return value in {
+        "transient_network", "transient_upstream", "upstream_5xx", "empty_response",
+    } or (
         value.startswith("http_") and value.endswith("_upstream")
     )
 
@@ -976,11 +978,11 @@ def provider_call[T](
                 retry_after = _retry_after_seconds(exc)
                 immediate = (
                     _hard_connectivity_error(exc) or _rate_limited(exc)
-                    or isinstance(exc, EmptyProviderResponse) or _permanent_failure(exc)
+                    or _permanent_failure(exc)
                 )
                 # 429 requires an upstream-directed pause, and 401/403 must
-                # never burn retry budget.  Only transient transport/5xx
-                # failures retry, bounded by the shared provider contract.
+                # never burn retry budget. Empty responses are retryable for
+                # providers whose adapter opts into empty-response detection.
                 if immediate or not _retryable_failure(exc) or attempt >= attempts:
                     PROVIDER_HEALTH.failure(
                         lane, exc, immediate=immediate, retry_after=retry_after,
@@ -1007,6 +1009,7 @@ def akshare_call[T](
     *args,
     lane: str = "akshare:eastmoney",
     probe: bool = False,
+    empty_opens: bool = True,
     **kwargs,
 ) -> T:
     """AKShare adapter; retry/circuit/singleflight are owned by provider_call."""
@@ -1021,6 +1024,7 @@ def akshare_call[T](
     cfg = get_config().data
     return provider_call(
         lane, key, lambda: func(*args, **kwargs), probe=probe,
+        empty_opens=empty_opens,
         retry_attempts=max(1, int(cfg.akshare_retries)),
         retry_backoff=max(0.0, float(cfg.akshare_retry_backoff)),
     )
