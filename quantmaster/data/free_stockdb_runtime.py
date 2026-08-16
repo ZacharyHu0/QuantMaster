@@ -48,6 +48,7 @@ _AUTO_MAX_ATTEMPTS = 3
 _AUTO_RETRY_SECONDS = 15 * 60
 _UPDATER_TIMEOUT_SECONDS = 30 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
+_SERVICE_CHECK_SECONDS = 5
 _DATA_STABILITY_SECONDS = 10
 _DATA_QUIESCENCE_POLL_SECONDS = 5
 _OWNER_STALE_SECONDS = 120
@@ -247,6 +248,7 @@ class FreeStockDBRuntime:
         self._supervised = False
         self._control: _RuntimeControl | None = None
         self._last_target_check = 0.0
+        self._last_service_check = 0.0
         self._last_vendor_force = 0.0
         self._next_retry_at = 0.0
         self._retry_target = ""
@@ -1400,6 +1402,16 @@ class FreeStockDBRuntime:
                     self.update_now("retry", target_session=target, attempt=attempt)
                     continue
                 cfg = get_config().data
+                service_check_due = (
+                    cfg.free_stockdb_managed
+                    and not self._update_lock.locked()
+                    and time.monotonic() - self._last_service_check >= _SERVICE_CHECK_SECONDS
+                )
+                if service_check_due:
+                    self._last_service_check = time.monotonic()
+                    if not self._listening():
+                        logger.warning("free-stockdb 服务失联，监督器尝试重新启动")
+                        self._start_service()
                 scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
                 due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
                 if (

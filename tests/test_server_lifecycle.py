@@ -37,8 +37,10 @@ def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):
 
     asyncio.run(run())
 
+    assert calls[0] == "stockdb-start"
     assert ("supervisor", False) in calls
     assert "supervisor-stop" in calls
+    assert calls[-1] == "stockdb-stop"
 
 
 def test_splash_waits_for_listener_and_core_readiness_without_sleep() -> None:
