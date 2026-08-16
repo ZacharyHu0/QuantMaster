@@ -313,7 +313,12 @@ class SlotRegistry:
 
     def mark_blocked(self, error: str) -> dict[str, object]:
         state = self.read()
-        blocked = {**state, "status": "blocked", "last_error": str(error)[:500]}
+        blocked = {
+            **state,
+            "pending": "",
+            "status": "blocked",
+            "last_error": str(error)[:500],
+        }
         self._write_state(blocked)
         return blocked
 
@@ -402,15 +407,18 @@ class SubprocessGenerationController:
         self.port = int(port)
         self._drain_identity: ApplicationIdentity | None = None
 
-    def _health(self) -> Mapping[str, object] | None:
+    def _json(self, path: str) -> Mapping[str, object] | None:
         try:
             with urllib.request.urlopen(
-                f"http://{self.host}:{self.port}/api/v1/health", timeout=0.5,
+                f"http://{self.host}:{self.port}/api/v1/{path}", timeout=0.5,
             ) as response:
                 value = json.loads(response.read().decode("utf-8"))
         except (OSError, ValueError, TypeError, urllib.error.URLError):
             return None
         return value if isinstance(value, Mapping) else None
+
+    def _health(self) -> Mapping[str, object] | None:
+        return self._json("health")
 
     def current_identity(self) -> Mapping[str, object] | None:
         return self._health()
@@ -473,15 +481,12 @@ class SubprocessGenerationController:
             raise ActivationBlocked("candidate_start_failed", "候选槽启动失败") from exc
 
     def _worker_ready(self, identity: ApplicationIdentity) -> bool:
-        try:
-            from quantmaster.config import get_config
-
-            value = json.loads((get_config().data_root / "runtime-worker.json").read_text(encoding="utf-8"))
-            age = max(0.0, time.time() - float(value.get("updated_at") or 0))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        runtime = self._json("settings/runtime")
+        if runtime is None or not isinstance(runtime.get("worker"), Mapping):
             return False
+        value = cast(Mapping[str, object], runtime["worker"])
         return (
-            age <= 5.0
+            value.get("available") is True
             and value.get("build_sha") == identity.build_sha
             and value.get("slot_id") == identity.slot_id
             and value.get("runtime_generation") == identity.runtime_generation
