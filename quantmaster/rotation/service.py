@@ -36,6 +36,7 @@ from quantmaster.rotation.analytics import (
     market_temperature_reference_dates,
 )
 from quantmaster.rotation.contracts import RotationJobSpec
+from quantmaster.rotation.session import expected_market_session
 from quantmaster.rotation.status import (
     data_status_payload,
     provider_status_payload,
@@ -59,7 +60,6 @@ from quantmaster.runtime.jobs import (
 )
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.metrics import get_runtime_metrics
-from quantmaster.trading_sessions import resolve_session_target
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
@@ -322,12 +322,7 @@ def _snapshot_id(as_of: str, columns: list[str], scope: str) -> str:
     return hashlib.sha256(logical.encode("utf-8")).hexdigest()[:20]
 
 
-def _expected_market_session(
-    now: datetime | None = None, *, as_of: str = "",
-) -> str:
-    """Latest completed session backed by an official or verified local calendar."""
-    expectation = resolve_session_target(as_of, now)
-    return expectation.session if expectation.ready else ""
+_expected_market_session = expected_market_session
 
 
 def _mark_stale(
@@ -1789,9 +1784,9 @@ class _RotationBuildRun:
         state = self.state
         if state.spec.source != "auto":
             return
-        from quantmaster.rotation.provider import RotationProvider
+        from quantmaster.rotation_provider_access import rotation_provider
 
-        operations = self._provider_operations(RotationProvider(self.service.store))
+        operations = self._provider_operations(rotation_provider()(self.service.store))
         for key, label, operation in operations:
             self._run_provider_operation(key, label, operation)
         if not operations:

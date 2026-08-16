@@ -14,6 +14,9 @@ from quantmaster.research.contracts import (
     ResearchSpec,
     RunManifest,
 )
+from quantmaster.research.repair import repair_research_partition as _repair_research_partition
+
+_ = _repair_research_partition
 
 __all__ = [
     "ArtifactKind",

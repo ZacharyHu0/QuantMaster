@@ -9,35 +9,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
+from quantmaster.artifact_contract import ArtifactRef
+from quantmaster.research_primitives import ArtifactKind, AssetClass, Frequency
 from quantmaster.runtime.json import strict_json_dumps
 
 
 class _ValueEnum(enum.StrEnum):
     def __str__(self) -> str:
         return self.value
-
-
-class AssetClass(_ValueEnum):
-    STOCK = "stock"
-    ETF = "etf"
-    FUTURE = "future"
-
-
-class Frequency(_ValueEnum):
-    DAILY = "1d"
-    MINUTE_1 = "1m"
-    MINUTE_5 = "5m"
-    MINUTE_15 = "15m"
-    MINUTE_30 = "30m"
-    MINUTE_60 = "60m"
-
-
-class ArtifactKind(_ValueEnum):
-    RAW = "raw"
-    FACTOR = "factors"
-    LABEL = "labels"
-    RISK = "risk"
-    MODEL = "models"
 
 
 class CapabilityState(_ValueEnum):
@@ -226,36 +205,6 @@ class FactorProviderSpec:
             "lookback_sessions": self.lookback_sessions,
             "lookahead_sessions": self.lookahead_sessions,
         }
-
-
-@dataclass(frozen=True)
-class ArtifactRef:
-    kind: ArtifactKind
-    id: str
-    version: str
-    asset_class: AssetClass
-    frequency: Frequency = Frequency.DAILY
-    output: str = "value"
-
-    def __post_init__(self) -> None:
-        if not _ID_RE.fullmatch(self.id) or not _VERSION_RE.fullmatch(self.version):
-            raise ValueError("ArtifactRef 的 id/version 非法")
-
-    @property
-    def storage_column(self) -> str:
-        version = re.sub(r"[^A-Za-z0-9]+", "_", self.version).strip("_")
-        return f"{self.id}__v{version}"
-
-    def to_dict(self) -> dict[str, Any]:
-        return _enum_value(asdict(self))
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> ArtifactRef:
-        data = dict(value)
-        data["kind"] = ArtifactKind(data["kind"])
-        data["asset_class"] = AssetClass(data["asset_class"])
-        data["frequency"] = Frequency(data.get("frequency", "1d"))
-        return cls(**data)
 
 
 @dataclass(frozen=True)

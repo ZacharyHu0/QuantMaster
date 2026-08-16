@@ -113,56 +113,61 @@ def _validate_partition_links(
     return conflicts
 
 
-def _content_conflicts(connection: sqlite3.Connection) -> tuple[str, ...]:
-    conflicts: set[str] = set()
-    rows = connection.execute("SELECT * FROM research_jobs ORDER BY created_at,id").fetchall()
-    for row in rows:
-        job_id = str(row["id"])
-        status = str(row["status"])
-        if status not in _STATUSES:
-            conflicts.add(f"status:{status}")
-            continue
-        try:
-            plan = _json_object(row["plan_json"], "plan_json")
-            ExecutionPlan.from_dict(plan)
-            failures = _json_list(row["failures_json"], "failures_json")
-            manifest = _json_object(row["manifest_json"], "manifest_json")
-            task_indexes = _json_list(row["task_indexes_json"], "task_indexes_json")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-            conflicts.add(f"{job_id}:json")
-            continue
-        tasks = list(plan.get("tasks") or ())
-        if (
-            any(not isinstance(item, dict) for item in failures)
-            or any(not isinstance(item, int) or item < 0 or item >= len(tasks) for item in task_indexes)
-            or int(row["next_index"]) < 0
-            or int(row["next_index"]) > len(task_indexes)
-            or int(row["total"]) != len(task_indexes)
-        ):
-            conflicts.add(f"{job_id}:progress")
-        conflicts.update(_validate_partition_links(connection, job_id, manifest))
-        if status in {"completed", "completed_with_errors"}:
-            run = connection.execute(
-                "SELECT manifest_json FROM research_runs WHERE run_id=?", (job_id,),
-            ).fetchone()
-            if run is None:
+def _job_content_conflicts(connection: sqlite3.Connection, row: sqlite3.Row) -> set[str]:
+    job_id = str(row["id"])
+    status = str(row["status"])
+    if status not in _STATUSES:
+        return {f"status:{status}"}
+    try:
+        plan = _json_object(row["plan_json"], "plan_json")
+        ExecutionPlan.from_dict(plan)
+        failures = _json_list(row["failures_json"], "failures_json")
+        manifest = _json_object(row["manifest_json"], "manifest_json")
+        task_indexes = _json_list(row["task_indexes_json"], "task_indexes_json")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return {f"{job_id}:json"}
+    tasks = list(plan.get("tasks") or ())
+    conflicts = set()
+    if (
+        any(not isinstance(item, dict) for item in failures)
+        or any(not isinstance(item, int) or item < 0 or item >= len(tasks) for item in task_indexes)
+        or int(row["next_index"]) < 0
+        or int(row["next_index"]) > len(task_indexes)
+        or int(row["total"]) != len(task_indexes)
+    ):
+        conflicts.add(f"{job_id}:progress")
+    conflicts.update(_validate_partition_links(connection, job_id, manifest))
+    if status in {"completed", "completed_with_errors"}:
+        run = connection.execute(
+            "SELECT manifest_json FROM research_runs WHERE run_id=?", (job_id,),
+        ).fetchone()
+        if run is None:
+            conflicts.add(f"{job_id}:run_manifest")
+        else:
+            try:
+                published = _json_object(run["manifest_json"], "run_manifest")
+            except (TypeError, ValueError, json.JSONDecodeError):
                 conflicts.add(f"{job_id}:run_manifest")
             else:
-                try:
-                    published = _json_object(run["manifest_json"], "run_manifest")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    conflicts.add(f"{job_id}:run_manifest")
-                else:
-                    if str(published.get("plan_hash") or "") != str(plan.get("plan_hash") or ""):
-                        conflicts.add(f"{job_id}:plan_hash")
+                if str(published.get("plan_hash") or "") != str(plan.get("plan_hash") or ""):
+                    conflicts.add(f"{job_id}:plan_hash")
+    return conflicts
+
+
+def _event_content_conflicts(row: sqlite3.Row) -> set[str]:
+    try:
+        payload = _json_object(row["event_json"], "event_json")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {f"{row['job_id']}:event_json"}
+    return set() if str(payload.get("type") or "") else {f"{row['job_id']}:event_type"}
+
+
+def _content_conflicts(connection: sqlite3.Connection) -> tuple[str, ...]:
+    conflicts: set[str] = set()
+    for row in connection.execute("SELECT * FROM research_jobs ORDER BY created_at,id"):
+        conflicts.update(_job_content_conflicts(connection, row))
     for row in connection.execute("SELECT job_id,event_json FROM research_job_events"):
-        try:
-            payload = _json_object(row["event_json"], "event_json")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            conflicts.add(f"{row['job_id']}:event_json")
-            continue
-        if not str(payload.get("type") or ""):
-            conflicts.add(f"{row['job_id']}:event_type")
+        conflicts.update(_event_content_conflicts(row))
     return tuple(sorted(conflicts))
 
 

@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from quantmaster.bootstrap_hooks import server_worker_hooks
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
 from quantmaster.runtime.identity import get_application_identity
@@ -193,15 +194,16 @@ class _DefaultWorkerPlan:
         )
         from quantmaster.rotation.etf_research import reset_etf_research_service
         from quantmaster.rotation.service import get_rotation_worker
-        from quantmaster.server.diagnostics import (
-            start_diagnostics_sampler,
-            stop_diagnostics_sampler,
-        )
-        from quantmaster.server.management import settings_manager
-        from quantmaster.server.settings_jobs import (
+        from quantmaster.worker_components import register_worker_components
+
+        register_worker_components()
+        (
+            settings_manager,
             get_settings_jobs,
             shutdown_settings_jobs,
-        )
+            start_diagnostics_sampler,
+            stop_diagnostics_sampler,
+        ) = server_worker_hooks()
 
         # This installs only the bundled offline catalogue. It must not
         # trigger a remote catalogue refresh at worker startup.

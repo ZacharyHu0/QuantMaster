@@ -26,7 +26,7 @@ def _series_to_points(series: pd.Series) -> list[list]:
 
 def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
     """Merge favorites, follows and holdings while preserving their memberships."""
-    from quantmaster.data import read_stock_names
+    from quantmaster.data.names import read_stock_names
     from quantmaster.portfolio import AssetListStore, Ledger
 
     symbols: dict[str, str] = {}
@@ -63,7 +63,7 @@ def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
 
 def _market_groups() -> dict[str, dict[str, str]]:
     from quantmaster.data.akshare_source import A_SHARE_INDEXES, FUTURES_MAIN
-    from quantmaster.data.yfinance_source import GLOBAL_REFS
+    from quantmaster.data.reference_catalog import GLOBAL_REFS
 
     return {
         "A股指数": dict(A_SHARE_INDEXES),
@@ -271,10 +271,10 @@ def build_market_overview_data(
     refresh: Literal["auto", "incremental", "local"] = "auto",
 ) -> dict:
     """Build the personal-stock and reference-market projection from owned evidence."""
-    from quantmaster.data import refresh_history
+    from quantmaster import data as data_api
+    from quantmaster.data.reference_catalog import GLOBAL_REFS
     from quantmaster.data.reference_market import refresh_reference_panel
     from quantmaster.data.storage import BarStore
-    from quantmaster.data.yfinance_source import GLOBAL_REFS
 
     end = pd.Timestamp(default_close_data_end())
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
@@ -312,7 +312,7 @@ def build_market_overview_data(
     yahoo_symbols = set(GLOBAL_REFS)
 
     def one(group: str, symbol: str, name: str):
-        envelope = refresh_history(
+        envelope = data_api.refresh_history(
             symbol,
             start_value,
             end_value,

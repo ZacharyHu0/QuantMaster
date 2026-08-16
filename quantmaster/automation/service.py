@@ -645,6 +645,38 @@ class AutomationService:
             raise ValueError("action 仅支持 pause/resume/reschedule")
         return self.store.update_job(name, enabled, value, actor)
 
+    def _market_turn_allowed(
+        self, event: AlertEvent, target: dict[str, Any], policy: dict[str, Any],
+        now: datetime,
+    ) -> bool:
+        if event.kind != "market_turn":
+            return True
+        if int(event.payload.get("confirmation_count", 1)) < int(policy["confirmation_bars"]):
+            return False
+        last = self.store.last_delivered_event(target["id"], "market_turn")
+        if not last or last["direction"] != event.direction:
+            return True
+        delivered = datetime.fromisoformat(last["delivered_at"])
+        return now - delivered >= timedelta(minutes=int(policy["cooldown_minutes"]))
+
+    def _target_allows_event(
+        self, event: AlertEvent, stored: dict[str, Any], target: dict[str, Any],
+        now: datetime, target_ids: set[str] | None,
+    ) -> bool:
+        if target_ids is not None and target["id"] not in target_ids:
+            return False
+        if not target["target"] or not target["enabled"] or target["status"] == "paused":
+            return False
+        policy = resolved_policy(target["preset"], target["overrides"])
+        if event.kind not in policy["event_types"]:
+            return False
+        bypass = event.kind in UNFILTERED_KINDS or event.score >= 95
+        if not bypass and not policy_allows(stored, policy):
+            return False
+        if not bypass and not self._market_turn_allowed(event, target, policy, now):
+            return False
+        return bypass or self.store.hourly_delivery_count(target["id"]) < int(policy["hourly_cap"])
+
     def process_event(self, event: AlertEvent, target_ids: set[str] | None = None,
                       *, force_delivery: bool = False) -> dict:
         stored, created = self.store.save_event(event)
@@ -653,30 +685,14 @@ class AutomationService:
         count = 0
         now = datetime.now(UTC)
         for target in self.store.targets():
-            if target_ids is not None and target["id"] not in target_ids:
-                continue
-            if not target["target"]:
-                continue
             if force_delivery:
+                if target_ids is not None and target["id"] not in target_ids:
+                    continue
+                if not target["target"]:
+                    continue
                 count += int(self.store.enqueue(event.id, target["id"]))
                 continue
-            if not target["enabled"] or target["status"] == "paused":
-                continue
-            policy = resolved_policy(target["preset"], target["overrides"])
-            if event.kind not in policy["event_types"]:
-                continue
-            bypass = event.kind in UNFILTERED_KINDS or event.score >= 95
-            if not bypass and not policy_allows(stored, policy):
-                continue
-            if event.kind == "market_turn" and not bypass:
-                if int(event.payload.get("confirmation_count", 1)) < int(policy["confirmation_bars"]):
-                    continue
-                last = self.store.last_delivered_event(target["id"], "market_turn")
-                if last and last["direction"] == event.direction:
-                    delivered = datetime.fromisoformat(last["delivered_at"])
-                    if now - delivered < timedelta(minutes=int(policy["cooldown_minutes"])):
-                        continue
-            if not bypass and self.store.hourly_delivery_count(target["id"]) >= int(policy["hourly_cap"]):
+            if not self._target_allows_event(event, stored, target, now, target_ids):
                 continue
             count += int(self.store.enqueue(event.id, target["id"]))
         return {"event": stored, "created": True, "enqueued": count}
@@ -1214,14 +1230,14 @@ class AutomationService:
     # ---------- 任务实现 ----------
 
     def _task_intraday_monitor(self) -> dict:
-        from quantmaster.data import refresh_intraday, refresh_spot
+        from quantmaster import data as data_api
         from quantmaster.data.universe import load_universe_analysis
 
         now = pd.Timestamp.now(tz=get_config().automation.timezone).tz_localize(None)
         cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
         start = cutoff - pd.Timedelta(days=35)
         bar_envelopes = {
-            symbol: refresh_intraday(symbol, str(start), str(now), "5m")
+            symbol: data_api.refresh_intraday(symbol, str(start), str(now), "5m")
             for symbol in get_config().automation.sentinel_indices
         }
         bars = {
@@ -1235,7 +1251,7 @@ class AutomationService:
         breadth_source = "live"
         warning = ""
         try:
-            spot_envelope = refresh_spot(symbols)
+            spot_envelope = data_api.refresh_spot(symbols)
             spot = spot_envelope.require_data()
             if (
                 spot_envelope.quality.status != "verified"
@@ -1370,7 +1386,7 @@ class AutomationService:
         )
 
     def _task_daily_close_pipeline(self, *, as_of: str = "") -> dict:
-        from quantmaster.data import read_stock_names, refresh_panel
+        from quantmaster import data as data_api
         from quantmaster.data.industry import load_industry_analysis_context
         from quantmaster.data.universe import load_universe_analysis_snapshot
         from quantmaster.decision import DecisionStore, hybrid_daily_selection
@@ -1396,7 +1412,7 @@ class AutomationService:
             # market-data gate below still decides whether anything is persisted.
             universe_snapshot = load_universe_analysis_snapshot(cfg.primary_universe)
         symbols = list(universe_snapshot.symbols)
-        market_envelope = refresh_panel(
+        market_envelope = data_api.refresh_panel(
             symbols, str(start.date()), str(end.date()), work_class="normal",
         )
         panel = market_envelope.require_data()
@@ -1420,7 +1436,7 @@ class AutomationService:
             panel, top_n=10, horizon=3, profile="risk_adjusted",
             universe=cfg.primary_universe,
             industry_map=industry_map,
-            name_map=read_stock_names(symbols),
+            name_map=data_api.read_stock_names(symbols),
             evidence_sink=decision_feature_inputs,
         )
         selection["calculation_quality"] = selection.get("data_quality")

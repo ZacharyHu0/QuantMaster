@@ -33,11 +33,14 @@ from quantmaster.data.resilience import (
     endpoint_cache_bypassed,
     provider_call,
 )
+from quantmaster.index_source_access import register_index_source
+from quantmaster.instrument_source_access import register_instrument_source
 from quantmaster.temporal import (
     ProviderDateFormat,
     TemporalContractError,
     parse_provider_date,
 )
+from quantmaster.trading_session_sources import register_official_calendar
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)
@@ -823,3 +826,21 @@ class TushareSource(DataSource):
         ).drop_duplicates(
             subset=["index_code", "symbol", "trade_date"], keep="last"
         ).sort_values(["trade_date", "symbol"])
+
+
+def _official_calendar(start, end) -> list[str]:
+    calendar = TushareSource().trade_calendar(start.isoformat(), end.isoformat())
+    return [str(value.date()) for value in calendar]
+
+
+register_official_calendar(_official_calendar)
+register_index_source(TushareSource)
+
+
+def _instrument_source() -> TushareSource:
+    # Resolve the class at call time so the seam remains replaceable for
+    # catalogue refresh tests and provider hot-swaps.
+    return TushareSource()
+
+
+register_instrument_source(_instrument_source)

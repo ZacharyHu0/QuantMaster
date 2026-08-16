@@ -12,12 +12,12 @@ from quantmaster.data.base import (
     DataCapability,
     DataSource,
     Market,
-    guess_market,
     normalize_bars,
     normalize_daily,
     validate_frequency,
 )
 from quantmaster.data.resilience import akshare_call
+from quantmaster.market_identity import guess_market
 
 
 def _require_akshare():

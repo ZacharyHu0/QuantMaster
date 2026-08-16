@@ -60,16 +60,17 @@ BASELINE = {
     "quantmaster/runtime/maintenance.py": 2,
     "quantmaster/runtime/process.py": 2,
     "quantmaster/runtime/sqlite.py": 2,
-    "quantmaster/server/app.py": 12,
+    "quantmaster/server/app.py": 1,
+    "quantmaster/server/problems.py": 7,
+    "quantmaster/server/capabilities.py": 11,
     "quantmaster/server/automation.py": 10,
     "quantmaster/server/diagnostics.py": 1,
     "quantmaster/server/lab.py": 12,
     "quantmaster/server/management.py": 6,
     "quantmaster/server/news.py": 8,
-    "quantmaster/server/problems.py": 7,
     "quantmaster/server/trading.py": 11,
     "quantmaster/settings_checks.py": 4,
-    "quantmaster/server/settings_jobs.py": 1,
+    "quantmaster/settings_jobs.py": 1,
 }
 
 STRICT_PREFIXES = (

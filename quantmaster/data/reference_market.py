@@ -12,6 +12,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.base import normalize_daily
+from quantmaster.data.frame_quality_access import assess_daily_frame, covers_requested_range
 from quantmaster.data.resilience import akshare_call
 from quantmaster.data.storage import BarStore
 
@@ -197,7 +198,6 @@ def refresh_reference_panel(
     store: BarStore,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
     """Refresh global reference symbols through one validated cache interface."""
-    from quantmaster.data.registry import _assess_daily_frame, _covers_requested_range
     from quantmaster.data.resilience import data_priority
 
     plans: dict[str, str] = {}
@@ -223,14 +223,14 @@ def refresh_reference_panel(
             if (
                 frame is None
                 or frame.empty
-                or not _covers_requested_range(frame, fetch_start, end, symbol=symbol)
+                or not covers_requested_range(frame, fetch_start, end, symbol=symbol)
             ):
                 raise ValueError("响应缺失有效交易日或内部过于稀疏")
             with store.lock(symbol):
                 cached = store.get(symbol)
                 merged = frame if cached is None or cached.empty else pd.concat([cached, frame])
                 merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-                quality = _assess_daily_frame(
+                quality = assess_daily_frame(
                     merged.loc[start:end], start, end, symbol=symbol, source=fetched.source,
                 )
                 store.put(

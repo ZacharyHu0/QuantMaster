@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from contextlib import closing
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 
@@ -62,12 +62,22 @@ class RemainingSchemaMigrator:
     def _targets(root: Path) -> list[tuple[str, Path, Callable[[], None], tuple]]:
         from quantmaster.data.resilience import ProviderHealthStore, TushareRateLimiter
         from quantmaster.data.storage import BarStore
-        from quantmaster.portfolio.ledger import Ledger
+        from quantmaster.schema_access import schema_target
 
         targets: list[tuple[str, Path, Callable[[], None], tuple]] = []
         provider_columns = {
             "failure_class", "config_revision", "probe_started", "retry_after",
             "diagnostic_code",
+        }
+        research_tables = {
+            "research_specs", "research_partitions", "research_runs", "research_leases",
+            "research_capabilities", "research_jobs",
+        }
+        research_columns = {
+            "research_partitions": {"file_size", "file_mtime_ns"},
+            "research_jobs": {
+                "owner", "lease_expires", "heartbeat_at", "attempt", "task_indexes_json",
+            },
         }
         fixed = (
             ("provider-health", root / "source_health.sqlite",
@@ -76,6 +86,10 @@ class RemainingSchemaMigrator:
             ("tushare-rate", root / "tushare_rate.sqlite",
              lambda: TushareRateLimiter.migrate_legacy_database(root / "tushare_rate.sqlite"),
              ({"rate_state"}, {"rate_state": {"name", "next_call"}}, 1)),
+            ("research", root / "research_lake" / "_meta" / "catalog.sqlite",
+             lambda: schema_target("research_catalog").migrate_legacy_database(
+                 root / "research_lake" / "_meta" / "catalog.sqlite"
+             ), (research_tables, research_columns, 1)),
         )
         targets.extend(fixed)
         bar_roots = [root / "bars", root / "fundamentals", root / "pit_execution"]
@@ -104,7 +118,8 @@ class RemainingSchemaMigrator:
                 "cashflows": {"idempotency_key"},
             }
             targets.append((
-                key, path, lambda value=path: Ledger.migrate_legacy_database(value),
+                key, path,
+                lambda value=path: schema_target("ledger").migrate_legacy_database(value),
                 ({"trades", "cashflows"}, ledger_columns, 1),
             ))
         return sorted(targets, key=lambda item: item[0])

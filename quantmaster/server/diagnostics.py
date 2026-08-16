@@ -45,7 +45,12 @@ def _refresh() -> None:
         from quantmaster.server.cache_observability import collect_cache_observability
 
         report["cache"] = collect_cache_observability()
-        report["llm"] = get_llm_execution_coordinator().diagnostics()
+        llm = get_llm_execution_coordinator().diagnostics()
+        from quantmaster.ai.llm import llm_gate_status, news_llm_gate_status
+
+        llm["scopes"]["global"]["gate"] = llm_gate_status()
+        llm["scopes"]["news"]["gate"] = news_llm_gate_status()
+        report["llm"] = llm
         from quantmaster.server.readiness import runtime_status
 
         runtime = runtime_status()

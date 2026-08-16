@@ -20,7 +20,7 @@ def run_factor_test(
     refresh: bool = False,
 ) -> dict:
     """Evaluate one factor against PIT evidence and return its diagnostic projection."""
-    from quantmaster.data import read_panel, refresh_panel
+    from quantmaster import data as data_api
     from quantmaster.data.universe import load_universe_analysis_snapshot
     from quantmaster.factors.analysis import analyze_factor
     from quantmaster.factors.engine import compute_factor
@@ -32,7 +32,9 @@ def run_factor_test(
     universe_snapshot = load_universe_analysis_snapshot(universe, as_of=evidence_as_of)
     symbols = list(universe_snapshot.symbols)
     factor = resolve_factor(expression, symbols, start, resolved_end)
-    market_envelope = (refresh_panel if refresh else read_panel)(symbols, start, resolved_end)
+    market_envelope = (
+        data_api.refresh_panel if refresh else data_api.read_panel
+    )(symbols, start, resolved_end)
     panel = market_envelope.require_data()
     values = compute_factor(factor, panel)
     neutralized = False

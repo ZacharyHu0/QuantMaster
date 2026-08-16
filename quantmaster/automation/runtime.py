@@ -143,7 +143,9 @@ class AutomationRuntime:
 
         if not self.started or getattr(self.service, "_closed", False):
             return
-        router = BotCommandRouter(self.service, self.service.reply)
+        router = BotCommandRouter(
+            self.service, self.service.reply, reload_jobs=self.reload_jobs,
+        )
         try:
             self.service.executor.submit(router.handle, actor, text)
         except RuntimeError:
@@ -329,43 +331,36 @@ class AutomationRuntime:
             recovered.append(self.discover_job(item["name"], now=current, actor="startup_recovery"))
         return recovered
 
-    def reload_jobs(self) -> None:
-        if not self.scheduler or not self.leader:
+    def _install_schedule(self, item: dict[str, Any], cron_type: Any, interval_type: Any) -> None:
+        if not item["enabled"]:
+            self.service.store.set_next_run(item["name"], "")
             return
-        from apscheduler.triggers.cron import CronTrigger
-        from apscheduler.triggers.interval import IntervalTrigger
+        schedule = item["schedule"]
+        common = {
+            "coalesce": True, "max_instances": 1,
+            "misfire_grace_time": 120 if schedule["type"] == "interval" else 2700,
+        }
+        if schedule["type"] == "interval":
+            trigger = interval_type(
+                minutes=int(schedule["minutes"]), timezone=self.timezone,
+            )
+            self.scheduler.add_job(
+                self._scheduled_job, trigger, args=[item["name"]], id=item["name"],
+                replace_existing=True, **common,
+            )
+            return
+        for value in schedule["times"]:
+            hour, minute = map(int, value.split(":"))
+            trigger = cron_type(
+                hour=hour, minute=minute, timezone=self.timezone,
+                day_of_week="mon-fri" if schedule.get("weekdays") else None,
+            )
+            self.scheduler.add_job(
+                self._scheduled_job, trigger, args=[item["name"]],
+                id=f"{item['name']}:{value}", replace_existing=True, **common,
+            )
 
-        for existing in self.scheduler.get_jobs():
-            if not existing.id.startswith("_"):
-                self.scheduler.remove_job(existing.id)
-        for item in self.service.store.jobs():
-            if not item["enabled"]:
-                self.service.store.set_next_run(item["name"], "")
-                continue
-            schedule = item["schedule"]
-            common = {
-                "coalesce": True, "max_instances": 1,
-                "misfire_grace_time": 120 if schedule["type"] == "interval" else 2700,
-            }
-            if schedule["type"] == "interval":
-                trigger = IntervalTrigger(
-                    minutes=int(schedule["minutes"]), timezone=self.timezone,
-                )
-                self.scheduler.add_job(
-                    self._scheduled_job, trigger, args=[item["name"]], id=item["name"],
-                    replace_existing=True, **common,
-                )
-            else:
-                for value in schedule["times"]:
-                    hour, minute = map(int, value.split(":"))
-                    trigger = CronTrigger(
-                        hour=hour, minute=minute, timezone=self.timezone,
-                        day_of_week="mon-fri" if schedule.get("weekdays") else None,
-                    )
-                    self.scheduler.add_job(
-                        self._scheduled_job, trigger, args=[item["name"]],
-                        id=f"{item['name']}:{value}", replace_existing=True, **common,
-                    )
+    def _save_next_runs(self) -> None:
         next_by_name: dict[str, str] = {}
         for scheduled in self.scheduler.get_jobs():
             if scheduled.id.startswith("_"):
@@ -376,6 +371,19 @@ class AutomationRuntime:
                 next_by_name[name] = value
         for name, value in next_by_name.items():
             self.service.store.set_next_run(name, value)
+
+    def reload_jobs(self) -> None:
+        if not self.scheduler or not self.leader:
+            return
+        from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        for existing in self.scheduler.get_jobs():
+            if not existing.id.startswith("_"):
+                self.scheduler.remove_job(existing.id)
+        for item in self.service.store.jobs():
+            self._install_schedule(item, CronTrigger, IntervalTrigger)
+        self._save_next_runs()
 
     def reconfigure(self) -> bool:
         """应用刚保存的自动化配置，并按需重建调度器与通道监听。"""

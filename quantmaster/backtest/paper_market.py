@@ -18,8 +18,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from quantmaster.data.base import Market, guess_market
+from quantmaster.data.base import Market
 from quantmaster.data.semantics import NumericSemantics, PriceType
+from quantmaster.market_identity import guess_market
 
 if TYPE_CHECKING:
     from quantmaster.data.storage import BarStore

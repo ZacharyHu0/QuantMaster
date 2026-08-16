@@ -51,7 +51,7 @@ class LabJobManager:
 
     def __init__(self, service: Any | None = None, runtime: UnifiedJobRuntime | None = None):
         if service is None:
-            from quantmaster.lab.service import get_lab_service
+            from quantmaster.lab.service_access import get_lab_service
 
             service = get_lab_service()
         self.service: Any = service

@@ -34,6 +34,7 @@ from quantmaster.runtime.identity import (
     require_application_identity,
 )
 from quantmaster.runtime.json import strict_json_dumps
+from quantmaster.runtime.llm import register_job_store_factory
 from quantmaster.runtime.sqlite import connect_sqlite
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,53 @@ def _canonical(value: Any) -> str:
 
 def _content_hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _legacy_iso(value: Any, default: str = "") -> str:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), UTC).isoformat()
+    return str(value or default)
+
+
+def _import_legacy_artifacts(
+    connection: sqlite3.Connection,
+    job_id: str,
+    record: Mapping[str, Any],
+    artifacts: Sequence[Mapping[str, Any]],
+    spec_hash: str,
+    updated_at: str,
+) -> str:
+    result_artifact_id = ""
+    for artifact in artifacts:
+        payload = artifact.get("payload") or {}
+        encoded = _canonical(payload)
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        kind = str(artifact.get("kind") or "legacy.result")[:200]
+        checkpoint = str(artifact.get("checkpoint_key") or "")[:200]
+        artifact_key = f"{job_id}\0{kind}\0{checkpoint}\0{digest}"
+        artifact_id = f"artifact_legacy_{hashlib.sha256(artifact_key.encode()).hexdigest()[:32]}"
+        row = connection.execute(
+            "SELECT content_hash FROM runtime_job_artifacts WHERE id=?", (artifact_id,),
+        ).fetchone()
+        if row is not None and str(row["content_hash"]) != digest:
+            raise ValueError(f"旧任务产物 ID 冲突: {artifact_id}")
+        connection.execute(
+            "INSERT OR IGNORE INTO runtime_job_artifacts "
+            "(id,job_id,attempt,kind,schema_version,payload_json,content_hash,"
+            "payload_bytes,lineage_json,checkpoint_key,spec_hash,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                artifact_id, job_id,
+                max(1, int(artifact.get("attempt") or record.get("attempt") or 1)),
+                kind, str(artifact.get("schema_version") or "1.0")[:50], encoded,
+                digest, len(encoded.encode("utf-8")),
+                _canonical({"legacy_import": True}), checkpoint, spec_hash,
+                _legacy_iso(artifact.get("created_at"), updated_at),
+            ),
+        )
+        if artifact.get("result"):
+            result_artifact_id = artifact_id
+    return result_artifact_id
 
 
 class ArtifactIntegrityError(RuntimeError):
@@ -563,14 +611,9 @@ class UnifiedJobStore:
         spec_json = _canonical(dict(spec))
         spec_hash = hashlib.sha256(spec_json.encode("utf-8")).hexdigest()
 
-        def iso(value: Any, default: str = "") -> str:
-            if isinstance(value, (int, float)):
-                return datetime.fromtimestamp(float(value), UTC).isoformat()
-            return str(value or default)
-
         now = _utc_now()
-        created_at = iso(record.get("created_at"), now)
-        updated_at = iso(record.get("updated_at"), created_at)
+        created_at = _legacy_iso(record.get("created_at"), now)
+        updated_at = _legacy_iso(record.get("updated_at"), created_at)
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -602,7 +645,8 @@ class UnifiedJobStore:
                         str(record.get("llm_scope") or "")[:40],
                         str(record.get("llm_revision") or "")[:120],
                         created_at, updated_at,
-                        iso(record.get("started_at")), iso(record.get("finished_at")),
+                        _legacy_iso(record.get("started_at")),
+                        _legacy_iso(record.get("finished_at")),
                     ),
                 )
             elif str(existing["type"]) != job_type or str(existing["spec_hash"]) != spec_hash:
@@ -616,39 +660,12 @@ class UnifiedJobStore:
                         max(1, int(event.get("attempt") or record.get("attempt") or 1)),
                         str(event.get("type") or "legacy_event")[:120],
                         _canonical(event.get("payload") or {}),
-                        iso(event.get("created_at"), created_at),
+                         _legacy_iso(event.get("created_at"), created_at),
                     ),
                 )
-            result_artifact_id = ""
-            for artifact in artifacts:
-                payload = artifact.get("payload") or {}
-                encoded = _canonical(payload)
-                digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-                kind = str(artifact.get("kind") or "legacy.result")[:200]
-                checkpoint = str(artifact.get("checkpoint_key") or "")[:200]
-                artifact_key = f"{job_id}\0{kind}\0{checkpoint}\0{digest}"
-                artifact_id = f"artifact_legacy_{hashlib.sha256(artifact_key.encode()).hexdigest()[:32]}"
-                row = connection.execute(
-                    "SELECT content_hash FROM runtime_job_artifacts WHERE id=?", (artifact_id,),
-                ).fetchone()
-                if row is not None and str(row["content_hash"]) != digest:
-                    raise ValueError(f"旧任务产物 ID 冲突: {artifact_id}")
-                connection.execute(
-                    "INSERT OR IGNORE INTO runtime_job_artifacts "
-                    "(id,job_id,attempt,kind,schema_version,payload_json,content_hash,"
-                    "payload_bytes,lineage_json,checkpoint_key,spec_hash,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        artifact_id, job_id,
-                        max(1, int(artifact.get("attempt") or record.get("attempt") or 1)),
-                        kind, str(artifact.get("schema_version") or "1.0")[:50], encoded,
-                        digest, len(encoded.encode("utf-8")),
-                        _canonical({"legacy_import": True}), checkpoint, spec_hash,
-                        iso(artifact.get("created_at"), updated_at),
-                    ),
-                )
-                if artifact.get("result"):
-                    result_artifact_id = artifact_id
+            result_artifact_id = _import_legacy_artifacts(
+                connection, job_id, record, artifacts, spec_hash, updated_at,
+            )
             if result_artifact_id:
                 connection.execute(
                     "UPDATE runtime_jobs SET result_artifact_id=? WHERE id=?",
@@ -1074,6 +1091,7 @@ class UnifiedJobStore:
             "queued_cancelled": sum(str(row["status"]) in {"queued", "interrupted"} for row in rows),
             "running_cancelling": sum(str(row["status"]) in {"running", "cancelling"} for row in rows),
         }
+
 
     def cancelled(
         self, job_id: str, owner: str = "", lease_token: str = "",
@@ -2536,3 +2554,6 @@ class UnifiedJobRuntime:
                 "retry": f"/api/v1/jobs/{job['id']}/retry",
             },
         }
+
+
+register_job_store_factory(UnifiedJobStore)

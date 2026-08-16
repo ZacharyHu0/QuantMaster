@@ -17,7 +17,15 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.lab.cache import feature_cache_lock
-from quantmaster.lab.ml import _engineered_features, _resolve_torch_device, artifact_sha256
+from quantmaster.lab.ml_core import (
+    artifact_sha256,
+)
+from quantmaster.lab.ml_core import (
+    engineered_features as _engineered_features,
+)
+from quantmaster.lab.ml_core import (
+    resolve_torch_device as _resolve_torch_device,
+)
 from quantmaster.lab.research import HORIZONS, FeatureSetSpec, TimeFold
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.paths import confined_path

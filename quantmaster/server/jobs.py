@@ -22,7 +22,6 @@ from quantmaster.data.maintenance import data_refresh_manager
 from quantmaster.data.repair import DataRepairManager
 from quantmaster.lab.jobs import LAB_JOB_TYPES, LabJobManager, get_lab_job_manager
 from quantmaster.research.jobs import (
-    ResearchJobManager,
     get_research_job_manager,
     list_research_jobs,
     read_research_job,
@@ -181,6 +180,87 @@ def _manual_retry_required(value: dict[str, Any], status: str) -> bool:
         return True
 
 
+def _artifact_payload(value: dict[str, Any]) -> dict[str, Any] | None:
+    artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
+    payload = artifact.get("payload") if isinstance(artifact, dict) else None
+    return payload if isinstance(payload, dict) else None
+
+
+def _apply_artifact_projection(
+    public: dict[str, Any], domain: str, value: dict[str, Any],
+) -> None:
+    job_type = str(value.get("type") or "")
+    if job_type == "rotation.etf.scan":
+        tier = str((value.get("spec") or {}).get("tier") or "production")
+        public.update({
+            "tier": tier,
+            "formal_eligible": tier == "production",
+            "message": str(value.get("detail") or ""),
+        })
+        payload = _artifact_payload(value)
+        if payload is not None:
+            snapshot_id = str(payload.get("snapshot_id") or "")
+            public["result"] = {
+                "snapshot_id": snapshot_id,
+                "preview_id": snapshot_id if tier == "sandbox" else "",
+                "tier": tier,
+                "formal_eligible": bool(payload.get("formal_eligible")),
+                "artifact_id": str(value.get("result_artifact_id") or ""),
+            }
+    if domain in {"news", "settings"}:
+        payload = _artifact_payload(value)
+        if payload is not None:
+            public["result"] = dict(payload)
+    if domain == "lab" and job_type in _UNIFIED_DOMAIN_TYPES["lab"]:
+        payload = _artifact_payload(value)
+        if payload is not None:
+            public["result"] = dict(payload)
+
+
+def _apply_domain_projection(public: dict[str, Any], domain: str, value: dict[str, Any]) -> None:
+    if domain == "backtests":
+        public.update({
+            key: value.get(key)
+            for key in (
+                "name", "config", "config_hash", "manifest", "result", "error",
+                "diagnostic", "worker", "legacy_read_only", "outcome",
+            )
+            if key in value
+        })
+        return
+    if domain == "data":
+        public.update({
+            key: value.get(key)
+            for key in (
+                "scope", "universe_name", "start_date", "end_date", "next_index",
+                "total", "succeeded", "failed", "failures", "current_symbol",
+            )
+            if key in value
+        })
+    if domain == "lab":
+        if str(value.get("type") or "") in LAB_JOB_TYPES:
+            projected = LabJobManager._project(_read_unified_store(), value)
+            public.update({
+                key: projected.get(key)
+                for key in (
+                    "kind", "params", "result", "preflight", "error_info", "telemetry",
+                    "dataset_id", "resource_class", "worker", "heartbeat_at", "started_at",
+                    "finished_at", "error", "error_code", "checkpoint", "outcome",
+                )
+                if key in projected
+            })
+            return
+        public.update({
+            key: value.get(key)
+            for key in (
+                "kind", "params", "result", "preflight", "error_info", "telemetry",
+                "dataset_id", "resource_class", "worker", "heartbeat_at", "started_at",
+                "finished_at", "error", "error_code",
+            )
+            if key in value
+        })
+
+
 def _public_job(domain: str, value: dict[str, Any]) -> dict[str, Any]:
     status = str(value.get("status") or "unknown")
     job_id = str(value.get("id") or "")
@@ -215,82 +295,8 @@ def _public_job(domain: str, value: dict[str, Any]) -> dict[str, Any]:
             "retry": f"/api/v1/jobs/{job_id}/retry",
         },
     }
-    # ETF research already uses the same durable UnifiedJobStore, but its
-    # published artifact has a small domain-specific result projection used by
-    # the current page.  Expose that projection through the unified URL rather
-    # than keeping a second set of polling routes alive.
-    if str(value.get("type") or "") == "rotation.etf.scan":
-        tier = str((value.get("spec") or {}).get("tier") or "production")
-        public.update({
-            "tier": tier,
-            "formal_eligible": tier == "production",
-            "message": str(value.get("detail") or ""),
-        })
-        artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        if isinstance(payload, dict):
-            snapshot_id = str(payload.get("snapshot_id") or "")
-            public["result"] = {
-                "snapshot_id": snapshot_id,
-                "preview_id": snapshot_id if tier == "sandbox" else "",
-                "tier": tier,
-                "formal_eligible": bool(payload.get("formal_eligible")),
-                "artifact_id": str(value.get("result_artifact_id") or ""),
-            }
-    if domain == "news":
-        # News crawl results are stored as content-addressed artifacts.  The
-        # generic task route exposes their compact projection without ever
-        # re-running a provider request or re-aggregating the feed.
-        artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        if isinstance(payload, dict):
-            public["result"] = dict(payload)
-    if domain == "settings":
-        artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        if isinstance(payload, dict):
-            public["result"] = dict(payload)
-    if domain == "lab" and str(value.get("type") or "") in LAB_JOB_TYPES:
-        projected = LabJobManager._project(_read_unified_store(), value)
-        public.update({
-            key: projected.get(key)
-            for key in (
-                "kind", "params", "result", "preflight", "error_info", "telemetry",
-                "dataset_id", "resource_class", "worker", "heartbeat_at", "started_at",
-                "finished_at", "error", "error_code", "checkpoint", "outcome",
-            )
-            if key in projected
-        })
-        return public
-    if domain == "lab" and str(value.get("type") or "") == "lab.cloud_suggestion":
-        artifact = _read_unified_artifact(str(value.get("result_artifact_id") or ""))
-        payload = artifact.get("payload") if isinstance(artifact, dict) else None
-        if isinstance(payload, dict):
-            public["result"] = dict(payload)
-        return public
-    if domain == "backtests":
-        public.update({
-            key: value.get(key)
-            for key in (
-                "name", "config", "config_hash", "manifest", "result", "error",
-                "diagnostic", "worker", "legacy_read_only", "outcome",
-            )
-            if key in value
-        })
-        return public
-    if domain == "data":
-        # The settings page consumes the durable refresh progress through the
-        # same task URL as every other long-running job.  Keep this projection
-        # intentionally small and local; the full symbol plan never leaves
-        # the worker-owned ledger.
-        public.update({
-            key: value.get(key)
-            for key in (
-                "scope", "universe_name", "start_date", "end_date", "next_index",
-                "total", "succeeded", "failed", "failures", "current_symbol",
-            )
-            if key in value
-        })
+    _apply_artifact_projection(public, domain, value)
+    _apply_domain_projection(public, domain, value)
     return public
 
 
@@ -300,208 +306,298 @@ def _rotation_job(job_id: str) -> dict[str, Any]:
     return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["rotation"])
 
 
+def _get_repairs(job_id: str) -> dict[str, Any]:
+    try:
+        return _read_repair_manager().get(job_id)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
+
+
+def _get_research(job_id: str) -> dict[str, Any]:
+    try:
+        return read_research_job(job_id)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
+
+
+def _get_lab(job_id: str) -> dict[str, Any]:
+    return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["lab"])
+
+
+def _get_backtest(job_id: str) -> dict[str, Any]:
+    try:
+        return read_backtest_job(job_id)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
+
+
 def _get(domain: JobDomain, job_id: str) -> dict[str, Any]:
-    if domain == "news":
-        return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["news"])
-    if domain == "settings":
-        return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["settings"])
-    if domain == "after_close":
-        return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["after_close"])
+    unified = _UNIFIED_DOMAIN_TYPES.get(domain)
+    if unified is not None and domain not in {"lab", "backtests"}:
+        return _read_unified_job(job_id, types=unified)
     if domain == "automation":
         return _read_unified_job(job_id, prefix="automation.")
-    if domain == "repairs":
-        try:
-            return _read_repair_manager().get(job_id)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-    if domain == "research":
-        try:
-            value = read_research_job(job_id)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-        return ResearchJobManager.public(value)
-    if domain == "data":
-        return data_refresh_manager.get(job_id)
-    if domain == "rotation":
-        return _rotation_job(job_id)
-    if domain == "lab":
-        return _read_unified_job(job_id, types=_UNIFIED_DOMAIN_TYPES["lab"])
-    if domain == "backtests":
-        try:
-            return read_backtest_job(job_id)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-    raise KeyError(job_id)
+    handlers = {
+        "repairs": _get_repairs,
+        "research": _get_research,
+        "data": data_refresh_manager.get,
+        "rotation": _rotation_job,
+        "lab": _get_lab,
+        "backtests": _get_backtest,
+    }
+    handler = handlers.get(domain)
+    if handler is None:
+        raise KeyError(job_id)
+    return handler(job_id)
+
+
+def _list_repairs(limit: int) -> list[dict[str, Any]]:
+    try:
+        return _read_repair_manager().list(limit=limit)
+    except (FileNotFoundError, sqlite3.Error):
+        return []
+
+
+def _list_research(limit: int) -> list[dict[str, Any]]:
+    try:
+        return list_research_jobs(limit)
+    except (FileNotFoundError, sqlite3.Error):
+        return []
+
+
+def _list_lab(limit: int) -> list[dict[str, Any]]:
+    return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["lab"])
+
+
+def _list_backtests(limit: int) -> list[dict[str, Any]]:
+    return list_backtest_jobs(limit)
 
 
 def _list(domain: JobDomain, limit: int) -> list[dict[str, Any]]:
-    if domain == "news":
-        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["news"])
-    if domain == "settings":
-        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["settings"])
-    if domain == "after_close":
-        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["after_close"])
+    unified = _UNIFIED_DOMAIN_TYPES.get(domain)
+    if unified is not None and domain not in {"lab", "backtests"}:
+        return _list_unified_jobs(limit, types=unified)
     if domain == "automation":
         return _list_unified_jobs(limit, prefix="automation.")
-    if domain == "repairs":
-        try:
-            return _read_repair_manager().list(limit=limit)
-        except (FileNotFoundError, sqlite3.Error):
-            return []
-    if domain == "research":
-        try:
-            return [
-                ResearchJobManager.public(value)
-                for value in list_research_jobs(limit)
-            ]
-        except (FileNotFoundError, sqlite3.Error):
-            return []
-    if domain == "data":
-        return data_refresh_manager.list(limit)
-    if domain == "rotation":
-        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["rotation"])
-    if domain == "lab":
-        return _list_unified_jobs(limit, types=_UNIFIED_DOMAIN_TYPES["lab"])
-    if domain == "backtests":
-        return list_backtest_jobs(limit)
-    return []
+    handlers = {
+        "repairs": _list_repairs,
+        "research": _list_research,
+        "data": data_refresh_manager.list,
+        "rotation": lambda size: _list_unified_jobs(
+            size, types=_UNIFIED_DOMAIN_TYPES["rotation"],
+        ),
+        "lab": _list_lab,
+        "backtests": _list_backtests,
+    }
+    return handlers.get(domain, lambda _size: [])(limit)
+
+
+def _events_repairs(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    try:
+        _get("repairs", job_id)
+        return _read_repair_manager().events(job_id, after)[:limit]
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
+
+
+def _events_research(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    try:
+        _get("research", job_id)
+        return research_job_events(job_id, after, limit)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
+
+
+def _events_lab(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    _get("lab", job_id)
+    return _read_unified_events(job_id, after, limit)
+
+
+def _events_backtests(job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
+    try:
+        return backtest_job_events(job_id, after, limit)
+    except (FileNotFoundError, sqlite3.Error) as exc:
+        raise KeyError(job_id) from exc
 
 
 def _events(domain: JobDomain, job_id: str, after: int, limit: int) -> list[dict[str, Any]]:
-    if domain == "news":
+    if (
+        domain in _UNIFIED_DOMAIN_TYPES and domain not in {"lab", "backtests"}
+    ) or domain == "automation":
         _get(domain, job_id)
         return _read_unified_events(job_id, after, limit)
-    if domain == "settings":
-        _get(domain, job_id)
-        return _read_unified_events(job_id, after, limit)
-    if domain == "after_close":
-        _get(domain, job_id)
-        return _read_unified_events(job_id, after, limit)
-    if domain == "automation":
-        _get(domain, job_id)
-        return _read_unified_events(job_id, after, limit)
-    if domain == "repairs":
-        try:
-            _get(domain, job_id)
-            return _read_repair_manager().events(job_id, after)[:limit]
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-    _get(domain, job_id)
-    if domain == "research":
-        try:
-            return research_job_events(job_id, after, limit)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-    if domain == "data":
-        return data_refresh_manager.events(job_id, after, limit)
-    if domain == "rotation":
-        _rotation_job(job_id)
-        return _read_unified_events(job_id, after, limit)
-    if domain == "lab":
-        _get(domain, job_id)
-        return _read_unified_events(job_id, after, limit)
-    if domain == "backtests":
-        try:
-            return backtest_job_events(job_id, after, limit)
-        except (FileNotFoundError, sqlite3.Error) as exc:
-            raise KeyError(job_id) from exc
-    raise KeyError(job_id)
+    handlers = {
+        "repairs": _events_repairs,
+        "research": _events_research,
+        "data": data_refresh_manager.events,
+        "rotation": lambda task_id, offset, size: (
+            _rotation_job(task_id), _read_unified_events(task_id, offset, size),
+        )[1],
+        "lab": _events_lab,
+        "backtests": _events_backtests,
+    }
+    handler = handlers.get(domain)
+    if handler is None:
+        raise KeyError(job_id)
+    return handler(job_id, after, limit)
+
+
+def _cancel_news(job_id: str) -> dict[str, Any]:
+    from quantmaster.ai.news_jobs import get_news_jobs
+
+    _get("news", job_id)
+    return get_news_jobs().runtime.store.cancel(job_id)
+
+
+def _cancel_settings(job_id: str) -> dict[str, Any]:
+    from quantmaster.server.settings_jobs import get_settings_jobs
+
+    jobs = get_settings_jobs()
+    _get("settings", job_id)
+    value = jobs.runtime_for(job_id).store.cancel(job_id)
+    jobs.cleanup_cancelled_credentials()
+    return value
+
+
+def _cancel_after_close(job_id: str) -> dict[str, Any]:
+    from quantmaster.after_close.jobs import get_after_close_jobs
+
+    _get("after_close", job_id)
+    return get_after_close_jobs().runtime.store.cancel(job_id)
+
+
+def _cancel_automation(job_id: str) -> dict[str, Any]:
+    _get("automation", job_id)
+    return get_runtime().service.jobs.store.cancel(job_id)
+
+
+def _cancel_repairs(job_id: str) -> dict[str, Any]:
+    from quantmaster.data.repair import get_data_repair_manager
+
+    return get_data_repair_manager().cancel(job_id)
+
+
+def _cancel_research(job_id: str) -> dict[str, Any]:
+    manager = get_research_job_manager()
+    return manager.public(manager.cancel(job_id))
+
+
+def _cancel_rotation(job_id: str) -> dict[str, Any]:
+    value = _rotation_job(job_id)
+    if str(value.get("type") or "") == "rotation.etf.scan":
+        from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+
+        return get_etf_research_jobs().cancel(job_id)
+    return cancel_rotation_job(job_id)
+
+
+def _cancel_lab(job_id: str) -> dict[str, Any]:
+    value = _get("lab", job_id)
+    if str(value.get("type") or "") == "lab.cloud_suggestion":
+        from quantmaster.lab.llm_jobs import get_lab_llm_jobs
+
+        return get_lab_llm_jobs().runtime.store.cancel(job_id)
+    get_lab_job_manager().cancel(job_id)
+    return _read_unified_job(job_id, types=LAB_JOB_TYPES)
 
 
 def _cancel(domain: JobDomain, job_id: str) -> dict[str, Any]:
-    if domain == "news":
-        from quantmaster.ai.news_jobs import get_news_jobs
+    handlers = {
+        "news": _cancel_news,
+        "settings": _cancel_settings,
+        "after_close": _cancel_after_close,
+        "automation": _cancel_automation,
+        "repairs": _cancel_repairs,
+        "research": _cancel_research,
+        "data": lambda task_id: _data_worker_command("data.refresh.cancel", task_id),
+        "rotation": _cancel_rotation,
+        "lab": _cancel_lab,
+        "backtests": lambda task_id: get_backtest_job_manager().cancel(task_id),
+    }
+    handler = handlers.get(domain)
+    if handler is None:
+        raise KeyError(job_id)
+    return handler(job_id)
 
-        _get(domain, job_id)
-        return get_news_jobs().runtime.store.cancel(job_id)
-    if domain == "settings":
-        from quantmaster.server.settings_jobs import get_settings_jobs
 
-        jobs = get_settings_jobs()
-        _get(domain, job_id)
-        value = jobs.runtime_for(job_id).store.cancel(job_id)
-        jobs.cleanup_cancelled_credentials()
-        return value
-    if domain == "after_close":
-        from quantmaster.after_close.jobs import get_after_close_jobs
+def _retry_news(job_id: str) -> dict[str, Any]:
+    from quantmaster.ai.news_jobs import get_news_jobs
 
-        _get(domain, job_id)
-        return get_after_close_jobs().runtime.store.cancel(job_id)
-    if domain == "automation":
-        _get(domain, job_id)
-        return get_runtime().service.jobs.store.cancel(job_id)
-    if domain == "repairs":
-        from quantmaster.data.repair import get_data_repair_manager
+    _get("news", job_id)
+    return get_news_jobs().runtime.retry(job_id)
 
-        return get_data_repair_manager().cancel(job_id)
-    if domain == "research":
-        return get_research_job_manager().public(get_research_job_manager().cancel(job_id))
-    if domain == "data":
-        return _data_worker_command("data.refresh.cancel", job_id)
-    if domain == "rotation":
-        value = _rotation_job(job_id)
-        if str(value.get("type") or "") == "rotation.etf.scan":
-            from quantmaster.rotation.etf_jobs import get_etf_research_jobs
 
-            return get_etf_research_jobs().cancel(job_id)
-        return cancel_rotation_job(job_id)
-    if domain == "lab":
-        value = _get(domain, job_id)
-        if str(value.get("type") or "") == "lab.cloud_suggestion":
-            from quantmaster.lab.llm_jobs import get_lab_llm_jobs
+def _retry_settings(job_id: str) -> dict[str, Any]:
+    from quantmaster.server.settings_jobs import get_settings_jobs
 
-            return get_lab_llm_jobs().runtime.store.cancel(job_id)
-        get_lab_job_manager().cancel(job_id)
-        return _read_unified_job(job_id, types=LAB_JOB_TYPES)
-    return get_backtest_job_manager().cancel(job_id)
+    jobs = get_settings_jobs()
+    _get("settings", job_id)
+    return jobs.runtime_for(job_id).retry(job_id)
+
+
+def _retry_after_close(job_id: str) -> dict[str, Any]:
+    from quantmaster.after_close.jobs import get_after_close_jobs
+
+    _get("after_close", job_id)
+    return get_after_close_jobs().runtime.retry(job_id)
+
+
+def _retry_automation(job_id: str) -> dict[str, Any]:
+    _get("automation", job_id)
+    return get_runtime().service.jobs.retry(job_id)
+
+
+def _retry_repairs(job_id: str) -> dict[str, Any]:
+    from quantmaster.data.repair import get_data_repair_manager
+
+    return get_data_repair_manager().retry(job_id)
+
+
+def _retry_research(job_id: str) -> dict[str, Any]:
+    manager = get_research_job_manager()
+    return manager.public(manager.resume(job_id))
+
+
+def _retry_rotation(job_id: str) -> dict[str, Any]:
+    value = _rotation_job(job_id)
+    if str(value.get("type") or "") == "rotation.etf.scan":
+        from quantmaster.rotation.etf_jobs import get_etf_research_jobs
+
+        return get_etf_research_jobs().retry(job_id)
+    return retry_rotation_job(job_id)
+
+
+def _retry_lab(job_id: str) -> dict[str, Any]:
+    value = _get("lab", job_id)
+    if str(value.get("type") or "") == "lab.cloud_suggestion":
+        from quantmaster.lab.llm_jobs import get_lab_llm_jobs
+
+        return get_lab_llm_jobs().runtime.retry(job_id)
+    get_lab_job_manager().retry(job_id)
+    return _read_unified_job(job_id, types=LAB_JOB_TYPES)
+
+
+def _retry_backtest(job_id: str) -> dict[str, Any]:
+    return get_backtest_job_manager().retry(job_id)
 
 
 def _retry(domain: JobDomain, job_id: str) -> dict[str, Any]:
-    if domain == "news":
-        from quantmaster.ai.news_jobs import get_news_jobs
-
-        _get(domain, job_id)
-        return get_news_jobs().runtime.retry(job_id)
-    if domain == "settings":
-        from quantmaster.server.settings_jobs import get_settings_jobs
-
-        jobs = get_settings_jobs()
-        _get(domain, job_id)
-        return jobs.runtime_for(job_id).retry(job_id)
-    if domain == "after_close":
-        from quantmaster.after_close.jobs import get_after_close_jobs
-
-        _get(domain, job_id)
-        return get_after_close_jobs().runtime.retry(job_id)
-    if domain == "automation":
-        _get(domain, job_id)
-        return get_runtime().service.jobs.retry(job_id)
-    if domain == "repairs":
-        from quantmaster.data.repair import get_data_repair_manager
-
-        return get_data_repair_manager().retry(job_id)
-    if domain == "research":
-        manager = get_research_job_manager()
-        return manager.public(manager.resume(job_id))
-    if domain == "data":
-        return _data_worker_command("data.refresh.retry", job_id)
-    if domain == "rotation":
-        value = _rotation_job(job_id)
-        if str(value.get("type") or "") == "rotation.etf.scan":
-            from quantmaster.rotation.etf_jobs import get_etf_research_jobs
-
-            return get_etf_research_jobs().retry(job_id)
-        return retry_rotation_job(job_id)
-    if domain == "lab":
-        value = _get(domain, job_id)
-        if str(value.get("type") or "") == "lab.cloud_suggestion":
-            from quantmaster.lab.llm_jobs import get_lab_llm_jobs
-
-            return get_lab_llm_jobs().runtime.retry(job_id)
-        get_lab_job_manager().retry(job_id)
-        return _read_unified_job(job_id, types=LAB_JOB_TYPES)
-
-    return get_backtest_job_manager().retry(job_id)
+    handlers = {
+        "news": _retry_news,
+        "settings": _retry_settings,
+        "after_close": _retry_after_close,
+        "automation": _retry_automation,
+        "repairs": _retry_repairs,
+        "research": _retry_research,
+        "data": lambda task_id: _data_worker_command("data.refresh.retry", task_id),
+        "rotation": _retry_rotation,
+        "lab": _retry_lab,
+        "backtests": _retry_backtest,
+    }
+    handler = handlers.get(domain)
+    if handler is None:
+        raise KeyError(job_id)
+    return handler(job_id)
 
 
 def _not_found(exc: KeyError) -> HTTPException:

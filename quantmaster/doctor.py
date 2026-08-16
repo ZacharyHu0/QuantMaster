@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import ipaddress
 import multiprocessing
 import os
@@ -105,83 +104,33 @@ def _issue(
     }
 
 
-def _module(path: Path) -> str:
-    return ".".join(path.relative_to(PACKAGE_ROOT.parent).with_suffix("").parts)
-
-
-def _imports(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    values: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module:
-            values.add(node.module)
-        elif isinstance(node, ast.Import):
-            values.update(alias.name for alias in node.names)
-    return values
-
-
 def _architecture_issues() -> list[dict[str, Any]]:
+    from quantmaster.architecture import (
+        build_graph,
+        cycles,
+        layer_violations,
+        sqlite_connect_lines,
+    )
+
     issues: list[dict[str, Any]] = []
-    paths = [path for path in PACKAGE_ROOT.rglob("*.py") if path.name != "__init__.py"]
-    modules = {_module(path): path for path in paths}
-    graph = {
-        module: {name for name in _imports(path) if name in modules}
-        for module, path in modules.items()
-    }
-    visited: set[str] = set()
-    active: set[str] = set()
-    stack: list[str] = []
-    cycles: set[tuple[str, ...]] = set()
-
-    def visit(module: str) -> None:
-        visited.add(module)
-        active.add(module)
-        stack.append(module)
-        for dependency in graph[module]:
-            if dependency not in visited:
-                visit(dependency)
-            elif dependency in active:
-                cycles.add(tuple([*stack[stack.index(dependency):], dependency]))
-        stack.pop()
-        active.remove(module)
-
-    for module in graph:
-        if module not in visited:
-            visit(module)
-    for cycle in sorted(cycles):
+    graph = build_graph(PACKAGE_ROOT)
+    for cycle in sorted(cycles(graph.imports), key=lambda value: tuple(sorted(value))):
         issues.append(_issue(
-            "import_cycle", "high", "包内存在顶层循环依赖", " -> ".join(cycle),
+            "import_cycle", "high", "包内存在顶层循环依赖", " -> ".join(sorted(cycle)),
         ))
-
+    for violation in layer_violations(graph):
+        source, _, _target = violation.partition(" -> ")
+        issues.append(_issue(
+            "architecture_layer", "high", "包层依赖违反架构边界",
+            violation, target=source,
+        ))
     allowed_sqlite = {"runtime/sqlite.py", "data/migration.py"}
-    for path in paths:
-        relative = path.relative_to(PACKAGE_ROOT).as_posix()
-        imports = _imports(path)
-        if relative != "cli.py" and not relative.startswith("server/"):
-            leaked = sorted(
-                name for name in imports
-                if name == "quantmaster.server" or name.startswith("quantmaster.server.")
-            )
-            for name in leaked:
-                issues.append(_issue(
-                    "transport_dependency", "high", "领域模块依赖 Web 传输层",
-                    name, target=relative,
-                ))
-        if relative in allowed_sqlite:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "sqlite3"
-                and node.func.attr == "connect"
-            ):
-                issues.append(_issue(
-                    "sqlite_factory_bypass", "high", "生产代码绕过统一 SQLite 工厂",
-                    f"line {node.lineno}", target=relative,
-                ))
+    for relative, line in sqlite_connect_lines(PACKAGE_ROOT):
+        if relative not in allowed_sqlite:
+            issues.append(_issue(
+                "sqlite_factory_bypass", "high", "生产代码绕过统一 SQLite 工厂",
+                f"line {line}", target=relative,
+            ))
     return issues
 
 

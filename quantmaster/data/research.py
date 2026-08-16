@@ -9,7 +9,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from quantmaster.lab.models import content_hash
+from quantmaster.runtime.json import content_hash
 from quantmaster.trading_sessions import market_date
 
 REQUIRED_SIGNAL_FIELDS = ("open", "high", "low", "close", "volume")

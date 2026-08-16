@@ -112,304 +112,310 @@ def _component_failure(name: str) -> Problem:
     )
 
 
+def _health_llm() -> list[Problem]:
+    from quantmaster.ai.llm import llm_provider_health
+
+    issues: list[Problem] = []
+    for item in llm_provider_health():
+        if item.get("status") not in {"degraded", "healthy"}:
+            continue
+        category = str(item.get("error_category") or "unknown")
+        provider = _clean(item.get("provider") or "LLM", 40)
+        model = _clean(item.get("model") or "未指定模型", 120)
+        retry_status = _clean(item.get("retry_status") or "", 80)
+        healthy = item.get("status") == "healthy"
+        issues.append(make_problem(
+            str(item.get("error_code") or "llm_healthy"),
+            severity="info" if healthy else "warning", source="模型服务",
+            title="模型服务运行正常" if healthy else _llm_title(category),
+            message=(f"{provider} · {model}：最近请求成功" if healthy else
+                     f"{provider} · {model}：{_clean(item.get('message') or '请求失败')}"),
+            action="LLM 故障不会阻断不依赖模型的后台任务。" if healthy else _llm_action(
+                category, retryable=bool(item.get("retry_after_seconds")), retry_status=retry_status,
+            ),
+            problem_id=f"llm:{provider}:{model}", can_continue=True,
+            provider=provider, endpoint=_clean(item.get("endpoint"), 220), model=model,
+            occurred_at=item.get("occurred_at"), last_success_at=item.get("last_success_at"),
+            diagnostic_id=_clean(item.get("last_request_id"), 80), error_category=category,
+            http_status=item.get("http_status"), retry_status=retry_status,
+            next_retry_at=item.get("next_retry_at"),
+            response_summary=_clean(item.get("response_summary"), 180),
+        ))
+    return issues
+
+
+def _health_providers() -> list[Problem]:
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+
+    issues: list[Problem] = []
+    for lane, item in PROVIDER_HEALTH.status().items():
+        state = item.get("state", "closed")
+        if state == "closed":
+            continue
+        remaining = max(0, int(float(item.get("open_until") or 0) - datetime.now().timestamp()))
+        disabled = state == "disabled"
+        raw_failure_class = str(item.get("failure_class") or "transient_upstream")
+        failure_class = canonical_provider_status(raw_failure_class)
+        provider_name = _provider_name(lane)
+        diagnostic_code = _clean(item.get("diagnostic_code") or raw_failure_class, 80)
+        issues.append(make_problem(
+            "provider_disabled" if disabled else "provider_circuit_open", severity="info",
+            source="行情数据源", title=f"{provider_name}{'已停止自动请求' if disabled else '已暂停请求'}",
+            message=_provider_failure_message(failure_class, disabled=disabled),
+            action=("更新对应凭据或依赖后，在后台诊断中执行一次手工探测。" if disabled else
+                    f"约 {remaining} 秒后系统会自动探测恢复。" if remaining else
+                    "下一次相关请求会执行受控恢复探测。"),
+            problem_id=f"provider:{lane}", state=state, failure_class=failure_class,
+            provider_status=failure_class, capability=str(lane).partition(":")[2] or str(lane),
+            diagnostic_code=diagnostic_code, diagnostic_id=f"provider:{lane}:{diagnostic_code}",
+            last_success=float(item.get("last_success") or 0),
+            last_failure=float(item.get("last_failure") or 0),
+            next_probe_at=float(item.get("next_probe_at") or 0),
+            retry_after_at=float(item.get("retry_after_at") or 0),
+            remote_failures=int(item.get("failures") or 0), local_blocks=int(item.get("suppressed") or 0),
+            can_continue=True,
+        ))
+    return issues
+
+
+def _health_refresh() -> list[Problem]:
+    from quantmaster.data.maintenance import data_refresh_manager
+
+    issues: list[Problem] = []
+    refresh = data_refresh_manager.latest()
+    if refresh and refresh.get("status") in {"running", "cancelling", "interrupted", "completed_with_errors"}:
+        status = str(refresh["status"])
+        running = status in {"running", "cancelling"}
+        failed = int(refresh.get("failed") or len(refresh.get("failures") or []))
+        issues.append(make_problem(
+            "data_refresh_status", severity="info" if running else "warning", source="数据刷新",
+            title="行情正在增量同步" if running else "最近的数据同步未完整完成",
+            message=(f"进度 {refresh.get('progress', 0)}%，当前 {refresh.get('current_symbol') or '准备中'}"
+                     if running else f"有 {failed} 个标的刷新失败或任务被中断。"),
+            action="任务会在后台继续，可正常浏览其他页面。" if running else "在设置中心查看失败项并重试。",
+            problem_id=f"refresh:{refresh.get('id', 'latest')}", job_status=status,
+        ))
+    return issues
+
+
+def _health_repairs() -> list[Problem]:
+    from quantmaster.data.repair import get_data_repair_manager
+
+    issues: list[Problem] = []
+    repairs = get_data_repair_manager().list(limit=200)
+    failed = [item for item in repairs if item.get("status") == "failed"]
+    pending = [item for item in repairs if item.get("status") in {"queued", "running", "cancelling"}]
+    if failed:
+        issues.append(make_problem(
+            "data_repair_failed", severity="warning", source="数据修复",
+            title="部分数据修复已耗尽自动重试", message=f"{len(failed)} 个可重建数据目标仍未恢复。",
+            action="在统一任务列表选择 repairs 查看错误并人工重试。", problem_id="data-repair:failed",
+        ))
+    elif pending:
+        issues.append(make_problem(
+            "data_repair_pending", severity="info", source="数据修复",
+            title="数据完整性修复正在排队", message=f"{len(pending)} 个目标将按来源额度与退避策略修复。",
+            action="系统会保留隔离原件并自动校验替换结果。", problem_id="data-repair:pending",
+        ))
+    return issues
+
+
+def _health_news() -> list[Problem]:
+    from quantmaster.ai.news_sources import NewsSourceStore
+
+    return [make_problem(
+        "news_source_failed", severity="warning", source="资讯来源",
+        title=f"{source.get('name') or '资讯源'} 最近抓取失败",
+        message=_clean(source.get("last_error")) or "来源未返回可用内容",
+        action="在资讯来源设置中检测该来源，或稍后重新抓取。",
+        problem_id=f"news-source:{source.get('id', 'unknown')}",
+    ) for source in NewsSourceStore().list(enabled=True) if source.get("last_status") == "failed"]
+
+
+def _health_search() -> list[Problem]:
+    from quantmaster.ai.llm import web_search_capability_status
+
+    search = web_search_capability_status()
+    if search.get("supported") is not False:
+        return []
+    return [make_problem(
+        "llm_web_search_unavailable", severity="warning", source="个股深度分析",
+        title="模型网关不支持原生联网搜索",
+        message=_clean(search.get("detail")) or "能力探测已确认当前网关不支持 Web Search。",
+        action="系统会自动使用内置金融数据源；如需联网补证，可切换支持原生搜索的模型接口。",
+        problem_id="stock-analysis:web-search",
+    )]
+
+
+def _health_automation() -> list[Problem]:
+    from quantmaster.automation.runtime import get_runtime
+    from quantmaster.config import get_config
+
+    if not get_config().automation.enabled:
+        return []
+    runtime = get_runtime()
+    status = runtime.status()
+    issues: list[Problem] = []
+    if status.get("status") == "degraded":
+        issues.append(make_problem(
+            "automation_degraded", severity="error", source="自动任务", title="自动化运行异常",
+            message="调度器或消息通道未按配置运行。", action="打开自动化页面检查调度状态和通道配置。",
+            problem_id="automation:runtime",
+        ))
+    latest = (runtime.service.overview().get("recent_runs") or [None])[0]
+    if latest and latest.get("status") == "failed":
+        issues.append(make_problem(
+            "automation_run_failed", severity="warning", source="自动任务",
+            title=f"{latest.get('job_name') or '最近任务'}执行失败",
+            message=_clean(latest.get("error")) or "任务未完成",
+            action="在自动化页面查看任务运行记录并重试。",
+            problem_id=f"automation-run:{latest.get('id', 'latest')}",
+        ))
+    return issues
+
+
+def _health_lab() -> list[Problem]:
+    from quantmaster.config import get_config
+    from quantmaster.lab.jobs import list_lab_jobs
+    from quantmaster.lab.store import LabStore
+    from quantmaster.lab.worker import get_worker
+
+    if not get_config().lab.enabled:
+        return []
+    issues: list[Problem] = []
+    status = get_worker().status()
+    if status.get("status") not in {"running", "draining"}:
+        issues.append(make_problem(
+            "lab_worker_unavailable", severity="error", source="Quant Lab",
+            title="研究任务执行器未运行", message="Quant Lab 已启用，但后台执行器当前不可用。",
+            action="重启本地服务；如仍失败，请查看服务端日志。", problem_id="lab:worker",
+        ))
+    latest = (list_lab_jobs(1) or [None])[0]
+    if latest and latest.get("status") == "failed":
+        issues.append(make_problem(
+            "lab_job_failed", severity="warning", source="Quant Lab", title="最近的研究任务失败",
+            message=_clean(latest.get("error")) or "研究任务未完成",
+            action="打开 Quant Lab 查看任务事件并重新运行。",
+            problem_id=f"lab-job:{latest.get('id', 'latest')}",
+        ))
+    publications = LabStore().pending_publications(100, due_only=False)
+    if publications:
+        issues.append(make_problem(
+            "lab_publication_pending", severity="warning", source="Quant Lab",
+            title="模型训练已完成，数据发布仍在重试",
+            message=f"{len(publications)} 个模型预测 outbox 尚未发布完成。",
+            action="Lab worker 会幂等重试；训练版本与验证证据不受影响。",
+            problem_id="lab:publication-pending",
+        ))
+    elif latest and latest.get("status") == "completed_with_warnings":
+        warnings = (latest.get("result") or {}).get("warnings") or []
+        warning = warnings[0] if warnings else {}
+        message = warning.get("message") if isinstance(warning, dict) else str(warning)
+        issues.append(make_problem(
+            "lab_job_partial", severity="warning", source="Quant Lab",
+            title="最近的研究任务部分完成",
+            message=_clean(message) or "已保留完成部分，仍有研究轮次未完成。",
+            action="打开 Quant Lab 查看已保存结果或按相同参数重新运行。",
+            problem_id=f"lab-job:{latest.get('id', 'latest')}",
+        ))
+    return issues
+
+
+def _health_backtest() -> list[Problem]:
+    from quantmaster.backtest.jobs import list_backtest_jobs
+
+    latest = (list_backtest_jobs(1) or [None])[0]
+    if not latest:
+        return []
+    if latest.get("status") in {"queued", "running", "interrupted"}:
+        return [make_problem(
+            "backtest_running", severity="info", source="策略回测", title="回测任务正在执行",
+            message=latest.get("detail") or latest.get("phase") or "等待后台执行",
+            action="任务状态已保存在本地，可以继续浏览其他页面。",
+            problem_id=f"backtest-run:{latest.get('id', 'latest')}",
+        )]
+    if latest.get("status") != "failed":
+        return []
+    stored = (latest.get("result") or {}).get("problem") or {}
+    return [make_problem(
+        str(stored.get("code") or "backtest_failed"), severity=str(stored.get("severity") or "error"),
+        source="策略回测", title=str(stored.get("title") or "最近的回测任务失败"),
+        message=str(stored.get("message") or latest.get("error") or "回测未完成"),
+        action=str(stored.get("action") or "打开回测工作台检查数据与参数后重试。"),
+        blocking=bool(stored.get("blocking", True)), can_continue=bool(stored.get("can_continue", False)),
+        problem_id=f"backtest-run:{latest.get('id', 'latest')}",
+        items=stored.get("items") if isinstance(stored.get("items"), list) else None,
+    )]
+
+
+def _safe_health_providers() -> list[Problem]:
+    try:
+        return _health_providers()
+    except Exception:
+        return [_component_failure("行情数据源")]
+
+
+def _safe_health_refresh() -> list[Problem]:
+    try:
+        return _health_refresh()
+    except Exception:
+        return [_component_failure("数据刷新")]
+
+
+def _safe_health_repairs() -> list[Problem]:
+    try:
+        return _health_repairs()
+    except Exception:
+        return [_component_failure("数据修复")]
+
+
+def _safe_health_news() -> list[Problem]:
+    try:
+        return _health_news()
+    except Exception:
+        return [_component_failure("资讯来源")]
+
+
+def _safe_health_automation() -> list[Problem]:
+    try:
+        return _health_automation()
+    except Exception:
+        return [_component_failure("自动任务")]
+
+
+def _safe_health_lab() -> list[Problem]:
+    try:
+        return _health_lab()
+    except Exception:
+        return [_component_failure("Quant Lab")]
+
+
+def _safe_health_backtest() -> list[Problem]:
+    try:
+        return _health_backtest()
+    except Exception:
+        return [_component_failure("策略回测")]
+
+
 def collect_health_report() -> dict[str, Any]:
     """聚合全局后台健康与当前任务；任一子系统失败不影响其余状态。"""
     issues: list[Problem] = []
-
-    # LLM issues are informational health projections only: unrelated jobs
-    # remain visible and runnable even while a provider is degraded.
-    try:
-        from quantmaster.ai.llm import llm_provider_health
-
-        for item in llm_provider_health():
-            if item.get("status") not in {"degraded", "healthy"}:
-                continue
-            category = str(item.get("error_category") or "unknown")
-            provider = _clean(item.get("provider") or "LLM", 40)
-            model = _clean(item.get("model") or "未指定模型", 120)
-            retry_status = _clean(item.get("retry_status") or "", 80)
-            healthy = item.get("status") == "healthy"
-            issues.append(make_problem(
-                str(item.get("error_code") or "llm_healthy"), severity="info" if healthy else "warning",
-                source="模型服务", title="模型服务运行正常" if healthy else _llm_title(category),
-                message=(f"{provider} · {model}：最近请求成功" if healthy else
-                         f"{provider} · {model}：{_clean(item.get('message') or '请求失败')}"),
-                action="LLM 故障不会阻断不依赖模型的后台任务。" if healthy else _llm_action(
-                    category, retryable=bool(item.get("retry_after_seconds")), retry_status=retry_status,
-                ),
-                problem_id=f"llm:{provider}:{model}", can_continue=True,
-                provider=provider, endpoint=_clean(item.get("endpoint"), 220), model=model,
-                occurred_at=item.get("occurred_at"), last_success_at=item.get("last_success_at"),
-                diagnostic_id=_clean(item.get("last_request_id"), 80),
-                error_category=category, http_status=item.get("http_status"),
-                retry_status=retry_status, next_retry_at=item.get("next_retry_at"),
-                response_summary=_clean(item.get("response_summary"), 180),
-            ))
-    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
-        issues.append(_component_failure("模型服务"))
-
-    try:
-        from quantmaster.data.resilience import PROVIDER_HEALTH
-
-        for lane, item in PROVIDER_HEALTH.status().items():
-            state = item.get("state", "closed")
-            if state == "closed":
-                continue
-            remaining = max(0, int(float(item.get("open_until") or 0) - datetime.now().timestamp()))
-            disabled = state == "disabled"
-            raw_failure_class = str(item.get("failure_class") or "transient_upstream")
-            failure_class = canonical_provider_status(raw_failure_class)
-            provider_name = _provider_name(lane)
-            diagnostic_code = _clean(item.get("diagnostic_code") or raw_failure_class, 80)
-            issues.append(make_problem(
-                "provider_disabled" if disabled else "provider_circuit_open",
-                # Provider health is an independent operational projection.
-                # The consuming data view decides whether missing data is a
-                # warning/error; an upstream-only issue remains informational.
-                severity="info",
-                source="行情数据源",
-                title=f"{provider_name}{'已停止自动请求' if disabled else '已暂停请求'}",
-                message=_provider_failure_message(failure_class, disabled=disabled),
-                action=(
-                    "更新对应凭据或依赖后，在后台诊断中执行一次手工探测。"
-                    if disabled else (
-                        f"约 {remaining} 秒后系统会自动探测恢复。" if remaining
-                        else "下一次相关请求会执行受控恢复探测。"
-                    )
-                ),
-                problem_id=f"provider:{lane}",
-                state=state,
-                failure_class=failure_class,
-                provider_status=failure_class,
-                capability=str(lane).partition(":")[2] or str(lane),
-                diagnostic_code=diagnostic_code,
-                diagnostic_id=f"provider:{lane}:{diagnostic_code}",
-                last_success=float(item.get("last_success") or 0),
-                last_failure=float(item.get("last_failure") or 0),
-                next_probe_at=float(item.get("next_probe_at") or 0),
-                retry_after_at=float(item.get("retry_after_at") or 0),
-                remote_failures=int(item.get("failures") or 0),
-                local_blocks=int(item.get("suppressed") or 0),
-                can_continue=True,
-            ))
-    except Exception:
-        issues.append(_component_failure("行情数据源"))
-
-    try:
-        from quantmaster.data.maintenance import data_refresh_manager
-
-        refresh = data_refresh_manager.latest()
-        if refresh and refresh.get("status") in {
-            "running", "cancelling", "interrupted", "completed_with_errors",
-        }:
-            status = str(refresh["status"])
-            running = status in {"running", "cancelling"}
-            failed = int(refresh.get("failed") or len(refresh.get("failures") or []))
-            issues.append(make_problem(
-                "data_refresh_status",
-                severity="info" if running else "warning",
-                source="数据刷新",
-                title="行情正在增量同步" if running else "最近的数据同步未完整完成",
-                message=(
-                    f"进度 {refresh.get('progress', 0)}%，"
-                    f"当前 {refresh.get('current_symbol') or '准备中'}"
-                    if running else f"有 {failed} 个标的刷新失败或任务被中断。"
-                ),
-                action=("任务会在后台继续，可正常浏览其他页面。" if running
-                        else "在设置中心查看失败项并重试。"),
-                problem_id=f"refresh:{refresh.get('id', 'latest')}",
-                job_status=status,
-            ))
-    except Exception:
-        issues.append(_component_failure("数据刷新"))
-
-    try:
-        from quantmaster.data.repair import get_data_repair_manager
-
-        repairs = get_data_repair_manager().list(limit=200)
-        failed_repairs = [item for item in repairs if item.get("status") == "failed"]
-        pending_repairs = [
-            item for item in repairs
-            if item.get("status") in {"queued", "running", "cancelling"}
-        ]
-        if failed_repairs:
-            issues.append(make_problem(
-                "data_repair_failed",
-                severity="warning",
-                source="数据修复",
-                title="部分数据修复已耗尽自动重试",
-                message=f"{len(failed_repairs)} 个可重建数据目标仍未恢复。",
-                action="在统一任务列表选择 repairs 查看错误并人工重试。",
-                problem_id="data-repair:failed",
-            ))
-        elif pending_repairs:
-            issues.append(make_problem(
-                "data_repair_pending",
-                severity="info",
-                source="数据修复",
-                title="数据完整性修复正在排队",
-                message=f"{len(pending_repairs)} 个目标将按来源额度与退避策略修复。",
-                action="系统会保留隔离原件并自动校验替换结果。",
-                problem_id="data-repair:pending",
-            ))
-    except Exception:
-        issues.append(_component_failure("数据修复"))
-
-    try:
-        from quantmaster.ai.news_sources import NewsSourceStore
-
-        for source in NewsSourceStore().list(enabled=True):
-            if source.get("last_status") != "failed":
-                continue
-            issues.append(make_problem(
-                "news_source_failed",
-                severity="warning",
-                source="资讯来源",
-                title=f"{source.get('name') or '资讯源'} 最近抓取失败",
-                message=_clean(source.get("last_error")) or "来源未返回可用内容",
-                action="在资讯来源设置中检测该来源，或稍后重新抓取。",
-                problem_id=f"news-source:{source.get('id', 'unknown')}",
-            ))
-    except Exception:
-        issues.append(_component_failure("资讯来源"))
-
-    try:
-        from quantmaster.ai.llm import web_search_capability_status
-
-        search = web_search_capability_status()
-        if search.get("supported") is False:
-            issues.append(make_problem(
-                "llm_web_search_unavailable",
-                severity="warning",
-                source="个股深度分析",
-                title="模型网关不支持原生联网搜索",
-                message=_clean(search.get("detail")) or "能力探测已确认当前网关不支持 Web Search。",
-                action="系统会自动使用内置金融数据源；如需联网补证，可切换支持原生搜索的模型接口。",
-                problem_id="stock-analysis:web-search",
-            ))
-    except (ImportError, RuntimeError, TypeError, ValueError):
-        issues.append(_component_failure("个股联网搜索"))
-
-    try:
-        from quantmaster.automation.runtime import get_runtime
-        from quantmaster.config import get_config
-
-        if get_config().automation.enabled:
-            runtime = get_runtime()
-            status = runtime.status()
-            if status.get("status") == "degraded":
-                issues.append(make_problem(
-                    "automation_degraded",
-                    severity="error",
-                    source="自动任务",
-                    title="自动化运行异常",
-                    message="调度器或消息通道未按配置运行。",
-                    action="打开自动化页面检查调度状态和通道配置。",
-                    problem_id="automation:runtime",
-                ))
-            overview = runtime.service.overview()
-            latest = (overview.get("recent_runs") or [None])[0]
-            if latest and latest.get("status") == "failed":
-                issues.append(make_problem(
-                    "automation_run_failed",
-                    severity="warning",
-                    source="自动任务",
-                    title=f"{latest.get('job_name') or '最近任务'}执行失败",
-                    message=_clean(latest.get("error")) or "任务未完成",
-                    action="在自动化页面查看任务运行记录并重试。",
-                    problem_id=f"automation-run:{latest.get('id', 'latest')}",
-                ))
-    except Exception:
-        issues.append(_component_failure("自动任务"))
-
-    try:
-        from quantmaster.config import get_config
-        from quantmaster.lab.jobs import list_lab_jobs
-        from quantmaster.lab.store import LabStore
-        from quantmaster.lab.worker import get_worker
-
-        if get_config().lab.enabled:
-            status = get_worker().status()
-            if status.get("status") not in {"running", "draining"}:
-                issues.append(make_problem(
-                    "lab_worker_unavailable",
-                    severity="error",
-                    source="Quant Lab",
-                    title="研究任务执行器未运行",
-                    message="Quant Lab 已启用，但后台执行器当前不可用。",
-                    action="重启本地服务；如仍失败，请查看服务端日志。",
-                    problem_id="lab:worker",
-                ))
-            latest_jobs = list_lab_jobs(1)
-            latest = latest_jobs[0] if latest_jobs else None
-            if latest and latest.get("status") == "failed":
-                issues.append(make_problem(
-                    "lab_job_failed",
-                    severity="warning",
-                    source="Quant Lab",
-                    title="最近的研究任务失败",
-                    message=_clean(latest.get("error")) or "研究任务未完成",
-                    action="打开 Quant Lab 查看任务事件并重新运行。",
-                    problem_id=f"lab-job:{latest.get('id', 'latest')}",
-                ))
-            publications = LabStore().pending_publications(100, due_only=False)
-            if publications:
-                issues.append(make_problem(
-                    "lab_publication_pending",
-                    severity="warning",
-                    source="Quant Lab",
-                    title="模型训练已完成，数据发布仍在重试",
-                    message=f"{len(publications)} 个模型预测 outbox 尚未发布完成。",
-                    action="Lab worker 会幂等重试；训练版本与验证证据不受影响。",
-                    problem_id="lab:publication-pending",
-                ))
-            elif latest and latest.get("status") == "completed_with_warnings":
-                warnings = (latest.get("result") or {}).get("warnings") or []
-                warning = warnings[0] if warnings else {}
-                message = warning.get("message") if isinstance(warning, dict) else str(warning)
-                issues.append(make_problem(
-                    "lab_job_partial",
-                    severity="warning",
-                    source="Quant Lab",
-                    title="最近的研究任务部分完成",
-                    message=_clean(message) or "已保留完成部分，仍有研究轮次未完成。",
-                    action="打开 Quant Lab 查看已保存结果或按相同参数重新运行。",
-                    problem_id=f"lab-job:{latest.get('id', 'latest')}",
-                ))
-    except Exception:
-        issues.append(_component_failure("Quant Lab"))
-
-    try:
-        from quantmaster.backtest.jobs import list_backtest_jobs
-
-        latest_runs = list_backtest_jobs(1)
-        latest = latest_runs[0] if latest_runs else None
-        if latest and latest.get("status") in {"queued", "running", "interrupted"}:
-            issues.append(make_problem(
-                "backtest_running",
-                severity="info",
-                source="策略回测",
-                title="回测任务正在执行",
-                message=(latest.get("detail") or latest.get("phase") or "等待后台执行"),
-                action="任务状态已保存在本地，可以继续浏览其他页面。",
-                problem_id=f"backtest-run:{latest.get('id', 'latest')}",
-            ))
-        elif latest and latest.get("status") == "failed":
-            stored = (latest.get("result") or {}).get("problem") or {}
-            issues.append(make_problem(
-                str(stored.get("code") or "backtest_failed"),
-                severity=str(stored.get("severity") or "error"),
-                source="策略回测",
-                title=str(stored.get("title") or "最近的回测任务失败"),
-                message=str(stored.get("message") or latest.get("error") or "回测未完成"),
-                action=str(stored.get("action") or "打开回测工作台检查数据与参数后重试。"),
-                blocking=bool(stored.get("blocking", True)),
-                can_continue=bool(stored.get("can_continue", False)),
-                problem_id=f"backtest-run:{latest.get('id', 'latest')}",
-                items=stored.get("items") if isinstance(stored.get("items"), list) else None,
-            ))
-    except Exception:
-        issues.append(_component_failure("策略回测"))
+    for probe in (
+        _safe_health_providers,
+        _safe_health_refresh,
+        _safe_health_repairs,
+        _safe_health_news,
+        _safe_health_automation,
+        _safe_health_lab,
+        _safe_health_backtest,
+    ):
+        issues.extend(probe())
+    narrow_probes = (("模型服务", _health_llm), ("个股联网搜索", _health_search))
+    for name, probe in narrow_probes:
+        try:
+            issues.extend(probe())
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+            issues.append(_component_failure(name))
 
     level = "error" if any(item["severity"] == "error" for item in issues) else (
         "warning" if any(item["severity"] == "warning" for item in issues) else "ok"

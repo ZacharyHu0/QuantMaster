@@ -19,6 +19,7 @@ from quantmaster.research.contracts import (
     utc_now,
 )
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
+from quantmaster.schema_access import register_research_catalog
 
 RESEARCH_SCHEMA_VERSION = 2
 
@@ -462,3 +463,5 @@ class ResearchCatalog:
                 "SELECT manifest_json FROM research_runs WHERE run_id=?", (run_id,)
             ).fetchone()
         return json.loads(row["manifest_json"]) if row else None
+
+register_research_catalog(ResearchCatalog)

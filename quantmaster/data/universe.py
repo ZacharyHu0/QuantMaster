@@ -15,27 +15,13 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.research.contracts import content_hash
+from quantmaster.data.catalog import DEMO_STOCK_NAMES
+from quantmaster.runtime.json import content_hash
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date
 
 if TYPE_CHECKING:
     from quantmaster.data.instruments import InstrumentStore
 
-# 内置示例候选：沪深各行业代表性大盘股（便于开箱即用地跑通流程）
-DEMO_STOCK_NAMES = {
-    "600519.SH": "贵州茅台",
-    "601318.SH": "中国平安",
-    "600036.SH": "招商银行",
-    "601899.SH": "紫金矿业",
-    "600900.SH": "长江电力",
-    "688981.SH": "中芯国际",
-    "000333.SZ": "美的集团",
-    "000858.SZ": "五粮液",
-    "300750.SZ": "宁德时代",
-    "002594.SZ": "比亚迪",
-    "300059.SZ": "东方财富",
-    "002230.SZ": "科大讯飞",
-}
 DEMO_UNIVERSE = list(DEMO_STOCK_NAMES)
 
 # 新建候选时可直接读取的常用指数。科技成长方向优先排列；这些条目只是

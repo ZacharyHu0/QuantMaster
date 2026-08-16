@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -122,7 +123,7 @@ def resolve_factor(
     if name_or_expr == "news_sentiment":
         from quantmaster.ai.sentiment import NewsSentimentFactor
 
-        return NewsSentimentFactor()
+        return cast(Any, NewsSentimentFactor())
     if name_or_expr in FUNDAMENTAL_FACTOR_NAMES:
         from quantmaster.data.fundamentals import fundamental_panel
 
@@ -153,9 +154,9 @@ def resolve_factor(
     # Quant Lab display names are unique registry aliases. Resolving them here keeps
     # copied names and autocomplete insertions executable without exposing the raw
     # expression (whose function commas conflict with multi-factor separators).
-    from quantmaster.lab.store import LabStore
+    from quantmaster.schema_access import schema_target
 
-    stored = LabStore().factor_reference(name_or_expr)
+    stored = schema_target("lab_store").factor_reference(name_or_expr)
     if stored is not None:
         if stored["kind"] != "expression":
             raise ValueError(

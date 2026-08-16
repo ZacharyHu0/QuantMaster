@@ -333,9 +333,9 @@ def resolve_policy(
     a_share_compatible = _is_a_share_symbols(symbols)
     try:
         if store is None:
-            from quantmaster.lab.store import LabStore
+            from quantmaster.schema_access import schema_target
 
-            store = LabStore()
+            store = schema_target("lab_store")
         if mode == "historical_replay":
             if not hasattr(store, "deployments_as_of") or not hasattr(
                 store, "champion_strategies_as_of"
@@ -514,7 +514,7 @@ def _expression_component(
 def _learned_component(
     panel: dict[str, pd.DataFrame], component: dict[str, Any],
 ) -> pd.DataFrame:
-    from quantmaster.lab.ml import predict_panel
+    from quantmaster.lab_access import predict_panel
 
     spec = component.get("spec") or {}
     values = predict_panel(
@@ -1062,7 +1062,7 @@ class HybridDecisionStrategy:
         eligibility_mask: pd.DataFrame | None = None,
         force_latest: bool = False,
     ):
-        from quantmaster.backtest.strategy import SignalBundle
+        from quantmaster.signal_contract import SignalBundle
 
         bundle = hybrid_score_bundle(
             panel, horizon=self.holding_days, profile=self.profile,

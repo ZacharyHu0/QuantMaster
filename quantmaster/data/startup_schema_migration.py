@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import MigrationRecord
+from quantmaster.data.migration_contracts import MigrationRecord
 from quantmaster.runtime.sqlite import connect_sqlite
 
 _DOMAINS = (
@@ -62,9 +62,10 @@ def _probe_jobs(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ..
 
 
 def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ...]]:
-    from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION
+    from quantmaster.schema_access import schema_target
 
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    paper_schema_version = int(schema_target("paper_schema_version"))
     tables = _tables(connection)
     core = {"paper_accounts", "paper_cycles", "paper_orders", "paper_auto_runs"}
     current_tables = core | {"paper_legacy_imports"}
@@ -72,7 +73,7 @@ def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, .
         "strategy_warning", "runtime_warning", "strategy_effective_after",
     }
     run_columns = {"lease_token", "heartbeat_at", "failure_code"}
-    if version == PAPER_SCHEMA_VERSION:
+    if version == paper_schema_version:
         missing = tuple(sorted(
             current_tables - tables
             | account_columns - _columns(connection, "paper_accounts")
@@ -82,7 +83,7 @@ def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, .
             ("current", "", ()) if not missing
             else ("conflict", "current_paper_schema_corrupt", missing)
         )
-    if version not in range(PAPER_SCHEMA_VERSION):
+    if version not in range(paper_schema_version):
         return ("conflict", "paper_schema_version_unclassified", ("user_version",))
     missing_core = tuple(sorted(core - tables))
     if missing_core:
@@ -126,9 +127,9 @@ def _upgrade(domain: str, path: Path, root: Path) -> None:
         store.artifacts_root = root / "derived" / "job-artifacts"
         store._migrate_legacy_schema()
     else:
-        from quantmaster.backtest.paper_accounts import PaperStore
+        from quantmaster.schema_access import schema_target
 
-        PaperStore.migrate_legacy_database(path, root / "paper_accounts")
+        schema_target("paper_store").migrate_legacy_database(path, root / "paper_accounts")
 
 
 class StartupSchemaMigrator:

@@ -586,4 +586,3 @@ def test_onedir_smoke_cli_writes_evidence_and_exits_one_on_budget_failure(
     assert payload["within_budgets"] is False
     assert payload["help"]["cold_seconds"] == 1.6
     assert payload["core_ready"]["within_budget"] is True
-
