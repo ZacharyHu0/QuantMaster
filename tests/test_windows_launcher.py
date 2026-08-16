@@ -110,9 +110,18 @@ def test_stable_shortcut_starts_the_exact_single_line_slot(tmp_path, monkeypatch
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows stable launcher contract")
-@pytest.mark.parametrize("tail", ("", r"..\outside", r"C:\outside", "safe:stream"))
-def test_stable_shortcut_rejects_every_multiline_target_before_process_start(
-    tmp_path, monkeypatch, tail: str,
+@pytest.mark.parametrize(
+    "target",
+    (
+        f"{'a' * 40}\n\n",
+        f"{'a' * 40}\n..\\outside\n",
+        r"..\outside".ljust(40, "a") + "\n",
+        r"C:\outside".ljust(40, "a") + "\n",
+        "safe:stream".ljust(40, "a") + "\n",
+    ),
+)
+def test_stable_shortcut_rejects_unsafe_target_before_process_start(
+    tmp_path, monkeypatch, target: str,
 ) -> None:
     from quantmaster.runtime.launcher import create_stable_shortcut
 
@@ -127,9 +136,7 @@ def test_stable_shortcut_rejects_every_multiline_target_before_process_start(
     outside = root / "outside"
     outside.mkdir()
     shutil.copy2(sys.executable, outside / "QuantMaster.exe")
-    (root / "launcher.target").write_text(
-        f"{'a' * 40}\n{tail}\n", encoding="ascii",
-    )
+    (root / "launcher.target").write_text(target, encoding="ascii")
 
     result = run(
         ["cmd.exe", "/d", "/c", "call", str(root / "QuantMaster Stable Launcher.cmd")],
