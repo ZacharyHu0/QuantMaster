@@ -288,15 +288,17 @@ def _portfolio_value_at_open(
     symbols: list[str],
     day_open: pd.Series,
 ) -> float:
-    position_value = sum(
-        state.shares[symbol] * (
-            float(day_open.get(symbol))
-            if pd.notna(day_open.get(symbol)) and float(day_open.get(symbol)) > 0
-            else state.last_close.get(symbol, 0.0)
-        )
-        for symbol in symbols
-        if state.shares[symbol] > 0
+    shares = np.array([state.shares[s] for s in symbols], dtype=np.float64)
+    prices = np.array(
+        [float(day_open.get(s, np.nan)) if pd.notna(day_open.get(s, np.nan)) else 0.0 for s in symbols],
+        dtype=np.float64,
     )
+    # Use last_close as fallback for missing/zero prices
+    fallback = np.array(
+        [state.last_close.get(s, 0.0) for s in symbols], dtype=np.float64,
+    )
+    prices = np.where((prices > 0), prices, fallback)
+    position_value = float(np.sum(shares * prices))
     return state.cash + position_value
 
 
@@ -314,22 +316,33 @@ def _build_orders(
     portfolio_value: float,
     date_str: str,
 ) -> tuple[list[tuple[str, float]], bool]:
-    orders: list[tuple[str, float]] = []
+    n = len(symbols)
+    target_values = np.zeros(n, dtype=np.float64)
+    current_values = np.zeros(n, dtype=np.float64)
+    valid_mask = np.ones(n, dtype=bool)
     retry_pending = False
-    for symbol in symbols:
+
+    for i, symbol in enumerate(symbols):
         price = day_open.get(symbol, np.nan)
-        target_weight = float(weights.get(symbol, 0.0))
+        tw = float(weights.get(symbol, 0.0))
         if np.isnan(price) or price <= 0:
-            if state.shares[symbol] > 0 or target_weight > 0:
-                side = "sell" if target_weight <= 0 else "rebalance"
+            valid_mask[i] = False
+            if state.shares[symbol] > 0 or tw > 0:
+                side = "sell" if tw <= 0 else "rebalance"
                 state.blocked_orders.append(
                     BlockedOrder(date_str, symbol, side, "missing_open")
                 )
                 retry_pending = True
             continue
-        target_value = portfolio_value * target_weight
-        orders.append((symbol, target_value - state.shares[symbol] * price))
-    orders.sort(key=itemgetter(1))
+        target_values[i] = portfolio_value * tw
+        current_values[i] = state.shares[symbol] * price
+
+    differences = target_values - current_values
+    valid_indices = np.where(valid_mask)[0]
+    valid_diffs = differences[valid_indices]
+    sorted_indices = valid_indices[np.argsort(valid_diffs)]
+
+    orders = [(symbols[i], float(differences[i])) for i in sorted_indices]
     return orders, retry_pending
 
 
