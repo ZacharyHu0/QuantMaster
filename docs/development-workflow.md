@@ -136,6 +136,37 @@ Start a task server from the primary checkout:
 
 Pass `--stockdb-root <absolute-path>` only for read-only access to an installed StockDB SDK.
 
+### Eight-hour stable-use acceptance
+
+The release acceptance for “develop while using” is a real eight-hour Windows run, not a shortened
+sleep test. It owns the stable launcher, samples the stable Web/runtime/compute identity and exact
+served shell every 60 seconds, and exercises two distinct registered task worktrees every two
+hours. Stable configuration, data, StockDB, logs, and JSON evidence stay under the prepared
+`stable-use-soak` task artifact root; the runner never uses the user's writable data roots.
+
+Prepare two clean fixture tasks with `tasks.py start`, stage both immutable A and B slots through
+the verified staging workflow, and run from the primary checkout with its project interpreter:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.release.stable_runtime_soak `
+  --dev-task soak-dev-a `
+  --dev-task soak-dev-b `
+  --candidate-sha <full-lowercase-B-sha> `
+  --evidence <absolute-prepared-task-artifact-path>\stable-runtime-soak.json
+```
+
+The CLI fixes the duration to eight hours, health sampling to 60 seconds, and development cycles
+to two hours. It rejects duplicate/unregistered/dirty tasks, a non-full candidate SHA, an occupied
+stable port, and evidence outside prepared task artifacts. Each cycle edits dependency metadata,
+Python source, and a static asset, starts both task servers on their official isolated ports, runs
+real deep compute probes, then restores clean worktrees. The final phase uses only the existing
+manual activation API for A→B and the existing coordinator fault seam for a deterministic failed
+B→A attempt; the durable result must keep B active within the 15-second transition budget.
+
+Success and failure both write local JSON evidence. Failures include the observation timestamp and
+the exact expected/observed generation and process identities when drift occurs. Cleanup targets
+only the Web root PIDs recorded by this run and verifies every owned port is released.
+
 ## 8. GitHub management
 
 The normative GitHub procedure is [docs/github-workflow.md](github-workflow.md). Summary of the
