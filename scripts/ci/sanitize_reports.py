@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.logging_config import redact_public_text
 
 TEXT_SUFFIXES = frozenset({".json", ".log", ".txt", ".xml"})
 
@@ -25,7 +25,7 @@ def _report_files(inputs: list[Path]) -> list[Path]:
 
 def scrub_file(path: Path) -> bool:
     original = path.read_text(encoding="utf-8", errors="replace")
-    scrubbed = redact_sensitive_text(original)
+    scrubbed = redact_public_text(original)
     if scrubbed == original:
         return False
     path.write_text(scrubbed, encoding="utf-8")
