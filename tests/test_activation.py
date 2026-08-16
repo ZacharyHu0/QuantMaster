@@ -9,6 +9,7 @@ from quantmaster.runtime.activation import (
     ActivationBlocked,
     ActivationCoordinator,
     SlotRegistry,
+    SubprocessGenerationController,
 )
 from quantmaster.runtime.identity import ApplicationIdentity
 
@@ -147,6 +148,47 @@ def test_candidate_failure_rolls_back_previous_slot(tmp_path):
     assert ("start", SHA_A) in controller.calls
 
 
+def test_failed_first_activation_is_retryable_without_registry_repair(tmp_path):
+    _candidate(tmp_path, SHA_B)
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController(fail=SHA_B)
+
+    with pytest.raises(ActivationBlocked) as failure:
+        ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert failure.value.code == "candidate_start_failed"
+    assert registry.read() == {
+        "schema": 1,
+        "active": "",
+        "previous": "",
+        "pending": "",
+        "status": "blocked",
+        "last_error": "candidate_start_failed: fixture failure",
+    }
+    assert not (tmp_path / "launcher.target").exists()
+
+    controller.fail = ""
+    result = ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert result["status"] == "activated"
+    assert registry.read()["active"] == SHA_B
+
+
+def test_interrupted_first_activation_clears_pending_before_retry(tmp_path):
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active="", pending=SHA_B, status="pending")
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController()
+
+    with pytest.raises(ActivationBlocked) as failure:
+        ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert failure.value.code == "pending_without_previous"
+    assert registry.read()["status"] == "blocked"
+    assert registry.read()["pending"] == ""
+    assert ActivationCoordinator(registry, controller).activate(SHA_B)["status"] == "activated"
+
+
 def test_interrupted_pending_is_recovered_before_retry(tmp_path):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
@@ -204,3 +246,34 @@ def test_already_active_is_idempotent(tmp_path):
 
     assert result["status"] == "already_active"
     assert controller.calls == []
+
+
+def test_packaged_worker_readiness_comes_from_candidate_http_projection(monkeypatch):
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    controller = SubprocessGenerationController()
+
+    def candidate_json(path: str):
+        if path == "health":
+            return {
+                "status": "ok",
+                "core_ready": True,
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }
+        assert path == "settings/runtime"
+        return {
+            "worker": {
+                "available": True,
+                "pid": 42,
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            },
+        }
+
+    monkeypatch.setattr(controller, "_json", candidate_json)
+
+    health = controller.wait_ready(_Generation(SHA_B), identity, 0.2)
+
+    assert health["build_sha"] == SHA_B
