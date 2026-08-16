@@ -1694,6 +1694,13 @@ function acceptAssetLists(data) {
   if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
 }
 
+/* #31: 分组关注列表。
+ * 计划扩展 AssetListStore 以支持 group 字段，新增批量导入/导出、拖拽排序、列配置、提醒冷却。
+ * 骨架实现：group 字段暂未使用，但已预留数据结构。
+ * - assetListsData 将来可支持 {groupName: {symbols: [...], metadata: {order, description}}}
+ * - 批量操作通过现有 API 端点，但需要新增批量端点以提高效率。
+ */
+
 async function loadAssetLists(showError = true) {
   if (assetListsLoading) return assetListsLoading;
   assetListsError = '';
