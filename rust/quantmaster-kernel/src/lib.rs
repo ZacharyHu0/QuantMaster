@@ -185,7 +185,7 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
         .par_chunks_mut(rows)
         .enumerate()
         .for_each(|(col_idx, col_out)| {
-            for stop in 0..rows {
+            for (stop, out) in col_out.iter_mut().enumerate() {
                 let start = stop.saturating_sub(window - 1);
                 let sample: Vec<f64> = (start..=stop)
                     .filter_map(|r| {
@@ -202,11 +202,11 @@ fn rolling_impl(matrix: ndarray::ArrayView2<'_, f64>, window: usize, std: bool) 
                 }
                 let mean = sample.iter().sum::<f64>() / sample.len() as f64;
                 if !std {
-                    col_out[stop] = mean;
+                    *out = mean;
                 } else {
                     let variance = sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                         / (sample.len() - 1) as f64;
-                    col_out[stop] = variance.sqrt();
+                    *out = variance.sqrt();
                 }
             }
         });
@@ -279,7 +279,7 @@ fn rolling_corr<'py>(
         .par_chunks_mut(rows)
         .enumerate()
         .for_each(|(col_idx, col_out)| {
-            for stop in 0..rows {
+            for (stop, out) in col_out.iter_mut().enumerate() {
                 let start = stop.saturating_sub(window - 1);
                 let sample: Vec<(f64, f64)> = (start..=stop)
                     .filter_map(|r| {
@@ -305,7 +305,7 @@ fn rolling_corr<'py>(
                 let var_a = sample.iter().map(|t| (t.0 - mean_a).powi(2)).sum::<f64>();
                 let var_b = sample.iter().map(|t| (t.1 - mean_b).powi(2)).sum::<f64>();
                 if var_a > 0.0 && var_b > 0.0 {
-                    col_out[stop] = cov / (var_a * var_b).sqrt();
+                    *out = cov / (var_a * var_b).sqrt();
                 }
             }
         });

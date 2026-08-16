@@ -78,10 +78,10 @@ def main() -> int:
     bars = load_bars(args.url, args.start, args.end, limit=args.limit)
     print(f"[benchmark-stockdb] rows={len(bars)}", flush=True)
 
-    py_samples, py_median, py_cold = measure(
+    _py_samples, py_median, py_cold = measure(
         lambda: compute_core_factors(bars, Kernel(KernelBackend.PYTHON)), args.runs,
     )
-    rust_samples, rust_median, rust_cold = measure(
+    _rust_samples, rust_median, rust_cold = measure(
         lambda: compute_core_factors(bars, Kernel(KernelBackend.RUST)), args.runs,
     )
     speedup = py_median / rust_median if rust_median > 0 else float("nan")
