@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-08-16T00:00:00+00:00",
+  "machine": {
+    "platform": "win32",
+    "python": "3.12.13",
+    "processor": "local development machine",
+    "rust_kernel_version": "0.2.0"
+  },
+  "dataset": {
+    "kind": "synthetic-market-panel",
+    "days": 760,
+    "symbols": 800,
+    "rows": 608000,
+    "seed": 20260816,
+    "identity": "benchmark_zero_copy.make_bars(days=760, symbols=800, seed=20260816)"
+  },
+  "method": {
+    "seam": "quantmaster.research.providers.compute_core_factors",
+    "warm_cold": "warm (1 untimed warmup)",
+    "runs": 3,
+    "memory_method": "not measured in this preliminary report",
+    "note": "Full-market StockDB-backed report is still required for final #155 evidence."
+  },
+  "results": {
+    "python_kernel_p50_ms": 32298.9,
+    "python_kernel_samples_ms": [29310.4, 32298.9, 41438.6],
+    "rust_zero_copy_p50_ms": 1701.1,
+    "rust_zero_copy_samples_ms": [1707.0, 1696.9, 1701.1],
+    "net_speedup": 18.987
+  },
+  "correctness": {
+    "parity_test": "passed",
+    "test": "test_rust_kernel_matches_python_when_extension_is_available",
+    "threshold": "atol=1e-6, rtol=1e-6, equal_nan=True"
+  },
+  "decision": {
+    "status": "preliminary_keep",
+    "threshold_met": true,
+    "threshold_speedup_min": 1.2,
+    "measured_speedup": 18.987,
+    "requires_full_market_report": true
+  }
+}
