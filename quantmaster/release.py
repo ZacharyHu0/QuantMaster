@@ -5,8 +5,8 @@
 任务分支的 checkpoint 提交不得修改本文件。
 """
 
-VERSION = "1.16.0"
-RELEASE_DATE = "2026-08-15"
+VERSION = "1.16.1"
+RELEASE_DATE = "2026-08-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 RELEASES = (
@@ -15,42 +15,59 @@ RELEASES = (
         "date": RELEASE_DATE,
         "sections": (
             {
-                "title": "产品、架构与协作基线",
+                "title": "启动时间预算门禁与零拷贝 Rust 内核",
                 "items": (
                     (
-                        "固定日常决策与量化研究双核心、四工作区与市场能力边界；"
-                        "CLI 收敛为 factor-test、backtest 薄入口，Web 与 CLI 共用可审计执行入口。"
+                        "onedir 安装实例的 CLI --help 冷启动 ≤ 1.5s、Web core_ready ≤ 5s 硬门禁"
+                        "生效，采样为 1 次冷启动 + 2 次热启动中位数，测量证据写入 JSON。"
                     ),
                     (
-                        "模块化单体依赖矩阵与唯一组成根保持明确；任务统一经 GitHub Issue、"
-                        "Draft PR、分层 CI 与自动状态对账管理，版本变更集中在单独版本 PR。"
+                        "Rust 研究内核改用 PyO3 numpy crate 零拷贝传递 NumPy 数组，消除"
+                        " _to_native/_from_native 转换开销；全市场 2500 标的 × 760 日基准净加速约 18x。"
+                    ),
+                    (
+                        "桌面发行包裁剪未使用的 Feishu SDK 家族（Sheets/Tasks/VC/Wiki/Workplace 等）"
+                        "和 PyArrow Flight/Substrait/CUDA 等可选后端；包体门禁同步更新。"
                     ),
                 ),
             },
             {
-                "title": "数据与因子证据",
+                "title": "任务生命周期与本地卫生",
                 "items": (
                     (
-                        "全球参考行情、本地估值与因子验证共用统一数据门禁和降级证据；"
-                        "因子目录支持相关性矩阵与逐版本、逐周期的鲁棒性穿透详情。"
+                        "tasks.py remove/gc 在删除任务工件后自动清理对应的 .task-running.lock 标记；"
+                        "gc 额外清理孤儿锁标记，锁文件不再累积。"
+                    ),
+                    (
+                        "CI 报告与 tasks.py 日志脱敏，不再包含本地绝对路径；新增路径安全测试。"
+                    ),
+                    (
+                        "复杂度 ratchet 审计支持 owner 授权的基线更新命令（--accept），"
+                        "机械增长不再阻塞整个质量门禁。"
                     ),
                 ),
             },
             {
-                "title": "开发流程与 Windows 交付",
+                "title": "A 股恐贪指数与 onedir 测量",
                 "items": (
                     (
-                        "Draft PR 快检、Ready 完整矩阵分层执行；ready --accept-ci 复用同一"
-                        " commit 的绿色 CI 证据；GitHub 管理记录由脚本自动对账。"
+                        "接入 FundDB A 股恐贪指数，支持上证指数/沪深300 口径切换，"
+                        "与 CNN 指数并行展示。"
                     ),
                     (
-                        "Windows 打包默认绑定用户 AppData 配置与数据根，冻结运行时冒烟"
-                        "继续验证启动、核心就绪、进程身份与协调关闭。"
+                        "Windows onedir ZIP 测量通道正式可用，安装/压缩/模块归因报告写入 artifact。"
+                    ),
+                    (
+                        "accept-ci 在集成基线冻结后不再因 origin/main 前进而拒绝复用绿色 CI。"
                     ),
                 ),
             },
         ),
     },
+    {
+        "version": "1.16.0",
+        "date": "2026-08-15",
+        "sections": (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
