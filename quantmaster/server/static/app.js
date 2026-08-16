@@ -1774,7 +1774,6 @@ function todayCharts() {
   if (!todayChartsPromise) {
     const retry = todayChartsRetry;
     const pending = import(`./today-charts.js${retry ? `?retry=${retry}` : ''}`).catch(error => {
-      if (todayChartsPromise === pending) todayChartsPromise = null;
       todayChartsRetry = retry + 1;
       throw error;
     });
@@ -2286,6 +2285,7 @@ function disposeMarketSparks() {
   if (todayChartsPromise) void todayChartsPromise
     .then(module => module.disposeTodayCharts(document.getElementById('tab-decision')))
     .catch(() => {});
+  todayChartsPromise = null;
 }
 
 function marketChangeSeries(nav) {

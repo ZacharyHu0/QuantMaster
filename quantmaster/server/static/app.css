@@ -237,11 +237,12 @@
     .mkt-spark-foot { font-size:8px; }
   }
   @media (max-width:680px) {
-    .market-sentiment-head { grid-template-columns:1fr auto; gap:var(--space-md); }
+    .market-sentiment-head { grid-template-columns:minmax(0,1fr) auto; gap:var(--space-md); min-width:0; }
     .market-stale-banner { align-items:flex-start; flex-direction:column; gap:var(--space-md); }
     .market-stale-actions { align-self:flex-start; }
-    .market-sentiment-copy { display:grid; grid-column:1 / -1; grid-row:2; gap:var(--space-xs); }
+    .market-sentiment-copy { display:grid; grid-template-columns:minmax(0,1fr); grid-column:1 / -1; grid-row:2; gap:var(--space-xs); }
     .market-sentiment-copy p { white-space:normal; }
+    .market-sentiment-meta { min-width:0; flex-wrap:wrap; white-space:normal; }
     .market-sentiment-visuals { grid-template-columns:1fr; }
     .market-sentiment-status { align-items:flex-start; flex-direction:column; gap:var(--space-xs); }
     .fear-greed-gauge { height:164px; }
@@ -657,6 +658,8 @@
     .decision-kline-canvas { height:300px; }
   }
   @media (max-width:560px) {
+    .mkt-item { display:block; }
+    html[data-qm-theme="ink"] .mkt-item { display:block; }
     .header-primary { flex-wrap:wrap; gap:8px; padding-inline:12px; }
     header #nav.workspace-nav { order:2; flex:1 0 100%; width:100%; }
     .workspace-nav button { min-height:44px; padding-inline:12px; }
