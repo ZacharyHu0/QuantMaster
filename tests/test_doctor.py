@@ -85,6 +85,17 @@ def test_api_doctor_ignores_framework_router_sentinels(monkeypatch):
     assert not any(item["code"] == "api_contract_missing" for item in _api_issues())
 
 
+def test_api_doctor_flags_obsolete_health_route(monkeypatch):
+    from quantmaster.server.app import app
+
+    obsolete = SimpleNamespace(path="/api/v1/health/live")
+    monkeypatch.setattr(app.router, "routes", [*app.router.routes, obsolete])
+
+    issues = _api_issues()
+
+    assert any(item["code"] == "obsolete_health_route_present" for item in issues)
+
+
 def test_api_doctor_flattens_lazy_included_routers():
     nested = SimpleNamespace(routes=[SimpleNamespace(path="/jobs")])
     context = SimpleNamespace(prefix="/api/v1")
