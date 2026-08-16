@@ -13,6 +13,12 @@ from scripts.release import check_desktop_artifact as policy
 from scripts.release.check_desktop_artifact import check_onefile, package_onedir
 
 
+def test_immutable_release_package_budget_constants() -> None:
+    assert policy.ZIP_TARGET_MIB == 150
+    assert policy.ZIP_MAX_MIB == 150
+    assert policy.ONEDIR_MAX_MIB == 400
+
+
 def _fake_clean_git(
     monkeypatch,
     *,

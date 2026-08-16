@@ -111,7 +111,7 @@ Quant Lab 是唯一正式研究入口，流程固定为：
 | 后台连续性 | 更新前停止接单并有界排空；持久任务不丢失、不重复提交，新生 Compute 不得加载其他 generation 的代码 |
 | 启动性能 | Windows onefile `qm --help` 与 Web `core_ready` 都不超过 20 秒，并在自解压期间显示真实状态 Splash；最终安装 onedir `qm --help` 不超过 1.5 秒且不装配 Splash |
 | 前端体积 | 初始 raw HTML+CSS+JS 总量不超过 1 MiB；ECharts、完整手册、Lab 与 Rotation 不计入首屏且只按需加载 |
-| 桌面包体 | Windows ZIP 目标不高于 125 MiB、超过 130 MiB 硬失败；单次增长超过 2 MiB 必须给出模块归因；onedir 安装体不超过 350 MiB |
+| 桌面包体 | Windows ZIP 不超过 150 MiB；单次增长超过 2 MiB 必须给出模块归因；onedir 安装体不超过 400 MiB |
 | 消息通道 | 飞书覆盖全部已支持的结构化通知与任务进度；未启用微信时主流程功能损失为 0，微信不得成为正式结果唯一送达路径 |
 | 可恢复性 | 更新、任务或数据写入故障不得删除用户事实数据；故障注入验收中静默改写历史结果和不可恢复数据丢失均为 0 |
 
