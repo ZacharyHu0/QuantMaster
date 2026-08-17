@@ -1153,7 +1153,7 @@ def validate_ready_state(branch: str, status: str, behind: bool, changed: list[s
     if behind:
         raise SystemExit("任务分支落后于 origin/main；请先更新并解决冲突")
     version_changes = VERSION_PATHS.intersection(changed)
-    if version_changes:
+    if version_changes and not branch.startswith("codex/release-"):
         raise SystemExit("任务分支不得修改版本元数据：" + ", ".join(sorted(version_changes)))
 
 

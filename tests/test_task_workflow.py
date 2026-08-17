@@ -824,6 +824,9 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
         validate_ready_state("codex/task", "", False, ["quantmaster/release/history.py"])
     with pytest.raises(SystemExit, match="版本元数据"):
         validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+    # Owner-authorized structural release refactors on codex/release-* may touch
+    # the version metadata path; ordinary task branches remain blocked.
+    validate_ready_state("codex/release-split", "", False, ["quantmaster/release/history.py"])
 
 
 def test_ready_state_rejects_task_changelog_updates():
