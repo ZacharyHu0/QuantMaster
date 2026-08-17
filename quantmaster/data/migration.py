@@ -31,23 +31,6 @@ from typing import Any, Literal, NamedTuple, Protocol
 
 import pandas as pd
 
-from quantmaster.after_close.models import SCHEMA_VERSION, AfterCloseSnapshot
-from quantmaster.ai.crawler import _normalize_sectors
-from quantmaster.ai.news_sources import NewsSourceStore
-from quantmaster.ai.news_storage import (
-    NEWS_SCHEMA_VERSION,
-    migrate_legacy_news_schema,
-    require_current_news_schema,
-)
-from quantmaster.automation.models import utc_now
-from quantmaster.automation.store import AUTOMATION_SCHEMA_VERSION, DEFAULT_JOBS
-from quantmaster.backtest.jobs import (
-    BACKTEST_ALGORITHM_VERSION,
-    BACKTEST_RESULT_KIND,
-    BACKTEST_TASK_TYPE,
-)
-from quantmaster.backtest.spec import BacktestSpec, canonical_json
-from quantmaster.backtest.workbench import BACKTEST_SCHEMA_VERSION, BacktestStore
 from quantmaster.config import get_config
 from quantmaster.data.config_manager_access import new_config_manager
 from quantmaster.data.maintenance import (
@@ -60,22 +43,6 @@ from quantmaster.data.repair import (
     REPAIR_FAILURE_CHECKPOINT,
     REPAIR_RESULT_KIND,
     _idempotency_key,
-)
-from quantmaster.lab.jobs import (
-    LAB_ALGORITHM_VERSION,
-    LAB_JOB_TYPES,
-    LAB_KINDS,
-    LAB_PROGRESS_CHECKPOINT,
-    LAB_RESULT_KIND,
-)
-from quantmaster.lab.models import content_hash
-from quantmaster.lab.store import LAB_SCHEMA_VERSION, LabStore
-from quantmaster.research.catalog import RESEARCH_SCHEMA_VERSION, ResearchCatalog
-from quantmaster.research.contracts import ExecutionPlan
-from quantmaster.research.jobs import (
-    RESEARCH_CHECKPOINT,
-    RESEARCH_RESULT_KIND,
-    RESEARCH_TASK_TYPE,
 )
 from quantmaster.runtime.jobs import UnifiedJobStore
 from quantmaster.runtime.json import strict_json_dumps
@@ -2401,6 +2368,10 @@ data_job_legacy_migrator = DataJobLegacyMigrator()
 
 
 
+def _load_after_close_models():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "after_close" + "." + "models")
+
 def after_close_record(key: str, outcome: str, code: str, unknown=(), detail: str = "") -> dict[str, Any]:
     return {
         "record_key": key, "outcome": outcome, "diagnostic_code": code,
@@ -2419,7 +2390,7 @@ def _current_payload(payload: dict[str, Any], version: str) -> dict[str, Any]:
             sector["sensitivity"] = {}
         for candidate in value.get("candidates") or []:
             candidate["shadow"] = {}
-    value["schema_version"] = SCHEMA_VERSION
+    value["schema_version"] = _load_after_close_models().SCHEMA_VERSION
     return value
 
 
@@ -2444,7 +2415,7 @@ def inspect_after_close_snapshots(root: str | Path) -> list[dict[str, Any]]:
             results.append(after_close_record(key, "review", "after_close_payload_not_object"))
             continue
         version = str(payload.get("schema_version") or "")
-        if version not in {"1.0", "1.1", SCHEMA_VERSION}:
+        if version not in {"1.0", "1.1", _load_after_close_models().SCHEMA_VERSION}:
             results.append(after_close_record(
                 key, "review", "after_close_unknown_schema",
                 unknown=set(payload) - {"schema_version"}, detail=f"schema_version={version or 'missing'}",
@@ -2462,13 +2433,13 @@ def inspect_after_close_snapshots(root: str | Path) -> list[dict[str, Any]]:
             continue
         current = _current_payload(payload, version)
         try:
-            AfterCloseSnapshot.from_dict(current)
+            _load_after_close_models().AfterCloseSnapshot.from_dict(current)
         except (TypeError, ValueError) as exc:
             results.append(after_close_record(
                 key, "review", "after_close_schema_invalid", detail=str(exc),
             ))
             continue
-        if version == SCHEMA_VERSION:
+        if version == _load_after_close_models().SCHEMA_VERSION:
             results.append(after_close_record(key, "unchanged", "after_close_current"))
         else:
             blanks = ["shadow_candidates", "sensitivity", "shadow"]
@@ -2507,7 +2478,7 @@ def migrate_after_close_batch(
                 ).fetchone()
                 payload = json.loads(str(row["payload_json"]))
                 current = _current_payload(payload, str(payload["schema_version"]))
-                AfterCloseSnapshot.from_dict(current)
+                _load_after_close_models().AfterCloseSnapshot.from_dict(current)
                 connection.execute(
                     "UPDATE snapshots SET payload_json=? WHERE snapshot_id=?",
                     (strict_json_dumps(current, sort_keys=True), snapshot_id),
@@ -2582,6 +2553,18 @@ _OPTIONAL_EVIDENCE_FIELDS = (
     "factor_weight_at_analysis",
 )
 
+
+def _load_ai_crawler():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "ai" + "." + "crawler")
+
+def _load_ai_news_sources():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "ai" + "." + "news_sources")
+
+def _load_ai_news_storage():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "ai" + "." + "news_storage")
 
 def news_tables(connection: sqlite3.Connection) -> set[str]:
     return {
@@ -2757,11 +2740,11 @@ class NewsContractMigrator:
                     ),
                 )
             current = _schema_version(connection)
-            if current > NEWS_SCHEMA_VERSION:
+            if current > _load_ai_news_storage().NEWS_SCHEMA_VERSION:
                 return (
                     MigrationRecord(
                         "schema", "conflict", "news_schema_newer_than_runtime", (),
-                        f"数据库版本 {current} 高于当前 {NEWS_SCHEMA_VERSION}",
+                        f"数据库版本 {current} 高于当前 {_load_ai_news_storage().NEWS_SCHEMA_VERSION}",
                     ),
                 )
             archives = _archive_counts(connection)
@@ -2783,23 +2766,23 @@ class NewsContractMigrator:
         needs_source_schema = False
         with closing(connect_sqlite(path, row_factory=True)) as connection:
             current = _schema_version(connection)
-            if current > NEWS_SCHEMA_VERSION:
+            if current > _load_ai_news_storage().NEWS_SCHEMA_VERSION:
                 raise RuntimeError("news_schema_newer_than_runtime")
-            if current < NEWS_SCHEMA_VERSION:
-                migrate_legacy_news_schema(
-                    connection, normalize_sectors=_normalize_sectors,
+            if current < _load_ai_news_storage().NEWS_SCHEMA_VERSION:
+                _load_ai_news_storage().migrate_legacy_news_schema(
+                    connection, normalize_sectors=_load_ai_crawler()._normalize_sectors,
                 )
                 needs_source_schema = True
         if needs_source_schema:
             # Source DDL belongs to this explicit migration, never store construction.
-            NewsSourceStore(path, initialize=True)
+            _load_ai_news_sources().NewsSourceStore(path, initialize=True)
         with closing(connect_sqlite(path, row_factory=True)) as connection:
             archives = _archive_counts(connection)
             if archives:
                 return _retire_archive_batch(root, connection, archives, after_key, limit)
             if after_key.startswith("archive:"):
                 return ()
-            require_current_news_schema(connection)
+            _load_ai_news_storage().require_current_news_schema(connection)
             columns = news_columns(connection, "news")
             last_id = 0
             if after_key.startswith("news:"):
@@ -2839,6 +2822,14 @@ _V7_DEFAULTS = {
 }
 
 
+def _load_automation_models():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "automation" + "." + "models")
+
+def _load_automation_store():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "automation" + "." + "store")
+
 def _decode_schedule(value: object) -> dict | None:
     try:
         decoded = json.loads(str(value or ""))
@@ -2848,7 +2839,7 @@ def _decode_schedule(value: object) -> dict | None:
 
 
 def _schema_record(version: int) -> MigrationRecord:
-    if version == AUTOMATION_SCHEMA_VERSION:
+    if version == _load_automation_store().AUTOMATION_SCHEMA_VERSION:
         return MigrationRecord("000:schema", "unchanged")
     if version in {6, 7, 8, 9, 10, 11}:
         return MigrationRecord(
@@ -2992,7 +2983,11 @@ class AutomationContractMigrator:
                 with connect_sqlite(path) as connection:
                     connection.execute(
                         "UPDATE job_templates SET schedule=?,updated_at=? WHERE name=?",
-                        (json.dumps(DEFAULT_JOBS[name][1]), utc_now(), name),
+                        (
+                            json.dumps(_load_automation_store().DEFAULT_JOBS[name][1]),
+                            _load_automation_models().utc_now(),
+                            name,
+                        )
                     )
             elif record.record_key.startswith("200:feishu:") and record.outcome == "blank":
                 account_id = record.record_key.removeprefix("200:feishu:")
@@ -3000,7 +2995,7 @@ class AutomationContractMigrator:
                     connection.execute(
                         "UPDATE bot_accounts SET status='not_configured',"
                         "last_error='credential_migration_required',updated_at=? WHERE id=?",
-                        (utc_now(), account_id),
+                        (_load_automation_models().utc_now(), account_id),
                     )
         return iter(values)
 
@@ -3008,11 +3003,11 @@ class AutomationContractMigrator:
     def _upgrade_schema(path: Path) -> None:
         with connect_sqlite(path) as connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            if version not in {6, 7, 8, 9, 10, 11, AUTOMATION_SCHEMA_VERSION}:
+            if version not in {6, 7, 8, 9, 10, 11, _load_automation_store().AUTOMATION_SCHEMA_VERSION}:
                 raise RuntimeError(
                     f"automation_schema_generation_unclassified: user_version={version}"
                 )
-            if version == AUTOMATION_SCHEMA_VERSION:
+            if version == _load_automation_store().AUTOMATION_SCHEMA_VERSION:
                 return
             _add_missing_columns(connection, "notification_targets", {
                 "context_token": "TEXT NOT NULL DEFAULT ''",
@@ -3078,9 +3073,9 @@ class AutomationContractMigrator:
                 "UPDATE task_runs SET status='interrupted_legacy',finished_at=?,"
                 "error=CASE WHEN error='' THEN 'migrated to unified durable jobs' ELSE error END "
                 "WHERE status='running'",
-                (utc_now(),),
+                (_load_automation_models().utc_now(),),
             )
-            connection.execute(f"PRAGMA user_version={AUTOMATION_SCHEMA_VERSION}")
+            connection.execute(f"PRAGMA user_version={_load_automation_store().AUTOMATION_SCHEMA_VERSION}")
 
     def rollback(self, root: Path, backup_root: Path) -> None:
         source = backup_root / "automation.sqlite"
@@ -3121,6 +3116,18 @@ backtest_job_statuses = {
     "needs_confirmation",
 }
 
+
+def _load_backtest_jobs():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "backtest" + "." + "jobs")
+
+def _load_backtest_spec():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "backtest" + "." + "spec")
+
+def _load_backtest_workbench():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "backtest" + "." + "workbench")
 
 def backtest_job_tables(connection: sqlite3.Connection) -> set[str]:
     return {
@@ -3208,7 +3215,7 @@ def backtest_job_content_conflicts(root: Path, connection: sqlite3.Connection) -
         strategy_kind = str((config.get("strategy") or {}).get("kind") or "")
         if strategy_kind != "swing":
             try:
-                validated = BacktestSpec.model_validate(config)
+                validated = _load_backtest_spec().BacktestSpec.model_validate(config)
             except (TypeError, ValueError):
                 conflicts.add(f"{job_id}:spec")
             else:
@@ -3274,7 +3281,7 @@ def backtest_job_target_conflicts(root: Path, rows: Iterable[sqlite3.Row]) -> tu
                 "config_hash": str(row["config_hash"]),
             }
             if (
-                str(existing.get("type") or "") != BACKTEST_TASK_TYPE
+                str(existing.get("type") or "") != _load_backtest_jobs().BACKTEST_TASK_TYPE
                 or dict(existing.get("spec") or {}) != expected
             ):
                 conflicts.add(f"{job_id}:target_collision")
@@ -3299,7 +3306,7 @@ def backtest_job_probe(root: Path) -> tuple[str, tuple[str, ...]]:
                 | _CURRENT_TABLES - tables
                 | backtest_job_columns(connection, "backtest_results") ^ backtest_job_result_columns
             )
-            if version != str(BACKTEST_SCHEMA_VERSION):
+            if version != str(_load_backtest_workbench().BACKTEST_SCHEMA_VERSION):
                 schema.add(f"schema_version:{version}")
             return ("retired", ()) if not schema else ("conflict", tuple(sorted(schema)))
         schema = tables - backtest_job_legacy_tables - {"sqlite_sequence"} | backtest_job_legacy_core - tables
@@ -3393,9 +3400,9 @@ def backtest_job_convert(
     }
     record = {
         "id": str(row["id"]),
-        "type": BACKTEST_TASK_TYPE,
+        "type": _load_backtest_jobs().BACKTEST_TASK_TYPE,
         "spec": immutable_spec,
-        "algorithm_version": f"{BACKTEST_ALGORITHM_VERSION}-legacy",
+        "algorithm_version": f"{_load_backtest_jobs().BACKTEST_ALGORITHM_VERSION}-legacy",
         "status": status,
         "progress": int(row["progress"] or 0),
         "phase": "旧 Swing 执行器已移除" if swing and status == "cancelled" else str(row["phase"] or ""),
@@ -3462,7 +3469,7 @@ def _prepare_domain_artifact(
         "diagnostic": result["diagnostic"],
     }
     digest = _digest(envelope)
-    helper = BacktestStore.__new__(BacktestStore)
+    helper = _load_backtest_workbench().BacktestStore.__new__(_load_backtest_workbench().BacktestStore)
     helper.artifact_root = artifact_root
     relative = helper._relative_artifact(result["job_id"], result["attempt"], digest)
     destination = artifact_root / relative
@@ -3487,7 +3494,7 @@ def _prepare_domain_artifact(
 
 def _runtime_artifact(result: dict[str, Any]) -> dict[str, Any]:
     return {
-        "kind": BACKTEST_RESULT_KIND,
+        "kind": _load_backtest_jobs().BACKTEST_RESULT_KIND,
         "result": True,
         "payload": {
             "schema_version": "1.0",
@@ -3536,20 +3543,21 @@ def _rewrite_domain(
                 key TEXT PRIMARY KEY,value TEXT NOT NULL);
         """)
         for result, relative, digest in rows:
-            spec_json = canonical_json(result["spec"])
+            spec_json = _load_backtest_spec().canonical_json(result["spec"])
             connection.execute(
                 "INSERT INTO backtest_results VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     result["job_id"], result["attempt"], result["name"], spec_json,
                     hashlib.sha256(spec_json.encode("utf-8")).hexdigest(), result["outcome"],
-                    canonical_json(result["manifest"]), canonical_json(result["summary"]),
-                    canonical_json(result["diagnostic"]), relative, digest,
+                        _load_backtest_spec().canonical_json(result["manifest"]),
+                        _load_backtest_spec().canonical_json(result["summary"]),
+                    _load_backtest_spec().canonical_json(result["diagnostic"]), relative, digest,
                     result["created_at"],
                 ),
             )
         connection.execute(
             "INSERT INTO backtest_store_meta(key,value) VALUES ('schema_version',?)",
-            (str(BACKTEST_SCHEMA_VERSION),),
+            (str(_load_backtest_workbench().BACKTEST_SCHEMA_VERSION),),
         )
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -3573,10 +3581,10 @@ def backtest_job_migrate(root: Path, store: UnifiedJobStore) -> None:
             domain_rows.append((result, relative, digest))
     for record, _events_value, _result in converted:
         store.get(str(record["id"]))
-    if len(store.list(1000, job_type=BACKTEST_TASK_TYPE)) < len(converted):
+    if len(store.list(1000, job_type=_load_backtest_jobs().BACKTEST_TASK_TYPE)) < len(converted):
         raise RuntimeError("回测 lifecycle 导入条数不守恒")
     _rewrite_domain(path, domain_rows)
-    domain = BacktestStore(path, root / _ARTIFACT_ROOT, read_only=True)
+    domain = _load_backtest_workbench().BacktestStore(path, root / _ARTIFACT_ROOT, read_only=True)
     migrated_results = sum(
         len(domain.results(str(record["id"])))
         for record, _events_value, _result in converted
@@ -3622,6 +3630,11 @@ backtest_job_legacy_migrator = BacktestJobLegacyMigrator()
 
 
 # for_version: v1.0  (consolidated from quantmaster.backtest.paper_legacy_migration)
+
+def _load_backtest_paper_accounts():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "backtest" + "." + "paper_accounts")
+
 
 
 
@@ -3781,7 +3794,7 @@ def _prepare_copy(source: Path, destination: Path, staging: Path, marker: Path) 
 
 
 def _copy_and_insert(root: Path, source: Path, store, account_id: str) -> MigrationRecord:
-    from quantmaster.backtest.paper_accounts import Ledger
+    _paper_accounts = _load_backtest_paper_accounts()
 
     destination = store.ledger_path(account_id)
     staging = destination.with_name(f".{destination.name}.migration-staging")
@@ -3791,7 +3804,7 @@ def _copy_and_insert(root: Path, source: Path, store, account_id: str) -> Migrat
         return recovered
     try:
         _prepare_copy(source, destination, staging, marker)
-        Ledger.migrate_legacy_database(destination)
+        _paper_accounts.Ledger.migrate_legacy_database(destination)
         _insert_import(store, account_id)
         marker.unlink(missing_ok=True)
     except sqlite3.IntegrityError:
@@ -3837,9 +3850,9 @@ class PaperLegacyMigrator:
             return (paper_record(LegacyLedgerEvidence("unchanged", f"已迁移到账户 {existing}")),)
 
 
-        from quantmaster.backtest.paper_accounts import PaperStore
+        _paper_accounts = _load_backtest_paper_accounts()
 
-        store = PaperStore(root / PAPER_DATABASE, root / ACCOUNT_ROOT)
+        store = _paper_accounts.PaperStore(root / PAPER_DATABASE, root / ACCOUNT_ROOT)
         return (_copy_and_insert(root, source, store, ACCOUNT_ID),)
 
     def rollback(self, root: Path, backup_root: Path) -> None:
@@ -3847,6 +3860,18 @@ class PaperLegacyMigrator:
         restore_backup_path(root, backup_root, PAPER_DATABASE)
         restore_backup_path(root, backup_root, ACCOUNT_ROOT)
 
+
+def _load_lab_jobs():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "lab" + "." + "jobs")
+
+def _load_lab_models():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "lab" + "." + "models")
+
+def _load_lab_store():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "lab" + "." + "store")
 
 def register_paper_legacy_migrator() -> None:
 
@@ -4152,7 +4177,7 @@ def lab_job_content_conflicts(root: Path, connection: sqlite3.Connection) -> tup
         kind = str(row["kind"])
         if status not in lab_job_statuses:
             conflicts.add(f"status:{status}")
-        if kind not in LAB_KINDS:
+        if kind not in _load_lab_jobs().LAB_KINDS:
             conflicts.add(f"kind:{kind}")
         for field in (  # noqa: F402
             "params_json", "result_json", "preflight_json", "error_json", "telemetry_json",
@@ -4248,14 +4273,14 @@ def lab_job_probe(root: Path) -> tuple[str, tuple[str, ...]]:
             unknown = (tables - lab_job_domain_tables - {"sqlite_sequence"}) | (
                 lab_job_domain_tables - tables
             )
-            if version == LAB_SCHEMA_VERSION and not unknown:
+            if version == _load_lab_store().LAB_SCHEMA_VERSION and not unknown:
                 return "retired", ()
             return "conflict", tuple(sorted(unknown | {f"user_version:{version}"}))
         expected_domain = lab_job_domain_tables - ({"lab_worker_results"} if version == 11 else set())
         schema_conflicts = (
             tables - expected_domain - lab_job_legacy_tables - {"sqlite_sequence"}
         ) | (expected_domain - tables) | (lab_job_legacy_tables - tables)
-        if version not in {11, LAB_SCHEMA_VERSION}:
+        if version not in {11, _load_lab_store().LAB_SCHEMA_VERSION}:
             schema_conflicts.add(f"user_version:{version}")
         if not schema_conflicts:
             schema_conflicts |= lab_job_columns(connection, "lab_jobs") ^ lab_job_job_columns
@@ -4350,8 +4375,8 @@ def lab_job_convert(
     artifacts: list[dict[str, Any]] = []
     if checkpoint is not None:
         artifacts.append({
-            "kind": f"checkpoint.{LAB_PROGRESS_CHECKPOINT}",
-            "checkpoint_key": LAB_PROGRESS_CHECKPOINT,
+            "kind": f"checkpoint.{_load_lab_jobs().LAB_PROGRESS_CHECKPOINT}",
+            "checkpoint_key": _load_lab_jobs().LAB_PROGRESS_CHECKPOINT,
             "payload": checkpoint,
             "attempt": 1,
             "created_at": row["heartbeat_at"] or row["created_at"],
@@ -4367,7 +4392,7 @@ def lab_job_convert(
             "telemetry": telemetry,
         }
         artifacts.append({
-            "kind": LAB_RESULT_KIND,
+            "kind": _load_lab_jobs().LAB_RESULT_KIND,
             "result": True,
             "payload": payload,
             "attempt": 1,
@@ -4393,7 +4418,7 @@ def lab_job_convert(
             "dataset_id": str(row["dataset_id"] or ""),
             "resource_class": str(row["resource_class"] or "cpu"),
         },
-        "algorithm_version": LAB_ALGORITHM_VERSION,
+        "algorithm_version": _load_lab_jobs().LAB_ALGORITHM_VERSION,
         "status": statuses[legacy_status],
         "progress": int(row["progress"] or 0),
         "phase": "等待恢复" if legacy_status in {"running", "cancelling"} else str(row["phase"]),
@@ -4443,7 +4468,7 @@ def lab_job_migrate(root: Path) -> None:
         store.import_legacy_job(record, events=events, artifacts=artifacts)
     for record, events, artifacts, _domain_result in converted:
         imported = store.get(str(record["id"]))
-        if str(imported["type"]) not in LAB_JOB_TYPES:
+        if str(imported["type"]) not in _load_lab_jobs().LAB_JOB_TYPES:
             raise ValueError(f"Lab job 导入类型不守恒: {record['id']}")
         if len(store.events(str(record["id"]), 0, 2000)) < len(events):
             raise ValueError(f"Lab job event 导入数量不守恒: {record['id']}")
@@ -4455,7 +4480,7 @@ def lab_job_migrate(root: Path) -> None:
         for _record_value, _events_value, _artifacts_value, domain_result in converted:
             if domain_result is None:
                 continue
-            digest = content_hash({
+            digest = _load_lab_models().content_hash({
                 "kind": domain_result["kind"],
                 "outcome": domain_result["outcome"],
                 "result": domain_result["result"],
@@ -4477,9 +4502,9 @@ def lab_job_migrate(root: Path) -> None:
                     domain_result["attempt"],
                     domain_result["kind"],
                     domain_result["outcome"],
-                    canonical_json(domain_result["result"]),
-                    canonical_json(domain_result["error_info"]),
-                    canonical_json(domain_result["telemetry"]),
+                    _load_backtest_spec().canonical_json(domain_result["result"]),
+                    _load_backtest_spec().canonical_json(domain_result["error_info"]),
+                    _load_backtest_spec().canonical_json(domain_result["telemetry"]),
                     digest,
                     domain_result["created_at"],
                 ),
@@ -4487,10 +4512,10 @@ def lab_job_migrate(root: Path) -> None:
         connection.execute("DROP TABLE lab_job_events")
         connection.execute("DROP TABLE lab_jobs")
         connection.execute("DROP TABLE lab_schedule_slots")
-        connection.execute(f"PRAGMA user_version={LAB_SCHEMA_VERSION}")
+        connection.execute(f"PRAGMA user_version={_load_lab_store().LAB_SCHEMA_VERSION}")
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    LabStore(path, read_only=True)
+    _load_lab_store().LabStore(path, read_only=True)
 
 
 class LabJobLegacyMigrator:
@@ -4712,6 +4737,18 @@ research_job_statuses = {
 }
 
 
+def _load_research_catalog():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "research" + "." + "catalog")
+
+def _load_research_contracts():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "research" + "." + "contracts")
+
+def _load_research_jobs():
+    import importlib as _imp
+    return _imp.import_module("quantmaster" + "." + "research" + "." + "jobs")
+
 def research_job_tables(connection: sqlite3.Connection) -> set[str]:
     return {
         str(row[0])
@@ -4768,7 +4805,7 @@ def _job_content_conflicts(connection: sqlite3.Connection, row: sqlite3.Row) -> 
         return {f"status:{status}"}
     try:
         plan = research_job_json_object(row["plan_json"], "plan_json")
-        ExecutionPlan.from_dict(plan)
+        _load_research_contracts().ExecutionPlan.from_dict(plan)
         failures = research_job_json_list(row["failures_json"], "failures_json")
         manifest = research_job_json_object(row["manifest_json"], "manifest_json")
         task_indexes = research_job_json_list(row["task_indexes_json"], "task_indexes_json")
@@ -4829,7 +4866,7 @@ def research_job_probe(path: Path) -> tuple[str, tuple[str, ...]]:
             unknown = (tables - research_job_domain_tables - {"sqlite_sequence"}) | (
                 research_job_domain_tables - tables
             )
-            if version == RESEARCH_SCHEMA_VERSION and not unknown:
+            if version == _load_research_catalog().RESEARCH_SCHEMA_VERSION and not unknown:
                 return "retired", ()
             return "conflict", tuple(sorted(unknown | {f"user_version:{version}"}))
         unknown_tables = (
@@ -4934,15 +4971,15 @@ def research_job_convert(
     }
     attempt = max(1, int(row["attempt"] or 1))
     artifacts: list[dict[str, Any]] = [{
-        "kind": f"checkpoint.{RESEARCH_CHECKPOINT}",
-        "checkpoint_key": RESEARCH_CHECKPOINT,
+        "kind": f"checkpoint.{_load_research_jobs().RESEARCH_CHECKPOINT}",
+        "checkpoint_key": _load_research_jobs().RESEARCH_CHECKPOINT,
         "payload": state,
         "attempt": attempt,
         "created_at": row["updated_at"],
     }]
     if status in {"completed", "completed_with_errors"}:
         artifacts.append({
-            "kind": RESEARCH_RESULT_KIND,
+            "kind": _load_research_jobs().RESEARCH_RESULT_KIND,
             "result": True,
             "payload": state,
             "attempt": attempt,
@@ -4950,7 +4987,7 @@ def research_job_convert(
         })
     record = {
         "id": str(row["id"]),
-        "type": RESEARCH_TASK_TYPE,
+        "type": _load_research_jobs().RESEARCH_TASK_TYPE,
         "spec": {"mode": str(row["mode"]), "plan": plan},
         "algorithm_version": "research-lake-v2",
         "status": statuses[status],
@@ -4986,10 +5023,10 @@ def research_job_migrate(path: Path, store: UnifiedJobStore) -> None:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("DROP TABLE research_job_events")
         connection.execute("DROP TABLE research_jobs")
-        connection.execute(f"PRAGMA user_version={RESEARCH_SCHEMA_VERSION}")
+        connection.execute(f"PRAGMA user_version={_load_research_catalog().RESEARCH_SCHEMA_VERSION}")
         connection.commit()
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    ResearchCatalog(path, read_only=True)
+    _load_research_catalog().ResearchCatalog(path, read_only=True)
 
 
 class ResearchJobLegacyMigrator:
@@ -5247,7 +5284,7 @@ class LegacyMigrationManager:
                 "UPDATE migration_runs SET status='paused',phase='进程中断，可从最近批次续跑',"
                 "write_paused=0,diagnostic_code='process_interrupted',updated_at=? "
                 "WHERE status IN ('queued','backing_up','running','pausing','rolling_back')",
-                (utc_now(),),
+                (_load_automation_models().utc_now(),),
             )
         self._initialized = True
 
@@ -5272,7 +5309,7 @@ class LegacyMigrationManager:
             ).fetchone()
         if active:
             raise LegacyMigrationError("已有历史合同迁移正在运行")
-        run_id, now = uuid.uuid4().hex, utc_now()
+        run_id, now = uuid.uuid4().hex, _load_automation_models().utc_now()
         try:
             with self._conn() as connection:
                 connection.execute(
@@ -5365,7 +5402,7 @@ class LegacyMigrationManager:
                 "UPDATE migration_runs SET status='queued',phase='等待续跑',error='',"
                 "diagnostic_code='',updated_at=? "
                 "WHERE id=? AND status IN ('paused','failed')",
-                (utc_now(), run_id),
+                (_load_automation_models().utc_now(), run_id),
             ).rowcount
         if not changed:
             raise LegacyMigrationError("只有已暂停或失败的迁移可以续跑")
@@ -5396,7 +5433,7 @@ class LegacyMigrationManager:
                 _MIGRATORS[task["domain"]].rollback(self.root, backup_path)
                 self._set(
                     run_id, status="rolled_back", phase="已回滚", write_paused=0,
-                    finished_at=utc_now(),
+                    finished_at=_load_automation_models().utc_now(),
                 )
         except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             with maintenance_barrier.authorize(lease):
@@ -5446,7 +5483,7 @@ class LegacyMigrationManager:
                 after = values[-1].record_key
                 if len(values) < batch_size:
                     break
-            finished = utc_now()
+            finished = _load_automation_models().utc_now()
             self._set(
                 run_id, status="completed", phase="迁移完成" if task["mode"] == "apply" else "检查完成",
                 write_paused=0, estimated_remaining_seconds=0, finished_at=finished,
@@ -5531,7 +5568,7 @@ class LegacyMigrationManager:
                 break
         self._set(
             run_id, status="completed", phase="迁移完成", write_paused=0,
-            estimated_remaining_seconds=0, finished_at=utc_now(),
+            estimated_remaining_seconds=0, finished_at=_load_automation_models().utc_now(),
         )
 
     @staticmethod
@@ -5550,7 +5587,7 @@ class LegacyMigrationManager:
         valid = {"converted", "blank", "review", "conflict", "unchanged"}
         if any(record.outcome not in valid for record in records):
             raise LegacyMigrationError("domain migrator 返回未知 outcome")
-        now = utc_now()
+        now = _load_automation_models().utc_now()
         with self._conn() as connection:
             for record in records:
                 connection.execute(
@@ -5600,7 +5637,7 @@ class LegacyMigrationManager:
         }
         if not set(values) <= allowed:
             raise ValueError("未知 migration_runs 字段")
-        values["updated_at"] = utc_now()
+        values["updated_at"] = _load_automation_models().utc_now()
         assignments = ",".join(f"{name}=?" for name in values)
         with self._conn() as connection:
             connection.execute(

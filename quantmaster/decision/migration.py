@@ -7,11 +7,7 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from quantmaster.data.migration import MigrationRecord
-
+from typing import Any
 
 from quantmaster.decision.schema import (
     DECISION_PAYLOAD_SCHEMA_VERSION,
@@ -263,7 +259,7 @@ def migrate_decision_snapshots(
     }
 
 
-def _migration_record(outcome: dict[str, Any]) -> MigrationRecord:
+def _migration_record(outcome: dict[str, Any]) -> Any:
     import importlib
 
     _migration_module = importlib.import_module(
@@ -303,12 +299,12 @@ class DecisionLegacyMigrator:
             ).fetchall()
         return [_classify(row) for row in rows]
 
-    def inspect(self, root: str | Path) -> Iterable[MigrationRecord]:
+    def inspect(self, root: str | Path) -> Iterable[dict[str, Any]]:
         return (_migration_record(item) for item in self._outcomes(root))
 
     def migrate_batch(
         self, root: str | Path, *, after_key: str, limit: int,
-    ) -> Iterable[MigrationRecord]:
+    ) -> Iterable[dict[str, Any]]:
         selected = [
             item for item in self._outcomes(root)
             if _record_key(item["identity"]) > after_key
