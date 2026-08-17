@@ -1,6 +1,5 @@
 """Compatibility entry point for the production architecture scanner."""
 
-import importlib
 import sys
 from pathlib import Path
 
@@ -8,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_architecture = importlib.import_module("quantmaster.architecture")
+from quantmaster import architecture as _architecture  # noqa: E402 — needs sys.path above
+
 ImportRef = _architecture.ImportRef
 ProductionGraph = _architecture.ProductionGraph
 build_graph = _architecture.build_graph
