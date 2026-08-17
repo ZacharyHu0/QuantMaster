@@ -1,4 +1,4 @@
-"""Cross-domain stability metrics shared by HTTP diagnostics and ``qm doctor``."""
+"""Cross-domain stability metrics for HTTP diagnostics and ``qm doctor``."""
 
 from __future__ import annotations
 

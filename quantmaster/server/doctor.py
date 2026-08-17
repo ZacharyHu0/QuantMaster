@@ -328,7 +328,7 @@ def run_doctor(*, deep: bool = False) -> dict[str, Any]:
                 "计算子进程身份检查失败",
                 str(exc),
             ))
-        from quantmaster.operational_diagnostics import safe_operational_metrics
+        from quantmaster.server.operational_diagnostics import safe_operational_metrics
 
         metrics["operations"] = safe_operational_metrics()
     counts = {
