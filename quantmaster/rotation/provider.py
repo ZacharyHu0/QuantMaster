@@ -26,10 +26,10 @@ from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, akshare_call, provider_call
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.rotation.provider_access import register_rotation_provider
 from quantmaster.rotation.session import expected_market_session
 from quantmaster.rotation.store import ETF_OBSERVATION_COLUMNS, RotationStore
 from quantmaster.rotation.taxonomy import SW2021_L1
-from quantmaster.rotation_provider_access import register_rotation_provider
 from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
 logger = logging.getLogger(__name__)

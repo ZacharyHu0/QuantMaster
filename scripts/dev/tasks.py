@@ -603,7 +603,7 @@ def serve(
     else:
         environment["QM_FREE_STOCKDB_SDK_PATH"] = str(stable_root / "pybao")
 
-    command = [str(project_python(primary)), "-m", "quantmaster.cli", "serve"]
+    command = [str(project_python(primary)), "-m", "quantmaster.server.cli", "serve"]
     if open_browser:
         command.append("--open")
     print(f"[task] serving codex/{slug} at http://127.0.0.1:{port}", flush=True)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from quantmaster.cli import build_parser
+from quantmaster.server.cli import build_parser
 
 REMOVED_RESEARCH_COMMANDS = ("validate", "grid", "fund-test", "mine", "mine-llm")
 SUPPORTED_RESEARCH_COMMANDS = ("factor-test", "backtest", "lab")

@@ -339,8 +339,8 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     llm_probe: dict[str, Any] | None = None
     if any(field.startswith("llm.") for field in changed):
         try:
+            from quantmaster.server.settings_checks import list_llm_models
             from quantmaster.settings import document_from_config
-            from quantmaster.settings_checks import list_llm_models
 
             llm_probe = list_llm_models(
                 document_from_config(candidate_runtime_config).llm,
@@ -932,7 +932,7 @@ def check_setting(
     body: Annotated[dict[str, Any] | None, Body()] = None,
 ) -> dict:
     _require_csrf(request)
-    from quantmaster.settings_checks import (
+    from quantmaster.server.settings_checks import (
         check_data_sources,
         check_lab,
         check_server,

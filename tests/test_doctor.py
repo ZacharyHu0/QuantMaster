@@ -4,9 +4,9 @@ import json
 import os
 from types import SimpleNamespace
 
-from quantmaster.cli import main
-from quantmaster.doctor import _api_issues, _route_paths, run_doctor
 from quantmaster.runtime.identity import get_application_identity
+from quantmaster.server.cli import main
+from quantmaster.server.doctor import _api_issues, _route_paths, run_doctor
 
 
 def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config):

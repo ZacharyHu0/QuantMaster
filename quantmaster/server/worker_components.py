@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from quantmaster.bootstrap_hooks import register_server_worker_hooks
 from quantmaster.server.settings_control import settings_manager
+from quantmaster.server.worker_hooks import register_server_worker_hooks
 
 
 def register_worker_components() -> None:

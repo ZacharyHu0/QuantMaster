@@ -19,8 +19,8 @@ if __name__ == "__main__":
         update_splash("正在加载本地配置")
         update_splash("正在装配命令入口")
 
-        from quantmaster.cli import main
         from quantmaster.runtime.windows_app import initialize_windows_app_process
+        from quantmaster.server.cli import main
 
         arguments = ["app"] if len(sys.argv) == 1 else sys.argv[1:]
         command = next((argument for argument in arguments if not argument.startswith("-")), "")

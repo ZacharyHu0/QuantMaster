@@ -37,7 +37,7 @@ def test_development_launcher_keeps_quantmaster_attached_to_ctrl_c() -> None:
         encoding="utf-8",
     )
 
-    assert '"%QM_LAUNCHER%" -m quantmaster.cli serve %*' in launcher
+    assert '"%QM_LAUNCHER%" -m quantmaster.server.cli serve %*' in launcher
     assert 'start "QuantMaster" /b' not in launcher
 
 
@@ -266,7 +266,7 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
     freeze = entry.index("multiprocessing.freeze_support()")
     stdout = entry.index('sys.stdout.reconfigure(encoding="utf-8")')
     configure = entry.index("configure_installed_instance()")
-    cli_import = entry.index("from quantmaster.cli import main")
+    cli_import = entry.index("from quantmaster.server.cli import main")
     stage = entry.index('update_splash("正在加载本地配置")')
     close = entry.index("close_splash()")
 
@@ -322,7 +322,7 @@ def test_packaged_entry_closes_cli_splash_before_long_handler(
     calls = []
     config = ModuleType("quantmaster.config")
     config.configure_installed_instance = lambda: calls.append("configure")
-    cli = ModuleType("quantmaster.cli")
+    cli = ModuleType("quantmaster.server.cli")
     cli.main = lambda _arguments: calls.append(("main", "close" in calls)) or 0
     windows_app = ModuleType("quantmaster.runtime.windows_app")
     windows_app.initialize_windows_app_process = lambda **_kwargs: calls.append("initialize")
@@ -330,7 +330,7 @@ def test_packaged_entry_closes_cli_splash_before_long_handler(
     splash.update_splash = lambda stage: calls.append(("stage", stage))
     splash.close_splash = lambda: calls.append("close")
     monkeypatch.setitem(sys.modules, "quantmaster.config", config)
-    monkeypatch.setitem(sys.modules, "quantmaster.cli", cli)
+    monkeypatch.setitem(sys.modules, "quantmaster.server.cli", cli)
     monkeypatch.setitem(sys.modules, "quantmaster.runtime.windows_app", windows_app)
     monkeypatch.setitem(sys.modules, "quantmaster.runtime.splash", splash)
     monkeypatch.setattr(multiprocessing, "freeze_support", lambda: None)

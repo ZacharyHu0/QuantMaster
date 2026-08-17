@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from quantmaster import architecture as _architecture  # noqa: E402 — needs sys.path above
+from quantmaster.application import architecture as _architecture  # noqa: E402 — needs sys.path above
 
 ImportRef = _architecture.ImportRef
 ProductionGraph = _architecture.ProductionGraph

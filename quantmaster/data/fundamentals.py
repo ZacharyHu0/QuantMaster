@@ -29,7 +29,7 @@ from quantmaster.data.akshare_source import _require_akshare
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.resilience import akshare_call
 from quantmaster.data.storage import BarStore
-from quantmaster.temporal import TemporalContractError
+from quantmaster.data.temporal import TemporalContractError
 
 logger = logging.getLogger(__name__)
 

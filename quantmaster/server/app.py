@@ -52,9 +52,9 @@ def create_lifespan(*, bootstrap_rotation: bool):
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         _stream_runtime()
-        from quantmaster.bootstrap import get_runtime_worker, get_worker_supervisor
         from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.logging_config import current_log_path
+        from quantmaster.server.bootstrap import get_runtime_worker, get_worker_supervisor
         from quantmaster.server.management import capture_runtime_baseline
         from quantmaster.server.worker_components import register_worker_components
 

@@ -35,8 +35,8 @@ def raise_with_detail(_context, spec: dict) -> JobOutcome:
 
 
 def probe_rotation_provider(context, _spec: dict) -> JobOutcome:
+    from quantmaster.rotation.provider_access import rotation_provider
     from quantmaster.rotation.service import _ensure_rotation_provider_registered
-    from quantmaster.rotation_provider_access import rotation_provider
 
     _ensure_rotation_provider_registered()
     factory = rotation_provider()

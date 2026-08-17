@@ -1,4 +1,4 @@
-"""Repository and local-data diagnostics used by ``qm doctor --deep``."""
+"""Repository and local-data diagnostics used by the ``qm doctor`` command."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from quantmaster.runtime.identity import (
 )
 from quantmaster.runtime.sqlite import connect_sqlite
 
-PACKAGE_ROOT = Path(__file__).resolve().parent
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_application_identity_probe(expected: ApplicationIdentity, connection: Any) -> None:
@@ -107,7 +107,7 @@ def _issue(
 
 def _architecture_issues() -> list[dict[str, Any]]:
 
-    from quantmaster.architecture import (
+    from quantmaster.application.architecture import (
         build_graph,
         cycles,
         layer_violations,

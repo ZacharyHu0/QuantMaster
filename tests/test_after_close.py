@@ -438,7 +438,7 @@ def test_after_close_empty_snapshot_returns_problem_503(
 
 
 def test_after_close_cli_contract_supports_csv_export() -> None:
-    from quantmaster.cli import build_parser
+    from quantmaster.server.cli import build_parser
 
     args = build_parser().parse_args(
         [
