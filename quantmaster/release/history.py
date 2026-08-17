@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.4"
+VERSION = "1.17.5"
 RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "更新 IPC 配置一致性",
+                "items": (
+                    (
+                        "更新 helper 会从当前本地服务读取 runtime-worker 的数据根，"
+                        "并以同一配置根完成排空、恢复和新一代启动。"
+                    ),
+                    (
+                        "无法确认当前 worker 配置根时，激活会明确阻断并保留安全回滚，"
+                        "不再误连候选槽默认 IPC endpoint。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.4",
+        "date": "2026-08-18",
         "sections": (
             {
                 "title": "更新排空与恢复",
