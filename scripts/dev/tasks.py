@@ -747,6 +747,17 @@ def _remove_verified_tree(
     except PermissionError as exc:
         blocked = checked_blocked(exc)
         winerror = getattr(exc, "winerror", None)
+        def remove_empty_root() -> bool:
+            if winerror != 5:
+                return False
+            try:
+                root.rmdir()
+            except OSError:
+                return False
+            return True
+
+        if remove_empty_root():
+            return
         if winerror in _WINDOWS_TRANSIENT_CLEANUP_ERRORS:
             raise_residual(
                 blocked,
@@ -759,6 +770,8 @@ def _remove_verified_tree(
             raise_residual(blocked, kind=acl_error.kind, reason=acl_error)
         except OSError as acl_error:
             raise_residual(blocked, kind="transient", reason=acl_error)
+        if remove_empty_root():
+            return
         try:
             shutil.rmtree(root, onexc=make_writable)
             return
