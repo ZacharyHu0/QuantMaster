@@ -411,6 +411,7 @@ class SubprocessGenerationController:
         self.port = int(port)
         self._drain_identity: ApplicationIdentity | None = None
         self._drain_token = ""
+        self._drain_root: Path | None = None
 
     def _json(self, path: str) -> Mapping[str, object] | None:
         try:
@@ -428,6 +429,19 @@ class SubprocessGenerationController:
     def current_identity(self) -> Mapping[str, object] | None:
         return self._health()
 
+    def _current_worker_root(self) -> Path:
+        """Read the active generation's IPC root before replacing it."""
+
+        settings = self._json("settings")
+        data = settings.get("data") if settings is not None else None
+        raw_root = data.get("root") if isinstance(data, Mapping) else None
+        root = Path(raw_root) if isinstance(raw_root, str) and raw_root else None
+        if root is None or not root.is_absolute():
+            raise ActivationBlocked(
+                "worker_root_unavailable", "无法确认当前 runtime-worker 数据根",
+            )
+        return root
+
     def drain_current(self, timeout: float) -> None:
         current = self.current_identity()
         if current is None:
@@ -435,17 +449,19 @@ class SubprocessGenerationController:
         from quantmaster.runtime.identity import ApplicationIdentity
         from quantmaster.runtime.worker_ipc import call_worker_command
 
+        drain_timeout = min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS)
+        identity = ApplicationIdentity(
+            str(current.get("build_sha") or ""),
+            str(current.get("slot_id") or ""),
+            str(current.get("runtime_generation") or ""),
+        )
+        worker_root = self._current_worker_root()
         try:
-            drain_timeout = min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS)
-            identity = ApplicationIdentity(
-                str(current.get("build_sha") or ""),
-                str(current.get("slot_id") or ""),
-                str(current.get("runtime_generation") or ""),
-            )
             result = call_worker_command(
                 "maintenance.enter",
                 {"reason": "application activation", "timeout": drain_timeout},
                 timeout=timeout,
+                root=worker_root,
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
@@ -454,6 +470,7 @@ class SubprocessGenerationController:
                     "maintenance.status",
                     {"token": ""},
                     timeout=timeout,
+                    root=worker_root,
                     application_identity=identity,
                 )
             except (OSError, RuntimeError, ValueError, TypeError):
@@ -464,13 +481,15 @@ class SubprocessGenerationController:
             ):
                 self._drain_identity = identity
                 self._drain_token = ""
+                self._drain_root = worker_root
                 return
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法排空") from exc
         self._drain_identity = identity
         self._drain_token = str(result.get("token") or "")
+        self._drain_root = worker_root
 
     def resume_current(self, timeout: float) -> None:
-        identity, token = self._drain_identity, self._drain_token
+        identity, token, worker_root = self._drain_identity, self._drain_token, self._drain_root
         if identity is None or not token:
             return
         from quantmaster.runtime.worker_ipc import call_worker_command
@@ -480,12 +499,14 @@ class SubprocessGenerationController:
                 "maintenance.exit",
                 {"token": token},
                 timeout=min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS),
+                root=worker_root,
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法恢复") from exc
         self._drain_identity = None
         self._drain_token = ""
+        self._drain_root = None
 
     def stop_current(self, timeout: float) -> None:
         from quantmaster.runtime.windows_app import terminate_root_job
@@ -512,6 +533,8 @@ class SubprocessGenerationController:
             # user-facing stable launcher and stop the new generation with it.
             DETACHED_ACTIVATION_ENV: "1",
         })
+        if self._drain_root is not None:
+            environment["QM_DATA_ROOT"] = str(self._drain_root)
         environment.pop("QM_WINDOWS_APP_JOB_ROOT", None)
         try:
             return subprocess.Popen(

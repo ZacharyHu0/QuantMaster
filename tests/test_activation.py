@@ -326,19 +326,28 @@ def test_packaged_controller_marks_activation_generation_as_detached(monkeypatch
     assert "QM_WINDOWS_APP_JOB_ROOT" not in captured["environment"]
 
 
-def test_packaged_controller_releases_the_drain_lease(monkeypatch):
+def test_packaged_controller_releases_the_drain_lease(monkeypatch, tmp_path):
     identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
     controller = SubprocessGenerationController()
     calls = []
+    worker_root = tmp_path / "active-data"
 
-    monkeypatch.setattr(controller, "_json", lambda _path: {
-        "build_sha": identity.build_sha,
-        "slot_id": identity.slot_id,
-        "runtime_generation": identity.runtime_generation,
-    })
+    def current_json(path):
+        if path == "health":
+            return {
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }
+        assert path == "settings"
+        return {"data": {"root": str(worker_root)}}
+
+    monkeypatch.setattr(controller, "_json", current_json)
 
     def command(operation, payload, **kwargs):
-        calls.append((operation, payload, kwargs["application_identity"], kwargs["timeout"]))
+        calls.append((
+            operation, payload, kwargs["application_identity"], kwargs["timeout"], kwargs["root"],
+        ))
         return {"token": "lease"} if operation == "maintenance.enter" else {"released": True}
 
     monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
@@ -347,24 +356,39 @@ def test_packaged_controller_releases_the_drain_lease(monkeypatch):
     controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 15.0),
-        ("maintenance.exit", {"token": "lease"}, identity, 10.0),
+        (
+            "maintenance.enter",
+            {"reason": "application activation", "timeout": 10.0},
+            identity,
+            15.0,
+            worker_root,
+        ),
+        ("maintenance.exit", {"token": "lease"}, identity, 10.0, worker_root),
     ]
 
 
-def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch):
+def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch, tmp_path):
     identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
     controller = SubprocessGenerationController()
     calls = []
+    worker_root = tmp_path / "active-data"
 
-    monkeypatch.setattr(controller, "_json", lambda _path: {
-        "build_sha": identity.build_sha,
-        "slot_id": identity.slot_id,
-        "runtime_generation": identity.runtime_generation,
-    })
+    def current_json(path):
+        if path == "health":
+            return {
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }
+        assert path == "settings"
+        return {"data": {"root": str(worker_root)}}
+
+    monkeypatch.setattr(controller, "_json", current_json)
 
     def command(operation, payload, **kwargs):
-        calls.append((operation, payload, kwargs["application_identity"], kwargs["timeout"]))
+        calls.append((
+            operation, payload, kwargs["application_identity"], kwargs["timeout"], kwargs["root"],
+        ))
         if operation == "maintenance.enter":
             raise RuntimeError("reply lost after maintenance entered")
         assert operation == "maintenance.status"
@@ -376,6 +400,55 @@ def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch):
     controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 15.0),
-        ("maintenance.status", {"token": ""}, identity, 15.0),
+        (
+            "maintenance.enter",
+            {"reason": "application activation", "timeout": 10.0},
+            identity,
+            15.0,
+            worker_root,
+        ),
+        ("maintenance.status", {"token": ""}, identity, 15.0, worker_root),
     ]
+
+
+def test_packaged_controller_requires_current_worker_root(monkeypatch):
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller = SubprocessGenerationController()
+    calls = []
+
+    monkeypatch.setattr(controller, "_json", lambda _path: {
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
+    })
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker_ipc.call_worker_command",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    with pytest.raises(ActivationBlocked, match="数据根"):
+        controller.drain_current(15.0)
+
+    assert calls == []
+
+
+def test_packaged_controller_inherits_drained_worker_root(monkeypatch, tmp_path):
+    slot = _candidate(tmp_path, SHA_B)
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    controller = SubprocessGenerationController()
+    worker_root = tmp_path / "active-data"
+    captured = {}
+
+    class Process:
+        pass
+
+    def launch(_command, **kwargs):
+        captured["environment"] = kwargs["env"]
+        return Process()
+
+    controller._drain_root = worker_root
+    monkeypatch.setattr(activation.subprocess, "Popen", launch)
+
+    controller.start_generation(slot, identity)
+
+    assert captured["environment"]["QM_DATA_ROOT"] == str(worker_root)
