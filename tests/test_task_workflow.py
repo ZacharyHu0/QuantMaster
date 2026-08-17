@@ -1205,6 +1205,7 @@ def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_pat
     def restore(command, **kwargs):
         calls.append("inspect")
         assert "GetAccessControl" in command[-1]
+        assert "item.Parent" in command[-1]
         assert kwargs["env"]["QM_TASK_ARTIFACT_BLOCKED"] == str(artifacts.resolve())
         return SimpleNamespace(returncode=1, stdout="", stderr="access denied")
 
@@ -1225,6 +1226,39 @@ def test_remove_task_artifacts_classifies_uninspectable_acl(monkeypatch, tmp_pat
     assert str(artifacts) not in message
     assert calls == ["remove", "inspect"]
     assert artifacts.exists()
+
+
+def test_remove_task_artifacts_recovers_acl_from_accessible_parent(monkeypatch, tmp_path):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+    calls: list[str] = []
+    original_rmtree = tasks.shutil.rmtree
+
+    def remove(path, **kwargs):
+        calls.append("remove")
+        if calls.count("remove") == 1:
+            raise PermissionError(13, "denied", path)
+        return original_rmtree(path, **kwargs)
+
+    def restore(command, **_kwargs):
+        calls.append("restore")
+        assert "item.Parent" in command[-1]
+        assert "Directory]::GetAccessControl($parent.FullName)" in command[-1]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(tasks.shutil, "rmtree", remove)
+    monkeypatch.setattr(
+        pytest_windows_acl, "os", SimpleNamespace(name="nt", environ=os.environ),
+    )
+    monkeypatch.setattr(tasks.subprocess, "run", restore)
+
+    tasks.remove_task_artifacts(primary, "recovery")
+
+    assert calls == ["remove", "restore", "remove"]
+    assert not artifacts.exists()
 
 
 def test_remove_task_artifacts_classifies_transient_acl_failure(
