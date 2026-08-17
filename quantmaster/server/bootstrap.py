@@ -27,7 +27,7 @@ from quantmaster.server.worker_hooks import (
     server_worker_hooks,
     server_worker_hooks_registered,
 )
-from quantmaster.settings_control import settings_manager
+from quantmaster.server.settings_control import settings_manager
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +281,7 @@ class _DefaultWorkerPlan:
         self._shutdown_backtest_jobs = shutdown_backtest_job_managers
 
     def settings_projection(self) -> tuple[int, int]:
-        from quantmaster.settings_runtime import public_state
+        from quantmaster.server.settings_runtime import public_state
 
         state = public_state(self.settings_manager.path)
         return int(state["persisted_revision"]), int(state["latest_generation"])
@@ -385,7 +385,7 @@ class _DefaultWorkerPlan:
 
     def _apply_latest_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         from quantmaster.config import load_config, set_config
-        from quantmaster.settings_runtime import persisted_revision
+        from quantmaster.server.settings_runtime import persisted_revision
 
         revision = int(payload.get("revision") or 0)
         generation = int(payload.get("generation") or 0)

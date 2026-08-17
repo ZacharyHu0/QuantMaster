@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import Field
 
 from quantmaster.config import get_config
-from quantmaster.horizons import SUPPORTED_HORIZONS
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError, classify_lab_error
 from quantmaster.lab.service import LabService as _LabService
 from quantmaster.lab.service import get_lab_service as _get_lab_service

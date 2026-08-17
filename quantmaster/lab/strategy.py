@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
-from quantmaster.horizons import SUPPORTED_HORIZONS, require_supported_horizon
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS, require_supported_horizon
 
 TRADING_DAYS = 244
 ENSEMBLE_MIN_COMPONENTS = 3

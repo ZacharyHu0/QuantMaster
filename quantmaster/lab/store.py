@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
-from quantmaster.horizons import require_supported_horizon
+from quantmaster.lab.horizons import require_supported_horizon
 from quantmaster.lab.models import (
     FACTOR_STATUSES,
     FactorSpec,

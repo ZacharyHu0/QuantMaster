@@ -15,7 +15,7 @@ from typing import Any
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.settings import SettingsDocument
-from quantmaster.settings_control import apply_runtime, settings_manager
+from quantmaster.server.settings_control import apply_runtime, settings_manager
 
 APPLY_TASK_TYPE = "settings.apply"
 DIAGNOSTIC_TASK_TYPE = "settings.diagnostic"
@@ -94,7 +94,7 @@ class SettingsJobs:
         context.ensure_active()
         # Import lazily to avoid server module construction in Web request
         # paths.  This code runs in runtime-worker only.
-        from quantmaster.settings_runtime import persisted_revision
+        from quantmaster.server.settings_runtime import persisted_revision
 
         saved = dict(spec.get("saved") or {})
         revision = int(saved.get("config_revision") or 0)

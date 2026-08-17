@@ -158,7 +158,7 @@ def capture_runtime_baseline() -> None:
 
 def _runtime_status() -> dict[str, Any]:
     from quantmaster.runtime.worker import runtime_worker_status
-    from quantmaster.settings_runtime import public_state
+    from quantmaster.server.settings_runtime import public_state
 
     cfg = get_config()
     configured = {"host": cfg.server.host, "port": cfg.server.port}
@@ -227,7 +227,7 @@ def _report_apply_component(
     component: str, status: dict[str, Any], *, revision: int, generation: int,
     diagnostic_code: str, recommendation: str,
 ) -> None:
-    from quantmaster.settings_runtime import report_component
+    from quantmaster.server.settings_runtime import report_component
 
     degraded = str(status.get("status") or "unchanged") == "degraded"
     report_component(
@@ -290,7 +290,7 @@ def _report_remaining_components(
     llm_probe: dict[str, Any] | None, apply_status: dict[str, Any],
     *, revision: int, generation: int,
 ) -> None:
-    from quantmaster.settings_runtime import report_component
+    from quantmaster.server.settings_runtime import report_component
 
     if llm_probe and str(llm_probe.get("status")) == "error":
         previous = _runtime_status().get("components", {}).get("llm", {})
@@ -321,7 +321,7 @@ def _apply_runtime(result: dict[str, Any]) -> dict[str, Any]:
     """按变更字段热应用进程内服务；配置落盘成功不因联网状态回滚。"""
     from quantmaster.config import get_config as current_config
     from quantmaster.config import set_config
-    from quantmaster.settings_runtime import report_component
+    from quantmaster.server.settings_runtime import report_component
 
     changed = list(result.get("changed_fields") or [])
     revision = int(result.get("config_revision") or 0)
@@ -461,7 +461,7 @@ def _llm_cancellation_after_save(
 
 def _queue_runtime_apply(saved: dict[str, Any]) -> dict[str, Any]:
     from quantmaster.server.settings_jobs import get_settings_jobs
-    from quantmaster.settings_runtime import begin_apply
+    from quantmaster.server.settings_runtime import begin_apply
 
     if not int(saved.get("generation") or 0):
         saved["generation"] = begin_apply(
@@ -851,12 +851,12 @@ def save_settings(request: Request, update: SettingsUpdate) -> dict:
     _require_csrf(request)
     try:
         result = settings_manager.save(update)
-        from quantmaster.settings_runtime import report_component
+        from quantmaster.server.settings_runtime import report_component
         result["llm_cancellation"] = _llm_cancellation_after_save(
             result,
             llm_secret_changed=update.secrets.llm.action in {"replace", "clear"},
         )
-        from quantmaster.settings_runtime import begin_apply
+        from quantmaster.server.settings_runtime import begin_apply
 
         result["generation"] = begin_apply(
             settings_manager.path, int(result.get("config_revision") or 0),

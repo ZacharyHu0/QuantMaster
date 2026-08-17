@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from quantmaster.actor_context import ActorContext
+from quantmaster.automation.channels.actor_context import ActorContext
 
 __all__ = ["ActorContext", "AlertEvent", "LedgerIntent", "stable_hash", "utc_now"]
 

@@ -8,7 +8,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from quantmaster.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
+from quantmaster.lab.horizons import MAX_HORIZON, SUPPORTED_HORIZONS
 from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import content_hash
 

@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from quantmaster import __version__
-from quantmaster.actor_context import ActorContext
+from quantmaster.automation.channels.actor_context import ActorContext
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialStore
 

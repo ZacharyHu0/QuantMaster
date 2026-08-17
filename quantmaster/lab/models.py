@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from quantmaster.horizons import SUPPORTED_HORIZONS
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.runtime.json import strict_json_dumps
 
 FactorKind = Literal["expression", "python", "learned", "latent", "composite"]

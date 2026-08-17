@@ -19,7 +19,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
-from quantmaster.horizons import SUPPORTED_HORIZONS
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     create_snapshot,

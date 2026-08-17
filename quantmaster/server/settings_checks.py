@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 def _result(status: str, message: str, started: float, **details: Any) -> dict[str, Any]:
-    from quantmaster.settings_runtime import diagnostic_id
+    from quantmaster.server.settings_runtime import diagnostic_id
 
     return {
         "status": status,

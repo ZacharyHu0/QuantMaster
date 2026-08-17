@@ -24,7 +24,7 @@ from typing import Any, Literal, TypeVar
 import pandas as pd
 
 from quantmaster.data.semantics import NumericSemantics
-from quantmaster.market_identity import Market
+from quantmaster.market_capabilities import Market
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 INTRADAY_FREQUENCIES = ("1m", "5m", "15m", "30m", "60m")
