@@ -28,7 +28,7 @@ def test_in_memory_resolver_finds_lazy_relative_and_barrel_imports():
     refs = resolve_source_imports(
         """
 from quantmaster import server
-from .. import cli
+from ..server import cli
 from ..server import app
 def load():
     from ..runtime import jobs
@@ -39,7 +39,7 @@ def load():
     assert {
         "quantmaster",
         "quantmaster.server",
-        "quantmaster.cli",
+        "quantmaster.server.cli",
         "quantmaster.server.app",
         "quantmaster.runtime",
         "quantmaster.runtime.jobs",
@@ -52,7 +52,7 @@ def test_in_memory_resolver_finds_literal_dynamic_imports():
 import importlib
 from importlib import import_module
 __import__("quantmaster.server.app")
-importlib.import_module("quantmaster.cli")
+importlib.import_module("quantmaster.server.cli")
 import_module("quantmaster.runtime.jobs")
 """,
         module="quantmaster.market.fixture",
@@ -60,7 +60,7 @@ import_module("quantmaster.runtime.jobs")
     targets = {ref.target for ref in refs}
     assert {
         "quantmaster.server.app",
-        "quantmaster.cli",
+        "quantmaster.server.cli",
         "quantmaster.runtime.jobs",
     } <= targets
 

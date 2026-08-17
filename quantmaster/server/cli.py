@@ -1,4 +1,4 @@
-"""命令行入口 `qm`。
+"""服务命令行入口 `qm`。
 
 qm serve                                    启动 Web 界面
 qm setup-shortcut                           创建稳定槽用户快捷方式
@@ -133,7 +133,7 @@ def cmd_setup_shortcut(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    from quantmaster.doctor import run_doctor
+    from quantmaster.server.doctor import run_doctor
 
     report = run_doctor(deep=bool(args.deep))
     _print_json(report)

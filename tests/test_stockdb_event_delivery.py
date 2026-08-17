@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from quantmaster.bootstrap import StockDBEventDelivery
 from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime, StockDBUpdateEvent
+from quantmaster.server.bootstrap import StockDBEventDelivery
 
 
 class _Source:

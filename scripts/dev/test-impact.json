@@ -103,7 +103,7 @@
       "tests": ["tests/test_after_close.py"]
     },
     {
-      "paths": ["quantmaster/config.py", "quantmaster/settings.py", "quantmaster/settings_checks.py"],
+      "paths": ["quantmaster/config.py", "quantmaster/settings.py", "quantmaster/server/settings_checks.py"],
       "tests": ["tests/test_settings.py", "tests/test_settings_checks.py"]
     },
     {

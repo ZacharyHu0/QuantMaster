@@ -10,8 +10,8 @@ import threading
 
 import pytest
 
-from quantmaster import cli
 from quantmaster import logging_config as qm_logging
+from quantmaster.server import cli
 
 
 @pytest.fixture(autouse=True)
@@ -228,7 +228,7 @@ def test_unwritable_log_path_falls_back_to_full_terminal(tmp_path, capsys):
     try:
         _application_failure()
     except RuntimeError:
-        logging.getLogger("quantmaster.cli").exception("命令失败")
+        logging.getLogger("quantmaster.server.cli").exception("命令失败")
 
     output = capsys.readouterr().err
     assert "日志文件不可用" in output

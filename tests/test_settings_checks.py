@@ -9,14 +9,14 @@ import httpx
 import pytest
 
 from quantmaster.ai.llm import LLMError
-from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
-from quantmaster.settings_checks import (
+from quantmaster.server.settings_checks import (
     check_data_sources,
     check_lab,
     check_llm_web_search,
     check_storage,
     list_llm_models,
 )
+from quantmaster.settings import DataSettings, LabSettings, LLMSettings, normalize_api_base
 
 
 def test_storage_draft_check_does_not_create_candidate_directory(tmp_path):
@@ -266,8 +266,8 @@ def test_data_source_checks_use_real_endpoints_in_parallel_and_mask_proxy(monkey
         barrier.wait()
         return ProbeResponse()
 
-    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda name: object())
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fake_get)
+    monkeypatch.setattr("quantmaster.server.settings_checks.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("quantmaster.server.settings_checks.httpx.get", fake_get)
     monkeypatch.setattr(
         "quantmaster.data.resilience.provider_call",
         lambda lane, key, func, **kwargs: func(),
@@ -297,8 +297,8 @@ def test_data_source_check_classifies_http_status(
     def fake_get(url, **_kwargs):
         return httpx.Response(http_status, request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: object())
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fake_get)
+    monkeypatch.setattr("quantmaster.server.settings_checks.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr("quantmaster.server.settings_checks.httpx.get", fake_get)
     monkeypatch.setattr(
         "quantmaster.data.resilience.provider_call",
         lambda _lane, _key, func, **_kwargs: func(),
@@ -314,8 +314,8 @@ def test_data_source_check_reports_connectivity_failure(monkeypatch):
     def fail_get(_url, **_kwargs):
         raise httpx.ConnectTimeout("timed out")
 
-    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: object())
-    monkeypatch.setattr("quantmaster.settings_checks.httpx.get", fail_get)
+    monkeypatch.setattr("quantmaster.server.settings_checks.importlib.util.find_spec", lambda _name: object())
+    monkeypatch.setattr("quantmaster.server.settings_checks.httpx.get", fail_get)
     monkeypatch.setattr(
         "quantmaster.data.resilience.provider_call",
         lambda _lane, _key, func, **_kwargs: func(),
@@ -334,7 +334,7 @@ def test_data_source_check_reports_connectivity_failure(monkeypatch):
 
 
 def test_free_stockdb_connection_failure_degrades_to_warning(monkeypatch):
-    from quantmaster.settings_checks import _check_free_stockdb
+    from quantmaster.server.settings_checks import _check_free_stockdb
 
     def fail_probe(_self):
         raise httpx.ConnectError("local stockdb refused the connection")
@@ -352,7 +352,7 @@ def test_free_stockdb_connection_failure_degrades_to_warning(monkeypatch):
 
 
 def test_missing_optional_data_dependency_has_install_action(monkeypatch):
-    monkeypatch.setattr("quantmaster.settings_checks.importlib.util.find_spec", lambda _name: None)
+    monkeypatch.setattr("quantmaster.server.settings_checks.importlib.util.find_spec", lambda _name: None)
 
     result = check_data_sources(2)
 

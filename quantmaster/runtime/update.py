@@ -298,7 +298,7 @@ def _helper_command(build_sha: str, root_pid: int | None) -> list[str]:
     if getattr(sys, "frozen", False):
         command = [sys.executable, "activate", build_sha]
     else:
-        command = [sys.executable, "-m", "quantmaster.cli", "activate", build_sha]
+        command = [sys.executable, "-m", "quantmaster.server.cli", "activate", build_sha]
     if root_pid is not None:
         command.extend(("--root-pid", str(root_pid)))
     return command

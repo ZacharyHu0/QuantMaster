@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT_PACKAGE = "quantmaster"
-OUTER_LAYERS = frozenset({"bootstrap", "cli", "doctor", "server"})
+OUTER_LAYERS = frozenset({"application", "server"})
 RUNTIME_FOUNDATION = frozenset({"config", "logging_config", "release", "runtime"})
 
 

@@ -6,7 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.backtest.spec import BacktestSpec, LabVersionStrategySpec
-from quantmaster.cli import build_parser
 from quantmaster.config import Config, set_config
 from quantmaster.data.research import PitDataStore, ResearchDataBundle, load_research_bundle
 from quantmaster.data.tushare_source import TushareSource
@@ -30,6 +29,7 @@ from quantmaster.lab.research import (
     walk_forward_folds,
 )
 from quantmaster.lab.store import LabStore
+from quantmaster.server.cli import build_parser
 
 
 @pytest.fixture(autouse=True)

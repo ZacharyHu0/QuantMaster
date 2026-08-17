@@ -1,4 +1,4 @@
-"""设置中心的只读连通性与可用性检测。"""
+"""Web settings center's read-only connectivity and capability checks."""
 
 from __future__ import annotations
 
@@ -40,31 +40,80 @@ def _result(status: str, message: str, started: float, **details: Any) -> dict[s
     }
 
 
+def _model_catalog_endpoint(
+    settings: LLMSettings, api_key: str,
+) -> tuple[str, str, str, dict[str, str]]:
+    provider = settings.provider
+    if provider == "anthropic":
+        base = normalize_api_base(provider, settings.base_url) or "https://api.anthropic.com/v1"
+        return provider, base, f"{base.rstrip('/')}/models", {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+    if provider == "openai":
+        base = normalize_api_base(provider, settings.base_url) or "https://api.openai.com/v1"
+        return provider, base, f"{base.rstrip('/')}/models", {
+            "Authorization": f"Bearer {api_key}",
+        }
+    base = normalize_api_base(provider, settings.base_url)
+    return provider, base, f"{base.rstrip('/')}/models", {
+        "Authorization": f"Bearer {api_key}",
+    } if api_key else {}
+
+
+def _model_listing_error(
+    response: httpx.Response,
+    client: Any,
+    started: float,
+    *,
+    isolated: bool,
+) -> dict[str, Any] | None:
+    if response.status_code in {401, 403}:
+        message = "API Key 无效或无权读取模型列表"
+    elif response.status_code == 404:
+        message = "模型列表地址不存在，请检查 API 根地址"
+    else:
+        return None
+
+    from quantmaster.ai.llm import _api_error, llm_diagnostic_details, record_llm_failure
+
+    error = _api_error("模型目录", response)
+    if not isolated:
+        record_llm_failure(client.config, error)
+    return _result(
+        "error", message, started, models=[], **llm_diagnostic_details(client.config, error),
+    )
+
+
+def _model_ids(payload: dict[str, Any]) -> list[str]:
+    models: list[str] = []
+    for item in payload.get("data", payload.get("models", [])):
+        model_id = item.get("id") if isinstance(item, dict) else str(item)
+        if model_id:
+            models.append(str(model_id))
+    return models
+
+
+def _next_model_page(provider: str, base: str, payload: dict[str, Any]) -> str | None:
+    if provider != "anthropic" or not payload.get("has_more"):
+        return None
+    last_id = payload.get("last_id")
+    if not last_id:
+        return None
+    return str(httpx.URL(f"{base.rstrip('/')}/models").copy_add_param("after_id", str(last_id)))
+
+
 def list_llm_models(
     settings: LLMSettings, api_key: str = "", *, isolated: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    provider = settings.provider
-    if provider in {"anthropic", "openai"} and not api_key:
+    if settings.provider in {"anthropic", "openai"} and not api_key:
         return _result("error", "尚未配置 API Key", started, models=[])
-    headers: dict[str, str]
-    if provider == "anthropic":
-        base = normalize_api_base(provider, settings.base_url) or "https://api.anthropic.com/v1"
-        url = f"{base.rstrip('/')}/models"
-        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-    elif provider == "openai":
-        base = normalize_api_base(provider, settings.base_url) or "https://api.openai.com/v1"
-        url = f"{base.rstrip('/')}/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
-    else:
-        base = normalize_api_base(provider, settings.base_url)
-        url = f"{base.rstrip('/')}/models"
-        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    provider, base, url, headers = _model_catalog_endpoint(settings, api_key)
 
     from quantmaster.ai.llm import (
         LLMClient,
         LLMError,
-        _api_error,
         llm_diagnostic_details,
         record_llm_failure,
     )
@@ -89,33 +138,17 @@ def list_llm_models(
                 url, headers=headers, timeout=settings.timeout, follow_redirects=False,
                 record_health=not isolated,
             )
-            if response.status_code in {401, 403}:
-                error = _api_error("模型目录", response)
-                if not isolated:
-                    record_llm_failure(client.config, error)
-                return _result("error", "API Key 无效或无权读取模型列表", started, models=[],
-                               **llm_diagnostic_details(client.config, error))
-            if response.status_code == 404:
-                error = _api_error("模型目录", response)
-                if not isolated:
-                    record_llm_failure(client.config, error)
-                return _result("error", "模型列表地址不存在，请检查 API 根地址", started, models=[],
-                               **llm_diagnostic_details(client.config, error))
+            failure = _model_listing_error(response, client, started, isolated=isolated)
+            if failure is not None:
+                return failure
             response.raise_for_status()
             payload = response.json()
-            for item in payload.get("data", payload.get("models", [])):
-                model_id = item.get("id") if isinstance(item, dict) else str(item)
-                if model_id:
-                    models.append(str(model_id))
-            if provider != "anthropic" or not payload.get("has_more"):
-                break
-            last_id = payload.get("last_id")
-            if not last_id:
+            models.extend(_model_ids(payload))
+            next_url = _next_model_page(provider, base, payload)
+            if next_url is None:
                 break
             # Anthropic 使用 after_id 游标分页；保持用户原有 base URL。
-            url = str(httpx.URL(f"{base.rstrip('/')}/models").copy_add_param(
-                "after_id", str(last_id)
-            ))
+            url = next_url
         models = sorted(set(models), key=str.casefold)
         message = f"已读取 {len(models)} 个模型；列表不代表聊天接口兼容性"
         return _result("success", message, started, models=models,
@@ -387,56 +420,63 @@ def _connectivity_probes(
     return probes, disabled
 
 
-def check_data_sources(
-    timeout: float = 8.0,
-    data: DataSettings | None = None,
-) -> dict[str, Any]:
-    started = time.perf_counter()
-    probes, sources = _connectivity_probes(data)
+def _request_provider_endpoint(url: str, timeout: float) -> httpx.Response:
+    response = httpx.get(url, timeout=timeout, follow_redirects=True)
+    if response.status_code >= 400:
+        response.raise_for_status()
+    return response
 
-    def probe(package: str, lane: str, url: str) -> tuple[str, dict[str, str]]:
-        try:
-            from quantmaster.data.resilience import provider_call
 
-            def request_endpoint() -> httpx.Response:
-                response = httpx.get(url, timeout=timeout, follow_redirects=True)
-                if response.status_code >= 400:
-                    response.raise_for_status()
-                return response
+def _http_probe_failure(code: int) -> dict[str, str]:
+    if code == 429:
+        message, category, status = "真实行情端点限流（HTTP 429）", "rate-limit", "warning"
+    elif code == 401:
+        message, category, status = "真实行情端点认证失败（HTTP 401）", "authentication", "error"
+    elif code == 403:
+        message, category, status = "真实行情端点拒绝访问（HTTP 403）", "permission", "error"
+    elif code >= 500:
+        message, category, status = f"真实行情上游异常（HTTP {code}）", "upstream-5xx", "warning"
+    else:
+        message, category, status = f"真实行情端点拒绝请求（HTTP {code}）", "http-error", "warning"
+    return {"status": status, "message": message, "category": category}
 
-            response = provider_call(
-                lane, "settings-connectivity-probe",
-                request_endpoint,
-                probe=True,
-            )
-            return package, {
-                "status": "success",
-                "message": f"真实行情端点可达（HTTP {response.status_code}）",
-            }
-        except httpx.HTTPStatusError as exc:
-            code = exc.response.status_code
-            if code == 429:
-                message, category, status = "真实行情端点限流（HTTP 429）", "rate-limit", "warning"
-            elif code == 401:
-                message, category, status = "真实行情端点认证失败（HTTP 401）", "authentication", "error"
-            elif code == 403:
-                message, category, status = "真实行情端点拒绝访问（HTTP 403）", "permission", "error"
-            elif code >= 500:
-                message, category, status = (
-                    f"真实行情上游异常（HTTP {code}）", "upstream-5xx", "warning"
-                )
-            else:
-                message, category, status = (
-                    f"真实行情端点拒绝请求（HTTP {code}）", "http-error", "warning"
-                )
-            return package, {"status": status, "message": message, "category": category}
-        except Exception as exc:
-            return package, {
-                "status": "warning",
-                "message": f"依赖已安装，但行情网络不可达（{type(exc).__name__}）",
-                "category": "network",
-            }
 
+def _probe_data_source(
+    package: str,
+    lane: str,
+    url: str,
+    timeout: float,
+) -> tuple[str, dict[str, str]]:
+    try:
+        from quantmaster.data.resilience import provider_call
+
+        response = provider_call(
+            lane,
+            "settings-connectivity-probe",
+            lambda: _request_provider_endpoint(url, timeout),
+            probe=True,
+        )
+        return package, {
+            "status": "success",
+            "message": f"真实行情端点可达（HTTP {response.status_code}）",
+        }
+    except httpx.HTTPStatusError as exc:
+        return package, _http_probe_failure(exc.response.status_code)
+    except Exception as exc:
+        return package, {
+            "status": "warning",
+            "message": f"依赖已安装，但行情网络不可达（{type(exc).__name__}）",
+            "category": "network",
+        }
+
+
+def _collect_connectivity_sources(
+    probes: dict[str, tuple[str, str]],
+    sources: dict[str, Any],
+    timeout: float,
+) -> None:
+    if not probes:
+        return
     with ThreadPoolExecutor(max_workers=len(probes)) as pool:
         futures = []
         for package, (lane, url) in probes.items():
@@ -447,10 +487,34 @@ def check_data_sources(
                     "category": "missing-dependency",
                 }
             else:
-                futures.append(pool.submit(probe, package, lane, url))
+                futures.append(pool.submit(_probe_data_source, package, lane, url, timeout))
         for future in as_completed(futures):
             package, result = future.result()
             sources[package] = result
+
+
+def _configured_proxies() -> dict[str, str]:
+    proxies: dict[str, str] = {}
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        raw = os.environ.get(name) or os.environ.get(name.lower())
+        if not raw:
+            continue
+        parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        proxies[name] = f"{parsed.scheme}://{parsed.hostname or '已配置'}{f':{port}' if port else ''}"
+    return proxies
+
+
+def check_data_sources(
+    timeout: float = 8.0,
+    data: DataSettings | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    probes, sources = _connectivity_probes(data)
+    _collect_connectivity_sources(probes, sources, timeout)
 
     sources.update(_check_free_stockdb(data, timeout))
     sources.update(_check_free_stockdb_online(data, timeout))
@@ -463,22 +527,10 @@ def check_data_sources(
     from quantmaster.data.instruments import instrument_diagnostics
     from quantmaster.data.resilience import PROVIDER_HEALTH
 
-    proxies: dict[str, str] = {}
-    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
-        raw = os.environ.get(name) or os.environ.get(name.lower())
-        if not raw:
-            continue
-        parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
-        host = parsed.hostname or "已配置"
-        try:
-            port = parsed.port
-        except ValueError:
-            port = None
-        proxies[name] = f"{parsed.scheme}://{host}{f':{port}' if port else ''}"
     overall = "success" if all(v["status"] == "success" for v in sources.values()) else "warning"
     return _result(
         overall, "数据源依赖、真实行情端点与熔断状态检测完成", started,
-        sources=sources, circuits=PROVIDER_HEALTH.status(), proxies=proxies,
+        sources=sources, circuits=PROVIDER_HEALTH.status(), proxies=_configured_proxies(),
         security_master=instrument_diagnostics(),
     )
 
