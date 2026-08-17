@@ -1,4 +1,4 @@
-from quantmaster.operational_diagnostics import _market_session_metrics
+from quantmaster.server.operational_diagnostics import _market_session_metrics
 
 
 def test_partial_stockdb_status_has_stable_session_diagnostic() -> None:
