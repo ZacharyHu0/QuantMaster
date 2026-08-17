@@ -1352,6 +1352,32 @@ class TestBasics:
 
         assert market_overview._local_projection_end() == pd.Timestamp("2026-08-17")
 
+    def test_market_overview_local_end_prefers_newer_accepted_stockdb_session(
+        self, monkeypatch, tmp_path,
+    ):
+        from quantmaster.market import overview as market_overview
+
+        (tmp_path / ".quantmaster-update.json").write_text(json.dumps({
+            "schema_version": 2,
+            "validated_session": "2026-08-17",
+            "target_session": "2026-08-17",
+            "validation": {
+                "accepted": True,
+                "complete": False,
+                "target_session": "2026-08-17",
+                "actual_session": "2026-08-17",
+            },
+        }), encoding="utf-8")
+        monkeypatch.setattr(
+            market_overview, "default_close_data_end", lambda: "2026-08-13",
+        )
+        monkeypatch.setattr(
+            "quantmaster.config.get_config",
+            lambda: SimpleNamespace(free_stockdb_root=tmp_path),
+        )
+
+        assert market_overview._local_projection_end() == pd.Timestamp("2026-08-17")
+
     def test_market_overview_local_end_uses_market_date_without_stockdb_marker(
         self, monkeypatch, tmp_path,
     ):

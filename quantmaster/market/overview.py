@@ -30,12 +30,13 @@ def _local_projection_end() -> pd.Timestamp:
 
     Formal close-data consumers need a *completed* session and must keep using
     ``default_close_data_end``.  This projection only reads already-cached
-    bars, so an accepted-but-partial local StockDB session is valid display
-    evidence; fall back to it before using the market calendar date.
+    bars, so a newer accepted-but-partial local StockDB session is valid
+    display evidence; use the newest local endpoint before the market date.
     """
 
+    formal_end = None
     try:
-        return pd.Timestamp(default_close_data_end())
+        formal_end = pd.Timestamp(default_close_data_end())
     except (SessionTargetUnavailable, OSError, RuntimeError, ValueError, sqlite3.Error):
         pass
     from quantmaster.config import get_config
@@ -54,10 +55,11 @@ def _local_projection_end() -> pd.Timestamp:
             and str(validation.get("target_session") or "") == session
             and str(validation.get("actual_session") or "") == session
         ):
-            return pd.Timestamp(session)
+            local_end = pd.Timestamp(session)
+            return max(formal_end, local_end) if formal_end is not None else local_end
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         pass
-    return pd.Timestamp(market_date())
+    return formal_end if formal_end is not None else pd.Timestamp(market_date())
 
 
 def _series_to_points(series: pd.Series) -> list[list]:
