@@ -574,6 +574,38 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         browser.close()
 
 
+def test_classic_theme_is_default_without_overwriting_stored_choice(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch(headless=True)
+        cases = (
+            ("", "classic"),
+            ("localStorage.setItem('qm-theme', 'ink')", "ink"),
+            ("""
+              const getItem = Storage.prototype.getItem;
+              Storage.prototype.getItem = function(key) {
+                if (key !== 'qm-theme') return getItem.call(this, key);
+                Storage.prototype.getItem = getItem;
+                throw new Error('blocked');
+              };
+            """, "classic"),
+        )
+        for init_script, expected in cases:
+            page = browser.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error, items=errors: items.append(str(error)))
+            if init_script:
+                page.add_init_script(init_script)
+            page.goto(url)
+            page.wait_for_load_state("networkidle")
+
+            assert page.locator("html").get_attribute("data-qm-theme") == expected
+            assert page.locator(f"#qm-theme-{expected}").is_checked()
+            assert errors == []
+            page.close()
+        browser.close()
+
+
 def test_fear_greed_gauge_animates_normally_and_respects_reduced_motion(live_server):
     url, _ = live_server
     fear_greed = {
