@@ -380,6 +380,8 @@ class GenerationController(Protocol):
 
     def drain_current(self, timeout: float) -> None: ...
 
+    def resume_current(self, timeout: float) -> None: ...
+
     def stop_current(self, timeout: float) -> None: ...
 
     def start_generation(self, slot: Path, identity: ApplicationIdentity) -> object: ...
@@ -406,6 +408,7 @@ class SubprocessGenerationController:
         self.host = host
         self.port = int(port)
         self._drain_identity: ApplicationIdentity | None = None
+        self._drain_token = ""
 
     def _json(self, path: str) -> Mapping[str, object] | None:
         try:
@@ -436,7 +439,7 @@ class SubprocessGenerationController:
                 str(current.get("slot_id") or ""),
                 str(current.get("runtime_generation") or ""),
             )
-            call_worker_command(
+            result = call_worker_command(
                 "maintenance.enter",
                 {"reason": "application activation", "timeout": min(timeout, 10.0)},
                 timeout=min(timeout, 1.0),
@@ -445,6 +448,25 @@ class SubprocessGenerationController:
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法排空") from exc
         self._drain_identity = identity
+        self._drain_token = str(result.get("token") or "")
+
+    def resume_current(self, timeout: float) -> None:
+        identity, token = self._drain_identity, self._drain_token
+        if identity is None or not token:
+            return
+        from quantmaster.runtime.worker_ipc import call_worker_command
+
+        try:
+            call_worker_command(
+                "maintenance.exit",
+                {"token": token},
+                timeout=min(timeout, 1.0),
+                application_identity=identity,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法恢复") from exc
+        self._drain_identity = None
+        self._drain_token = ""
 
     def stop_current(self, timeout: float) -> None:
         from quantmaster.runtime.windows_app import terminate_root_job
@@ -608,6 +630,8 @@ class ActivationCoordinator:
         try:
             if current_stopped:
                 self._start_and_wait(previous, self.rollback_timeout)
+            else:
+                self.controller.resume_current(self.rollback_timeout)
             committed = self.registry.rollback(failure)
         except _ACTIVATION_FAILURES as rollback_exc:
             self.registry.mark_blocked(

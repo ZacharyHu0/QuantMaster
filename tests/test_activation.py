@@ -64,9 +64,10 @@ class _Generation:
 
 
 class FakeController:
-    def __init__(self, current: str = "", *, fail: str = "") -> None:
+    def __init__(self, current: str = "", *, fail: str = "", fail_stop: bool = False) -> None:
         self.current = current
         self.fail = fail
+        self.fail_stop = fail_stop
         self.calls: list[tuple[str, str]] = []
 
     def current_identity(self):
@@ -77,8 +78,13 @@ class FakeController:
     def drain_current(self, _timeout: float) -> None:
         self.calls.append(("drain", self.current))
 
+    def resume_current(self, _timeout: float) -> None:
+        self.calls.append(("resume", self.current))
+
     def stop_current(self, _timeout: float) -> None:
         self.calls.append(("stop-current", self.current))
+        if self.fail_stop:
+            raise ActivationBlocked("current_stop_failed", "fixture failure")
         self.current = ""
 
     def start_generation(self, _slot: Path, identity: ApplicationIdentity):
@@ -146,6 +152,22 @@ def test_candidate_failure_rolls_back_previous_slot(tmp_path):
     assert registry.read()["pending"] == ""
     assert (tmp_path / "launcher.target").read_text(encoding="ascii") == f"{SHA_A}\n"
     assert ("start", SHA_A) in controller.calls
+
+
+def test_stop_failure_releases_drain_before_retry(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController(SHA_A, fail_stop=True)
+
+    assert ActivationCoordinator(registry, controller).activate(SHA_B)["status"] == "rolled_back"
+    assert controller.calls == [
+        ("drain", SHA_A), ("stop-current", SHA_A), ("resume", SHA_A),
+    ]
+
+    controller.fail_stop = False
+    assert ActivationCoordinator(registry, controller).activate(SHA_B)["status"] == "activated"
 
 
 def test_failed_first_activation_is_retryable_without_registry_repair(tmp_path):
@@ -277,3 +299,29 @@ def test_packaged_worker_readiness_comes_from_candidate_http_projection(monkeypa
     health = controller.wait_ready(_Generation(SHA_B), identity, 0.2)
 
     assert health["build_sha"] == SHA_B
+
+
+def test_packaged_controller_releases_the_drain_lease(monkeypatch):
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller = SubprocessGenerationController()
+    calls = []
+
+    monkeypatch.setattr(controller, "_json", lambda _path: {
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
+    })
+
+    def command(operation, payload, **kwargs):
+        calls.append((operation, payload, kwargs["application_identity"]))
+        return {"token": "lease"} if operation == "maintenance.enter" else {"released": True}
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
+
+    controller.drain_current(0.2)
+    controller.resume_current(0.2)
+
+    assert calls == [
+        ("maintenance.enter", {"reason": "application activation", "timeout": 0.2}, identity),
+        ("maintenance.exit", {"token": "lease"}, identity),
+    ]
