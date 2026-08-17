@@ -16,7 +16,6 @@ from quantmaster.automation.channels.feishu import FeishuBotClient, feishu_conne
 from quantmaster.automation.channels.weixin import WeixinClawBotClient
 from quantmaster.automation.commands import BotCommandRouter
 from quantmaster.automation.delivery import OutboxDispatcher, format_alert, format_feishu_card
-from quantmaster.automation.migration import automation_contract_migrator
 from quantmaster.automation.models import ActorContext, AlertEvent
 from quantmaster.automation.news import importance_score, news_event
 from quantmaster.automation.policy import EVENT_KINDS, policy_allows, resolved_policy
@@ -24,6 +23,7 @@ from quantmaster.automation.runtime import AutomationRuntime
 from quantmaster.automation.service import NEWS_TASKS, AutomationService
 from quantmaster.automation.store import AutomationStore
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+from quantmaster.data.migration import automation_contract_migrator
 from quantmaster.server.app import app
 from quantmaster.trading_sessions import SessionExpectation
 

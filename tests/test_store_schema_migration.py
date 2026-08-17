@@ -5,8 +5,7 @@ import sqlite3
 
 import pytest
 
-from quantmaster.data.migration import backup_sqlite_tree
-from quantmaster.data.store_schema_migration import StoreSchemaMigrator
+from quantmaster.data.migration import StoreSchemaMigrator, backup_sqlite_tree
 from quantmaster.lab.store import LabSchemaMigrationRequired, LabStore
 from quantmaster.rotation.store import RotationSchemaMigrationRequired, RotationStore
 

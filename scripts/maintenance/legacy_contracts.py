@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from quantmaster.data.legacy_migration import (
+from quantmaster.data.migration import (
     LegacyMigrationManager,
     OfflineMaintenanceEvidence,
 )

@@ -21,12 +21,13 @@ from pydantic import Field
 
 from quantmaster.config import get_config
 from quantmaster.credentials import CredentialError
-from quantmaster.data.legacy_migration import (
+from quantmaster.data.migration import (
     LegacyMigrationError,
+    MigrationError,
     legacy_migration_manager,
+    migration_manager,
     registered_migrations,
 )
-from quantmaster.data.migration import MigrationError, migration_manager
 from quantmaster.runtime.activation import ActivationBlocked
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.problems import OperationProblem, make_problem

@@ -472,7 +472,7 @@ def test_after_close_current_decoder_never_guesses_old_or_damaged_payload(servic
 
 
 def test_after_close_one_shot_migration_uses_schema_label_and_leaves_new_facts_empty(service) -> None:
-    from quantmaster.after_close.migration import (
+    from quantmaster.data.migration import (
         inspect_after_close_snapshots,
         migrate_after_close_batch,
     )
@@ -511,7 +511,7 @@ def test_after_close_one_shot_migration_uses_schema_label_and_leaves_new_facts_e
 
 
 def test_after_close_damaged_current_is_not_misclassified_as_old(service) -> None:
-    from quantmaster.after_close.migration import inspect_after_close_snapshots
+    from quantmaster.data.migration import inspect_after_close_snapshots
     from quantmaster.runtime.sqlite import connect_sqlite
 
     snapshot = service.scan()

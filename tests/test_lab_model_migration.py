@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from quantmaster.lab.model_migration import LabModelArtifactMigrator
+from quantmaster.data.migration import LabModelArtifactMigrator
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.store import LabStore
 

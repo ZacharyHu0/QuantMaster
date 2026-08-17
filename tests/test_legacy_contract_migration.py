@@ -8,17 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from quantmaster.data.legacy_migration import (
+from quantmaster.data.migration import (
+    BACKUP_MARKER,
     LegacyMigrationError,
     LegacyMigrationManager,
     MigrationRecord,
     OfflineMaintenanceEvidence,
+    backup_sqlite_tree,
     register_migrator,
     registered_migrations,
-)
-from quantmaster.data.migration import (
-    BACKUP_MARKER,
-    backup_sqlite_tree,
     restore_backup_path,
     validate_backup_tree,
 )
@@ -79,10 +77,16 @@ def test_status_read_does_not_create_state_database(tmp_path):
 
 
 def test_builtin_domain_migrations_are_registered_without_touching_data(tmp_path):
+    registered = set(registered_migrations())
     assert {
         "market_data", "decision", "after_close", "news", "automation-contract-v9",
-        "paper-ledger", "backtest-jobs",
-    } <= set(registered_migrations())
+        "paper-ledger", "startup-schema", "backtest-jobs", "store-schema",
+        "data-jobs", "lab-jobs", "research-jobs", "remaining-schema",
+        "lab-model-artifact",
+    } <= registered
+    assert not {
+        "startup-schemas", "store-schemas", "remaining-schemas", "lab-model-artifacts",
+    } & registered
     assert not (tmp_path / "legacy_contract_migrations.sqlite").exists()
 
 

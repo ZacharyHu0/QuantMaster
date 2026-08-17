@@ -4,8 +4,7 @@ import json
 import sqlite3
 from contextlib import closing
 
-from quantmaster.data.migration import backup_sqlite_tree
-from quantmaster.lab.job_migration import LabJobLegacyMigrator
+from quantmaster.data.migration import LabJobLegacyMigrator, backup_sqlite_tree
 from quantmaster.lab.jobs import LabJobManager
 from quantmaster.lab.store import LabStore
 from quantmaster.runtime.jobs import UnifiedJobStore
@@ -228,7 +227,7 @@ def test_lab_job_migration_rejects_dangling_trial_and_artifact_before_writing(tm
 def test_lab_job_migration_is_idempotent_after_partial_target_import(tmp_path):
     _legacy_lab(tmp_path)
     migrator = LabJobLegacyMigrator()
-    from quantmaster.lab.job_migration import _convert
+    from quantmaster.data.migration import lab_job_convert as _convert
 
     with closing(connect := sqlite3.connect(tmp_path / "lab.sqlite")):
         connect.row_factory = sqlite3.Row
