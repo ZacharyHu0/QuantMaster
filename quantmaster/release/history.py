@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.16.2"
-RELEASE_DATE = "2026-08-16"
+VERSION = "1.17.0"
+RELEASE_DATE = "2026-08-17"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -24,6 +24,51 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "运行时更新与恢复",
+                "items": (
+                    (
+                        "已验证的本地发行槽在更新时调用规范的 "
+                        "`quantmaster.server.cli` 入口；根模块迁移后不再指向已删除的服务入口，"
+                        "激活链路保持单一路径。"
+                    ),
+                    (
+                        "更新激活在 drain 阶段失败时会释放失败的租约，后续受验证的激活或回滚可继续执行。"
+                    ),
+                ),
+            },
+            {
+                "title": "并行开发与 Windows 可靠性",
+                "items": (
+                    (
+                        "任务生命周期由受控锁和干净 main 控制面保护；并行任务的 worktree、"
+                        "pytest 临时状态和运行时工件彼此隔离。"
+                    ),
+                    (
+                        "Windows 清理在受限 ACL 情况下使用已验证的父级恢复路径；"
+                        "恢复失败仍保留证据并显式失败，不会扩大删除范围。"
+                    ),
+                ),
+            },
+            {
+                "title": "模块边界与迁移稳定性",
+                "items": (
+                    (
+                        "发布历史迁入 `quantmaster.release` 包内部，公开运行时版本接口保持不变；"
+                        "低扇出根模块继续收敛到所属领域。"
+                    ),
+                    (
+                        "数据迁移实现合并为单一模块，并保留持久化迁移域的稳定标识；"
+                        "旧记录不会被静默重解释为新契约。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.16.2",
+        "date": "2026-08-16",
         "sections": (
             {
                 "title": "A 股恐贪指数",
