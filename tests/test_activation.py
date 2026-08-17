@@ -347,6 +347,35 @@ def test_packaged_controller_releases_the_drain_lease(monkeypatch):
     controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 10.0),
+        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 15.0),
         ("maintenance.exit", {"token": "lease"}, identity, 10.0),
+    ]
+
+
+def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch):
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller = SubprocessGenerationController()
+    calls = []
+
+    monkeypatch.setattr(controller, "_json", lambda _path: {
+        "build_sha": identity.build_sha,
+        "slot_id": identity.slot_id,
+        "runtime_generation": identity.runtime_generation,
+    })
+
+    def command(operation, payload, **kwargs):
+        calls.append((operation, payload, kwargs["application_identity"], kwargs["timeout"]))
+        if operation == "maintenance.enter":
+            raise RuntimeError("reply lost after maintenance entered")
+        assert operation == "maintenance.status"
+        return {"state": "frozen", "reason": "application activation"}
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
+
+    controller.drain_current(15.0)
+    controller.resume_current(15.0)
+
+    assert calls == [
+        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 15.0),
+        ("maintenance.status", {"token": ""}, identity, 15.0),
     ]
