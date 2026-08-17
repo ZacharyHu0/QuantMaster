@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.6"
+VERSION = "1.17.7"
 RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -26,15 +26,15 @@ RELEASES = (
         "date": RELEASE_DATE,
         "sections": (
             {
-                "title": "更新维护预检恢复",
+                "title": "更新维护协调恢复",
                 "items": (
                     (
-                        "更新 helper 会在进入维护前预检当前 runtime-worker；"
-                        "已确认的应用更新冻结可直接接管并继续切换。"
+                        "更新 helper 在维护进入回复短暂丢失后会有界重试状态确认；"
+                        "已建立的应用更新冻结会被安全接管并继续切换。"
                     ),
                     (
-                        "非更新来源的维护冻结继续明确阻断，"
-                        "不会把可达 worker 误判为不可用或放宽回滚边界。"
+                        "排空未确认时结果会给出维护状态协调阶段并安全回滚；"
+                        "非更新维护冻结和身份、数据根检查仍严格阻断。"
                     ),
                 ),
             },
