@@ -4,8 +4,9 @@ import sqlite3
 
 import pytest
 
+from quantmaster import data as quantmaster_data
 from quantmaster.backtest.paper_accounts import PaperService, PaperStore
-from quantmaster.backtest.paper_legacy_migration import (
+from quantmaster.data.migration import (
     ACCOUNT_ID,
     DIAGNOSTIC_CODE,
     SOURCE_NAME,
@@ -112,10 +113,14 @@ def test_paper_migrator_recovers_copy_before_registration_without_orphan(
 ):
     _legacy_ledger(tmp_path / SOURCE_NAME)
     migrator = PaperLegacyMigrator()
-    from quantmaster.backtest import paper_legacy_migration as module
+    from quantmaster.data.migration import _insert_import
 
-    real_insert = module._insert_import
-    monkeypatch.setattr(module, "_insert_import", lambda *_: (_ for _ in ()).throw(OSError("crash")))
+    real_insert = _insert_import
+    monkeypatch.setattr(
+        quantmaster_data.migration,
+        "_insert_import",
+        lambda *_: (_ for _ in ()).throw(OSError("crash")),
+    )
     with pytest.raises(OSError, match="crash"):
         list(migrator.migrate_batch(tmp_path, after_key="", limit=1))
 
@@ -125,7 +130,7 @@ def test_paper_migrator_recovers_copy_before_registration_without_orphan(
     assert marker.is_file()
     assert not list((tmp_path / "paper_accounts").rglob("*migration-staging*"))
 
-    monkeypatch.setattr(module, "_insert_import", real_insert)
+    monkeypatch.setattr(quantmaster_data.migration, "_insert_import", real_insert)
     result = list(migrator.migrate_batch(tmp_path, after_key="", limit=1))
     assert result[0].outcome == "blank"
     assert not marker.exists()

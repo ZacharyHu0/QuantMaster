@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from quantmaster.ai.crawler import NewsItem, NewsStore
-from quantmaster.ai.news_migration import NEWS_ARCHIVE_TABLES, NewsContractMigrator
 from quantmaster.ai.news_storage import NewsSchemaMigrationRequired
+from quantmaster.data.migration import NEWS_ARCHIVE_TABLES, NewsContractMigrator
 
 
 def _legacy_database(path, *, symbols="[]", sectors="[]"):

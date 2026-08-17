@@ -4,11 +4,10 @@ import json
 import sqlite3
 from contextlib import closing
 
-from quantmaster.backtest.job_migration import BacktestJobLegacyMigrator
 from quantmaster.backtest.jobs import BACKTEST_TASK_TYPE, BacktestJobManager
 from quantmaster.backtest.spec import BacktestSpec
 from quantmaster.backtest.workbench import BacktestStore
-from quantmaster.data.migration import backup_sqlite_tree
+from quantmaster.data.migration import BacktestJobLegacyMigrator, backup_sqlite_tree
 from quantmaster.runtime.jobs import UnifiedJobStore
 
 
@@ -210,7 +209,7 @@ def test_backtest_job_migration_rejects_lease_and_target_conflicts_before_source
 def test_backtest_job_migration_is_idempotent_after_partial_target_import(tmp_path):
     _legacy_database(tmp_path)
     migrator = BacktestJobLegacyMigrator()
-    from quantmaster.backtest.job_migration import _convert
+    from quantmaster.data.migration import backtest_job_convert as _convert
 
     with closing(connecting := sqlite3.connect(tmp_path / "backtests.sqlite")):
         connecting.row_factory = sqlite3.Row

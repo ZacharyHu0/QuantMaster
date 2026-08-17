@@ -9,7 +9,7 @@ from quantmaster.backtest.paper_accounts import (
     PaperSchemaMigrationRequired,
     PaperStore,
 )
-from quantmaster.data.startup_schema_migration import StartupSchemaMigrator
+from quantmaster.data.migration import StartupSchemaMigrator
 from quantmaster.runtime.jobs import JobSchemaMigrationRequired, UnifiedJobStore
 
 

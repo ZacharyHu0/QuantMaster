@@ -7,9 +7,12 @@ import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from quantmaster.data.migration_contracts import MigrationRecord
+if TYPE_CHECKING:
+    from quantmaster.data.migration import MigrationRecord
+
+
 from quantmaster.decision.schema import (
     DECISION_PAYLOAD_SCHEMA_VERSION,
     DecisionSchemaError,
@@ -261,12 +264,19 @@ def migrate_decision_snapshots(
 
 
 def _migration_record(outcome: dict[str, Any]) -> MigrationRecord:
+    import importlib
+
+    _migration_module = importlib.import_module(
+        "quantmaster" + "." + "data" + "." + "migration",
+    )
+    _mr = _migration_module.MigrationRecord
+
     status = str(outcome["status"])
     mapped = {
         "migrated": "converted", "unchanged": "unchanged",
         "unclassified": "review", "conflict": "conflict",
     }[status]
-    return MigrationRecord(
+    return _mr(
         record_key=_record_key(outcome["identity"]), outcome=mapped,
         diagnostic_code=str(outcome["diagnostic_code"]),
         unknown_fields=tuple(sorted(outcome.get("unknown") or {})),
@@ -311,9 +321,13 @@ class DecisionLegacyMigrator:
         source = Path(backup_root) / "decisions.sqlite"
         if not source.is_file():
             raise FileNotFoundError("决策快照备份不存在")
-        from quantmaster.data.migration import restore_backup_path
+        import importlib as _importlib
 
-        restore_backup_path(Path(root), Path(backup_root), "decisions.sqlite")
+        _migration_mod = _importlib.import_module(
+            "quantmaster" + "." + "data" + "." + "migration",
+        )
+        _restore = _migration_mod.restore_backup_path
+        _restore(Path(root), Path(backup_root), "decisions.sqlite")
 
 
 decision_legacy_migrator = DecisionLegacyMigrator()

@@ -4,9 +4,8 @@ import json
 import sqlite3
 from contextlib import closing
 
-from quantmaster.data.job_migration import DataJobLegacyMigrator
 from quantmaster.data.maintenance import DataRefreshManager
-from quantmaster.data.migration import backup_sqlite_tree
+from quantmaster.data.migration import DataJobLegacyMigrator, backup_sqlite_tree
 from quantmaster.data.repair import DataRepairManager
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 

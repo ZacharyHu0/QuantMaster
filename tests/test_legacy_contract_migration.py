@@ -8,17 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from quantmaster.data.legacy_migration import (
+from quantmaster.data.migration import (
+    BACKUP_MARKER,
     LegacyMigrationError,
     LegacyMigrationManager,
     MigrationRecord,
     OfflineMaintenanceEvidence,
+    backup_sqlite_tree,
     register_migrator,
     registered_migrations,
-)
-from quantmaster.data.migration import (
-    BACKUP_MARKER,
-    backup_sqlite_tree,
     restore_backup_path,
     validate_backup_tree,
 )

@@ -241,7 +241,7 @@ class TestIndustryMapCache:
         self, isolated_config, monkeypatch,
     ):
         from quantmaster.data import industry as mod
-        from quantmaster.data.legacy_migrations import migrate_industry_current_projection
+        from quantmaster.data.migration import migrate_industry_current_projection
 
         projection = isolated_config.data_root / "industry_map.json"
         projection.write_text(

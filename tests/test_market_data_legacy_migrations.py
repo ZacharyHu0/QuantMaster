@@ -6,15 +6,15 @@ import sqlite3
 import pandas as pd
 import pytest
 
-from quantmaster.data.legacy_migrations import (
+from quantmaster.data.migration import (
     MarketDataLegacyMigrator,
+    backup_sqlite_tree,
     migrate_bar_filenames,
     migrate_index_membership,
     migrate_industry_current_projection,
     migrate_instrument_names,
     migrate_rotation_etf_artifacts,
 )
-from quantmaster.data.migration import backup_sqlite_tree
 
 
 def _catalog(path, rows):

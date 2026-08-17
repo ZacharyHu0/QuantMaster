@@ -4,10 +4,9 @@ import json
 import sqlite3
 from contextlib import closing
 
-from quantmaster.data.migration import backup_sqlite_tree
+from quantmaster.data.migration import ResearchJobLegacyMigrator, backup_sqlite_tree
 from quantmaster.research import AssetClass, ExecutionPlan, Frequency, PlanTask
 from quantmaster.research.catalog import ResearchCatalog
-from quantmaster.research.job_migration import ResearchJobLegacyMigrator
 from quantmaster.research.jobs import ResearchJobManager
 from quantmaster.runtime.jobs import UnifiedJobStore
 

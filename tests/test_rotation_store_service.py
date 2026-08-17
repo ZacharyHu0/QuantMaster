@@ -617,7 +617,7 @@ def test_legacy_taxonomy_backfill_adds_identity_without_inventing_effective_date
             ),
         )
 
-    from quantmaster.data.store_schema_migration import StoreSchemaMigrator
+    from quantmaster.data.migration import StoreSchemaMigrator
 
     record = next(iter(StoreSchemaMigrator().migrate_batch(
         tmp_path, after_key="", limit=3,
