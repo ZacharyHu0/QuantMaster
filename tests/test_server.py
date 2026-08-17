@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -1316,6 +1317,90 @@ class TestBasics:
         assert indexes["000698.SH"] == "科创100"
         assert indexes["399006.SZ"] == "创业板指"
         assert indexes["399673.SZ"] == "创业板50"
+
+    def test_market_overview_local_end_falls_back_to_accepted_stockdb_session(
+        self, monkeypatch, tmp_path,
+    ):
+        from quantmaster.market import overview as market_overview
+        from quantmaster.trading_sessions import (
+            SessionExpectation,
+            SessionTargetUnavailable,
+        )
+
+        marker = tmp_path / ".quantmaster-update.json"
+        marker.write_text(json.dumps({
+            "schema_version": 2,
+            "validated_session": "2026-08-17",
+            "target_session": "2026-08-17",
+            "validation": {
+                "accepted": True,
+                "complete": False,
+                "target_session": "2026-08-17",
+                "actual_session": "2026-08-17",
+            },
+        }), encoding="utf-8")
+
+        expectation = SessionExpectation(reason="provider published, local incomplete")
+        monkeypatch.setattr(
+            market_overview, "default_close_data_end",
+            lambda: (_ for _ in ()).throw(SessionTargetUnavailable(expectation)),
+        )
+        monkeypatch.setattr(
+            "quantmaster.config.get_config",
+            lambda: SimpleNamespace(free_stockdb_root=tmp_path),
+        )
+
+        assert market_overview._local_projection_end() == pd.Timestamp("2026-08-17")
+
+    def test_market_overview_local_end_prefers_newer_accepted_stockdb_session(
+        self, monkeypatch, tmp_path,
+    ):
+        from quantmaster.market import overview as market_overview
+
+        (tmp_path / ".quantmaster-update.json").write_text(json.dumps({
+            "schema_version": 2,
+            "validated_session": "2026-08-17",
+            "target_session": "2026-08-17",
+            "validation": {
+                "accepted": True,
+                "complete": False,
+                "target_session": "2026-08-17",
+                "actual_session": "2026-08-17",
+            },
+        }), encoding="utf-8")
+        monkeypatch.setattr(
+            market_overview, "default_close_data_end", lambda: "2026-08-13",
+        )
+        monkeypatch.setattr(
+            "quantmaster.config.get_config",
+            lambda: SimpleNamespace(free_stockdb_root=tmp_path),
+        )
+
+        assert market_overview._local_projection_end() == pd.Timestamp("2026-08-17")
+
+    def test_market_overview_local_end_uses_market_date_without_stockdb_marker(
+        self, monkeypatch, tmp_path,
+    ):
+        from quantmaster.market import overview as market_overview
+        from quantmaster.trading_sessions import (
+            SessionExpectation,
+            SessionTargetUnavailable,
+        )
+
+        expectation = SessionExpectation(reason="unavailable")
+        monkeypatch.setattr(
+            market_overview, "default_close_data_end",
+            lambda: (_ for _ in ()).throw(SessionTargetUnavailable(expectation)),
+        )
+        monkeypatch.setattr(
+            "quantmaster.config.get_config",
+            lambda: SimpleNamespace(free_stockdb_root=tmp_path),
+        )
+        monkeypatch.setattr(
+            market_overview, "market_date", lambda: pd.Timestamp("2026-08-18"),
+        )
+
+        assert market_overview._local_projection_end() == pd.Timestamp("2026-08-18")
 
     def test_market_overview_route_reads_only_a_published_snapshot(self, monkeypatch, isolated_config):
         from quantmaster.market import overview as market_overview

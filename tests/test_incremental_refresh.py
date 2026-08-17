@@ -68,7 +68,7 @@ def test_node_generations_invalidate_only_their_dependency_cut(tmp_path):
     store = RotationStore(tmp_path / "rotation")
     service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
     state = _local_state()
-    service._local_input_state = lambda: state  # type: ignore[method-assign]
+    service._local_input_state = lambda **_: state  # type: ignore[method-assign]
     store.replace_taxonomy_nodes([
         {"code": "801080.SI", "name": "电子", "level": "L1", "members": ["600000.SH"]},
     ])
@@ -103,7 +103,7 @@ def test_matching_published_nodes_short_circuit_before_matrix_read(tmp_path, mon
     store = RotationStore(tmp_path / "rotation")
     service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
     state = _local_state()
-    service._local_input_state = lambda: state  # type: ignore[method-assign]
+    service._local_input_state = lambda **_: state  # type: ignore[method-assign]
     monkeypatch.setattr(
         "quantmaster.rotation.service._expected_market_session", lambda: "2026-08-10",
     )
@@ -127,7 +127,7 @@ def test_etf_generation_only_recomputes_temperature_and_etf_nodes(tmp_path, monk
     store = RotationStore(tmp_path / "rotation")
     service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
     state = _local_state()
-    service._local_input_state = lambda: state  # type: ignore[method-assign]
+    service._local_input_state = lambda **_: state  # type: ignore[method-assign]
     dates = pd.bdate_range("2026-03-02", periods=100)
     symbols = [f"{600000 + index:06d}.SH" for index in range(40)]
     returns = np.random.default_rng(11).normal(0.0004, 0.012, (len(dates), len(symbols)))
@@ -137,7 +137,8 @@ def test_etf_generation_only_recomputes_temperature_and_etf_nodes(tmp_path, monk
     names = {symbol: f"股票{index}" for index, symbol in enumerate(symbols)}
     market_reads: list[str] = []
 
-    def load_values(*, progress, cancelled):
+    def load_values(*, progress, cancelled, target_as_of=""):
+        assert target_as_of == ""
         assert not cancelled()
         market_reads.append("read")
         return close, amount, names, len(symbols), ["test:local"]
