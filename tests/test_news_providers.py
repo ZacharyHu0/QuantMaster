@@ -61,6 +61,81 @@ def test_json_news_contract_rejects_html_interstitial_before_persistence():
     assert error.value.result_kind == CacheResultKind.INVALID_RESPONSE
 
 
+def test_html_news_contract_accepts_bytes_without_interstitial_markers():
+    _validate_http_representation(
+        {"id": "custom-html", "kind": "html"},
+        b"<HTML><title>Ordinary news page</title></HTML>",
+        httpx.Headers({"content-type": "text/html"}),
+    )
+
+
+def test_csrc_news_contract_accepts_declared_json_representation():
+    _validate_http_representation(
+        _source("csrc"),
+        b'{"data":{"results":[]}}',
+        httpx.Headers({"content-type": "application/json;charset=UTF-8"}),
+    )
+
+
+@pytest.mark.parametrize("failure", ["connect", "read"])
+def test_fetch_retries_one_transient_transport_failure(monkeypatch, failure):
+    real_client = httpx.Client
+    requests: list[str] = []
+    sleeps: list[float] = []
+
+    class FailingStream(httpx.SyncByteStream):
+        def __init__(self, request: httpx.Request):
+            self.request = request
+
+        def __iter__(self):
+            raise httpx.ReadTimeout("response interrupted", request=self.request)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if len(requests) == 1:
+            if failure == "connect":
+                raise httpx.ConnectTimeout("handshake timed out", request=request)
+            return httpx.Response(
+                200, stream=FailingStream(request),
+                headers={"content-type": "application/json"}, request=request,
+            )
+        return httpx.Response(
+            200,
+            content=b'{"items":[]}',
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    monkeypatch.setattr(
+        "quantmaster.ai.news_sources.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        "quantmaster.ai.news_sources.httpx.Client",
+        lambda **_kwargs: real_client(
+            transport=httpx.MockTransport(handler), follow_redirects=False,
+        ),
+    )
+    monkeypatch.setattr("quantmaster.ai.news_sources.time.sleep", sleeps.append)
+
+    class Store:
+        @staticmethod
+        def token(_source):
+            return ""
+
+    source = {
+        "id": "retry-json", "kind": "json", "url": "https://example.test/news",
+        "auth_type": "none", "parser": {}, "is_official": False,
+    }
+    content, final_url, raw_key = _fetch_bytes(source, source["url"], Store(), preview=True)
+
+    assert (content, final_url, raw_key) == (
+        b'{"items":[]}', "https://example.test/news", "",
+    )
+    assert requests == ["https://example.test/news", "https://example.test/news"]
+    assert sleeps == [1]
+
+
 @pytest.mark.parametrize("value", ["20260809", 1786240800000])
 def test_shared_published_parser_rejects_ambiguous_numeric_formats(value) -> None:
     with pytest.raises(NewsContractError, match=r"数字|纯数字") as error:
@@ -499,6 +574,10 @@ def test_szse_current_listing_scripts_bind_verified_detail(monkeypatch):
         //var curTitle = 'commented title';
         var curTitle = '\\u6df1\\u4ea4\\u6240\\u5f53\\u524d\\u901a\\u77e5\\u516c\\u544a';
         </script><span class="time">2026-08-09</span></div></li>
+        <li><div class="title"><script>
+        var curHref = './t20260808_621998.html';
+        var curTitle = '\\u6df1\\u4ea4\\u6240\\u8f83\\u65e9\\u901a\\u77e5\\u516c\\u544a';
+        </script><span class="time">2026-08-08</span></div></li>
     """
     detail = (
         '<div class="news-detail-con"><div class="des-content">'
@@ -513,7 +592,7 @@ def test_szse_current_listing_scripts_bind_verified_detail(monkeypatch):
     monkeypatch.setattr("quantmaster.ai.news_providers._fetch_bytes", fake_fetch)
     monkeypatch.setattr("quantmaster.ai.news_providers.time.time", lambda: 1786241400.0)
 
-    batch = fetch_szse(_source("szse"), object(), "", 30)
+    batch = fetch_szse(_source("szse"), object(), "", 1)
 
     assert [item.title for item in batch.articles] == ["深交所当前通知公告"]
     assert batch.articles[0].content == body
