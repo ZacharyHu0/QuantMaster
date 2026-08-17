@@ -830,6 +830,16 @@ def update_free_stockdb(request: Request, response: Response) -> dict:
     return {"accepted": accepted, **free_stockdb_runtime.status()}
 
 
+@router.post("/settings/free-stockdb/reset")
+def reset_free_stockdb_retry(request: Request, response: Response) -> dict:
+    _require_csrf(request)
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    result = free_stockdb_runtime.request_reset_service_retry()
+    response.status_code = 202 if result.get("status") == "queued" else 200
+    return result
+
+
 @router.post("/settings/validate")
 def validate_settings(request: Request, document: SettingsDocument) -> dict:
     _require_csrf(request)

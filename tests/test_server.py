@@ -880,6 +880,9 @@ class TestBasics:
         assert "--chart-primary" in chart_styles.text
         assert "scheduleFreeStockDbPoll" in settings_script.text
         assert "freeStockDbPollFailures < 5" in settings_script.text
+        assert "/api/v1/settings/free-stockdb/reset" in settings_script.text
+        assert "service_restart_backoff_seconds" in settings_script.text
+        assert 'id="free-stockdb-reset-retry"' in resp.text
         assert "['failed', 'manual_required'].includes(stockdb.update_result)" in settings_script.text
         assert "stockdb.target_session" in settings_script.text
         assert "succeededWithWarnings" in after_close_script.text
@@ -891,6 +894,19 @@ class TestBasics:
         assert help_content.text.count('data-calculator="') == 6
         assert help_content.text.count('data-lab="') == 4
         assert "2026-07-28" in help_content.text
+
+    def test_free_stockdb_retry_reset_endpoint_dispatches_to_runtime(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "quantmaster.data.free_stockdb_runtime.free_stockdb_runtime.request_reset_service_retry",
+            lambda: calls.append(True) or {"status": "reset", "state": "degraded"},
+        )
+
+        response = client.post("/api/v1/settings/free-stockdb/reset")
+
+        assert response.status_code == 200
+        assert response.json() == {"status": "reset", "state": "degraded"}
+        assert calls == [True]
 
     def test_help_handbook_structure_and_examples(self):
         text = client.get("/static/help-content.html").text
