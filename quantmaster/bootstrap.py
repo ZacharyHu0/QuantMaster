@@ -11,7 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from quantmaster.bootstrap_hooks import server_worker_hooks
+from quantmaster.bootstrap_hooks import (
+    register_server_worker_hooks,
+    server_worker_hooks,
+    server_worker_hooks_registered,
+)
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
 from quantmaster.lab.store import LabSchemaMigrationRequired
@@ -204,9 +208,14 @@ class _DefaultWorkerPlan:
         )
         from quantmaster.rotation.etf_research import reset_etf_research_service
         from quantmaster.rotation.service import get_rotation_worker
-        from quantmaster.worker_components import register_worker_components
-
-        register_worker_components()
+        if not server_worker_hooks_registered():
+            register_server_worker_hooks(
+                settings_manager=settings_manager(),
+                get_settings_jobs=get_settings_jobs,
+                shutdown_settings_jobs=shutdown_settings_jobs,
+                start_diagnostics_sampler=lambda: None,
+                stop_diagnostics_sampler=lambda: None,
+            )
         (
             settings_manager,
             get_settings_jobs,
