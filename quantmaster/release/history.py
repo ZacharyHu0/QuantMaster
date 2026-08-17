@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.5"
+VERSION = "1.17.6"
 RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "更新维护预检恢复",
+                "items": (
+                    (
+                        "更新 helper 会在进入维护前预检当前 runtime-worker；"
+                        "已确认的应用更新冻结可直接接管并继续切换。"
+                    ),
+                    (
+                        "非更新来源的维护冻结继续明确阻断，"
+                        "不会把可达 worker 误判为不可用或放宽回滚边界。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.5",
+        "date": "2026-08-18",
         "sections": (
             {
                 "title": "更新 IPC 配置一致性",
