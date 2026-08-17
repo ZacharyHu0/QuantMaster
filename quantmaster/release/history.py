@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.0"
+VERSION = "1.17.1"
 RELEASE_DATE = "2026-08-17"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "更新激活稳定性",
+                "items": (
+                    (
+                        "已激活的服务不再把短命激活 helper 作为存活父进程；"
+                        "helper 退出后，已验证的新发行槽保持运行。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.0",
+        "date": "2026-08-17",
         "sections": (
             {
                 "title": "运行时更新与恢复",
