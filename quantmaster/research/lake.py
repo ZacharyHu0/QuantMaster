@@ -20,6 +20,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quantmaster.config import get_config
+from quantmaster.data.research_access import register_research_lake
 from quantmaster.research.catalog import ResearchCatalog
 from quantmaster.research.contracts import (
     ArtifactKind,
@@ -30,7 +31,6 @@ from quantmaster.research.contracts import (
     content_hash,
     utc_now,
 )
-from quantmaster.data.research_access import register_research_lake
 from quantmaster.runtime.json import strict_json_dumps
 
 _SAFE_PART = re.compile(r"^[A-Za-z0-9_.-]+$")

@@ -19,7 +19,6 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
-from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     create_snapshot,
@@ -28,6 +27,7 @@ from quantmaster.lab.dataset import (
     load_local_dataset,
 )
 from quantmaster.lab.errors import LabError, classify_lab_error
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.models import DataPolicy, FactorSpec, content_hash
 from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
 from quantmaster.lab.service_access import register_lab_service_factory
@@ -551,9 +551,9 @@ class LabService:
         if claimed is None:
             return self.store.publication(publication_id) or current
         try:
-            from quantmaster.lab.ml import artifact_sha256
             from quantmaster.data.research_access import research_engine
             from quantmaster.data.research_primitives import AssetClass
+            from quantmaster.lab.ml import artifact_sha256
 
             payload = claimed["payload"]
             root = Path(get_config().data_root).resolve()

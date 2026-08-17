@@ -14,8 +14,8 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
-from quantmaster.settings import SettingsDocument
 from quantmaster.server.settings_control import apply_runtime, settings_manager
+from quantmaster.settings import SettingsDocument
 
 APPLY_TASK_TYPE = "settings.apply"
 DIAGNOSTIC_TASK_TYPE = "settings.diagnostic"

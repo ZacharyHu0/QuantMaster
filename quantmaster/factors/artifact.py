@@ -7,9 +7,9 @@ from typing import Any
 
 import pandas as pd
 
+from quantmaster.data.research_access import research_lake
 from quantmaster.factors.artifact_contract import ArtifactKind, ArtifactRef, AssetClass, Frequency
 from quantmaster.factors.base import Factor, PanelDict
-from quantmaster.data.research_access import research_lake
 
 _ARTIFACT_RE = re.compile(
     r"^artifact:(?P<kind>factor|factors|label|labels|risk|model|models):"

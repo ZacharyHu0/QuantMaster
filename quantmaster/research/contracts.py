@@ -9,8 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
-from quantmaster.factors.artifact_contract import ArtifactRef
 from quantmaster.data.research_primitives import ArtifactKind, AssetClass, Frequency
+from quantmaster.factors.artifact_contract import ArtifactRef
 from quantmaster.runtime.json import strict_json_dumps
 
 

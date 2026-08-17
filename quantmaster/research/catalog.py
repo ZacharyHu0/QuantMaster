@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from quantmaster.data.schema_access import register_research_catalog
 from quantmaster.research.contracts import (
     ArtifactKind,
     AssetClass,
@@ -19,7 +20,6 @@ from quantmaster.research.contracts import (
     utc_now,
 )
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.data.schema_access import register_research_catalog
 
 RESEARCH_SCHEMA_VERSION = 2
 

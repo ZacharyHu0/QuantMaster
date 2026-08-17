@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from quantmaster.data.research_access import register_research_engine
 from quantmaster.research.adapters import (
     COMPLETE_CROSS_SECTION_DATASETS,
     DATASET_BY_ID,
@@ -37,7 +38,6 @@ from quantmaster.research.kernel import Kernel
 from quantmaster.research.lake import ResearchLake
 from quantmaster.research.providers import build_future_continuous
 from quantmaster.research.registry import ProviderRegistry, built_in_registry
-from quantmaster.data.research_access import register_research_engine
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.trading_sessions import market_date
 

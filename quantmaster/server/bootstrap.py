@@ -21,13 +21,13 @@ from quantmaster.runtime.supervisor import (
 )
 from quantmaster.runtime.worker import RuntimeWorker, WorkerPlan
 from quantmaster.runtime.worker_ipc import WorkerCommandError
+from quantmaster.server.settings_control import settings_manager
 from quantmaster.server.settings_jobs import get_settings_jobs, shutdown_settings_jobs
 from quantmaster.server.worker_hooks import (
     register_server_worker_hooks,
     server_worker_hooks,
     server_worker_hooks_registered,
 )
-from quantmaster.server.settings_control import settings_manager
 
 logger = logging.getLogger(__name__)
 

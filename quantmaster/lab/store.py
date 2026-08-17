@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
+from quantmaster.data.schema_access import register_lab_store
 from quantmaster.lab.horizons import require_supported_horizon
 from quantmaster.lab.models import (
     FACTOR_STATUSES,
@@ -23,7 +24,6 @@ from quantmaster.lab.models import (
     utc_now,
 )
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.data.schema_access import register_lab_store
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 _GENERATED_FACTOR_NAME = re.compile(
