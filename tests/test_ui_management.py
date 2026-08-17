@@ -477,7 +477,7 @@ def live_server(module_config):
         _assert_no_ui_process_owners()
 
 
-def test_default_today_uses_native_canvas_without_echarts(live_server):
+def test_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {
         "groups": {"A股指数": [{
@@ -498,7 +498,8 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.add_init_script(
-            """window.__marketIntersections = [];
+            """localStorage.setItem('qm-theme', 'ink');
+            window.__marketIntersections = [];
             window.IntersectionObserver = class {
               constructor(callback) { this.callback = callback; this.targets = new Set(); }
               observe(target) { this.targets.add(target); window.__marketIntersections.push(this); }
