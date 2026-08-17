@@ -1870,6 +1870,9 @@ document.addEventListener('quantmaster:workspace-mounted', event => {
   if (root && !root.querySelector('[data-fear-greed-gauge] canvas')) {
     renderFearGreedVisuals(root);
   }
+  if (root && !root.querySelector('[data-ashare-fear-greed-gauge] canvas')) {
+    renderAshareFearGreedVisuals(root);
+  }
 });
 
 function rsiSparkPoints(history) {
