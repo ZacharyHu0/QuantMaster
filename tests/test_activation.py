@@ -338,15 +338,15 @@ def test_packaged_controller_releases_the_drain_lease(monkeypatch):
     })
 
     def command(operation, payload, **kwargs):
-        calls.append((operation, payload, kwargs["application_identity"]))
+        calls.append((operation, payload, kwargs["application_identity"], kwargs["timeout"]))
         return {"token": "lease"} if operation == "maintenance.enter" else {"released": True}
 
     monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
 
-    controller.drain_current(0.2)
-    controller.resume_current(0.2)
+    controller.drain_current(15.0)
+    controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.enter", {"reason": "application activation", "timeout": 0.2}, identity),
-        ("maintenance.exit", {"token": "lease"}, identity),
+        ("maintenance.enter", {"reason": "application activation", "timeout": 10.0}, identity, 10.0),
+        ("maintenance.exit", {"token": "lease"}, identity, 10.0),
     ]

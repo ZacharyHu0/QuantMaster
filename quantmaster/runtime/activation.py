@@ -28,6 +28,7 @@ LAUNCHER_TARGET = "launcher.target"
 DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
 READY_TIMEOUT_SECONDS = 15.0
 ROLLBACK_TIMEOUT_SECONDS = 15.0
+WORKER_DRAIN_TIMEOUT_SECONDS = 10.0
 _VALID_STATUSES = frozenset({"empty", "stable", "pending", "rolled_back", "blocked"})
 
 
@@ -435,6 +436,7 @@ class SubprocessGenerationController:
         from quantmaster.runtime.worker_ipc import call_worker_command
 
         try:
+            drain_timeout = min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS)
             identity = ApplicationIdentity(
                 str(current.get("build_sha") or ""),
                 str(current.get("slot_id") or ""),
@@ -442,8 +444,8 @@ class SubprocessGenerationController:
             )
             result = call_worker_command(
                 "maintenance.enter",
-                {"reason": "application activation", "timeout": min(timeout, 10.0)},
-                timeout=min(timeout, 1.0),
+                {"reason": "application activation", "timeout": drain_timeout},
+                timeout=drain_timeout,
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
@@ -461,7 +463,7 @@ class SubprocessGenerationController:
             call_worker_command(
                 "maintenance.exit",
                 {"token": token},
-                timeout=min(timeout, 1.0),
+                timeout=min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS),
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
