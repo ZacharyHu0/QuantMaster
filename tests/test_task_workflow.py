@@ -834,6 +834,12 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
         ["quantmaster/release/history.py"],
         release_source_relocated=True,
     )
+    validate_ready_state(
+        "codex/release-v1170",
+        "",
+        False,
+        ["CHANGELOG.md", "quantmaster/release/history.py"],
+    )
 
 
 def test_release_source_equivalence_allows_only_docstring_relocation():

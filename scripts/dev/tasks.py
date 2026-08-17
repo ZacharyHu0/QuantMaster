@@ -44,6 +44,7 @@ from quantmaster.logging_config import redact_public_text  # noqa: E402
 
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+RELEASE_VERSION_BRANCH_PATTERN = re.compile(r"^codex/release-v\d+$")
 LEGACY_RELEASE_PATH = "quantmaster/release.py"
 RELEASE_HISTORY_PATH = "quantmaster/release/history.py"
 VERSION_PATHS = frozenset({RELEASE_HISTORY_PATH, "CHANGELOG.md"})
@@ -1203,7 +1204,7 @@ def validate_ready_state(
     version_changes = set(VERSION_PATHS.intersection(changed))
     if release_source_relocated:
         version_changes.discard(RELEASE_HISTORY_PATH)
-    if version_changes:
+    if version_changes and not RELEASE_VERSION_BRANCH_PATTERN.fullmatch(branch):
         raise SystemExit("任务分支不得修改版本元数据：" + ", ".join(sorted(version_changes)))
 
 
