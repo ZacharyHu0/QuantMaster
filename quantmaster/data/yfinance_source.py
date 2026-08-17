@@ -9,7 +9,7 @@ import pandas as pd
 
 from quantmaster.data.base import DataCapability, DataSource, Market, normalize_daily
 from quantmaster.data.resilience import provider_call
-from quantmaster.yahoo_access import register_yahoo_loader
+from quantmaster.data.yahoo_access import register_yahoo_loader
 
 
 def _require_yfinance():

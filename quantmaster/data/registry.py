@@ -42,6 +42,7 @@ from quantmaster.data.cache_freshness import (
     assess_daily_freshness,
 )
 from quantmaster.data.frame_quality_access import register_frame_quality
+from quantmaster.data.market_data_access import register_history_refresh
 from quantmaster.data.resilience import (
     bypass_endpoint_cache,
     data_priority,
@@ -50,7 +51,6 @@ from quantmaster.data.resilience import (
 )
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.data.storage import BarStore, IntradayBarStore
-from quantmaster.market_data_access import register_history_refresh
 from quantmaster.market_identity import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now

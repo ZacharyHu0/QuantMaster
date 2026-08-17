@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from quantmaster.index_source_access import index_source
+from quantmaster.data.index_source_access import index_source
 from quantmaster.research_access import research_lake
 from quantmaster.research_primitives import (
     ArtifactKind,

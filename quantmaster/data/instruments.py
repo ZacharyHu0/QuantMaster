@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from quantmaster.config import get_config
-from quantmaster.instrument_source_access import instrument_source
+from quantmaster.data.instrument_source_access import instrument_source
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import market_date
 
@@ -962,7 +962,7 @@ class InstrumentStore:
 def _online_yahoo_records(query: str, limit: int) -> list[dict[str, Any]]:
     """按需补齐日/韩等未随包发布的市场；失败不影响本地搜索。"""
     from quantmaster.data.resilience import provider_call
-    from quantmaster.yahoo_access import yahoo_loader
+    from quantmaster.data.yahoo_access import yahoo_loader
 
     requested = re.sub(r"^(TYO|TSE|JP|KRX|KOSPI|KOSDAQ):", "", query.strip(), flags=re.I)
     key = f"lookup:{_normalized_alias(requested)}:{limit}"
@@ -1261,7 +1261,7 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
         return instrument
     from datetime import timedelta
 
-    from quantmaster.market_data_access import refresh_history
+    from quantmaster.data.market_data_access import refresh_history
 
     end = market_date()
     start = end - timedelta(days=21)
