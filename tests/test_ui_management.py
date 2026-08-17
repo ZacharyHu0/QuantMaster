@@ -477,7 +477,7 @@ def live_server(module_config):
         _assert_no_ui_process_owners()
 
 
-def test_default_today_uses_native_canvas_without_echarts(live_server):
+def test_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {
         "groups": {"A股指数": [{
@@ -498,7 +498,8 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         browser = manager.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.add_init_script(
-            """window.__marketIntersections = [];
+            """localStorage.setItem('qm-theme', 'ink');
+            window.__marketIntersections = [];
             window.IntersectionObserver = class {
               constructor(callback) { this.callback = callback; this.targets = new Set(); }
               observe(target) { this.targets.add(target); window.__marketIntersections.push(this); }
@@ -571,6 +572,38 @@ def test_default_today_uses_native_canvas_without_echarts(live_server):
         assert classic.locator('[data-market-group="A股指数"] .spark canvas').count() == 0
         classic.evaluate("window.__showMarketSparks()")
         classic.locator('[data-market-group="A股指数"] .spark canvas').wait_for(state="visible")
+        browser.close()
+
+
+def test_classic_theme_is_default_without_overwriting_stored_choice(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch(headless=True)
+        cases = (
+            ("", "classic"),
+            ("localStorage.setItem('qm-theme', 'ink')", "ink"),
+            ("""
+              const getItem = Storage.prototype.getItem;
+              Storage.prototype.getItem = function(key) {
+                if (key !== 'qm-theme') return getItem.call(this, key);
+                Storage.prototype.getItem = getItem;
+                throw new Error('blocked');
+              };
+            """, "classic"),
+        )
+        for init_script, expected in cases:
+            page = browser.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda error, items=errors: items.append(str(error)))
+            if init_script:
+                page.add_init_script(init_script)
+            page.goto(url)
+            page.wait_for_load_state("networkidle")
+
+            assert page.locator("html").get_attribute("data-qm-theme") == expected
+            assert page.locator(f"#qm-theme-{expected}").is_checked()
+            assert errors == []
+            page.close()
         browser.close()
 
 

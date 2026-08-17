@@ -16,6 +16,7 @@ from quantmaster.release.history import release_lookup, release_sections
 from quantmaster.runtime.activation import (
     FULL_SHA,
     ActivationBlocked,
+    Candidate,
     SlotRegistry,
     installed_app_root,
     lifecycle_lock,
@@ -294,11 +295,13 @@ def _root_pid() -> int | None:
     return value if value > 0 else None
 
 
-def _helper_command(build_sha: str, root_pid: int | None) -> list[str]:
+def _helper_command(candidate: Candidate, root_pid: int | None) -> list[str]:
     if getattr(sys, "frozen", False):
-        command = [sys.executable, "activate", build_sha]
+        command = [str(candidate.slot / "QuantMaster.exe"), "activate", candidate.build_sha]
     else:
-        command = [sys.executable, "-m", "quantmaster.server.cli", "activate", build_sha]
+        command = [
+            sys.executable, "-m", "quantmaster.server.cli", "activate", candidate.build_sha,
+        ]
     if root_pid is not None:
         command.extend(("--root-pid", str(root_pid)))
     return command
@@ -360,7 +363,7 @@ def start_activation(build_sha: str, app_root: str | Path | None = None) -> dict
             "QM_ACTIVATION_RESULT_PATH": str(result_path),
         })
         try:
-            command = _helper_command(candidate.build_sha, _root_pid())
+            command = _helper_command(candidate, _root_pid())
             if os.name == "nt":
                 process = subprocess.Popen(
                     command,

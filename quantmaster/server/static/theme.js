@@ -3,7 +3,7 @@
 
   var KEY = "qm-theme";
   var ATTR = "data-qm-theme";
-  var VALUES = ["ink", "classic"];
+  var VALUES = ["classic", "ink"];
   var root = document.documentElement;
 
   function ok(v) { return VALUES.indexOf(v) !== -1; }

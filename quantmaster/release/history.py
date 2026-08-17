@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.2"
-RELEASE_DATE = "2026-08-17"
+VERSION = "1.17.3"
+RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -26,11 +26,24 @@ RELEASES = (
         "date": RELEASE_DATE,
         "sections": (
             {
-                "title": "更新激活排空",
+                "title": "本机更新自举",
                 "items": (
                     (
-                        "更新激活将 runtime-worker IPC 响应等待与既有的十秒排空预算统一；"
-                        "正常较慢的排空不再被一秒客户端窗口误判为不可用并回滚。"
+                        "已安装版本启动更新 helper 时直接使用已验证的目标发行槽；"
+                        "候选版本的激活逻辑在切换前即可生效，本机更新不再受当前旧槽实现限制。"
+                    ),
+                ),
+            },
+            {
+                "title": "新闻与主题默认体验",
+                "items": (
+                    (
+                        "恢复内置新闻源的真实抓取与有界瞬态传输重试，"
+                        "官方 JSON、二进制响应和深交所首个限量窗口按既有契约解析。"
+                    ),
+                    (
+                        "无保存偏好、无效偏好或本地存储不可用时恢复经典主题为首屏默认；"
+                        "已有墨韵书房或经典主题偏好继续保留。"
                     ),
                 ),
             },
