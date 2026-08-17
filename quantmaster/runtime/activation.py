@@ -29,6 +29,9 @@ DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
 READY_TIMEOUT_SECONDS = 15.0
 ROLLBACK_TIMEOUT_SECONDS = 15.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 10.0
+WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS = 2.0
+WORKER_DRAIN_STATUS_TIMEOUT_SECONDS = 0.5
+WORKER_DRAIN_RETRY_DELAY_SECONDS = 0.05
 _VALID_STATUSES = frozenset({"empty", "stable", "pending", "rolled_back", "blocked"})
 
 
@@ -447,31 +450,48 @@ class SubprocessGenerationController:
         identity: ApplicationIdentity,
         worker_root: Path,
         timeout: float,
+        *,
+        wait_for_activation_drain: bool = False,
     ) -> bool:
-        """Reuse a confirmed update drain before attempting to enter maintenance."""
+        """Reuse a confirmed update drain before attempting to enter maintenance.
+
+        A lost ``maintenance.enter`` reply can leave the worker frozen while its
+        serial command server finishes the first request.  Reconcile that
+        short window before treating the update as unable to drain the worker.
+        """
 
         from quantmaster.runtime.worker_ipc import call_worker_command
 
-        try:
-            status = call_worker_command(
-                "maintenance.status",
-                {"token": ""},
-                timeout=timeout,
-                root=worker_root,
-                application_identity=identity,
-            )
-        except (OSError, RuntimeError, ValueError, TypeError):
-            return False
-        if status.get("state") != "frozen":
-            return False
-        if status.get("reason") != "application activation":
-            raise ActivationBlocked(
-                "worker_maintenance_active", "当前 runtime-worker 正在非更新维护冻结",
-            )
-        self._drain_identity = identity
-        self._drain_token = ""
-        self._drain_root = worker_root
-        return True
+        deadline = time.monotonic() + min(
+            max(0.05, float(timeout)), WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS,
+        )
+        while True:
+            status: Mapping[str, object] | None
+            try:
+                status = call_worker_command(
+                    "maintenance.status",
+                    {"token": ""},
+                    timeout=min(float(timeout), WORKER_DRAIN_STATUS_TIMEOUT_SECONDS),
+                    root=worker_root,
+                    application_identity=identity,
+                )
+            except (OSError, RuntimeError, ValueError, TypeError):
+                status = None
+            if status is not None and status.get("state") == "frozen":
+                if status.get("reason") != "application activation":
+                    raise ActivationBlocked(
+                        "worker_maintenance_active", "当前 runtime-worker 正在非更新维护冻结",
+                    )
+                self._drain_identity = identity
+                self._drain_token = ""
+                self._drain_root = worker_root
+                return True
+            if status is not None and not wait_for_activation_drain:
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(WORKER_DRAIN_RETRY_DELAY_SECONDS, remaining))
 
     def drain_current(self, timeout: float) -> None:
         current = self.current_identity()
@@ -498,9 +518,15 @@ class SubprocessGenerationController:
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
-            if self._reuse_existing_activation_drain(identity, worker_root, timeout):
+            if self._reuse_existing_activation_drain(
+                identity, worker_root, timeout, wait_for_activation_drain=True,
+            ):
                 return
-            raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法排空") from exc
+            raise ActivationBlocked(
+                "worker_drain_unconfirmed",
+                "当前 runtime-worker 排空状态未确认",
+                phase="maintenance_status_reconcile",
+            ) from exc
         self._drain_identity = identity
         self._drain_token = str(result.get("token") or "")
         self._drain_root = worker_root
@@ -632,7 +658,9 @@ class ActivationCoordinator:
 
     def _failure(self, exc: BaseException) -> str:
         if isinstance(exc, ActivationBlocked):
-            return f"{exc.code}: {exc.detail}"[:500]
+            phase = exc.context.get("phase")
+            suffix = f" [{phase}]" if isinstance(phase, str) and phase else ""
+            return f"{exc.code}: {exc.detail}{suffix}"[:500]
         return f"activation_failed: {type(exc).__name__}"[:500]
 
     def _start_and_wait(self, sha: str, timeout: float) -> tuple[object, Mapping[str, object]]:

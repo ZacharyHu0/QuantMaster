@@ -171,6 +171,31 @@ def test_stop_failure_releases_drain_before_retry(tmp_path):
     assert ActivationCoordinator(registry, controller).activate(SHA_B)["status"] == "activated"
 
 
+def test_drain_reconciliation_failure_records_its_phase(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    controller = FakeController(SHA_A)
+
+    def fail_drain(_timeout: float) -> None:
+        raise ActivationBlocked(
+            "worker_drain_unconfirmed",
+            "当前 runtime-worker 排空状态未确认",
+            phase="maintenance_status_reconcile",
+        )
+
+    controller.drain_current = fail_drain
+
+    result = ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert result["status"] == "rolled_back"
+    assert result["last_error"] == (
+        "worker_drain_unconfirmed: 当前 runtime-worker 排空状态未确认 "
+        "[maintenance_status_reconcile]"
+    )
+
+
 def test_failed_first_activation_is_retryable_without_registry_repair(tmp_path):
     _candidate(tmp_path, SHA_B)
     registry = SlotRegistry(tmp_path)
@@ -358,7 +383,7 @@ def test_packaged_controller_releases_the_drain_lease(monkeypatch, tmp_path):
     controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.status", {"token": ""}, identity, 15.0, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
         (
             "maintenance.enter",
             {"reason": "application activation", "timeout": 10.0},
@@ -401,11 +426,11 @@ def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch, tm
     controller.resume_current(15.0)
 
     assert calls == [
-        ("maintenance.status", {"token": ""}, identity, 15.0, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
     ]
 
 
-def test_packaged_controller_reuses_an_activation_drain_after_lost_enter_reply(monkeypatch, tmp_path):
+def test_packaged_controller_retries_an_inherited_activation_drain(monkeypatch, tmp_path):
     identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
     controller = SubprocessGenerationController()
     calls = []
@@ -423,6 +448,48 @@ def test_packaged_controller_reuses_an_activation_drain_after_lost_enter_reply(m
         return {"data": {"root": str(worker_root)}}
 
     monkeypatch.setattr(controller, "_json", current_json)
+    monkeypatch.setattr(activation, "WORKER_DRAIN_RETRY_DELAY_SECONDS", 0.0)
+
+    def command(operation, payload, **kwargs):
+        nonlocal status_attempts
+        calls.append((
+            operation, payload, kwargs["application_identity"], kwargs["timeout"], kwargs["root"],
+        ))
+        assert operation == "maintenance.status"
+        status_attempts += 1
+        if status_attempts == 1:
+            raise RuntimeError("worker status reply lost")
+        return {"state": "frozen", "reason": "application activation"}
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
+
+    controller.drain_current(15.0)
+
+    assert calls == [
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
+    ]
+
+
+def test_packaged_controller_reconciles_an_activation_drain_after_lost_enter_reply(monkeypatch, tmp_path):
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller = SubprocessGenerationController()
+    calls = []
+    worker_root = tmp_path / "active-data"
+    status_attempts = 0
+
+    def current_json(path):
+        if path == "health":
+            return {
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }
+        assert path == "settings"
+        return {"data": {"root": str(worker_root)}}
+
+    monkeypatch.setattr(controller, "_json", current_json)
+    monkeypatch.setattr(activation, "WORKER_DRAIN_RETRY_DELAY_SECONDS", 0.0)
 
     def command(operation, payload, **kwargs):
         nonlocal status_attempts
@@ -432,6 +499,8 @@ def test_packaged_controller_reuses_an_activation_drain_after_lost_enter_reply(m
         if operation == "maintenance.status":
             status_attempts += 1
             if status_attempts == 1:
+                return {"state": "running"}
+            if status_attempts < 4:
                 raise RuntimeError("worker status reply lost")
             return {"state": "frozen", "reason": "application activation"}
         assert operation == "maintenance.enter"
@@ -442,7 +511,7 @@ def test_packaged_controller_reuses_an_activation_drain_after_lost_enter_reply(m
     controller.drain_current(15.0)
 
     assert calls == [
-        ("maintenance.status", {"token": ""}, identity, 15.0, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
         (
             "maintenance.enter",
             {"reason": "application activation", "timeout": 10.0},
@@ -450,8 +519,43 @@ def test_packaged_controller_reuses_an_activation_drain_after_lost_enter_reply(m
             15.0,
             worker_root,
         ),
-        ("maintenance.status", {"token": ""}, identity, 15.0, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
+        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
     ]
+
+
+def test_packaged_controller_labels_an_unconfirmed_drain(monkeypatch, tmp_path):
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller = SubprocessGenerationController()
+    worker_root = tmp_path / "active-data"
+
+    def current_json(path):
+        if path == "health":
+            return {
+                "build_sha": identity.build_sha,
+                "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }
+        assert path == "settings"
+        return {"data": {"root": str(worker_root)}}
+
+    monkeypatch.setattr(controller, "_json", current_json)
+    monkeypatch.setattr(activation, "WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS", 0.0)
+
+    def command(operation, _payload, **_kwargs):
+        if operation == "maintenance.status":
+            return {"state": "running"}
+        assert operation == "maintenance.enter"
+        raise RuntimeError("maintenance enter reply lost")
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
+
+    with pytest.raises(ActivationBlocked) as exc_info:
+        controller.drain_current(15.0)
+
+    assert exc_info.value.code == "worker_drain_unconfirmed"
+    assert exc_info.value.context == {"phase": "maintenance_status_reconcile"}
 
 
 def test_packaged_controller_rejects_a_non_activation_maintenance_freeze(monkeypatch, tmp_path):
