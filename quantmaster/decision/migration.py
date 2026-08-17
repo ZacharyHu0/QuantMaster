@@ -1,5 +1,6 @@
 """One-time migration of decision rows; runtime readers never infer versions."""
 
+# for_version: v1.0  (decision module domain-specific migration)
 from __future__ import annotations
 
 import json
@@ -36,10 +37,8 @@ _CURRENT_FIELDS = {
     "universe_evidence", "industry_evidence", "market_provenance", "persistence",
 }
 
-
 def _iso_timestamp(value: Any) -> str:
     return datetime.fromtimestamp(float(value), tz=UTC).isoformat()
-
 
 def _identity(row: sqlite3.Row) -> dict[str, Any]:
     return {
@@ -52,10 +51,8 @@ def _identity(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": _iso_timestamp(row["created_at"]),
     }
 
-
 def _record_key(identity: dict[str, Any]) -> str:
     return json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
 
 def _outcome(
     status: str, code: str, detail: str, identity: dict[str, Any],
@@ -65,7 +62,6 @@ def _outcome(
         "status": status, "diagnostic_code": code, "detail": detail,
         "identity": identity, "payload": payload, "unknown": unknown or {},
     }
-
 
 def _parse_old_payload(row: sqlite3.Row, identity: dict[str, Any]) -> tuple[dict, dict] | dict:
     try:
@@ -82,7 +78,6 @@ def _parse_old_payload(row: sqlite3.Row, identity: dict[str, Any]) -> tuple[dict
         )
     return raw, identity
 
-
 def _identity_conflicts(raw: dict[str, Any], identity: dict[str, Any]) -> list[str]:
     conflicts: list[str] = []
     for payload_field, row_field in _IDENTITY_FIELDS.items():
@@ -98,7 +93,6 @@ def _identity_conflicts(raw: dict[str, Any], identity: dict[str, Any]) -> list[s
         if payload_value != identity[row_field]:
             conflicts.append(payload_field)
     return conflicts
-
 
 def _classify(row: sqlite3.Row) -> dict[str, Any]:
     identity = _identity(row)
@@ -164,7 +158,6 @@ def _classify(row: sqlite3.Row) -> dict[str, Any]:
         identity, payload=migrated, unknown=unknown,
     )
 
-
 def _apply_outcomes(
     database: Path, outcomes: list[dict[str, Any]], batch_size: int,
 ) -> None:
@@ -201,7 +194,6 @@ def _apply_outcomes(
                         datetime.now(UTC).isoformat(),
                     ),
                 )
-
 
 def migrate_decision_snapshots(
     path: Path,
@@ -258,7 +250,6 @@ def migrate_decision_snapshots(
         ],
     }
 
-
 def _migration_record(outcome: dict[str, Any]) -> Any:
     import importlib
 
@@ -278,7 +269,6 @@ def _migration_record(outcome: dict[str, Any]) -> Any:
         unknown_fields=tuple(sorted(outcome.get("unknown") or {})),
         detail=str(outcome["detail"]),
     )
-
 
 class DecisionLegacyMigrator:
     name = "decision"
@@ -324,6 +314,5 @@ class DecisionLegacyMigrator:
         )
         _restore = _migration_mod.restore_backup_path
         _restore(Path(root), Path(backup_root), "decisions.sqlite")
-
 
 decision_legacy_migrator = DecisionLegacyMigrator()
