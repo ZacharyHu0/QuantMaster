@@ -11,7 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from quantmaster.bootstrap_hooks import server_worker_hooks
+from quantmaster.bootstrap_hooks import (
+    register_server_worker_hooks,
+    server_worker_hooks,
+    server_worker_hooks_registered,
+)
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
 from quantmaster.lab.store import LabSchemaMigrationRequired
@@ -22,6 +26,8 @@ from quantmaster.runtime.supervisor import (
 )
 from quantmaster.runtime.worker import RuntimeWorker, WorkerPlan
 from quantmaster.runtime.worker_ipc import WorkerCommandError
+from quantmaster.settings_control import settings_manager
+from quantmaster.settings_jobs import get_settings_jobs, shutdown_settings_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -204,15 +210,20 @@ class _DefaultWorkerPlan:
         )
         from quantmaster.rotation.etf_research import reset_etf_research_service
         from quantmaster.rotation.service import get_rotation_worker
-        from quantmaster.worker_components import register_worker_components
-
-        register_worker_components()
+        if not server_worker_hooks_registered():
+            register_server_worker_hooks(
+                settings_manager=settings_manager(),
+                get_settings_jobs=get_settings_jobs,
+                shutdown_settings_jobs=shutdown_settings_jobs,
+                start_diagnostics_sampler=lambda: None,
+                stop_diagnostics_sampler=lambda: None,
+            )
         (
-            settings_manager,
-            get_settings_jobs,
-            shutdown_settings_jobs,
-            start_diagnostics_sampler,
-            stop_diagnostics_sampler,
+            _sm,
+            _gsj,
+            _ssj,
+            _sd,
+            _std,
         ) = server_worker_hooks()
 
         # This installs only the bundled offline catalogue. It must not
@@ -240,7 +251,7 @@ class _DefaultWorkerPlan:
         self.after_close_worker = get_after_close_jobs()
         self.etf_research_worker = get_etf_research_jobs()
         self.news_worker = get_news_jobs()
-        self.settings_worker = get_settings_jobs()
+        self.settings_worker = _gsj()
         self.lab_llm_worker = get_lab_llm_jobs()
         self.cnn_fear_greed_refresher = get_cnn_fear_greed_refresher()
         self.ashare_fear_greed_refresher = get_ashare_fear_greed_refresher()
@@ -256,16 +267,16 @@ class _DefaultWorkerPlan:
             reset_after_close=reset_after_close_service,
             reset_etf_research=reset_etf_research_service,
         )
-        self.settings_manager = settings_manager
+        self.settings_manager = _sm
         self._publish_capabilities = publish_capabilities
         self._publish_market_overview_snapshot = publish_market_overview_snapshot
-        self._start_diagnostics_sampler = start_diagnostics_sampler
-        self._stop_diagnostics_sampler = stop_diagnostics_sampler
+        self._start_diagnostics_sampler = _sd
+        self._stop_diagnostics_sampler = _std
         self._shutdown_stock_analysis_jobs = shutdown_stock_analysis_jobs
         self._shutdown_after_close_jobs = shutdown_after_close_jobs
         self._shutdown_etf_research_jobs = shutdown_etf_research_jobs
         self._shutdown_news_jobs = shutdown_news_jobs
-        self._shutdown_settings_jobs = shutdown_settings_jobs
+        self._shutdown_settings_jobs = _ssj
         self._shutdown_lab_llm_jobs = shutdown_lab_llm_jobs
         self._shutdown_backtest_jobs = shutdown_backtest_job_managers
 

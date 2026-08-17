@@ -104,14 +104,15 @@ def _issue(
     }
 
 
+
 def _architecture_issues() -> list[dict[str, Any]]:
+
     from quantmaster.architecture import (
         build_graph,
         cycles,
         layer_violations,
         sqlite_connect_lines,
     )
-
     issues: list[dict[str, Any]] = []
     graph = build_graph(PACKAGE_ROOT)
     for cycle in sorted(cycles(graph.imports), key=lambda value: tuple(sorted(value))):

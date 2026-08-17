@@ -25,6 +25,8 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.data.base import DataCapability, DataSource, Market, normalize_daily
+from quantmaster.data.index_source_access import register_index_source
+from quantmaster.data.instrument_source_access import register_instrument_source
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
     EndpointFrameCache,
@@ -33,8 +35,6 @@ from quantmaster.data.resilience import (
     endpoint_cache_bypassed,
     provider_call,
 )
-from quantmaster.index_source_access import register_index_source
-from quantmaster.instrument_source_access import register_instrument_source
 from quantmaster.temporal import (
     ProviderDateFormat,
     parse_provider_date,
