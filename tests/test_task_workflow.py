@@ -566,7 +566,7 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
     with pytest.raises(SystemExit, match="落后"):
         validate_ready_state("codex/task", "", True, [])
     with pytest.raises(SystemExit, match="版本元数据"):
-        validate_ready_state("codex/task", "", False, ["quantmaster/release.py"])
+        validate_ready_state("codex/task", "", False, ["quantmaster/release/history.py"])
     with pytest.raises(SystemExit, match="版本元数据"):
         validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
 

@@ -30,7 +30,7 @@ path. It selects adjacent contracts from the checked-in impact map and runs full
 rerun the exact pytest node id or `--last-failed`, then rerun the impact set. Do not run the full
 suite during the edit loop.
 
-Checkpoint commits are allowed. Task branches never edit `quantmaster/release.py` or
+Checkpoint commits are allowed. Task branches never edit `quantmaster/release/history.py` or
 `CHANGELOG.md`. Do not push a checkpoint while a local gate is red; fix it locally first.
 
 ## 3. Verify every Git write target

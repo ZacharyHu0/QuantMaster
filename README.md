@@ -383,7 +383,7 @@ cd .worktrees/<task-slug>
 ../../.venv/Scripts/python.exe scripts/dev/tasks.py check
 ```
 
-任务分支可自由做小步 checkpoint 提交，但不得修改 `quantmaster/release.py` 或
+任务分支可自由做小步 checkpoint 提交，但不得修改 `quantmaster/release/history.py` 或
 `CHANGELOG.md`。`check` 根据相对 `origin/main` 的改动读取受版本控制的影响映射，只运行
 相邻合同；显式测试总是带 `--full`，因此不会误跳过 full-only 文件。未知路径、测试基础设施、
 依赖或 CI/release 改动会保守升级到完整 Python 套件。可用 `--staged` 只检查暂存区，失败后
@@ -437,7 +437,7 @@ python scripts/release/sync.py install
 
 此后任务分支提交不需要版本变更，且 hook 会拒绝任务分支修改发布元数据。普通任务 squash
 到 `main` 也不会产生版本或 Release。版本变更只在 owner 明确要求时，由单独的版本 PR 一次
-完成：同时递增 `quantmaster/release.py`、更新实际发布日期并在 `CHANGELOG.md` 顶部加入
+完成：同时递增 `quantmaster/release/history.py`、更新实际发布日期并在 `CHANGELOG.md` 顶部加入
 对应说明。post-commit 会自动重试推送该 main release；普通任务分支和 Claude 归档分支不会
 自动上传。
 安装命令会为 HTTPS origin 自动绑定仓库 owner，并按完整仓库路径隔离 GitHub 凭据，

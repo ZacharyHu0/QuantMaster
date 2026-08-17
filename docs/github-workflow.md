@@ -63,7 +63,7 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 
 - agent 负责维护 PR、处理审查、跟进 Actions、squash merge 和任务 worktree 清理；不得绕过
   PR 直接改 `main`，除非 owner 明确授权紧急例外。
-- 普通任务合并不自动产生版本、tag 或 Release，也**不修改** `quantmaster/release.py` 或
+- 普通任务合并不自动产生版本、tag 或 Release，也**不修改** `quantmaster/release/history.py` 或
   `CHANGELOG.md`。版本变更只在 owner 明确要求时，由单独的版本 PR 一次完成。
 - 当前 `v*` tag workflow 会发布 GitHub Release，因此没有 owner 对具体版本、候选 SHA 和
   Release 的明确确认，不得推送 release tag。发布前后使用 `scripts/release/sync.py` 的

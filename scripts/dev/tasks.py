@@ -42,7 +42,7 @@ from quantmaster.logging_config import redact_public_text  # noqa: E402
 
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-VERSION_PATHS = frozenset({"quantmaster/release.py", "CHANGELOG.md"})
+VERSION_PATHS = frozenset({"quantmaster/release/history.py", "CHANGELOG.md"})
 VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1

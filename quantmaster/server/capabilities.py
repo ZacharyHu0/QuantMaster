@@ -29,7 +29,8 @@ from quantmaster import __version__
 from quantmaster.backtest.metrics import RISK_FREE, TRADING_DAYS
 from quantmaster.data.base import MarketDataUnavailable
 from quantmaster.logging_config import redact_sensitive_text
-from quantmaster.release import RELEASE_DATE, RELEASE_HISTORY_URL, RELEASES
+from quantmaster.release import RELEASE_DATE, RELEASES
+from quantmaster.release.history import RELEASE_HISTORY_URL
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.json import strict_json_dumps

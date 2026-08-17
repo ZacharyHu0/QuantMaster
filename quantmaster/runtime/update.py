@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
-from quantmaster.release import release_lookup, release_sections
+from quantmaster.release.history import release_lookup, release_sections
 from quantmaster.runtime.activation import (
     FULL_SHA,
     ActivationBlocked,

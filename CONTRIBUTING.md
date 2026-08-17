@@ -18,7 +18,7 @@ QuantMaster 使用 GitHub Issue 作为任务范围记录、Draft PR 作为变更
 `tasks.py ready`。Issue/PR/Project 状态用 `scripts/dev/github_sync.py reconcile` 对账，默认
 dry-run，`--apply` 只执行脚本列出的安全修复。
 
-任务分支不修改 `quantmaster/release.py` 或 `CHANGELOG.md`；版本变更由 owner 要求时单独
+任务分支不修改 `quantmaster/release/history.py` 或 `CHANGELOG.md`；版本变更由 owner 要求时单独
 版本 PR 完成。由于当前 release tag 会触发 GitHub Release，任何 tag/发布动作都必须等 owner
 对具体候选 SHA 和 Release 明确确认。
 

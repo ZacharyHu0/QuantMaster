@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
-RELEASE_FILE = "quantmaster/release.py"
+RELEASE_FILE = "quantmaster/release/history.py"
 CHANGELOG_FILE = "CHANGELOG.md"
 PENDING_MARKER = "quantmaster-release-sync.json"
 CI_RECOVERY_MARKER = "quantmaster-ci-recovery.json"

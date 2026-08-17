@@ -47,36 +47,55 @@ def _block(reason: str, detail: str, **context: object) -> None:
     raise StageBlocked(reason, detail, **context)
 
 
+def _const_assignments(source: str, source_path: Path) -> dict[str, str]:
+    tree = __import__("ast").parse(source, filename=str(source_path))
+    consts: dict[str, str] = {}
+    assigns = __import__("ast").Assign
+    names = __import__("ast").Name
+    constants = __import__("ast").Constant
+    for node in tree.body:
+        if not isinstance(node, assigns):
+            continue
+        for target in node.targets:
+            if (
+                isinstance(target, names)
+                and target.id in {"VERSION", "RELEASE_DATE"}
+                and isinstance(node.value, constants)
+            ):
+                consts[target.id] = node.value.value
+    return consts
+
+
 def _release_metadata(snapshot: Path) -> tuple[str, str]:
     """Read version/date constants from the exact snapshot's release metadata.
 
     We compile-and-const-eval only the two scalar constants from the snapshot's
-    release.py, keeping its large RELEASES changelog table out of the staging
-    import path so an older or partially-built snapshot cannot delay staging.
+    release history module (or the pre-split ``release.py`` of an older snapshot),
+    keeping its large RELEASES changelog table out of the staging import path so
+    an older or partially-built snapshot cannot delay staging.
     """
 
-    source_path = snapshot / "quantmaster" / "release.py"
+    candidates = (
+        snapshot / "quantmaster" / "release" / "history.py",
+        snapshot / "quantmaster" / "release.py",
+    )
+    source_path = next((path for path in candidates if path.is_file()), None)
+    if source_path is None:
+        _block("release_metadata_unreadable", "快照缺少可读的发布元数据")
     try:
         source = source_path.read_text(encoding="utf-8")
     except OSError as exc:
         _block("release_metadata_unreadable", f"无法读取快照发布元数据：{source_path}: {exc}")
     try:
-        tree = __import__("ast").parse(source, filename=str(source_path))
+        consts = _const_assignments(source, source_path)
     except SyntaxError as exc:
-        _block("release_metadata_unreadable", f"快照 release.py 语法无效：{exc}")
-    consts: dict[str, object] = {}
-    for node in tree.body:
-        if isinstance(node, __import__("ast").Assign):
-            for target in node.targets:
-                if isinstance(target, __import__("ast").Name) and target.id in {"VERSION", "RELEASE_DATE"}:
-                    if isinstance(node.value, (__import__("ast").Constant,)):
-                        consts[target.id] = node.value.value
+        _block("release_metadata_unreadable", f"快照发布元数据语法无效：{source_path}: {exc}")
     version = consts.get("VERSION", "")
     date = consts.get("RELEASE_DATE", "")
-    if not isinstance(version, str) or not version.strip():
-        _block("release_metadata_invalid", "快照 release.py 缺少有效 VERSION")
-    if not isinstance(date, str) or not date.strip():
-        _block("release_metadata_invalid", "快照 release.py 缺少有效 RELEASE_DATE")
+    if not version.strip():
+        _block("release_metadata_invalid", "快照发布元数据缺少有效 VERSION")
+    if not date.strip():
+        _block("release_metadata_invalid", "快照发布元数据缺少有效 RELEASE_DATE")
     return version.strip(), date.strip()
 
 

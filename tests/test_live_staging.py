@@ -444,8 +444,8 @@ def test_stage_smoke_failure_removes_only_the_new_candidate(tmp_path: Path, monk
     primary = tmp_path / "primary"
     primary.mkdir()
     package = primary / "quantmaster"
-    package.mkdir()
-    (package / "release.py").write_text(
+    (package / "release").mkdir(parents=True)
+    (package / "release" / "history.py").write_text(
         'VERSION = "1.16.2"\nRELEASE_DATE = "2026-08-16"\n',
         encoding="utf-8",
     )

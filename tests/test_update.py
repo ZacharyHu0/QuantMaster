@@ -159,7 +159,7 @@ def test_update_status_attaches_version_metadata_to_active_and_candidates(tmp_pa
 
 
 def test_release_lookup_returns_version_metadata_via_version_or_sha():
-    from quantmaster.release import release_lookup, release_sections
+    from quantmaster.release.history import release_lookup, release_sections
 
     assert release_lookup("1.16.2")["version"] == "1.16.2"
     assert release_lookup("1.16.2")["release_date"] == "2026-08-16"
