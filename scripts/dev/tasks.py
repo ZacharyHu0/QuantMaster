@@ -13,6 +13,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,10 @@ COMPLETION_SCHEMA = 1
 REMOVE_INTENT_SCHEMA = 1
 TASK_ARTIFACT_ACL_UNRECOVERABLE = "TASK_ARTIFACT_ACL_UNRECOVERABLE"
 TASK_CHECKOUT_ACL_UNRECOVERABLE = "TASK_CHECKOUT_ACL_UNRECOVERABLE"
+PRIMARY_CONTROL_INVALID = "PRIMARY_CONTROL_INVALID"
+TASK_CONTEXT_INVALID = "TASK_CONTEXT_INVALID"
+TASK_ADMIN_BUSY = "TASK_ADMIN_BUSY"
+TASK_ADMIN_LOCK_TIMEOUT_SECONDS = 30.0
 _WINDOWS_TRANSIENT_CLEANUP_ERRORS = frozenset({32, 33, 145})
 
 
@@ -71,6 +76,84 @@ def primary_root(cwd: Path = ROOT) -> Path:
         if line.startswith("worktree "):
             return Path(line.removeprefix("worktree ")).resolve()
     raise RuntimeError("无法确定主 worktree")
+
+
+def git_common_dir(cwd: Path) -> Path:
+    raw = git(["rev-parse", "--git-common-dir"], cwd=cwd).stdout.strip()
+    path = Path(raw)
+    return (path if path.is_absolute() else cwd / path).resolve()
+
+
+def worktree_branches(primary: Path) -> dict[Path, str | None]:
+    result: dict[Path, str | None] = {}
+    current: Path | None = None
+    records = git(["worktree", "list", "--porcelain"], cwd=primary).stdout
+    for raw in records.splitlines():
+        line = raw.strip().replace("\\", "/")
+        if line.startswith("worktree "):
+            current = Path(line.removeprefix("worktree ")).resolve()
+            result[current] = None
+        elif current is not None and line.startswith("branch "):
+            result[current] = line.removeprefix("branch ")
+    return result
+
+
+def require_primary_control(cwd: Path) -> Path:
+    primary = primary_root(ROOT)
+    reasons: list[str] = []
+    if ROOT.resolve() != primary:
+        reasons.append("source_not_primary")
+    if cwd.resolve() != primary:
+        reasons.append("cwd_not_primary")
+    branches = worktree_branches(primary)
+    if branches.get(primary) != "refs/heads/main":
+        reasons.append("primary_not_main")
+    main_holders = [
+        path for path, branch in branches.items() if branch == "refs/heads/main"
+    ]
+    if main_holders != [primary]:
+        reasons.append("main_holder_mismatch")
+    dirty = git(
+        ["status", "--porcelain", "--untracked-files=all"], cwd=primary,
+    ).stdout.splitlines()
+    if dirty:
+        reasons.append(f"primary_dirty={len(dirty)}")
+    common = git_common_dir(primary)
+    operations = {
+        "merge": common / "MERGE_HEAD",
+        "cherry_pick": common / "CHERRY_PICK_HEAD",
+        "revert": common / "REVERT_HEAD",
+        "rebase_merge": common / "rebase-merge",
+        "rebase_apply": common / "rebase-apply",
+    }
+    active = sorted(name for name, path in operations.items() if path.exists())
+    if active:
+        reasons.append("operation=" + ",".join(active))
+    if reasons:
+        raise SystemExit(f"{PRIMARY_CONTROL_INVALID}: " + "; ".join(reasons))
+    return primary
+
+
+def require_task_context(cwd: Path) -> tuple[Path, str]:
+    primary = primary_root(ROOT)
+    resolved = cwd.resolve()
+    tasks_root = (primary / ".worktrees").resolve()
+    reasons: list[str] = []
+    if ROOT.resolve() != resolved:
+        reasons.append("source_not_current_worktree")
+    if resolved.parent != tasks_root:
+        reasons.append("outside_managed_worktrees")
+    slug = resolved.name
+    if not SLUG_PATTERN.fullmatch(slug):
+        reasons.append("invalid_slug")
+    branches = worktree_branches(primary)
+    if resolved not in branches:
+        reasons.append("unregistered_worktree")
+    elif branches[resolved] != f"refs/heads/codex/{slug}":
+        reasons.append("branch_mismatch")
+    if reasons:
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: " + "; ".join(reasons))
+    return primary, slug
 
 
 def project_python(cwd: Path = ROOT) -> Path:
@@ -181,6 +264,28 @@ def _unlock(stream) -> None:
     import fcntl
 
     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def task_admin_lease(
+    primary: Path, *, timeout_seconds: float = TASK_ADMIN_LOCK_TIMEOUT_SECONDS,
+):
+    marker = git_common_dir(primary) / "quantmaster-task-admin.lock"
+    with marker.open("a+b") as stream:
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while not _try_lock(stream):
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"{TASK_ADMIN_BUSY}: another task lifecycle command is active"
+                )
+            time.sleep(0.1)
+        try:
+            yield
+        finally:
+            _unlock(stream)
 
 
 @contextlib.contextmanager
@@ -493,7 +598,14 @@ def check(cwd: Path, *, staged: bool = False, base: str = "origin/main") -> Impa
             "--full", *impact.tests,
             "--timeout=180", "--durations=20", "--basetemp", str(temp),
         ], cwd=cwd)
-        shutil.rmtree(temp)
+        _remove_verified_tree(
+            temp.resolve(),
+            expected_parent=temp.parent.resolve(),
+            scope="pytest impact run",
+            error_code=TASK_ARTIFACT_ACL_UNRECOVERABLE,
+            retry="scripts/dev/tasks.py check",
+            retained="pytest evidence retained",
+        )
     elif impact.mode == "docs":
         print("[task] documentation-only change: Python tests skipped")
     else:
@@ -1183,34 +1295,47 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def dispatch(args: argparse.Namespace, cwd: Path) -> None:
+    if args.command == "start":
+        start(args.slug)
+    elif args.command == "serve":
+        serve(
+            args.slug, open_browser=args.open,
+            stockdb_root=args.stockdb_root,
+        )
+    elif args.command == "check":
+        check(cwd, staged=args.staged, base=args.base)
+    elif args.command == "ready":
+        ready(
+            cwd, ui=args.ui, rust=args.rust, package=args.package,
+            accept_ci=args.accept_ci,
+        )
+    elif args.command == "remove":
+        remove(
+            args.slug, superseded_by=args.superseded_by,
+            adopt_partial_removal=args.adopt_partial_removal,
+        )
+    elif args.command == "gc":
+        gc_task_artifacts(
+            apply=args.apply, retention_days=args.retention_days,
+            adopt_legacy_orphans=args.adopt_legacy_orphans,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     cwd = Path.cwd().resolve()
+
     try:
-        if args.command == "start":
-            start(args.slug)
-        elif args.command == "serve":
-            serve(
-                args.slug, open_browser=args.open,
-                stockdb_root=args.stockdb_root,
-            )
-        elif args.command == "check":
-            check(cwd, staged=args.staged, base=args.base)
-        elif args.command == "ready":
-            ready(
-                cwd, ui=args.ui, rust=args.rust, package=args.package,
-                accept_ci=args.accept_ci,
-            )
-        elif args.command == "remove":
-            remove(
-                args.slug, superseded_by=args.superseded_by,
-                adopt_partial_removal=args.adopt_partial_removal,
-            )
-        elif args.command == "gc":
-            gc_task_artifacts(
-                apply=args.apply, retention_days=args.retention_days,
-                adopt_legacy_orphans=args.adopt_legacy_orphans,
-            )
+        if args.command in {"start", "remove", "gc"}:
+            primary = require_primary_control(cwd)
+            with task_admin_lease(primary):
+                require_primary_control(cwd)
+                dispatch(args, cwd)
+        else:
+            if args.command in {"check", "ready"}:
+                require_task_context(cwd)
+            dispatch(args, cwd)
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[task] FAILED: {redact_public_text(exc)}", file=sys.stderr)
         return 1

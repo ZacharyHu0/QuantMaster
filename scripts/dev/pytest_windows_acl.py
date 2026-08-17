@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import uuid
 from os import environ
 from pathlib import Path
 from typing import Any
@@ -174,6 +175,37 @@ def _install_inheriting_tmp_path_factory(config: Any) -> None:
     config.add_cleanup(lambda: setattr(TempPathFactory, "mktemp", original))
 
 
+def _pytest_artifact_root(config: Any) -> Path:
+    from scripts.dev.tasks import (
+        TASK_CONTEXT_INVALID,
+        primary_root,
+        registered_worktrees,
+    )
+
+    checkout = Path(config.rootpath).resolve()
+    primary = primary_root(checkout)
+    if checkout == primary:
+        return primary / ".artifacts"
+    tasks_root = (primary / ".worktrees").resolve()
+    if checkout.parent == tasks_root and checkout in registered_worktrees(primary):
+        return primary / ".artifacts" / "worktrees" / checkout.name
+    raise RuntimeError(
+        f"{TASK_CONTEXT_INVALID}: pytest checkout is not a managed task worktree"
+    )
+
+
+def _bind_default_basetemp(config: Any, factory: Any) -> Path:
+    artifacts = _pytest_artifact_root(config)
+    cache = getattr(config, "cache", None)
+    if cache is not None:
+        cache._cachedir = prepare_pytest_directory(artifacts / "pytest" / "cache")
+    runs = prepare_pytest_directory(artifacts / "pytest" / "runs")
+    pid = getattr(os, "getpid", lambda: 0)()
+    direct = runs / f"direct-{pid}-{uuid.uuid4().hex[:10]}"
+    factory._basetemp = prepare_pytest_directory(direct)
+    return direct
+
+
 @hookimpl(trylast=True)
 def pytest_configure(config: Any) -> None:
     _install_task_artifact_lease(config)
@@ -181,18 +213,22 @@ def pytest_configure(config: Any) -> None:
         return
     cache = getattr(config, "cache", None)
     cachedir = getattr(cache, "_cachedir", None)
-    if cachedir is not None:
-        prepare_pytest_directory(Path(cachedir))
-
     factory = getattr(config, "_tmp_path_factory", None)
     given_basetemp = getattr(factory, "_given_basetemp", None)
-    if factory is None or given_basetemp is None:
+    if factory is None:
+        if cachedir is not None:
+            prepare_pytest_directory(Path(cachedir))
         return
 
-    # TempPathFactory.getbasetemp() deletes an existing --basetemp and recreates
-    # it with mode=0700.  On Windows that replacement protects the DACL instead
-    # of inheriting the task artifact ACL, so a later sandbox identity cannot
-    # remove the directory.  Bind the prepared directory as the resolved base
-    # before pytest gets a chance to replace it.
-    factory._basetemp = prepare_pytest_directory(Path(given_basetemp))
+    if given_basetemp is None:
+        _bind_default_basetemp(config, factory)
+    else:
+        if cachedir is not None:
+            prepare_pytest_directory(Path(cachedir))
+        # TempPathFactory.getbasetemp() deletes an existing --basetemp and
+        # recreates it with mode=0700.  On Windows that replacement protects
+        # the DACL instead of inheriting the task artifact ACL, so a later
+        # sandbox identity cannot remove the directory.  Bind the prepared
+        # directory before pytest gets a chance to replace it.
+        factory._basetemp = prepare_pytest_directory(Path(given_basetemp))
     _install_inheriting_tmp_path_factory(config)

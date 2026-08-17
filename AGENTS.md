@@ -21,8 +21,13 @@ re-derive policy from prose or chat context.
 - Use the primary checkout's project interpreter for every Python command:
   `<primary>\.venv\Scripts\python.exe` on Windows (`.venv/bin/python` elsewhere). Task worktrees
   share that interpreter. Never fall back to system Python.
+- The primary checkout is a control plane, not a development workspace. It must remain a clean
+  `main` checkout. A coordinating agent stays there; every coding agent receives one absolute
+  `.worktrees/<slug>` working directory and never switches branches in any shared worktree.
 - `.artifacts`, pytest caches, writable databases, and runtime state are task-local. `tasks.py`
   owns every writable path; do not create, chmod, or delete task directories manually.
+- Direct `python -m pytest <node>` runs are supported: the Windows pytest plugin assigns a unique
+  task-local basetemp and cache. Do not override them with a system temporary directory.
 
 ## Task lifecycle (the only workflow)
 
@@ -30,6 +35,8 @@ re-derive policy from prose or chat context.
    acceptance checks; the Issue template supplies the rest. Do not start code without it.
 2. **Start the task.** From the primary checkout:
    `./.venv/Scripts/python.exe scripts/dev/tasks.py start <slug>`.
+   With concurrent agents, finish each `start` before dispatch and set the coding agent's working
+   directory to the newly created task worktree.
    Record the development baseline and keep it fixed. Do not fetch, merge, or rebase during
    development; movement of `main` is expected and irrelevant until integration.
 3. **Develop on the baseline.**

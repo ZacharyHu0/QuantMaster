@@ -38,8 +38,8 @@ def _refresh() -> None:
     global _cached, _cached_at, _refreshing
     try:
         report = collect_health_report()
-        from quantmaster.operational_diagnostics import safe_operational_metrics
         from quantmaster.runtime.llm import get_llm_execution_coordinator
+        from quantmaster.server.operational_diagnostics import safe_operational_metrics
 
         report["components"] = safe_operational_metrics()
         from quantmaster.server.cache_observability import collect_cache_observability

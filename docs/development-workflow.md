@@ -9,6 +9,12 @@ before spending time on `main` movement.
 Create every independent task with `scripts/dev/tasks.py start <slug>` from the primary checkout.
 Choose and record one development baseline at task creation.
 
+The primary checkout is the task control plane and permanently holds a clean `main`. Do not edit
+or switch branches there. For concurrent work, the coordinating agent creates every task first,
+then starts each coding agent with its absolute `.worktrees/<slug>` directory as the working
+directory. Lifecycle writes (`start`, `remove`, and `gc`) share one Git-common-dir lock; ordinary
+development and validation remain parallel across task worktrees.
+
 During development, do not poll, compare, fetch, merge, or rebase against local `main` or
 `origin/main`. Progress on either branch is expected and is not a reason to interrupt the task or
 repeat validation. Tasks with a real runtime, schema, or contract dependency must be ordered
@@ -29,6 +35,11 @@ path. It selects adjacent contracts from the checked-in impact map and runs full
 `--full`; unknown or infrastructure paths fail safe to the complete Python suite. After a failure,
 rerun the exact pytest node id or `--last-failed`, then rerun the impact set. Do not run the full
 suite during the edit loop.
+
+On Windows, direct pytest invocations without `--basetemp` are automatically routed to a unique
+`.artifacts/worktrees/<slug>/pytest/runs/direct-*` directory with a task-local cache. Repository
+tests must never use `%TEMP%/pytest-of-*`; explicit basetemps remain supported when a checked-in
+runner supplies a prepared artifact path.
 
 Checkpoint commits are allowed. Task branches never edit `quantmaster/release/history.py` or
 `CHANGELOG.md`. Do not push a checkpoint while a local gate is red; fix it locally first.

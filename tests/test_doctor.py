@@ -105,7 +105,7 @@ def test_api_doctor_flattens_lazy_included_routers():
 
 
 def test_operational_metrics_degrade_without_hiding_failure(monkeypatch):
-    from quantmaster import operational_diagnostics
+    from quantmaster.server import operational_diagnostics
 
     monkeypatch.setattr(
         operational_diagnostics,
