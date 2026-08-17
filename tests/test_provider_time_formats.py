@@ -6,8 +6,12 @@ import pytest
 from quantmaster.data.resilience import ProviderContractChanged
 from quantmaster.data.tushare_source import TushareSource
 from quantmaster.temporal import (
+    InformationBoundary,
+    KnowledgeMode,
     ProviderDateFormat,
     TemporalContractError,
+    information_time,
+    parse_business_date,
     parse_instant,
     parse_provider_date,
 )
@@ -52,6 +56,11 @@ def test_iso_instant_never_uses_host_timezone_or_date_midnight() -> None:
     assert parse_instant(
         "2026-08-13T09:30:00-04:00", field="event_at"
     ) == datetime(2026, 8, 13, 13, 30, tzinfo=UTC)
+    assert parse_instant(
+        "2026-08-13T09:00:00",
+        field="event_at",
+        default_timezone="Asia/Shanghai",
+    ) == datetime(2026, 8, 13, 1, 0, tzinfo=UTC)
 
     with pytest.raises(TemporalContractError) as missing_zone:
         parse_instant("2026-08-13 09:30:00", field="event_at")
@@ -62,6 +71,29 @@ def test_iso_instant_never_uses_host_timezone_or_date_midnight() -> None:
             "2026-08-13", field="event_at", default_timezone="Asia/Shanghai"
         )
     assert date_only.value.code == "date_used_as_instant"
+
+
+def test_business_date_and_cutoff_are_distinct_contracts() -> None:
+    assert parse_business_date("2026-08-13") == date(2026, 8, 13)
+    with pytest.raises(TemporalContractError, match="业务日期"):
+        parse_business_date(datetime(2026, 8, 13, tzinfo=UTC))
+    with pytest.raises(TemporalContractError, match="时区"):
+        InformationBoundary(
+            date(2026, 8, 13), datetime(2026, 8, 13, 15), "Asia/Shanghai",
+        )
+
+
+def test_replay_modes_choose_observed_or_trusted_published_explicitly() -> None:
+    published = datetime(2026, 8, 1, tzinfo=UTC)
+    observed = datetime(2026, 8, 10, tzinfo=UTC)
+    assert information_time(
+        published_at=published, first_observed_at=observed,
+        mode=KnowledgeMode.STRICT_OBSERVED,
+    ) == observed
+    assert information_time(
+        published_at=published, first_observed_at=observed,
+        mode=KnowledgeMode.TRUSTED_PUBLISHED,
+    ) == published
 
 
 @pytest.mark.parametrize(
