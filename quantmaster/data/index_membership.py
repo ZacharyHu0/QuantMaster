@@ -9,8 +9,8 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.data.index_source_access import index_source
-from quantmaster.research_access import research_lake
-from quantmaster.research_primitives import (
+from quantmaster.data.research_access import research_lake
+from quantmaster.data.research_primitives import (
     ArtifactKind,
     AssetClass,
     Frequency,

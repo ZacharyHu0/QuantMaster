@@ -97,7 +97,7 @@ class DataRefreshManager:
         if not universe:
             raise ValueError("指定候选刷新需要选择候选")
         if universe.lower() == "csi800":
-            from quantmaster.schema_access import schema_target
+            from quantmaster.data.schema_access import schema_target
 
             membership = schema_target("membership_loader")(start, end)
             return sorted(symbol for symbol in membership if membership[symbol].any())
@@ -183,7 +183,7 @@ class DataRefreshManager:
     @staticmethod
     def _publish_market_snapshot() -> None:
         try:
-            from quantmaster.schema_access import schema_target
+            from quantmaster.data.schema_access import schema_target
 
             schema_target("market_overview_publisher")()
         except (OSError, RuntimeError, ValueError, TypeError):

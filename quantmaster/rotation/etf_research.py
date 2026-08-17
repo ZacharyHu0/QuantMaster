@@ -31,8 +31,8 @@ from quantmaster.data.free_stockdb_ingest import _frame_hash as _stockdb_frame_h
 from quantmaster.data.free_stockdb_source import FreeStockDBSource
 from quantmaster.data.instruments import Instrument, InstrumentStore
 from quantmaster.data.resilience import PROVIDER_HEALTH, remote_io_allowed
-from quantmaster.etf_contract import is_exchange_etf as _is_exchange_etf
 from quantmaster.research.contracts import content_hash
+from quantmaster.research.etf_contract import is_exchange_etf as _is_exchange_etf
 from quantmaster.rotation.etf_models import (
     ETF_RESEARCH_MODEL_VERSION,
     ETF_SCHEMA_VERSION,

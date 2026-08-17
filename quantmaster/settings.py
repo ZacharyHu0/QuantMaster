@@ -21,8 +21,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from quantmaster.config import DEFAULT_CONFIG_PATHS, Config, load_config, set_config
-from quantmaster.config_manager_access import register_config_manager
 from quantmaster.credentials import CredentialError, CredentialStore
+from quantmaster.data.config_manager_access import register_config_manager
 from quantmaster.trading_sessions import market_date
 
 CONFIG_VERSION = 1

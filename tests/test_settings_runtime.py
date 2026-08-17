@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import yaml
 
-from quantmaster.settings_runtime import begin_apply, public_state, report_component
+from quantmaster.server.settings_runtime import begin_apply, public_state, report_component
 
 
 def _persist(path, revision: int) -> None:

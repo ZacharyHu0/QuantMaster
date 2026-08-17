@@ -17,7 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
-from quantmaster.trading_session_sources import official_calendar, research_calendar
+from quantmaster.runtime.trading_session_sources import official_calendar, research_calendar
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAILY_SIGNAL_CUTOFF = wall_time(15, 0)

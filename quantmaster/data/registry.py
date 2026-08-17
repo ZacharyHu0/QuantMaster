@@ -51,7 +51,7 @@ from quantmaster.data.resilience import (
 )
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.data.storage import BarStore, IntradayBarStore
-from quantmaster.market_identity import guess_market
+from quantmaster.market_capabilities import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
 

@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from quantmaster.config import get_config
-from quantmaster.config_manager_access import new_config_manager
+from quantmaster.data.config_manager_access import new_config_manager
 from quantmaster.runtime.maintenance import MaintenanceLease, maintenance_barrier
 
 

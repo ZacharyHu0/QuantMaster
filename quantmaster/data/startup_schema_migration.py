@@ -62,7 +62,7 @@ def _probe_jobs(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ..
 
 
 def _probe_paper(connection: sqlite3.Connection) -> tuple[str, str, tuple[str, ...]]:
-    from quantmaster.schema_access import schema_target
+    from quantmaster.data.schema_access import schema_target
 
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
     paper_schema_version = int(schema_target("paper_schema_version"))
@@ -127,7 +127,7 @@ def _upgrade(domain: str, path: Path, root: Path) -> None:
         store.artifacts_root = root / "derived" / "job-artifacts"
         store._migrate_legacy_schema()
     else:
-        from quantmaster.schema_access import schema_target
+        from quantmaster.data.schema_access import schema_target
 
         schema_target("paper_store").migrate_legacy_database(path, root / "paper_accounts")
 

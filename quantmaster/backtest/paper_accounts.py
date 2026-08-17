@@ -40,11 +40,11 @@ from quantmaster.backtest.spec import (
     signal_is_due,
 )
 from quantmaster.config import get_config
+from quantmaster.data.schema_access import register_paper_store, register_schema_target
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.schema_access import register_paper_store, register_schema_target
 from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_target
 
 logger = logging.getLogger(__name__)

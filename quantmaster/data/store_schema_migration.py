@@ -157,7 +157,7 @@ class StoreSchemaMigrator:
 
     @staticmethod
     def _upgrade_lab(root: Path) -> None:
-        from quantmaster.schema_access import schema_factory
+        from quantmaster.data.schema_access import schema_factory
 
         store_type = schema_factory("lab_store")
         store = store_type.__new__(store_type)
@@ -167,7 +167,7 @@ class StoreSchemaMigrator:
 
     @staticmethod
     def _upgrade_rotation(root: Path, target: _SchemaTarget) -> None:
-        from quantmaster.schema_access import schema_factory
+        from quantmaster.data.schema_access import schema_factory
 
         store_type = schema_factory("rotation_store")
         rotation = store_type.__new__(store_type)

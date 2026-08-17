@@ -16,7 +16,7 @@ from quantmaster.factors.analysis import (
     quantile_backtest,
     top_quantile_turnover,
 )
-from quantmaster.horizons import SUPPORTED_HORIZONS
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.research import WalkForwardSpec, walk_forward_folds
 from quantmaster.lab.robustness import (
     monte_carlo_block_bootstrap,

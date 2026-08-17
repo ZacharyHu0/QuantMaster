@@ -10,7 +10,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, Literal, get_args
 
-from quantmaster.actor_context import ActorContext
+from quantmaster.automation.channels.actor_context import ActorContext
 from quantmaster.credentials import CredentialError, CredentialStore
 from quantmaster.logging_config import normalize_third_party_logger, redact_public_text
 

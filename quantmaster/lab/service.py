@@ -19,7 +19,6 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.factors.base import ExpressionFactor
-from quantmaster.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.catalog import curated_catalog
 from quantmaster.lab.dataset import (
     create_snapshot,
@@ -28,6 +27,7 @@ from quantmaster.lab.dataset import (
     load_local_dataset,
 )
 from quantmaster.lab.errors import LabError, classify_lab_error
+from quantmaster.lab.horizons import SUPPORTED_HORIZONS
 from quantmaster.lab.models import DataPolicy, FactorSpec, content_hash
 from quantmaster.lab.preflight import compact_preflight, require_runnable, run_preflight
 from quantmaster.lab.service_access import register_lab_service_factory
@@ -551,9 +551,9 @@ class LabService:
         if claimed is None:
             return self.store.publication(publication_id) or current
         try:
+            from quantmaster.data.research_access import research_engine
+            from quantmaster.data.research_primitives import AssetClass
             from quantmaster.lab.ml import artifact_sha256
-            from quantmaster.research_access import research_engine
-            from quantmaster.research_primitives import AssetClass
 
             payload = claimed["payload"]
             root = Path(get_config().data_root).resolve()
@@ -1480,7 +1480,7 @@ class LabService:
         self, *, universe: str, start: str, end: str, population: int = 60,
         generations: int = 8, top_n: int = 10, horizon: int = 3, progress=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         if progress:
@@ -1560,7 +1560,7 @@ class LabService:
         self, *, universe: str, start: str, end: str, count: int = 8,
         rounds: int = 2, horizon: int = 3, progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         rounds = max(1, int(rounds))
@@ -1857,7 +1857,7 @@ class LabService:
         rounds: int = 3, candidate_limit: int = 24, finalists: int = 3,
         progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
         if not get_config().lab.ai_python_mining_enabled:
             raise ValueError("受限 Python AutoMiner 尚未启用")
         self.store.update_mining_run(run_id, status="running")

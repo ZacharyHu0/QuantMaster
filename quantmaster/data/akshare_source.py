@@ -17,7 +17,7 @@ from quantmaster.data.base import (
     validate_frequency,
 )
 from quantmaster.data.resilience import akshare_call
-from quantmaster.market_identity import guess_market
+from quantmaster.market_capabilities import guess_market
 
 
 def _require_akshare():

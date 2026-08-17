@@ -1465,6 +1465,6 @@ def readiness() -> dict[str, Any]:
     }
 
 
-from quantmaster.schema_access import register_membership_loader  # noqa: E402
+from quantmaster.data.schema_access import register_membership_loader  # noqa: E402
 
 register_membership_loader(load_csi800_membership)

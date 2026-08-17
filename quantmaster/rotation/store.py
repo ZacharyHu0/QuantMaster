@@ -23,10 +23,10 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.data.schema_access import register_rotation_store
 from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
-from quantmaster.schema_access import register_rotation_store
 
 ACTIVE_JOB_STATUSES = frozenset({"queued", "running", "cancelling"})
 TERMINAL_JOB_STATUSES = frozenset({"completed", "failed", "cancelled"})

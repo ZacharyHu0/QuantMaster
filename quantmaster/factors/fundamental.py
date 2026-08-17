@@ -154,7 +154,7 @@ def resolve_factor(
     # Quant Lab display names are unique registry aliases. Resolving them here keeps
     # copied names and autocomplete insertions executable without exposing the raw
     # expression (whose function commas conflict with multi-factor separators).
-    from quantmaster.schema_access import schema_target
+    from quantmaster.data.schema_access import schema_target
 
     stored = schema_target("lab_store").factor_reference(name_or_expr)
     if stored is not None:

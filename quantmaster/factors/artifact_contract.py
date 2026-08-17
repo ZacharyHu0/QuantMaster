@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from quantmaster.research_primitives import ArtifactKind, AssetClass, Frequency
+from quantmaster.data.research_primitives import ArtifactKind, AssetClass, Frequency
 
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,119}$")
 _VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")

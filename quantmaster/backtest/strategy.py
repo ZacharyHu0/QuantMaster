@@ -8,9 +8,9 @@ from typing import Any
 
 import pandas as pd
 
+from quantmaster.decision.signal_contract import SignalBundle
 from quantmaster.factors.base import Factor, PanelDict
 from quantmaster.factors.engine import compute_factor
-from quantmaster.signal_contract import SignalBundle
 
 
 class Strategy(ABC):

@@ -1160,7 +1160,7 @@ class EndpointFrameCache:
         except Exception as exc:
             logger.warning("接口缓存损坏，将隔离并重新拉取: %s", path)
             try:
-                from quantmaster.repair_access import enqueue_repair, quarantine_file
+                from quantmaster.data.repair_access import enqueue_repair, quarantine_file
 
                 quarantine = quarantine_file(
                     path,

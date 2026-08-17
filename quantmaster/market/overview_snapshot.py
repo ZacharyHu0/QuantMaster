@@ -211,6 +211,6 @@ def read_market_overview_snapshot_wire() -> tuple[dict[str, Any], bytes]:
     return snapshot.payload, snapshot.encoded
 
 
-from quantmaster.schema_access import register_market_overview_publisher  # noqa: E402
+from quantmaster.data.schema_access import register_market_overview_publisher  # noqa: E402
 
 register_market_overview_publisher(publish_market_overview_snapshot)
