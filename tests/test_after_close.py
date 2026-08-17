@@ -407,13 +407,14 @@ def test_after_close_invalid_snapshot_path_returns_404(
 def test_after_close_empty_snapshot_returns_problem_503(
     monkeypatch,
 ) -> None:
+    import tempfile
+    from pathlib import Path as _Path
+
     from fastapi.testclient import TestClient
 
+    from quantmaster.after_close.store import AfterCloseStore
     from quantmaster.server import after_close as routes
     from quantmaster.server.app import app
-    from quantmaster.after_close.store import AfterCloseStore
-    from pathlib import Path as _Path
-    import tempfile
 
     # Use read_only=True so the store doesn't create the DB file.
     # _published_service checks if the file exists; when it doesn't,
