@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import quantmaster.runtime.activation as activation
 from quantmaster.runtime.activation import (
     ActivationBlocked,
     ActivationCoordinator,
@@ -299,6 +300,30 @@ def test_packaged_worker_readiness_comes_from_candidate_http_projection(monkeypa
     health = controller.wait_ready(_Generation(SHA_B), identity, 0.2)
 
     assert health["build_sha"] == SHA_B
+
+
+def test_packaged_controller_marks_activation_generation_as_detached(monkeypatch, tmp_path):
+    slot = _candidate(tmp_path, SHA_B)
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    captured = {}
+
+    class Process:
+        pass
+
+    def launch(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setenv("QM_WINDOWS_APP_JOB_ROOT", "old-root")
+    monkeypatch.setattr(activation.subprocess, "Popen", launch)
+
+    result = SubprocessGenerationController().start_generation(slot, identity)
+
+    assert isinstance(result, Process)
+    assert captured["command"] == [str(slot / "QuantMaster.exe"), "serve"]
+    assert captured["environment"][activation.DETACHED_ACTIVATION_ENV] == "1"
+    assert "QM_WINDOWS_APP_JOB_ROOT" not in captured["environment"]
 
 
 def test_packaged_controller_releases_the_drain_lease(monkeypatch):

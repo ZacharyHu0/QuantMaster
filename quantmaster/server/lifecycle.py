@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from quantmaster.runtime.activation import DETACHED_ACTIVATION_ENV
 from quantmaster.runtime.splash import close_splash, splash_active
 
 logger = logging.getLogger(__name__)
@@ -269,8 +270,11 @@ def watch_parent_exit(
         return
 
 
-def server_parent_pid() -> int:
-    """Return the real launcher PID when a frozen bootloader sits in between."""
+def server_parent_pid() -> int | None:
+    """Return the stable-launcher PID, or no owner for an activation generation."""
+
+    if os.environ.get(DETACHED_ACTIVATION_ENV) == "1":
+        return None
     raw = os.environ.get("QM_LAUNCHER_PID")
     if raw is None:
         return os.getppid()
@@ -352,13 +356,15 @@ def run_uvicorn_foreground(
     def request_shutdown() -> None:
         server.should_exit = True
 
-    watcher = threading.Thread(
-        target=watch_parent_exit,
-        args=(parent_pid, request_shutdown, stop_watcher),
-        name="qm-parent-watch",
-        daemon=True,
-    )
-    watcher.start()
+    watcher = None
+    if parent_pid is not None:
+        watcher = threading.Thread(
+            target=watch_parent_exit,
+            args=(parent_pid, request_shutdown, stop_watcher),
+            name="qm-parent-watch",
+            daemon=True,
+        )
+        watcher.start()
     splash_stop = threading.Event()
     splash_watcher = _start_splash_readiness_watcher(server, splash_stop)
     unregister_handler = install_windows_console_handler(request_shutdown, shutdown_complete)
@@ -371,4 +377,5 @@ def run_uvicorn_foreground(
         stop_watcher.set()
         shutdown_complete.set()
         unregister_handler()
-        watcher.join(timeout=1.0)
+        if watcher is not None:
+            watcher.join(timeout=1.0)
