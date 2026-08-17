@@ -281,6 +281,37 @@ def test_retry_queued_before_previous_worker_cleanup_is_rescheduled(tmp_path):
     runtime.stop()
 
 
+def test_retry_cancelling_job_waits_for_previous_worker_cleanup(tmp_path):
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, max_workers=1)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    attempts: list[int] = []
+
+    def handler(context, _spec):
+        attempts.append(context.attempt)
+        if context.attempt == 1:
+            first_started.set()
+            assert release_first.wait(2)
+            context.ensure_active()
+        return JobOutcome("completed", "done")
+
+    runtime.register("test.cancel-retry-race", handler)
+    job, _ = runtime.submit("test.cancel-retry-race", {"value": 1})
+    assert first_started.wait(2)
+
+    assert store.cancel(job["id"])["status"] == "cancelling"
+    retried = runtime.retry(job["id"])
+    assert retried["status"] == "queued"
+    assert retried["attempt"] == 2
+
+    release_first.set()
+    completed = _wait(store, job["id"], {"completed"})
+    assert completed["attempt"] == 2
+    assert attempts == [1, 2]
+    runtime.stop()
+
+
 def test_runtime_stop_drains_current_atomic_unit_and_rejects_new_work(tmp_path):
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     runtime = UnifiedJobRuntime(store, max_workers=1)
