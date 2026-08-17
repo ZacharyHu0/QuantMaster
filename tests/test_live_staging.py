@@ -46,6 +46,20 @@ def _smoke_report(build_sha: str = "a" * 40) -> dict[str, object]:
     }
 
 
+def test_release_metadata_rejects_non_string_constants(tmp_path: Path) -> None:
+    history = tmp_path / "quantmaster" / "release" / "history.py"
+    history.parent.mkdir(parents=True)
+    history.write_text(
+        'VERSION = 1162\nRELEASE_DATE = "2026-08-16"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(live.StageBlocked) as failure:
+        live._release_metadata(tmp_path)
+
+    assert failure.value.reason == "release_metadata_invalid"
+
+
 def _git(cwd: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-c", f"safe.directory={cwd.as_posix()}", *args],

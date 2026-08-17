@@ -47,9 +47,9 @@ def _block(reason: str, detail: str, **context: object) -> None:
     raise StageBlocked(reason, detail, **context)
 
 
-def _const_assignments(source: str, source_path: Path) -> dict[str, str]:
+def _const_assignments(source: str, source_path: Path) -> dict[str, object]:
     tree = __import__("ast").parse(source, filename=str(source_path))
-    consts: dict[str, str] = {}
+    consts: dict[str, object] = {}
     assigns = __import__("ast").Assign
     names = __import__("ast").Name
     constants = __import__("ast").Constant
@@ -92,9 +92,9 @@ def _release_metadata(snapshot: Path) -> tuple[str, str]:
         _block("release_metadata_unreadable", f"快照发布元数据语法无效：{source_path}: {exc}")
     version = consts.get("VERSION", "")
     date = consts.get("RELEASE_DATE", "")
-    if not version.strip():
+    if not isinstance(version, str) or not version.strip():
         _block("release_metadata_invalid", "快照发布元数据缺少有效 VERSION")
-    if not date.strip():
+    if not isinstance(date, str) or not date.strip():
         _block("release_metadata_invalid", "快照发布元数据缺少有效 RELEASE_DATE")
     return version.strip(), date.strip()
 
