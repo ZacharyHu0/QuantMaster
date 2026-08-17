@@ -218,7 +218,7 @@ def test_rotation_local_input_state_tracks_validated_stockdb_session(
             self.index = 0
 
         def fetchone(self):
-            return self.rows[0] if self.rows else None
+            return next(iter(self.rows), None)
 
         def __iter__(self):
             return iter(self.rows)
@@ -231,9 +231,10 @@ def test_rotation_local_input_state_tracks_validated_stockdb_session(
             return False
 
         def execute(self, sql):
-            if "MAX(observed_at)" in sql:
-                return FakeCursor([{"count": 3, "latest": 0}])
-            return FakeCursor([{"count": 3}])
+            rows = ([{"count": 3}], [{"count": 3, "latest": 0}])[
+                "MAX(observed_at)" in sql
+            ]
+            return FakeCursor(rows)
 
     class FakeInstruments:
         def _connection(self):
