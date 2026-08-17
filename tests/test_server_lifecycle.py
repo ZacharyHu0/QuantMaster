@@ -168,6 +168,19 @@ def test_explicit_launcher_pid_overrides_onefile_bootloader_parent(monkeypatch):
     assert lifecycle.server_parent_pid() == 54321
 
 
+def test_detached_activation_has_no_parent_liveness_owner(monkeypatch):
+    from quantmaster.runtime.activation import DETACHED_ACTIVATION_ENV
+
+    monkeypatch.setenv(DETACHED_ACTIVATION_ENV, "1")
+    monkeypatch.setattr(
+        lifecycle.os,
+        "getppid",
+        lambda: (_ for _ in ()).throw(AssertionError("must not watch activation helper")),
+    )
+
+    assert lifecycle.server_parent_pid() is None
+
+
 def test_windows_console_handler_routes_ctrl_c_to_coordinated_shutdown(monkeypatch):
     import ctypes
 

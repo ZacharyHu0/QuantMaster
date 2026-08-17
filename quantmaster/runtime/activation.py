@@ -25,6 +25,7 @@ STAGE_SCHEMA = 1
 STAGE_MARKER = ".quantmaster-stage.json"
 LIFECYCLE_LOCK = ".lifecycle.lock"
 LAUNCHER_TARGET = "launcher.target"
+DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
 READY_TIMEOUT_SECONDS = 15.0
 ROLLBACK_TIMEOUT_SECONDS = 15.0
 _VALID_STATUSES = frozenset({"empty", "stable", "pending", "rolled_back", "blocked"})
@@ -488,6 +489,10 @@ class SubprocessGenerationController:
             "QM_BUILD_SHA": identity.build_sha,
             "QM_SLOT_ID": identity.slot_id,
             "QM_RUNTIME_GENERATION": identity.runtime_generation,
+            # The activation helper exits after this generation is proven ready.
+            # Do not let the Web lifecycle mistake that short-lived helper for a
+            # user-facing stable launcher and stop the new generation with it.
+            DETACHED_ACTIVATION_ENV: "1",
         })
         environment.pop("QM_WINDOWS_APP_JOB_ROOT", None)
         try:
