@@ -915,6 +915,31 @@ class StockDBIngestService:
             )
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+    def read_cross_section_history(
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
+        *,
+        progress: Progress,
+        cancelled: Cancelled,
+    ) -> pd.DataFrame:
+        """Read a raw point-in-time local StockDB panel without publishing.
+
+        This is the bounded local-read seam for display/current-analysis
+        consumers.  It never performs cross-source validation and never writes
+        an immutable ingest snapshot; formal research still goes through
+        :meth:`load_or_create` and its stricter adjustment-factor gate.
+        """
+
+        return self._read_batches(
+            list(dict.fromkeys(str(symbol).upper() for symbol in symbols)),
+            start,
+            end,
+            progress=progress,
+            cancelled=cancelled,
+        )
+
     @staticmethod
     def cross_validation_sample(frame: pd.DataFrame) -> dict[str, Any]:
         """Pick a content-addressed, exchange/liquidity-stratified sample.

@@ -131,6 +131,156 @@ def test_rotation_research_lake_is_labeled_as_local_data(monkeypatch):
     assert sources == ["local:research_lake"]
 
 
+def test_rotation_market_matrices_reads_stockdb_preview_when_lake_is_stale(
+    monkeypatch, isolated_config,
+):
+    stale_dates = pd.bdate_range("2026-06-01", "2026-08-13")
+    symbols = [f"{600000 + index:06d}.SH" for index in range(30)]
+    stale_close = pd.DataFrame(
+        {
+            symbol: 10.0 + index * 0.5
+            for index, symbol in enumerate(symbols)
+        },
+        index=stale_dates,
+    )
+    stale_amount = stale_close * 100
+    target = "2026-08-17"
+    fresh_dates = pd.bdate_range("2026-06-01", target)
+    read_calls: dict[str, object] = {}
+
+    class FakeStockDBService:
+        def __init__(self):
+            self.read_metrics = []
+
+        def read_cross_section_history(self, symbols_value, start, end, *, progress, cancelled):
+            read_calls.update({
+                "symbols": symbols_value, "start": start, "end": end,
+            })
+            rows = []
+            for symbol in symbols_value:
+                for index, date in enumerate(fresh_dates):
+                    rows.append({
+                        "date": date,
+                        "symbol": symbol,
+                        "close": 10.0 + (0 if symbol.endswith("SH") else 5.0) + index * 0.01,
+                        "amount": 1_000.0 + index,
+                    })
+            return pd.DataFrame(rows)
+
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_listed_instruments",
+        staticmethod(lambda: (SimpleNamespace(), len(symbols))),
+    )
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_listed_symbols",
+        staticmethod(lambda _instruments: (
+            symbols, {symbol: f"名称-{symbol}" for symbol in symbols},
+        )),
+    )
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_research_lake_matrices",
+        lambda *_args, **_kwargs: (
+            stale_close, stale_amount, {}, len(symbols), ["local:research_lake"],
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService",
+        FakeStockDBService,
+    )
+
+    close, amount, names, expected_count, sources = RotationDataLoader(
+        RotationStore(),
+    ).market_matrices(
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        target_as_of=target,
+    )
+
+    assert read_calls["symbols"] == symbols
+    assert read_calls["end"] == target
+    assert sources == ["local:stockdb:raw"]
+    assert expected_count == len(symbols)
+    assert list(close.columns) == symbols
+    assert close.index.max() == pd.Timestamp(target)
+    assert amount.index.max() == pd.Timestamp(target)
+    assert names == {symbol: f"名称-{symbol}" for symbol in symbols}
+
+
+def test_rotation_local_input_state_tracks_validated_stockdb_session(
+    monkeypatch, isolated_config,
+):
+    class FakeCursor:
+        def __init__(self, rows):
+            self.rows = list(rows)
+            self.index = 0
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql):
+            if "MAX(observed_at)" in sql:
+                return FakeCursor([{"count": 3, "latest": 0}])
+            return FakeCursor([{"count": 3}])
+
+    class FakeInstruments:
+        def _connection(self):
+            return FakeConnection()
+
+        def get_many(self, requested):
+            return {}
+
+    class FakeBars:
+        def metadata_many(self):
+            return {}
+
+    entry = {
+        "source": "stockdb.validated_session",
+        "partition_key": "2026-08-17",
+        "content_id": "accepted-partial-session",
+        "coverage_start": "2026-08-17",
+        "coverage_end": "2026-08-17",
+    }
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_listed_instruments",
+        staticmethod(lambda: (FakeInstruments(), 3)),
+    )
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_validated_stockdb_session",
+        staticmethod(lambda: ("2026-08-17", entry)),
+    )
+    monkeypatch.setattr("quantmaster.rotation.service.BarStore", FakeBars)
+
+    loader = RotationDataLoader(RotationStore())
+    state = loader.local_input_state()
+
+    assert state["as_of"] == "2026-08-17"
+    assert state["source"] == "stockdb_preview"
+    assert state["available"] is True
+    generations = {item.get("source") for item in state["generations"]}
+    assert "stockdb.validated_session" in generations
+
+    formal_state = loader.local_input_state(include_stockdb_preview=False)
+    assert formal_state["as_of"] == ""
+    assert formal_state["available"] is False
+    formal_generations = {item.get("source") for item in formal_state["generations"]}
+    assert "stockdb.validated_session" not in formal_generations
+
+
 def test_market_etf_evidence_overlays_stockdb_prices_for_unpriced_share_rows(
     monkeypatch,
 ):
@@ -933,7 +1083,8 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         ),
     )
 
-    def load_values(*, progress, cancelled):
+    def load_values(*, progress, cancelled, target_as_of=""):
+        assert target_as_of == ""
         assert not cancelled()
         progress(20, "测试行情", "已准备")
         return close, amount, names, len(close.columns), ["test:local"]

@@ -89,6 +89,10 @@ def test_partial_event_resets_domain_caches_and_only_dispatches_rotation(isolate
 
     assert calls[0:2] == ["reset_after_close", "reset_etf_research"]
     assert [item[0] for item in calls if isinstance(item, tuple)] == ["rotation"]
+    rotation = calls[-1][1]
+    assert (rotation.scope, rotation.source, rotation.as_of) == (
+        "all", "local", "2026-08-10",
+    )
 
 
 def test_failed_event_dispatches_alert_without_success_consumers(isolated_config):

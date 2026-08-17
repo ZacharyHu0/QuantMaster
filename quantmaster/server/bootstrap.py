@@ -92,8 +92,13 @@ class StockDBEventDelivery:
             ):
                 self.after_close_jobs.submit(as_of=target, force=False)
                 logger.info("free-stockdb 验收完成，已提交 %s 盘后研究扫描", target)
+            # Partial or provider-published sessions have no formal research
+            # panel yet.  Refresh current-analysis snapshots from the accepted
+            # local StockDB session itself; do not make that path wait for an
+            # online market-history supplement.
+            rotation_source = "auto" if kind == "update_succeeded" else "local"
             self.rotation_worker.submit(
-                RotationJobSpec(scope="all", source="auto", as_of=target),
+                RotationJobSpec(scope="all", source=rotation_source, as_of=target),
             )
             if kind == "update_succeeded" and target and cfg.automation.enabled:
                 self.automation_runtime.service.run_task(

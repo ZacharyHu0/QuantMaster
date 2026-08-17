@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal, cast
@@ -12,12 +13,51 @@ from typing import Literal, cast
 import pandas as pd
 
 from quantmaster.runtime.json import strict_json_dumps
-from quantmaster.trading_sessions import default_close_data_end
+from quantmaster.trading_sessions import (
+    SessionTargetUnavailable,
+    default_close_data_end,
+    market_date,
+)
 
 logger = logging.getLogger(__name__)
 
 PERSONAL_MARKET_GROUP = "我的股票"
 ProgressEmitter = Callable[..., None]
+
+
+def _local_projection_end() -> pd.Timestamp:
+    """Resolve the read endpoint for the local-only market projection.
+
+    Formal close-data consumers need a *completed* session and must keep using
+    ``default_close_data_end``.  This projection only reads already-cached
+    bars, so an accepted-but-partial local StockDB session is valid display
+    evidence; fall back to it before using the market calendar date.
+    """
+
+    try:
+        return pd.Timestamp(default_close_data_end())
+    except (SessionTargetUnavailable, OSError, RuntimeError, ValueError, sqlite3.Error):
+        pass
+    from quantmaster.config import get_config
+
+    marker = get_config().free_stockdb_root / ".quantmaster-update.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        validation = payload.get("validation") if isinstance(payload, dict) else {}
+        session = str(payload.get("validated_session") or "").strip()
+        if (
+            payload.get("schema_version") == 2
+            and session
+            and str(payload.get("target_session") or "") == session
+            and isinstance(validation, dict)
+            and validation.get("accepted") is True
+            and str(validation.get("target_session") or "") == session
+            and str(validation.get("actual_session") or "") == session
+        ):
+            return pd.Timestamp(session)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return pd.Timestamp(market_date())
 
 
 def _series_to_points(series: pd.Series) -> list[list]:
@@ -303,7 +343,10 @@ def build_market_overview_data(
     from quantmaster.data.reference_market import refresh_reference_panel
     from quantmaster.data.storage import BarStore
 
-    end = pd.Timestamp(default_close_data_end())
+    end = (
+        _local_projection_end()
+        if refresh == "local" else pd.Timestamp(default_close_data_end())
+    )
     start_ts = pd.Timestamp(start) if start else end - pd.Timedelta(days=365)
     start_value, end_value = str(start_ts.date()), str(end.date())
     personal_symbols, personal_memberships = _personal_market_symbols()

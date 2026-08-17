@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import sqlite3
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -391,6 +392,91 @@ class RotationDataLoader:
             ).fetchone()
         return instruments, int(row["count"] if row else 0)
 
+    @staticmethod
+    def _listed_symbols(instruments: InstrumentStore) -> tuple[list[str], dict[str, str]]:
+        """Return the listed CN stock universe with display names."""
+        with instruments._connection() as connection:
+            rows = connection.execute(
+                "SELECT symbol,name FROM instruments WHERE market='CN' "
+                "AND asset_type='stock' AND lower(status) IN ('l','listed') "
+                "ORDER BY symbol"
+            ).fetchall()
+        symbols: list[str] = []
+        names: dict[str, str] = {}
+        for row in rows:
+            symbol = str(row["symbol"] or "").upper().strip()
+            if not symbol:
+                continue
+            symbols.append(symbol)
+            names[symbol] = str(row["name"] or symbol).strip() or symbol
+        return symbols, names
+
+    @staticmethod
+    def _validated_stockdb_session() -> tuple[str, dict[str, Any] | None]:
+        """Describe the latest accepted local StockDB session as a generation.
+
+        An accepted-but-partial session is valid local evidence for a current
+        display snapshot, even though it never satisfies the formal
+        completed-session resolver.
+        """
+
+        try:
+            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+            status = free_stockdb_runtime.status()
+        except (ImportError, OSError, RuntimeError, ValueError, sqlite3.Error):
+            status = {}
+        validation = status.get("validation") if isinstance(status, dict) else {}
+        session = str(status.get("validated_session") or "").strip() if isinstance(status, dict) else ""
+        if (
+            not isinstance(validation, dict)
+            or validation.get("accepted") is not True
+            or not session
+            or str(validation.get("target_session") or "").strip() != session
+            or str(validation.get("actual_session") or "").strip() != session
+        ):
+            try:
+                marker = get_config().free_stockdb_root / ".quantmaster-update.json"
+                payload = json.loads(marker.read_text(encoding="utf-8"))
+                validation = payload.get("validation") if isinstance(payload, dict) else {}
+                session = str(payload.get("validated_session") or "").strip()
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                return "", None
+        if not isinstance(validation, dict):
+            return "", None
+        target = str(validation.get("target_session") or "").strip()
+        actual = str(validation.get("actual_session") or "").strip()
+        if (
+            not session
+            or validation.get("accepted") is not True
+            or target != session
+            or actual != session
+        ):
+            return "", None
+        stable = {
+            key: validation.get(key)
+            for key in (
+                "target_session",
+                "actual_session",
+                "accepted",
+                "complete",
+                "observed_symbols",
+                "expected_symbols",
+                "symbol_ratio",
+                "required_ohlcv_ratio",
+            )
+        }
+        content_id = hashlib.sha256(
+            strict_json_dumps(stable, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return session, {
+            "source": "stockdb.validated_session",
+            "partition_key": session,
+            "content_id": content_id,
+            "coverage_start": session,
+            "coverage_end": session,
+        }
+
     def _research_lake(self) -> tuple[pd.DataFrame, pd.DataFrame] | None:
         if not (get_config().data_root / "research_lake").is_dir():
             return None
@@ -431,13 +517,15 @@ class RotationDataLoader:
             logger.debug("研究湖全市场日线暂不可用", exc_info=True)
             return None
 
-    def local_input_state(self) -> dict[str, Any]:
+    def local_input_state(self, *, include_stockdb_preview: bool = True) -> dict[str, Any]:
         """Read only local catalogs to describe the currently usable panel.
 
         This method is deliberately forbidden from opening Parquet bars.  It is
         used before submitting a refresh to decide whether a published snapshot
         is already valid and whether an ``auto`` request actually needs a
-        remote supplement.
+        remote supplement.  Accepted-but-partial StockDB sessions count as
+        local display evidence only when ``include_stockdb_preview`` is true;
+        formal and historical callers keep the completed-session boundary.
         """
 
         instruments, expected_count = self._listed_instruments()
@@ -528,6 +616,12 @@ class RotationDataLoader:
             newer_bar_count < max(1000, round(expected_count * 0.70))
         )
         selected_entries = lake_entries if use_lake else bar_entries
+        panel_as_of = lake_as_of if use_lake else bar_as_of
+        stockdb_session, stockdb_entry = (
+            self._validated_stockdb_session() if include_stockdb_preview else ("", None)
+        )
+        if stockdb_entry is not None:
+            selected_entries = [stockdb_entry, *selected_entries]
         generations = self.store.derived.advance_source_generations([
             *selected_entries,
             {
@@ -536,12 +630,15 @@ class RotationDataLoader:
                 "content_id": instrument_identity,
             },
         ])
+        use_stockdb = bool(stockdb_entry is not None and stockdb_session > panel_as_of)
         return {
             "generations": generations,
-            "as_of": lake_as_of if use_lake else bar_as_of,
-            "source": "research_lake" if use_lake else "bar_store",
+            "as_of": stockdb_session if use_stockdb else panel_as_of,
+            "source": "stockdb_preview" if use_stockdb else (
+                "research_lake" if use_lake else "bar_store"
+            ),
             "expected_count": expected_count,
-            "available": bool(selected_entries),
+            "available": bool(selected_entries) or stockdb_entry is not None,
         }
 
     @staticmethod
@@ -647,18 +744,104 @@ class RotationDataLoader:
         selected_names = {symbol: names.get(symbol, symbol) for symbol in close.columns}
         return close, amount, selected_names, expected_count, ["local:bar_store"]
 
+    def _stockdb_matrices(
+        self,
+        instruments: InstrumentStore,
+        expected_count: int,
+        target_as_of: str,
+        progress: Progress,
+        cancelled: Cancelled,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
+        """Build a raw local-StockDB panel for current-analysis snapshots.
+
+        Formal research prices require a complete adjustment-factor chain.
+        Current display/current-analysis snapshots may instead use the accepted
+        local StockDB session directly; the source marker keeps that
+        distinction visible in the published provenance.
+        """
+
+        symbols, names = self._listed_symbols(instruments)
+        if len(symbols) < 30:
+            raise ValueError("本地证券主数据中没有足够的 A 股股票")
+        target = pd.Timestamp(target_as_of).normalize()
+        sessions = max(60, int(get_config().data.free_stockdb_stock_history_sessions))
+        # 380 calendar days safely covers 180 A-share sessions, including
+        # Spring Festival and the National Day closure clusters.
+        start = (target - timedelta(days=max(380, sessions * 2))).date().isoformat()
+        end = target.date().isoformat()
+        from quantmaster.data.free_stockdb_ingest import StockDBIngestService
+
+        service = StockDBIngestService()
+
+        def mapped_progress(value: int, phase: str, detail: str) -> None:
+            progress(4 + min(26, round(26 * max(0, min(100, value)) / 100)), phase, detail)
+
+        frame = service.read_cross_section_history(
+            symbols,
+            start,
+            end,
+            progress=mapped_progress,
+            cancelled=cancelled,
+        )
+        if frame.empty or not {"date", "symbol", "close"}.issubset(frame.columns):
+            raise ValueError("本地 StockDB 没有可用于市场温度预览的日频截面")
+        frame = frame.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+        frame["symbol"] = frame["symbol"].astype(str).str.upper()
+        frame = frame.dropna(subset=["date", "symbol"])
+        frame = frame.loc[frame["date"] <= target]
+        if "amount" not in frame:
+            if "volume" not in frame:
+                raise ValueError("本地 StockDB 截面缺少 amount/volume")
+            frame["amount"] = (
+                pd.to_numeric(frame["volume"], errors="coerce")
+                * pd.to_numeric(frame["close"], errors="coerce")
+            )
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame["amount"] = pd.to_numeric(frame["amount"], errors="coerce")
+        close = frame.pivot_table(
+            index="date", columns="symbol", values="close", aggfunc="last",
+        )
+        amount = frame.pivot_table(
+            index="date", columns="symbol", values="amount", aggfunc="last",
+        )
+        close = close.reindex(columns=symbols).sort_index()
+        amount = amount.reindex(columns=symbols).reindex(close.index).sort_index()
+        if close.empty or str(close.index.max().date()) < target_as_of:
+            raise ValueError(
+                f"本地 StockDB 最新截面为 {str(close.index.max().date()) if not close.empty else '未知'}，"
+                f"尚未覆盖目标日 {target_as_of}"
+            )
+        progress(
+            30,
+            "读取本地 StockDB 截面",
+            f"{len(close.columns)} 只 · 截至 {close.index.max().date()} · 原始价格预览",
+        )
+        return close, amount, names, expected_count, ["local:stockdb:raw"]
+
     def market_matrices(
         self,
         *,
         progress: Progress,
         cancelled: Cancelled,
+        target_as_of: str = "",
     ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
         instruments, expected_count = self._listed_instruments()
         lake_result = self._research_lake_matrices(
             instruments, expected_count, progress,
         )
         if lake_result is not None:
-            return lake_result
+            lake_as_of = str(pd.Timestamp(lake_result[0].index.max()).date())
+            if not target_as_of or lake_as_of >= target_as_of:
+                return lake_result
+        if target_as_of:
+            return self._stockdb_matrices(
+                instruments,
+                expected_count,
+                target_as_of,
+                progress,
+                cancelled,
+            )
         return self._bar_store_matrices(
             instruments, expected_count, progress, cancelled,
         )
@@ -965,9 +1148,11 @@ class RotationService:
             if spec.as_of else _expected_market_session()
         )
 
-    def _local_input_state(self) -> dict[str, Any]:
+    def _local_input_state(self, *, include_stockdb_preview: bool = True) -> dict[str, Any]:
         try:
-            return self.loader.local_input_state()
+            return self.loader.local_input_state(
+                include_stockdb_preview=include_stockdb_preview,
+            )
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
             logger.warning("读取本地 generation 失败；本次不会将旧快照误判为命中", exc_info=True)
             return {
@@ -1007,7 +1192,10 @@ class RotationService:
     ) -> tuple[str, dict[str, Any]]:
         """Fingerprint only catalog rows, never the full market matrix."""
 
-        state = local_state or self._local_input_state()
+        preview_allowed = spec.purpose in {"display", "current_analysis"}
+        state = local_state or self._local_input_state(
+            include_stockdb_preview=preview_allowed,
+        )
         node_fingerprints = self.snapshot_input_fingerprints(spec, local_state=state)
         fingerprint = self.store.derived.input_fingerprint(
             schema_version=2,
@@ -1041,7 +1229,10 @@ class RotationService:
         its own dependency cut.
         """
 
-        state = local_state or self._local_input_state()
+        preview_allowed = spec.purpose in {"display", "current_analysis"}
+        state = local_state or self._local_input_state(
+            include_stockdb_preview=preview_allowed,
+        )
         local_generations = list(state.get("generations") or [])
         catalog_generations = self.store.source_generations()
 
@@ -1604,10 +1795,14 @@ class _RotationBuildRun:
         checkpoint: Callable[[str, dict[str, Any]], None] | None,
     ) -> None:
         need_market = spec.scope in {"all", "close", "market", "industries", "themes"}
-        local_state = service._local_input_state() if need_market else {
-            "generations": [], "as_of": "", "source": "not_required",
-            "expected_count": 0, "available": True,
-        }
+        preview_allowed = spec.purpose in {"display", "current_analysis"}
+        local_state = (
+            service._local_input_state(include_stockdb_preview=preview_allowed)
+            if need_market else {
+                "generations": [], "as_of": "", "source": "not_required",
+                "expected_count": 0, "available": True,
+            }
+        )
         input_fingerprint, local_state = service.input_fingerprint(
             spec, local_state=local_state,
         )
@@ -1802,7 +1997,10 @@ class _RotationBuildRun:
         if not operations:
             return
         if state.need_market:
-            state.local_state = self.service._local_input_state()
+            preview_allowed = state.spec.purpose in {"display", "current_analysis"}
+            state.local_state = self.service._local_input_state(
+                include_stockdb_preview=preview_allowed,
+            )
         state.input_fingerprint, state.local_state = self.service.input_fingerprint(
             state.spec, local_state=state.local_state,
         )
@@ -1848,6 +2046,14 @@ class _RotationBuildRun:
 
     def _load_market_matrices(self) -> None:
         state = self.state
+        allow_stockdb_preview = state.spec.purpose in {"display", "current_analysis"}
+        target_as_of = (
+            (
+                state.spec.as_of
+                or self.service.loader._validated_stockdb_session()[0]
+            )
+            if allow_stockdb_preview else ""
+        )
         with self.metrics.node_timer(
             "rotation.market_matrix", job_id=state.job_id,
             input_fingerprint=state.input_fingerprint,
@@ -1856,12 +2062,21 @@ class _RotationBuildRun:
                 state.close, state.amount, state.names,
                 state.expected_count, state.sources,
             ) = self.service.loader.market_matrices(
-                progress=self._market_loader_progress(), cancelled=state.cancelled,
+                progress=self._market_loader_progress(),
+                cancelled=state.cancelled,
+                target_as_of=target_as_of,
             )
             dimensions.update(
                 input_rows=len(state.close),
                 output_rows=int(state.close.notna().sum().sum()),
             )
+        if state.sources == ["local:stockdb:raw"]:
+            issue = (
+                "本地 StockDB 原始价格用于当前展示分析；"
+                "复权因子链未完整验证，不能作为正式研究依据"
+            )
+            if issue not in state.provider_issues["market"]:
+                state.provider_issues["market"].append(issue)
         if state.cancelled():
             raise InterruptedError("板块联动刷新已取消")
         state.checkpoint_node("market_panel", {
@@ -1946,6 +2161,17 @@ class _RotationBuildRun:
             }
         return etf_evidence, sentiment_evidence, historical
 
+    def _mark_market_preview_quality(self, quality: dict[str, Any]) -> dict[str, Any]:
+        """Expose raw StockDB current-analysis evidence as partial quality."""
+
+        state = self.state
+        if state.sources != ["local:stockdb:raw"]:
+            return quality
+        value = dict(quality)
+        if str(value.get("status") or "") not in {"cold", "empty", "corrupt", "loading"}:
+            value["status"] = "partial"
+        return value
+
     def _temperature_sources(
         self,
         etf_evidence: dict[str, Any],
@@ -1996,6 +2222,7 @@ class _RotationBuildRun:
         quality["issues"] = list(dict.fromkeys([
             *(quality.get("issues") or []), *state.provider_issues["market"],
         ]))
+        quality = self._mark_market_preview_quality(quality)
         quality = _mark_stale(
             quality, str(temperature.get("as_of") or ""), state.expected_as_of,
         )
@@ -2075,6 +2302,7 @@ class _RotationBuildRun:
                 *state.provider_issues["industries"],
             ],
         )
+        quality = self._mark_market_preview_quality(quality)
         return industries, _mark_stale(quality, state.as_of, state.expected_as_of), count
 
     def _compute_industries(self) -> None:
@@ -2200,7 +2428,7 @@ class _RotationBuildRun:
                 *state.provider_issues["themes"],
             ])),
         )
-        return data, quality, count
+        return data, self._mark_market_preview_quality(quality), count
 
     def _compute_themes(self) -> None:
         state = self.state
