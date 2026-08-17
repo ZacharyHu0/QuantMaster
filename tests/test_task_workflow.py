@@ -1089,6 +1089,28 @@ def test_remove_task_artifacts_reports_acl_block(monkeypatch, tmp_path):
     assert artifacts.exists()
 
 
+def test_remove_task_artifacts_removes_empty_acl_blocked_root(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "recovery"
+    artifacts.mkdir(parents=True)
+
+    def blocked_rmtree(*_args, **_kwargs):
+        error = PermissionError(13, "denied", artifacts)
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(
+        tasks.shutil, "rmtree",
+        blocked_rmtree,
+    )
+
+    remove_task_artifacts(primary, "recovery")
+
+    assert not artifacts.exists()
+
+
 def test_remove_task_artifacts_refuses_acl_recovery_outside_task_root(
     monkeypatch, tmp_path,
 ):
@@ -1127,6 +1149,7 @@ def test_remove_task_artifacts_retries_after_restoring_acl_inheritance(
     primary = tmp_path / "primary"
     artifacts = primary / ".artifacts" / "worktrees" / "recovery"
     artifacts.mkdir(parents=True)
+    (artifacts / "payload").write_text("keep", encoding="utf-8")
     calls: list[str] = []
 
     def remove(path, **_kwargs):
@@ -1243,14 +1266,18 @@ def test_remove_task_artifacts_recovers_acl_from_accessible_parent(monkeypatch, 
             raise PermissionError(13, "denied", path)
         return original_rmtree(path, **kwargs)
 
-    def restore(command, **_kwargs):
+    def restore(command, **kwargs):
         calls.append("restore")
+        environment = kwargs["env"]
         assert "item.Parent" in command[-1]
         assert (
             "Import-Module Microsoft.PowerShell.Security -Force "
             "-ErrorAction SilentlyContinue" in command[-1]
         )
         assert "Get-Acl -LiteralPath $parent.FullName" in command[-1]
+        assert environment["PSModulePath"].casefold().endswith(
+            r"\system32\windowspowershell\v1.0\modules"
+        )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)

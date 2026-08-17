@@ -83,6 +83,10 @@ def restore_acl_inheritance(path: Path) -> None:
         "}"
     )
     environment = os.environ.copy()
+    system_root = environment.get("SystemRoot", r"C:\Windows").rstrip("\\/")
+    environment["PSModulePath"] = (
+        f"{system_root}\\System32\\WindowsPowerShell\\v1.0\\Modules"
+    )
     environment["QM_TASK_ARTIFACT_BLOCKED"] = str(blocked)
     try:
         result = subprocess.run(
