@@ -1250,7 +1250,7 @@ class UnifiedJobStore:
             ).fetchone()
             if row is None:
                 raise KeyError(job_id)
-            if str(row["status"]) not in {*TERMINAL_STATUSES, "interrupted"}:
+            if str(row["status"]) not in {*TERMINAL_STATUSES, "interrupted", "cancelling"}:
                 raise ValueError("当前任务不能重试")
             attempt = int(row["attempt"]) + 1
             if attempt > int(row["max_attempts"]):
