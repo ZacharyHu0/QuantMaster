@@ -753,10 +753,26 @@ def migrator_named(name: str) -> DomainMigrator | None:
     return _MIGRATORS.get(name)
 
 
-# Direct references to the migrator instances now defined in this module.
-# Decision is intentionally left in quantmaster.decision.migration.
-_BUILTIN_DIRECTS: tuple[tuple[str, DomainMigrator], ...] = ()  # populated below
-_BUILTIN_CALLABLES: tuple[tuple[str, Callable[[], DomainMigrator]], ...] = ()  # lazily constructed
+class _RegisteredMigrator:
+    """Expose a builtin under its stable persisted migration-domain ID."""
+
+    def __init__(self, name: str, delegate: DomainMigrator) -> None:
+        self.name = name
+        self._delegate = delegate
+
+    def inspect(self, root: Path) -> Iterable[MigrationRecord]:
+        return self._delegate.inspect(root)
+
+    def migrate_batch(
+        self, root: Path, *, after_key: str, limit: int,
+    ) -> Iterable[MigrationRecord]:
+        return self._delegate.migrate_batch(root, after_key=after_key, limit=limit)
+
+    def rollback(self, root: Path, backup_root: Path) -> None:
+        self._delegate.rollback(root, backup_root)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._delegate, name)
 
 
 def register_builtin_migrations() -> None:
@@ -783,9 +799,9 @@ def register_builtin_migrations() -> None:
         ("remaining-schema", remaining_schema_migrator),
         ("lab-model-artifact", lab_model_artifact_migrator),
     )
-    for _name, migrator in _directs:
-        if migrator_named(migrator.name) is None:
-            register_migrator(migrator)
+    for name, migrator in _directs:
+        if migrator_named(name) is None:
+            register_migrator(_RegisteredMigrator(name, migrator))
 
 
 # for_version: v1.0  (consolidated from quantmaster.data.legacy_migrations)
@@ -1541,8 +1557,8 @@ class RemainingSchemaMigrator:
     @staticmethod
     def _targets(root: Path) -> list[tuple[str, Path, Callable[[], None], tuple]]:
         from quantmaster.data.resilience import ProviderHealthStore, TushareRateLimiter
-        from quantmaster.data.storage import BarStore
         from quantmaster.data.schema_access import schema_target
+        from quantmaster.data.storage import BarStore
 
         targets: list[tuple[str, Path, Callable[[], None], tuple]] = []
         provider_columns = {
@@ -1992,8 +2008,8 @@ class StoreSchemaMigrator:
 
     @staticmethod
     def _upgrade_rotation(root: Path, target: _SchemaTarget) -> None:
-        from quantmaster.runtime.sqlite import migrate_schema
         from quantmaster.data.schema_access import schema_factory
+        from quantmaster.runtime.sqlite import migrate_schema
 
         store_type = schema_factory("rotation_store")
         rotation = store_type.__new__(store_type)

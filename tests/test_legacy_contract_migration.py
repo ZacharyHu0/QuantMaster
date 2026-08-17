@@ -77,10 +77,16 @@ def test_status_read_does_not_create_state_database(tmp_path):
 
 
 def test_builtin_domain_migrations_are_registered_without_touching_data(tmp_path):
+    registered = set(registered_migrations())
     assert {
         "market_data", "decision", "after_close", "news", "automation-contract-v9",
-        "paper-ledger", "backtest-jobs",
-    } <= set(registered_migrations())
+        "paper-ledger", "startup-schema", "backtest-jobs", "store-schema",
+        "data-jobs", "lab-jobs", "research-jobs", "remaining-schema",
+        "lab-model-artifact",
+    } <= registered
+    assert not {
+        "startup-schemas", "store-schemas", "remaining-schemas", "lab-model-artifacts",
+    } & registered
     assert not (tmp_path / "legacy_contract_migrations.sqlite").exists()
 
 
