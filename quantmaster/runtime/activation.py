@@ -442,6 +442,37 @@ class SubprocessGenerationController:
             )
         return root
 
+    def _reuse_existing_activation_drain(
+        self,
+        identity: ApplicationIdentity,
+        worker_root: Path,
+        timeout: float,
+    ) -> bool:
+        """Reuse a confirmed update drain before attempting to enter maintenance."""
+
+        from quantmaster.runtime.worker_ipc import call_worker_command
+
+        try:
+            status = call_worker_command(
+                "maintenance.status",
+                {"token": ""},
+                timeout=timeout,
+                root=worker_root,
+                application_identity=identity,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            return False
+        if status.get("state") != "frozen":
+            return False
+        if status.get("reason") != "application activation":
+            raise ActivationBlocked(
+                "worker_maintenance_active", "当前 runtime-worker 正在非更新维护冻结",
+            )
+        self._drain_identity = identity
+        self._drain_token = ""
+        self._drain_root = worker_root
+        return True
+
     def drain_current(self, timeout: float) -> None:
         current = self.current_identity()
         if current is None:
@@ -456,6 +487,8 @@ class SubprocessGenerationController:
             str(current.get("runtime_generation") or ""),
         )
         worker_root = self._current_worker_root()
+        if self._reuse_existing_activation_drain(identity, worker_root, timeout):
+            return
         try:
             result = call_worker_command(
                 "maintenance.enter",
@@ -465,23 +498,7 @@ class SubprocessGenerationController:
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
-            try:
-                status = call_worker_command(
-                    "maintenance.status",
-                    {"token": ""},
-                    timeout=timeout,
-                    root=worker_root,
-                    application_identity=identity,
-                )
-            except (OSError, RuntimeError, ValueError, TypeError):
-                status = {}
-            if (
-                status.get("state") == "frozen"
-                and status.get("reason") == "application activation"
-            ):
-                self._drain_identity = identity
-                self._drain_token = ""
-                self._drain_root = worker_root
+            if self._reuse_existing_activation_drain(identity, worker_root, timeout):
                 return
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法排空") from exc
         self._drain_identity = identity
