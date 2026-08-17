@@ -65,6 +65,15 @@ def _hold_direct_pytest_task_lease(primary: str, ready, release) -> None:
     cleanups.pop()()
 
 
+def _hold_task_admin_lease(primary: str, ready, release) -> None:
+    from scripts.dev.tasks import task_admin_lease
+
+    with task_admin_lease(Path(primary)):
+        ready.set()
+        if not release.wait(10):
+            raise RuntimeError("test did not release task admin lease")
+
+
 def _temporary_task_repo(
     tmp_path: Path, **branches: str,
 ) -> tuple[Path, Path, dict[str, Path]]:
@@ -226,6 +235,154 @@ def test_task_artifact_lease_is_external_and_reusable_after_use(tmp_path):
         assert task_artifacts_active(artifacts) is True
     assert marker.is_file()
     assert task_artifacts_active(artifacts) is False
+
+
+def test_admin_cli_rejects_invalid_primary_before_dispatch(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    monkeypatch.chdir(tmp_path)
+
+    def reject(_cwd):
+        raise SystemExit(f"{tasks.PRIMARY_CONTROL_INVALID}: primary_not_main")
+
+    monkeypatch.setattr(tasks, "require_primary_control", reject)
+    monkeypatch.setattr(
+        tasks, "start", lambda _slug: pytest.fail("start must not run"),
+    )
+
+    with pytest.raises(SystemExit, match=tasks.PRIMARY_CONTROL_INVALID):
+        tasks.main(["start", "demo"])
+
+
+def test_task_cli_rejects_wrong_context_before_check(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    monkeypatch.chdir(tmp_path)
+
+    def reject(_cwd):
+        raise SystemExit(f"{tasks.TASK_CONTEXT_INVALID}: branch_mismatch")
+
+    monkeypatch.setattr(tasks, "require_task_context", reject)
+    monkeypatch.setattr(
+        tasks, "check", lambda *_args, **_kwargs: pytest.fail("check must not run"),
+    )
+
+    with pytest.raises(SystemExit, match=tasks.TASK_CONTEXT_INVALID):
+        tasks.main(["check"])
+
+
+def test_primary_control_requires_clean_unique_main(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    other = tmp_path / "other"
+    common = primary / ".git"
+    common.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "ROOT", primary)
+    monkeypatch.setattr(tasks, "primary_root", lambda _cwd: primary)
+    monkeypatch.setattr(tasks, "git_common_dir", lambda _cwd: common)
+    monkeypatch.setattr(
+        tasks, "worktree_branches",
+        lambda _primary: {
+            primary: "refs/heads/codex/demo",
+            other: "refs/heads/main",
+        },
+    )
+    monkeypatch.setattr(
+        tasks, "git",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="changed.py\n"),
+    )
+
+    with pytest.raises(SystemExit) as captured:
+        tasks.require_primary_control(primary)
+
+    message = str(captured.value)
+    assert tasks.PRIMARY_CONTROL_INVALID in message
+    assert "primary_not_main" in message
+    assert "main_holder_mismatch" in message
+    assert "primary_dirty=1" in message
+    assert str(primary) not in message
+
+
+def test_primary_control_rejects_in_progress_git_operation(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    common = primary / ".git"
+    common.mkdir(parents=True)
+    (common / "MERGE_HEAD").write_text("commit", encoding="utf-8")
+    monkeypatch.setattr(tasks, "ROOT", primary)
+    monkeypatch.setattr(tasks, "primary_root", lambda _cwd: primary)
+    monkeypatch.setattr(tasks, "git_common_dir", lambda _cwd: common)
+    monkeypatch.setattr(
+        tasks, "worktree_branches",
+        lambda _primary: {primary: "refs/heads/main"},
+    )
+    monkeypatch.setattr(
+        tasks, "git", lambda *_args, **_kwargs: SimpleNamespace(stdout=""),
+    )
+
+    with pytest.raises(SystemExit, match="operation=merge"):
+        tasks.require_primary_control(primary)
+
+
+def test_task_context_rejects_registered_branch_mismatch(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "demo"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "ROOT", target)
+    monkeypatch.setattr(tasks, "primary_root", lambda _cwd: primary)
+    monkeypatch.setattr(
+        tasks, "worktree_branches",
+        lambda _primary: {target: "refs/heads/codex/other"},
+    )
+
+    with pytest.raises(SystemExit, match="branch_mismatch"):
+        tasks.require_task_context(target)
+
+
+def test_task_admin_lease_reports_busy_without_mutation(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr(tasks, "git_common_dir", lambda _cwd: common)
+
+    with tasks.task_admin_lease(tmp_path):
+        with pytest.raises(SystemExit, match=tasks.TASK_ADMIN_BUSY):
+            with tasks.task_admin_lease(tmp_path, timeout_seconds=0):
+                pytest.fail("busy lease must not be acquired")
+
+
+def test_task_admin_lease_serializes_processes(tmp_path):
+    import multiprocessing
+
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    subprocess.run(
+        ["git", "init", "--quiet", str(primary)], check=True,
+        capture_output=True, text=True,
+    )
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_task_admin_lease,
+        args=(str(primary), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(10)
+        with pytest.raises(SystemExit, match=tasks.TASK_ADMIN_BUSY):
+            with tasks.task_admin_lease(primary, timeout_seconds=0):
+                pytest.fail("second process must not acquire the admin lease")
+    finally:
+        release.set()
+        process.join(10)
+    assert process.exitcode == 0
 
 
 def test_task_runner_marks_outer_lease_for_child_process(monkeypatch, tmp_path):
@@ -768,6 +925,124 @@ def test_windows_pytest_plugin_prevents_pytest_from_replacing_prepared_basetemp(
     assert factory.getbasetemp() == basetemp.resolve()
     assert sentinel.read_text(encoding="utf-8") == "keep"
     cleanups.pop()()
+
+
+def test_windows_pytest_plugin_routes_default_temp_to_task_artifacts(
+    monkeypatch, tmp_path,
+):
+    from _pytest.tmpdir import TempPathFactory
+
+    from scripts.dev import pytest_windows_acl
+
+    artifacts = tmp_path / "task-artifacts"
+    monkeypatch.setattr(
+        pytest_windows_acl,
+        "os",
+        SimpleNamespace(
+            name="nt", access=os.access, W_OK=os.W_OK, getpid=lambda: 123,
+        ),
+    )
+    monkeypatch.setattr(
+        pytest_windows_acl, "_pytest_artifact_root", lambda _config: artifacts,
+    )
+    monkeypatch.setattr(
+        "_pytest.tmpdir.tempfile.gettempdir",
+        lambda: pytest.fail("default pytest must not inspect the system temp root"),
+    )
+    factory = TempPathFactory(
+        given_basetemp=None,
+        retention_count=3,
+        retention_policy="all",
+        trace=lambda *_args: None,
+        basetemp=None,
+        _ispytest=True,
+    )
+    cache = SimpleNamespace(_cachedir=tmp_path / "old-cache")
+    cleanups = []
+    config = SimpleNamespace(
+        cache=cache,
+        _tmp_path_factory=factory,
+        add_cleanup=cleanups.append,
+    )
+
+    pytest_windows_acl.pytest_configure(config)
+
+    basetemp = factory.getbasetemp()
+    assert basetemp.parent == (artifacts / "pytest" / "runs").resolve()
+    assert basetemp.name.startswith("direct-123-")
+    assert cache._cachedir == (artifacts / "pytest" / "cache").resolve()
+    assert basetemp.is_dir()
+    assert not (tmp_path / "old-cache").exists()
+    cleanups.pop()()
+
+
+def test_windows_pytest_plugin_allocates_unique_direct_run_roots(
+    monkeypatch, tmp_path,
+):
+    from _pytest.tmpdir import TempPathFactory
+
+    from scripts.dev import pytest_windows_acl
+
+    artifacts = tmp_path / "task-artifacts"
+    monkeypatch.setattr(
+        pytest_windows_acl,
+        "os",
+        SimpleNamespace(
+            name="nt", access=os.access, W_OK=os.W_OK, getpid=lambda: 456,
+        ),
+    )
+    monkeypatch.setattr(
+        pytest_windows_acl, "_pytest_artifact_root", lambda _config: artifacts,
+    )
+
+    roots = []
+    for _index in range(2):
+        factory = TempPathFactory(
+            given_basetemp=None,
+            retention_count=3,
+            retention_policy="all",
+            trace=lambda *_args: None,
+            basetemp=None,
+            _ispytest=True,
+        )
+        cleanups = []
+        config = SimpleNamespace(
+            cache=None,
+            _tmp_path_factory=factory,
+            add_cleanup=cleanups.append,
+        )
+        pytest_windows_acl.pytest_configure(config)
+        roots.append(factory.getbasetemp())
+        cleanups.pop()()
+
+    assert roots[0] != roots[1]
+
+
+def test_pytest_artifact_root_separates_registered_task_worktrees(
+    monkeypatch, tmp_path,
+):
+    from scripts.dev import pytest_windows_acl, tasks
+
+    primary = tmp_path / "primary"
+    alpha = primary / ".worktrees" / "alpha"
+    beta = primary / ".worktrees" / "beta"
+    alpha.mkdir(parents=True)
+    beta.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "primary_root", lambda _cwd: primary)
+    monkeypatch.setattr(
+        tasks, "registered_worktrees", lambda _primary: {primary, alpha, beta},
+    )
+
+    alpha_root = pytest_windows_acl._pytest_artifact_root(
+        SimpleNamespace(rootpath=alpha),
+    )
+    beta_root = pytest_windows_acl._pytest_artifact_root(
+        SimpleNamespace(rootpath=beta),
+    )
+
+    assert alpha_root == primary / ".artifacts" / "worktrees" / "alpha"
+    assert beta_root == primary / ".artifacts" / "worktrees" / "beta"
+    assert alpha_root != beta_root
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows ACL contract")
