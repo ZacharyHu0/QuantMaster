@@ -1580,14 +1580,6 @@ html[data-qm-theme="ink"] :is(.candidate-list,.decision-history-panel,.etf-secto
   }
 }
 @media (max-width:640px){
-  html[data-qm-theme="ink"] #tab-lab .lab-head-actions{
-    display:grid;
-    grid-template-columns:minmax(0,1fr);
-  }
-  html[data-qm-theme="ink"] #tab-lab .lab-head-actions .lab-button{
-    width:100%;
-    min-height:44px;
-  }
   html[data-qm-theme="ink"] #tab-market .fear-greed-gauge,
   html[data-qm-theme="ink"] #tab-market .fear-greed-history,
   html[data-qm-theme="ink"] #tab-candidates .candidate-workspace{
