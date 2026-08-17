@@ -21,7 +21,10 @@ packaged_build_sha = runpy.run_path(
     str(project_root / "scripts/release/check_desktop_artifact.py")
 )["packaged_build_sha"]
 release_scope = {}
-exec((project_root / "quantmaster" / "release.py").read_text(encoding="utf-8"), release_scope)
+exec(
+    (project_root / "quantmaster" / "release" / "history.py").read_text(encoding="utf-8"),
+    release_scope,
+)
 version = release_scope["VERSION"]
 build_sha = packaged_build_sha(project_root)
 runtime_identity_hook = Path(workpath) / "quantmaster_runtime_identity.py"

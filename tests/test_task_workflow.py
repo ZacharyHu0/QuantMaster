@@ -14,6 +14,7 @@ import yaml
 from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
     Impact,
+    _release_source_equivalent,
     full_validation_identity,
     gc_task_artifacts,
     has_full_validation,
@@ -821,9 +822,27 @@ def test_ready_state_rejects_main_dirty_behind_and_version_changes():
     with pytest.raises(SystemExit, match="落后"):
         validate_ready_state("codex/task", "", True, [])
     with pytest.raises(SystemExit, match="版本元数据"):
-        validate_ready_state("codex/task", "", False, ["quantmaster/release.py"])
+        validate_ready_state("codex/task", "", False, ["quantmaster/release/history.py"])
     with pytest.raises(SystemExit, match="版本元数据"):
         validate_ready_state("codex/task", "", False, ["CHANGELOG.md"])
+    with pytest.raises(SystemExit, match="版本元数据"):
+        validate_ready_state("codex/release-split", "", False, ["quantmaster/release/history.py"])
+    validate_ready_state(
+        "codex/release-split",
+        "",
+        False,
+        ["quantmaster/release/history.py"],
+        release_source_relocated=True,
+    )
+
+
+def test_release_source_equivalence_allows_only_docstring_relocation():
+    before = '"""Old release source."""\nVERSION = "1.16.2"\nRELEASES = ()\n'
+    relocated = '"""Release history source."""\nVERSION = "1.16.2"\nRELEASES = ()\n'
+    changed = '"""Release history source."""\nVERSION = "1.16.3"\nRELEASES = ()\n'
+
+    assert _release_source_equivalent(before, relocated)
+    assert not _release_source_equivalent(before, changed)
 
 
 def test_ready_state_rejects_task_changelog_updates():

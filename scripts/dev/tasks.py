@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import fnmatch
 import json
@@ -43,7 +44,9 @@ from quantmaster.logging_config import redact_public_text  # noqa: E402
 
 IMPACT_FILE = Path(__file__).with_name("test-impact.json")
 SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-VERSION_PATHS = frozenset({"quantmaster/release.py", "CHANGELOG.md"})
+LEGACY_RELEASE_PATH = "quantmaster/release.py"
+RELEASE_HISTORY_PATH = "quantmaster/release/history.py"
+VERSION_PATHS = frozenset({RELEASE_HISTORY_PATH, "CHANGELOG.md"})
 VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
@@ -233,6 +236,33 @@ def task_changed_paths(cwd: Path) -> list[str]:
     """Return committed changes introduced by this task, not inherited main history."""
 
     return git_lines(["diff", "--name-only", "--diff-filter=ACMR", "main...HEAD"], cwd=cwd)
+
+
+def _release_source_equivalent(before: str, after: str) -> bool:
+    """Compare release source bodies while allowing a module-docstring rewrite."""
+
+    def body(source: str) -> tuple[str, ...]:
+        tree = ast.parse(source)
+        nodes = tree.body[1:] if ast.get_docstring(tree) is not None else tree.body
+        return tuple(ast.dump(node, include_attributes=False) for node in nodes)
+
+    return body(before) == body(after)
+
+
+def release_source_is_relocated(cwd: Path) -> bool:
+    """Allow only a behavior-preserving one-time move of the release source."""
+
+    before = git(["show", f"main:{LEGACY_RELEASE_PATH}"], cwd=cwd, check=False)
+    after = git(["show", f"HEAD:{RELEASE_HISTORY_PATH}"], cwd=cwd, check=False)
+    legacy_still_exists = git(
+        ["cat-file", "-e", f"HEAD:{LEGACY_RELEASE_PATH}"], cwd=cwd, check=False,
+    ).returncode == 0
+    if before.returncode or after.returncode or legacy_still_exists:
+        return False
+    try:
+        return _release_source_equivalent(before.stdout, after.stdout)
+    except SyntaxError:
+        return False
 
 
 def _try_lock(stream) -> bool:
@@ -1116,7 +1146,18 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool, accept_ci: bool = F
         ).returncode)
         behind = behind_origin or behind_local
     task_changes = task_changed_paths(cwd)
-    validate_ready_state(branch, status, behind, task_changes)
+    release_source_relocated = (
+        release_source_is_relocated(cwd)
+        if RELEASE_HISTORY_PATH in task_changes
+        else False
+    )
+    validate_ready_state(
+        branch,
+        status,
+        behind,
+        task_changes,
+        release_source_relocated=release_source_relocated,
+    )
     integration_base = git(["merge-base", "main", "HEAD"], cwd=cwd).stdout.strip()
     identity = full_validation_identity(
         cwd, base=integration_base, ui=ui, rust=rust, package=package,
@@ -1145,14 +1186,23 @@ def ready(cwd: Path, *, ui: bool, rust: bool, package: bool, accept_ci: bool = F
     print("[task] READY: 可 squash 为一个独立 main 提交；仅在明确发布时更新版本元数据")
 
 
-def validate_ready_state(branch: str, status: str, behind: bool, changed: list[str]) -> None:
+def validate_ready_state(
+    branch: str,
+    status: str,
+    behind: bool,
+    changed: list[str],
+    *,
+    release_source_relocated: bool = False,
+) -> None:
     if not branch.startswith("codex/"):
         raise SystemExit("ready 只能在 codex/<task-slug> 任务分支运行")
     if status:
         raise SystemExit("工作区不干净；请先提交任务改动")
     if behind:
         raise SystemExit("任务分支落后于 origin/main；请先更新并解决冲突")
-    version_changes = VERSION_PATHS.intersection(changed)
+    version_changes = set(VERSION_PATHS.intersection(changed))
+    if release_source_relocated:
+        version_changes.discard(RELEASE_HISTORY_PATH)
     if version_changes:
         raise SystemExit("任务分支不得修改版本元数据：" + ", ".join(sorted(version_changes)))
 

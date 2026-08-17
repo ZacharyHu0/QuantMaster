@@ -41,7 +41,7 @@ On Windows, direct pytest invocations without `--basetemp` are automatically rou
 tests must never use `%TEMP%/pytest-of-*`; explicit basetemps remain supported when a checked-in
 runner supplies a prepared artifact path.
 
-Checkpoint commits are allowed. Task branches never edit `quantmaster/release.py` or
+Checkpoint commits are allowed. Task branches never edit `quantmaster/release/history.py` or
 `CHANGELOG.md`. Do not push a checkpoint while a local gate is red; fix it locally first.
 
 ## 3. Verify every Git write target

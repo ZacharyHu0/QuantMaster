@@ -58,7 +58,7 @@ def test_check_worktree_accepts_an_already_published_historical_date(tmp_path, m
     from scripts.release import sync as release_sync
 
     release, changelog = valid_sources()
-    (tmp_path / "quantmaster").mkdir()
+    (tmp_path / "quantmaster" / "release").mkdir(parents=True)
     (tmp_path / RELEASE_FILE).write_text(release, encoding="utf-8")
     (tmp_path / CHANGELOG_FILE).write_text(changelog, encoding="utf-8")
     monkeypatch.setattr(release_sync, "ROOT", tmp_path)

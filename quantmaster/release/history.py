@@ -1,8 +1,10 @@
-"""QuantMaster 发布元数据。
+"""QuantMaster 发布历史与更新日志查询。
 
-这里是应用版本号、发布日期和前端最近 10 条更新日志的唯一运行时来源。
+本模块持有版本号、发布日期和前端最近 10 条更新日志，以及按构建 SHA 或
+版本号查询稳定元数据的辅助函数。运行时导入请使用公开入口
+``quantmaster.release``（仅导出 ``VERSION`` / ``RELEASE_DATE`` / ``RELEASES``）。
 版本变更由 owner 要求时在单独版本 PR 完成，并同步更新根目录 CHANGELOG.md。
-任务分支的 checkpoint 提交不得修改本文件。
+任务分支的 checkpoint 提交不得修改版本元数据。
 """
 
 from __future__ import annotations
