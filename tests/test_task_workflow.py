@@ -1246,7 +1246,7 @@ def test_remove_task_artifacts_recovers_acl_from_accessible_parent(monkeypatch, 
     def restore(command, **_kwargs):
         calls.append("restore")
         assert "item.Parent" in command[-1]
-        assert "Directory]::GetAccessControl($parent.FullName)" in command[-1]
+        assert "Get-Acl -LiteralPath $parent.FullName" in command[-1]
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(tasks.shutil, "rmtree", remove)

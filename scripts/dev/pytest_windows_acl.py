@@ -54,7 +54,7 @@ def restore_acl_inheritance(path: Path) -> None:
         "if($_.Exception.Message -notmatch '(?i)access denied|unauthorized'){throw};"
         "$parent=if($item.PSIsContainer){$item.Parent}else{$item.Directory};"
         "while($null -ne $parent -and $null -eq $acl){"
-        "try{$acl=[System.IO.Directory]::GetAccessControl($parent.FullName)}"
+        "try{$acl=Get-Acl -LiteralPath $parent.FullName -ErrorAction Stop}"
         "catch{"
         "if($_.Exception.Message -notmatch '(?i)access denied|unauthorized'){throw};"
         "$parent=$parent.Parent"
