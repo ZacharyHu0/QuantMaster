@@ -74,6 +74,19 @@ def _hold_task_admin_lease(primary: str, ready, release) -> None:
             raise RuntimeError("test did not release task admin lease")
 
 
+def _run_task_cli(primary: str, arguments: tuple[str, ...], ready, release) -> None:
+    from scripts.dev import tasks
+
+    root = Path(primary)
+    tasks.ROOT = root
+    os.chdir(root)
+    ready.put(os.getpid())
+    if not release.wait(10):
+        raise RuntimeError("test did not release task command")
+    if tasks.main(list(arguments)):
+        raise RuntimeError(f"task command failed: {arguments}")
+
+
 def _temporary_task_repo(
     tmp_path: Path, **branches: str,
 ) -> tuple[Path, Path, dict[str, Path]]:
@@ -383,6 +396,91 @@ def test_task_admin_lease_serializes_processes(tmp_path):
         release.set()
         process.join(10)
     assert process.exitcode == 0
+
+
+def test_concurrent_task_lifecycle_keeps_worktrees_independent(tmp_path):
+    import multiprocessing
+
+    primary = tmp_path / "primary"
+    subprocess.run(
+        ["git", "init", "--quiet", "--initial-branch=main", str(primary)],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(primary), "config", "user.email", "tests@example.invalid"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(primary), "config", "user.name", "QuantMaster Tests"],
+        check=True, capture_output=True, text=True,
+    )
+    (primary / ".gitignore").write_text(
+        "/.artifacts/\n/.worktrees/\n", encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(primary), "add", ".gitignore"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(primary), "commit", "--quiet", "-m", "baseline"],
+        check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        [
+            "git", "-C", str(primary), "update-ref",
+            "refs/remotes/origin/main", "HEAD",
+        ],
+        check=True, capture_output=True, text=True,
+    )
+
+    context = multiprocessing.get_context("spawn")
+
+    def run_concurrently(*commands: tuple[str, ...]) -> None:
+        ready = context.Queue()
+        release = context.Event()
+        processes = [
+            context.Process(
+                target=_run_task_cli,
+                args=(str(primary), command, ready, release),
+            )
+            for command in commands
+        ]
+        for process in processes:
+            process.start()
+        for _process in processes:
+            ready.get(timeout=10)
+        release.set()
+        for process in processes:
+            process.join(15)
+            assert process.exitcode == 0
+
+    run_concurrently(("start", "alpha"), ("start", "beta"))
+
+    alpha = primary / ".worktrees" / "alpha"
+    beta = primary / ".worktrees" / "beta"
+    (alpha / "agent.txt").write_text("alpha\n", encoding="utf-8")
+    (beta / "agent.txt").write_text("beta\n", encoding="utf-8")
+    assert subprocess.run(
+        ["git", "-C", str(alpha), "status", "--short"],
+        check=True, capture_output=True, text=True,
+    ).stdout == "?? agent.txt\n"
+    assert subprocess.run(
+        ["git", "-C", str(beta), "status", "--short"],
+        check=True, capture_output=True, text=True,
+    ).stdout == "?? agent.txt\n"
+    assert (alpha / "agent.txt").read_text(encoding="utf-8") == "alpha\n"
+    assert (beta / "agent.txt").read_text(encoding="utf-8") == "beta\n"
+    (alpha / "agent.txt").unlink()
+    (beta / "agent.txt").unlink()
+
+    run_concurrently(("remove", "alpha"), ("remove", "beta"))
+
+    assert subprocess.run(
+        ["git", "-C", str(primary), "status", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout == ""
+    assert not alpha.exists()
+    assert not beta.exists()
 
 
 def test_task_runner_marks_outer_lease_for_child_process(monkeypatch, tmp_path):
