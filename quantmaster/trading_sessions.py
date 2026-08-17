@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as wall_time
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
@@ -32,8 +33,9 @@ class SessionExpectation:
     completion: str = "calendar_unavailable"
     market_timezone: str = "Asia/Shanghai"
     cutoff_at: str = ""
+    coverage: dict[str, Any] | None = None
 
-    def as_dict(self) -> dict[str, str | bool]:
+    def as_dict(self) -> dict[str, Any]:
         return {
             "session": self.session,
             "source": self.source,
@@ -42,6 +44,7 @@ class SessionExpectation:
             "completion": self.completion,
             "market_timezone": self.market_timezone,
             "cutoff_at": self.cutoff_at,
+            "coverage": dict(self.coverage or {}),
         }
 
 
@@ -216,6 +219,13 @@ class SessionExpectationResolver:
             cutoff,
         )
         cutoff_iso = current.astimezone(UTC).isoformat()
+        coverage: dict[str, Any] = {
+            "official_dates": official_sessions,
+            "research_dates": research_sessions,
+            "stockdb_session": stockdb_session,
+            "stockdb_completion": stockdb_completion,
+            "failures": failures,
+        }
         if (
             stockdb_session
             and stockdb_completion == "current_session_complete"
@@ -224,30 +234,30 @@ class SessionExpectationResolver:
             return SessionExpectation(
                 stockdb_session, "stockdb:validated", True,
                 "StockDB 完整验收记录", stockdb_completion,
-                "Asia/Shanghai", cutoff_iso,
+                "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and stockdb_session == expected and stockdb_completion != "unavailable":
             ready = stockdb_completion == "current_session_complete"
             return SessionExpectation(
                 expected, "stockdb:validated", ready,
                 "StockDB 完整验收记录" if ready else "provider 已发布但本地覆盖尚未完整",
-                stockdb_completion, "Asia/Shanghai", cutoff_iso,
+                stockdb_completion, "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and local_complete == expected:
             return SessionExpectation(
                 expected, "research_lake", True, "已验证本地交易分区",
-                "current_session_complete", "Asia/Shanghai", cutoff_iso,
+                "current_session_complete", "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected:
             return SessionExpectation(
                 expected, "tushare:SSE", False,
                 "交易时段已结束，等待 provider 发布及本地完整摄取",
-                "current_session_closed_waiting_provider", "Asia/Shanghai", cutoff_iso,
+                "current_session_closed_waiting_provider", "Asia/Shanghai", cutoff_iso, coverage,
             )
         if local_complete:
             return SessionExpectation(
                 local_complete, "research_lake", True, "最近完整本地交易分区",
-                "previous_session_complete", "Asia/Shanghai", cutoff_iso,
+                "previous_session_complete", "Asia/Shanghai", cutoff_iso, coverage,
             )
         action = "请配置 Tushare 交易日历或先完成一次全市场日线同步"
         detail = "；".join(failures)
@@ -258,6 +268,7 @@ class SessionExpectationResolver:
             completion="calendar_unavailable",
             market_timezone="Asia/Shanghai",
             cutoff_at=current.astimezone(UTC).isoformat(),
+            coverage=coverage,
         )
 
     def resolve_explicit(self, value: date, now: datetime | None = None) -> SessionExpectation:
@@ -271,24 +282,34 @@ class SessionExpectationResolver:
         verified = {str(item)[:10] for item in [*official, *research]}
         if stockdb_session:
             verified.add(stockdb_session)
+        coverage: dict[str, Any] = {
+            "official_dates": [str(item)[:10] for item in official],
+            "research_dates": [str(item)[:10] for item in research],
+            "stockdb_session": stockdb_session,
+            "stockdb_completion": stockdb_completion,
+            "verified_dates": sorted(verified),
+        }
         if value.isoformat() not in verified:
             raise ValueError("交易日目标不是已验证交易日")
         if stockdb_session == value.isoformat() and stockdb_completion == "current_session_complete":
             return SessionExpectation(
                 value.isoformat(), "stockdb:validated", True, "StockDB 完整验收记录",
                 stockdb_completion, "Asia/Shanghai", current.astimezone(UTC).isoformat(),
+                coverage,
             )
         if value.isoformat() in {str(item)[:10] for item in research}:
             return SessionExpectation(
                 value.isoformat(), "research_lake", True, "已验证本地交易分区",
                 "previous_session_complete", "Asia/Shanghai",
                 current.astimezone(UTC).isoformat(),
+                coverage,
             )
         return SessionExpectation(
             value.isoformat(), "tushare:SSE", False,
             "交易日已验证，但 cutoff 前缺少完整本地数据证据",
             "current_session_closed_waiting_provider", "Asia/Shanghai",
             current.astimezone(UTC).isoformat(),
+            coverage,
         )
 
 
