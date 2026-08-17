@@ -744,7 +744,7 @@ def _official_html_provider(
     raw_keys = [raw_key]
     detail_failures = 0
     if articles:
-        with ThreadPoolExecutor(max_workers=min(4, len(articles))) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {
                 executor.submit(
                     _official_detail,
@@ -933,7 +933,7 @@ def fetch_szse(
                 article.raw_cache_key = detail_key
                 article.content_scope = "full_article"
                 raw_keys.append(detail_key)
-    complete = (reached and len(candidates) <= item_limit) and detail_failures == 0
+    complete = (not watermark or (reached and len(candidates) <= item_limit)) and detail_failures == 0
     return _batch(
         source, articles, watermark, raw_keys, complete=complete,
         pending_watermark=parsed_articles[0].provider_item_id if parsed_articles else "",

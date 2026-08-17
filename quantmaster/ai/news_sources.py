@@ -1468,7 +1468,9 @@ def _validate_http_representation(
     media_type = headers.get("content-type", "").partition(";")[0].strip().casefold()
     source_id = str(source.get("id") or "")
     kind = str(source.get("kind") or "")
-    expects_json = kind == "json" or source_id in {"sina_live", "eastmoney_fast", "jin10_authorized"}
+    expects_json = kind == "json" or source_id in {
+        "sina_live", "eastmoney_fast", "jin10_authorized", "csrc",
+    }
     expects_xml = kind == "rss" or source_id in {"nbs_release", "nbs_interpretation"}
     expected = "json" if expects_json else "xml" if expects_xml else "html"
     if media_type and expected not in media_type and not (
@@ -1478,7 +1480,7 @@ def _validate_http_representation(
             f"资讯来源 Content-Type 与声明不一致: {media_type}", code="unexpected_media_type"
         )
 
-    prefix = content[:4096].lstrip().casefold()
+    prefix = content[:4096].lstrip().lower()
     looks_html = prefix.startswith((b"<!doctype html", b"<html"))
     if looks_html and expected != "html":
         raise NewsContractError("资讯接口返回了 HTML 页面", code="html_interstitial")
@@ -1525,35 +1527,42 @@ def _fetch_bytes(source: dict[str, Any], url: str, store: NewsFetchStore,
                 current,
                 allow_fake_ip=_allow_builtin_fake_ip(source, current),
             )
-            with client.stream("GET", current, headers=headers) as response:
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    location = response.headers.get("location")
-                    if not location:
+            for attempt in range(2):
+                try:
+                    with client.stream("GET", current, headers=headers) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location:
+                                response.raise_for_status()
+                            current = urljoin(current, location)
+                            _require_official_host(source, current)
+                            headers = dict(base_headers)
+                            if _origin(current) != _origin(source["url"]):
+                                headers = _without_auth(headers, source)
+                            break
+                        if response.status_code == 304 and not preview:
+                            store.touch_not_modified(source["id"], current)
+                            return None, current, ""
                         response.raise_for_status()
-                    current = urljoin(current, location)
-                    _require_official_host(source, current)
-                    headers = dict(base_headers)
-                    if _origin(current) != _origin(source["url"]):
-                        headers = _without_auth(headers, source)
-                    continue
-                if response.status_code == 304 and not preview:
-                    store.touch_not_modified(source["id"], current)
-                    return None, current, ""
-                response.raise_for_status()
-                chunks, size = [], 0
-                for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > response_limit:
-                        raise ValueError(
-                            f"来源响应超过 {response_limit // (1024 * 1024)}MB 安全上限"
+                        chunks, size = [], 0
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > response_limit:
+                                raise ValueError(
+                                    f"来源响应超过 {response_limit // (1024 * 1024)}MB 安全上限"
+                                )
+                            chunks.append(chunk)
+                        content = b"".join(chunks)
+                        _validate_http_representation(source, content, response.headers)
+                        key = "" if preview else store.save_response(
+                            source["id"], current, content, response.headers,
+                            response.status_code, official=bool(source.get("is_official")),
                         )
-                    chunks.append(chunk)
-                content = b"".join(chunks)
-                _validate_http_representation(source, content, response.headers)
-                key = "" if preview else store.save_response(
-                    source["id"], current, content, response.headers, response.status_code,
-                    official=bool(source.get("is_official")))
-                return content, current, key
+                        return content, current, key
+                except httpx.TransportError:
+                    if attempt:
+                        raise
+                    time.sleep(1)
     raise ValueError("来源重定向次数超过安全上限")
 
 
