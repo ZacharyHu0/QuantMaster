@@ -52,7 +52,7 @@ def restore_acl_inheritance(path: Path) -> None:
         "}else{[System.IO.File]::GetAccessControl($item.FullName)}"
         "}catch{"
         "if($_.Exception.Message -notmatch '(?i)access denied|unauthorized'){throw};"
-        "Import-Module Microsoft.PowerShell.Security -ErrorAction Stop;"
+        "Import-Module Microsoft.PowerShell.Security -Force -ErrorAction Stop;"
         "$parent=if($item.PSIsContainer){$item.Parent}else{$item.Directory};"
         "while($null -ne $parent -and $null -eq $acl){"
         "try{$acl=Get-Acl -LiteralPath $parent.FullName -ErrorAction Stop}"
