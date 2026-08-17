@@ -39,7 +39,7 @@ from quantmaster.data.temporal import (
     ProviderDateFormat,
     parse_provider_date,
 )
-from quantmaster.trading_session_sources import register_official_calendar
+from quantmaster.runtime.trading_session_sources import register_official_calendar
 from quantmaster.trading_sessions import market_date
 
 logger = logging.getLogger(__name__)

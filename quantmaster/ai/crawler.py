@@ -1894,7 +1894,7 @@ class AICrawler:
                         "资讯分析租约已转交其他 worker",
                         code="claim_lost", retryable=True,
                     )
-                from quantmaster.news_scoring import importance_score
+                from quantmaster.ai.news_scoring import importance_score
 
                 prepared: list[tuple[int, NewsItem]] = []
                 for item, result in zip(items, parsed, strict=True):

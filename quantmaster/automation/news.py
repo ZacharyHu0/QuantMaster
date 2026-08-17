@@ -5,10 +5,10 @@ from collections.abc import Iterable
 
 from quantmaster.ai.crawler import NewsItem
 from quantmaster.automation.models import AlertEvent, stable_hash
-from quantmaster.news_scoring import (
+from quantmaster.ai.news_scoring import (
     CRITICAL_PATTERNS as _CRITICAL_PATTERNS,
 )
-from quantmaster.news_scoring import (
+from quantmaster.ai.news_scoring import (
     importance_score,
 )
 

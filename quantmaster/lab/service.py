@@ -1480,7 +1480,7 @@ class LabService:
         self, *, universe: str, start: str, end: str, population: int = 60,
         generations: int = 8, top_n: int = 10, horizon: int = 3, progress=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         if progress:
@@ -1560,7 +1560,7 @@ class LabService:
         self, *, universe: str, start: str, end: str, count: int = 8,
         rounds: int = 2, horizon: int = 3, progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
 
         panel, _membership, snapshot = self._context(universe, start, end, progress)
         rounds = max(1, int(rounds))
@@ -1857,7 +1857,7 @@ class LabService:
         rounds: int = 3, candidate_limit: int = 24, finalists: int = 3,
         progress=None, cancelled=None,
     ) -> dict:
-        from quantmaster.factor_mining_access import factor_miner
+        from quantmaster.factors.access import factor_miner
         if not get_config().lab.ai_python_mining_enabled:
             raise ValueError("受限 Python AutoMiner 尚未启用")
         self.store.update_mining_run(run_id, status="running")

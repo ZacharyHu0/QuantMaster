@@ -62,7 +62,7 @@ class RemainingSchemaMigrator:
     def _targets(root: Path) -> list[tuple[str, Path, Callable[[], None], tuple]]:
         from quantmaster.data.resilience import ProviderHealthStore, TushareRateLimiter
         from quantmaster.data.storage import BarStore
-        from quantmaster.schema_access import schema_target
+        from quantmaster.data.schema_access import schema_target
 
         targets: list[tuple[str, Path, Callable[[], None], tuple]] = []
         provider_columns = {

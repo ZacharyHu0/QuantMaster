@@ -18,7 +18,7 @@ from quantmaster.backtest.spec import BacktestSpec, canonical_json
 from quantmaster.config import get_config
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.sqlite import connect_sqlite
-from quantmaster.schema_access import register_backtest_store
+from quantmaster.data.schema_access import register_backtest_store
 
 BACKTEST_SCHEMA_VERSION = 2
 

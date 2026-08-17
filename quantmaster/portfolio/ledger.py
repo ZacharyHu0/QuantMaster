@@ -26,7 +26,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite, migrate_schema
-from quantmaster.schema_access import register_ledger
+from quantmaster.data.schema_access import register_ledger
 
 LEDGER_SCHEMA_VERSION = 1
 

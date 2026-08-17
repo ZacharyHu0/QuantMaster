@@ -333,7 +333,7 @@ def resolve_policy(
     a_share_compatible = _is_a_share_symbols(symbols)
     try:
         if store is None:
-            from quantmaster.schema_access import schema_target
+            from quantmaster.data.schema_access import schema_target
 
             store = schema_target("lab_store")
         if mode == "historical_replay":

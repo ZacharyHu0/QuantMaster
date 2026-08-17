@@ -411,7 +411,7 @@ class StockDBResearchAdapter:
             instruments = [item for item in self.instruments.list(market="CN", asset_type="stock")
                            if item.status.casefold() in active]
         else:
-            from quantmaster.etf_contract import is_exchange_etf
+            from quantmaster.research.etf_contract import is_exchange_etf
 
             instruments = [item for item in self.instruments.list(market="CN") if is_exchange_etf(item)]
         symbols = [item.symbol for item in instruments]
