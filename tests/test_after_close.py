@@ -375,6 +375,68 @@ def test_after_close_api_and_web_share_the_same_snapshot(service, monkeypatch) -
     assert "扫描数据已更新至" in script.text
 
 
+def test_after_close_invalid_snapshot_path_returns_404(
+    service, monkeypatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from quantmaster.server import after_close as routes
+    from quantmaster.server.app import app
+
+    service.scan()
+    monkeypatch.setattr(routes, "get_after_close_service", lambda **_kwargs: service)
+    client = TestClient(app)
+
+    # The literal path "after-close" must NOT match the
+    # {snapshot_id} route — snapshot IDs always start with "ac_".
+    bad = client.get("/api/v1/after-close/snapshots/after-close")
+    assert bad.status_code == 404
+
+    # A path that looks plausible but is not a valid snapshot ID
+    # should also be rejected at the router layer.
+    not_a_snapshot = client.get(
+        "/api/v1/after-close/snapshots/2026-08-15"
+    )
+    assert not_a_snapshot.status_code == 404
+
+    # The legitimately-generated snapshot ID must still resolve.
+    good = client.get(f"/api/v1/after-close/snapshots/{service.store.latest().snapshot_id}")
+    assert good.status_code == 200
+
+
+def test_after_close_empty_snapshot_returns_problem_503(
+    monkeypatch,
+) -> None:
+    import tempfile
+    from pathlib import Path as _Path
+
+    from fastapi.testclient import TestClient
+
+    from quantmaster.after_close.store import AfterCloseStore
+    from quantmaster.server import after_close as routes
+    from quantmaster.server.app import app
+
+    # Use read_only=True so the store doesn't create the DB file.
+    # _published_service checks if the file exists; when it doesn't,
+    # it raises 503 before latest() even runs.
+    with tempfile.TemporaryDirectory() as td:
+        db_path = _Path(td) / "nonexistent.sqlite"
+        fake_store = AfterCloseStore(path=db_path, read_only=True)
+        fake_service = type("FakeService", (), {"store": fake_store})()
+
+        monkeypatch.setattr(
+            routes, "get_after_close_service",
+            lambda **_kwargs: fake_service,
+        )
+
+        client = TestClient(app)
+        resp = client.get("/api/v1/after-close/snapshots/latest")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["problem"]["id"].endswith("snapshot_unavailable")
+
+
 def test_after_close_cli_contract_supports_csv_export() -> None:
     from quantmaster.cli import build_parser
 
