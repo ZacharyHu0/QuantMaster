@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.1"
+VERSION = "1.17.2"
 RELEASE_DATE = "2026-08-17"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "更新激活排空",
+                "items": (
+                    (
+                        "更新激活将 runtime-worker IPC 响应等待与既有的十秒排空预算统一；"
+                        "正常较慢的排空不再被一秒客户端窗口误判为不可用并回滚。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.1",
+        "date": "2026-08-17",
         "sections": (
             {
                 "title": "更新激活稳定性",
