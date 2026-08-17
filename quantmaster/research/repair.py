@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from quantmaster.repair_access import quarantine_file
+from quantmaster.data.repair_access import quarantine_file
 from quantmaster.research.contracts import (
     ArtifactKind,
     AssetClass,
     Frequency,
 )
-from quantmaster.research_access import (
+from quantmaster.data.research_access import (
     register_research_repair_handler,
     research_engine,
     research_lake,

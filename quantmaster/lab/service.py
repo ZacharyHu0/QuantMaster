@@ -552,8 +552,8 @@ class LabService:
             return self.store.publication(publication_id) or current
         try:
             from quantmaster.lab.ml import artifact_sha256
-            from quantmaster.research_access import research_engine
-            from quantmaster.research_primitives import AssetClass
+            from quantmaster.data.research_access import research_engine
+            from quantmaster.data.research_primitives import AssetClass
 
             payload = claimed["payload"]
             root = Path(get_config().data_root).resolve()

@@ -324,7 +324,7 @@ class BarStore:
         if self.read_only or self.root.name != "bars":
             return
         try:
-            from quantmaster.repair_access import resolve_repair
+            from quantmaster.data.repair_access import resolve_repair
 
             resolve_repair(
                 "bar", f"{self.root.resolve()}::{symbol}",
@@ -589,7 +589,7 @@ class BarStore:
         if not enqueue or self.root.name != "bars":
             return
         try:
-            from quantmaster.repair_access import enqueue_repair
+            from quantmaster.data.repair_access import enqueue_repair
 
             enqueue_repair(
                 "bar",

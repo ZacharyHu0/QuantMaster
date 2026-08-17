@@ -17,7 +17,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
-from quantmaster.repair_access import register_repair_access
+from quantmaster.data.repair_access import register_repair_access
 from quantmaster.runtime.jobs import (
     JobContext,
     JobOutcome,
@@ -158,7 +158,7 @@ class DataRepairManager:
     def _register_builtin_handlers(self) -> None:
         self.register_handler("bar", self._repair_bar)
         self.register_handler("api_cache", self._repair_api_cache)
-        from quantmaster.research_access import research_repair_handler
+        from quantmaster.data.research_access import research_repair_handler
 
         handler = research_repair_handler()
         if handler is not None:

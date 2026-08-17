@@ -1155,6 +1155,6 @@ def predict_panel(
     return predict_multi_bundle(panel, model, horizon=selected).expected_excess[selected]
 
 
-from quantmaster.lab_access import register_predict_panel  # noqa: E402
+from quantmaster.decision.lab_access import register_predict_panel  # noqa: E402
 
 register_predict_panel(predict_panel)

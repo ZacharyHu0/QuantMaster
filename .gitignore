@@ -45,3 +45,4 @@ config.checks.json
 .DS_Store
 .idea/
 .vscode/
+config.runtime.json
