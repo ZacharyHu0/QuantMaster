@@ -72,7 +72,7 @@ release = [
 ]
 
 [project.scripts]
-qm = "quantmaster.cli:main"
+qm = "quantmaster.server.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["quantmaster*"]
@@ -135,7 +135,7 @@ files = [
     "quantmaster/research/lake.py",
     "quantmaster/research/catalog.py",
     "quantmaster/portfolio/ledger.py",
-    "quantmaster/doctor.py",
+    "quantmaster/server/doctor.py",
     "quantmaster/ai/news_claims.py",
     "quantmaster/ai/llm.py",
     "quantmaster/analysis/stock_evidence.py",

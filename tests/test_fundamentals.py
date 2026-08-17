@@ -15,10 +15,10 @@ from quantmaster.data.fundamentals import (
     fundamental_store,
     quarterly_to_daily,
 )
+from quantmaster.data.temporal import TemporalContractError
 from quantmaster.factors.analysis import analyze_factor
 from quantmaster.factors.engine import compute_factor
 from quantmaster.factors.fundamental import make_fundamental_factors, resolve_factor
-from quantmaster.temporal import TemporalContractError
 
 DATES = pd.bdate_range("2023-01-02", "2023-12-29")
 

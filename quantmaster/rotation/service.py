@@ -70,7 +70,7 @@ def _ensure_rotation_provider_registered() -> None:
     """Load the bundled provider before a fresh compute child uses the seam."""
 
     from quantmaster.rotation.provider import _rotation_provider_factory
-    from quantmaster.rotation_provider_access import register_rotation_provider
+    from quantmaster.rotation.provider_access import register_rotation_provider
 
     register_rotation_provider(_rotation_provider_factory)
 
@@ -1794,7 +1794,7 @@ class _RotationBuildRun:
         if state.spec.source != "auto":
             return
         _ensure_rotation_provider_registered()
-        from quantmaster.rotation_provider_access import rotation_provider
+        from quantmaster.rotation.provider_access import rotation_provider
 
         operations = self._provider_operations(rotation_provider()(self.service.store))
         for key, label, operation in operations:

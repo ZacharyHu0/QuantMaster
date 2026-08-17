@@ -1,4 +1,4 @@
-"""Registries used by the composition root without importing Web modules."""
+"""Web-owned hooks used by the application composition root."""
 
 from __future__ import annotations
 

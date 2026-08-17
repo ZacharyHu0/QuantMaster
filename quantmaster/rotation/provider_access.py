@@ -1,4 +1,4 @@
-"""Composition seam for the optional rotation provider implementation."""
+"""Registered optional rotation provider implementation."""
 
 from __future__ import annotations
 

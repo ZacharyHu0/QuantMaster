@@ -1,7 +1,7 @@
 {
-  "count": 130,
-  "reason": "Issue #79/#87 final audited ceiling after integrating main #171 Lab lifecycle",
-  "at": "2026-08-15T23:20:54+00:00",
+  "count": 128,
+  "reason": "Issue #274 moves safe low-fan-in modules without package cycles and lowers the audited C901 inventory from 130 to 128.",
+  "at": "2026-08-17T08:29:17+00:00",
   "findings": [
     {
       "file": "quantmaster/after_close/service.py",
@@ -29,43 +29,43 @@
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 183,
+      "line": 184,
       "function": "_analysis_error_message",
       "complexity": 16
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 493,
+      "line": 494,
       "function": "save",
       "complexity": 14
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 1054,
+      "line": 1057,
       "function": "query",
       "complexity": 16
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 1265,
+      "line": 1268,
       "function": "sandbox_factor_rows",
       "complexity": 13
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 1858,
+      "line": 1861,
       "function": "_process_annotation_batch",
       "complexity": 12
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 1987,
+      "line": 1990,
       "function": "_enrich_pending_events_unlocked",
       "complexity": 18
     },
     {
       "file": "quantmaster/ai/crawler.py",
-      "line": 2207,
+      "line": 2210,
       "function": "_run_unlocked",
       "complexity": 15
     },
@@ -83,7 +83,7 @@
     },
     {
       "file": "quantmaster/ai/news_contracts.py",
-      "line": 282,
+      "line": 302,
       "function": "normalize_published_at",
       "complexity": 14
     },
@@ -101,19 +101,19 @@
     },
     {
       "file": "quantmaster/ai/news_sources.py",
-      "line": 159,
+      "line": 158,
       "function": "_validate_source_dict",
       "complexity": 28
     },
     {
       "file": "quantmaster/ai/news_sources.py",
-      "line": 817,
+      "line": 816,
       "function": "register_ingest_batch",
       "complexity": 11
     },
     {
       "file": "quantmaster/ai/news_sources.py",
-      "line": 1693,
+      "line": 1692,
       "function": "fetch_declarative_source",
       "complexity": 16
     },
@@ -134,6 +134,12 @@
       "line": 357,
       "function": "_fundamental_dimension",
       "complexity": 17
+    },
+    {
+      "file": "quantmaster/backtest/job_migration.py",
+      "line": 117,
+      "function": "_content_conflicts",
+      "complexity": 21
     },
     {
       "file": "quantmaster/backtest/paper_accounts.py",
@@ -179,19 +185,19 @@
     },
     {
       "file": "quantmaster/data/free_stockdb_runtime.py",
-      "line": 541,
+      "line": 585,
       "function": "_start_service",
       "complexity": 13
     },
     {
       "file": "quantmaster/data/free_stockdb_runtime.py",
-      "line": 898,
+      "line": 942,
       "function": "_validate_data",
       "complexity": 14
     },
     {
       "file": "quantmaster/data/free_stockdb_runtime.py",
-      "line": 1162,
+      "line": 1206,
       "function": "_update_now_locked",
       "complexity": 14
     },
@@ -377,13 +383,13 @@
     },
     {
       "file": "quantmaster/data/tushare_source.py",
-      "line": 101,
+      "line": 99,
       "function": "_validate_tushare_frame",
       "complexity": 11
     },
     {
       "file": "quantmaster/data/tushare_source.py",
-      "line": 426,
+      "line": 424,
       "function": "research_daily",
       "complexity": 11
     },
@@ -569,7 +575,7 @@
     },
     {
       "file": "quantmaster/market/overview.py",
-      "line": 268,
+      "line": 295,
       "function": "build_market_overview_data",
       "complexity": 31
     },
@@ -641,31 +647,31 @@
     },
     {
       "file": "quantmaster/rotation/provider.py",
-      "line": 1013,
+      "line": 1012,
       "function": "_sync_eastmoney_themes",
       "complexity": 14
     },
     {
       "file": "quantmaster/rotation/provider.py",
-      "line": 1135,
+      "line": 1134,
       "function": "_sync_tushare_themes",
       "complexity": 18
     },
     {
       "file": "quantmaster/rotation/provider.py",
-      "line": 1326,
+      "line": 1325,
       "function": "_sync_ths_themes",
       "complexity": 14
     },
     {
       "file": "quantmaster/rotation/provider.py",
-      "line": 1487,
+      "line": 1486,
       "function": "sync_themes",
       "complexity": 12
     },
     {
       "file": "quantmaster/runtime/json.py",
-      "line": 44,
+      "line": 42,
       "function": "sanitize_json",
       "complexity": 14
     },
@@ -683,7 +689,7 @@
     },
     {
       "file": "quantmaster/runtime/worker.py",
-      "line": 215,
+      "line": 229,
       "function": "_handle_command",
       "complexity": 12
     },
@@ -700,18 +706,6 @@
       "complexity": 14
     },
     {
-      "file": "quantmaster/settings_checks.py",
-      "line": 43,
-      "function": "list_llm_models",
-      "complexity": 17
-    },
-    {
-      "file": "quantmaster/settings_checks.py",
-      "line": 390,
-      "function": "check_data_sources",
-      "complexity": 17
-    },
-    {
       "file": "scripts/ci/run.py",
       "line": 376,
       "function": "main",
@@ -719,25 +713,25 @@
     },
     {
       "file": "scripts/dev/tasks.py",
-      "line": 536,
+      "line": 537,
       "function": "serve",
       "complexity": 11
     },
     {
       "file": "scripts/dev/tasks.py",
-      "line": 728,
-      "function": "remove_task_artifacts",
+      "line": 708,
+      "function": "_remove_verified_tree",
       "complexity": 16
     },
     {
       "file": "scripts/dev/tasks.py",
-      "line": 829,
+      "line": 851,
       "function": "gc_task_artifacts",
       "complexity": 25
     },
     {
       "file": "scripts/dev/tasks.py",
-      "line": 1029,
+      "line": 1051,
       "function": "_remove_locked",
       "complexity": 14
     },
@@ -749,7 +743,7 @@
     },
     {
       "file": "scripts/release/smoke_frozen_runtime.py",
-      "line": 431,
+      "line": 429,
       "function": "smoke",
       "complexity": 18
     },
@@ -767,13 +761,13 @@
     },
     {
       "file": "tests/test_ui_management.py",
-      "line": 2529,
+      "line": 2570,
       "function": "test_automation_subscriptions_audit_and_source_save_feedback",
       "complexity": 13
     },
     {
       "file": "tests/test_ui_management.py",
-      "line": 3712,
+      "line": 3767,
       "function": "test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog",
       "complexity": 12
     }

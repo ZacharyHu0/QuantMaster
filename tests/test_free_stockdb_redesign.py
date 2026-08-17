@@ -1299,7 +1299,7 @@ def test_etf_metadata_only_change_reuses_compatible_local_daily_ingest(
 
 
 def test_etf_cli_contract_supports_cancel_and_resume():
-    from quantmaster.cli import build_parser
+    from quantmaster.server.cli import build_parser
 
     cancel = build_parser().parse_args(["etf-research", "cancel", "job-1"])
     resume = build_parser().parse_args(["etf-research", "resume", "job-1"])

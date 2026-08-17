@@ -33,7 +33,6 @@ FALLBACK_BASELINE = FINAL_CEILING
 
 TRANSPORT_ORCHESTRATION_PREFIXES = (
     "quantmaster/server/",
-    "quantmaster/cli.py",
     "quantmaster/automation/",
     "quantmaster/lab/service.py",
     "quantmaster/lab/worker.py",

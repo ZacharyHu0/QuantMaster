@@ -4,8 +4,7 @@ import pandas as pd
 import pytest
 
 from quantmaster.data.resilience import ProviderContractChanged
-from quantmaster.data.tushare_source import TushareSource
-from quantmaster.temporal import (
+from quantmaster.data.temporal import (
     InformationBoundary,
     KnowledgeMode,
     ProviderDateFormat,
@@ -15,6 +14,7 @@ from quantmaster.temporal import (
     parse_instant,
     parse_provider_date,
 )
+from quantmaster.data.tushare_source import TushareSource
 
 
 def test_provider_date_requires_declared_wire_format() -> None:

@@ -328,7 +328,7 @@ def smoke_fresh_wheel() -> None:
         smoke_env["QM_CONFIG_PATH"] = os.devnull
         smoke_env["QM_DATA_ROOT"] = str(temp / "data")
         smoke_env["PYTHONPATH"] = str(target)
-        invoke = "from quantmaster.cli import main; raise SystemExit(main(ARGS))"
+        invoke = "from quantmaster.server.cli import main; raise SystemExit(main(ARGS))"
         run_external(
             "fresh wheel CLI help",
             [str(PYTHON), "-c", invoke.replace("ARGS", "['--help']")],

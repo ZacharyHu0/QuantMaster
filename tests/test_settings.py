@@ -725,7 +725,7 @@ def test_data_source_settings_check_allows_explicit_provider_probe(monkeypatch, 
             "latency_ms": 1, "checked_at": "2026-08-12T00:00:00+00:00", "details": {},
         }
 
-    monkeypatch.setattr("quantmaster.settings_checks.check_data_sources", checked_probe)
+    monkeypatch.setattr("quantmaster.server.settings_checks.check_data_sources", checked_probe)
     monkeypatch.setattr(management, "settings_manager", manager)
     client = TestClient(app)
     settings = client.get("/api/v1/settings").json()

@@ -35,7 +35,7 @@ from quantmaster.data.resilience import (
     endpoint_cache_bypassed,
     provider_call,
 )
-from quantmaster.temporal import (
+from quantmaster.data.temporal import (
     ProviderDateFormat,
     parse_provider_date,
 )

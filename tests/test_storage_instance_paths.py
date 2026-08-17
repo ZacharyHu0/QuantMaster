@@ -145,7 +145,7 @@ def test_source_instance_path_bootstrap_is_noop(monkeypatch):
 
 
 def test_packaged_help_does_not_create_installed_paths(tmp_path, packaged_windows):
-    from quantmaster.cli import main
+    from quantmaster.server.cli import main
 
     config_module.configure_installed_instance()
 

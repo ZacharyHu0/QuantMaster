@@ -1,4 +1,4 @@
-"""Explicit business-date and instant contracts used at data boundaries.
+"""Explicit business-date and instant contracts owned by the data domain.
 
 Dates name market/business periods.  Instants name knowledge boundaries.  The
 two are deliberately separate so a date-only ``as_of`` can never silently turn

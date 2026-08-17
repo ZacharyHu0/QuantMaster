@@ -22,7 +22,7 @@ BASELINE = {
     "quantmaster/backtest/paper_accounts.py": 1,
     "quantmaster/backtest/spec.py": 1,
     "quantmaster/backtest/validation.py": 1,
-    "quantmaster/cli.py": 7,
+    "quantmaster/server/cli.py": 7,
     "quantmaster/credentials.py": 4,
     "quantmaster/data/akshare_source.py": 2,
     "quantmaster/data/fundamentals.py": 3,
@@ -39,7 +39,7 @@ BASELINE = {
     "quantmaster/data/storage.py": 1,
     "quantmaster/data/tushare_source.py": 2,
     "quantmaster/decision/hybrid.py": 3,
-    "quantmaster/doctor.py": 1,
+    "quantmaster/server/doctor.py": 1,
     "quantmaster/factors/mining/genetic.py": 1,
     "quantmaster/factors/mining/llm_miner.py": 1,
     "quantmaster/factors/mining/python_miner.py": 4,
@@ -69,8 +69,8 @@ BASELINE = {
     "quantmaster/server/management.py": 6,
     "quantmaster/server/news.py": 8,
     "quantmaster/server/trading.py": 11,
-    "quantmaster/settings_checks.py": 4,
-    "quantmaster/settings_jobs.py": 1,
+    "quantmaster/server/settings_checks.py": 4,
+    "quantmaster/server/settings_jobs.py": 1,
 }
 
 STRICT_PREFIXES = (

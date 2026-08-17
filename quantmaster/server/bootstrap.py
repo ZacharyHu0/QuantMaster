@@ -1,4 +1,4 @@
-"""Application composition root for durable QuantMaster worker processes."""
+"""Server composition root for durable QuantMaster worker processes."""
 
 from __future__ import annotations
 
@@ -11,11 +11,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from quantmaster.bootstrap_hooks import (
-    register_server_worker_hooks,
-    server_worker_hooks,
-    server_worker_hooks_registered,
-)
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
 from quantmaster.lab.store import LabSchemaMigrationRequired
@@ -26,8 +21,13 @@ from quantmaster.runtime.supervisor import (
 )
 from quantmaster.runtime.worker import RuntimeWorker, WorkerPlan
 from quantmaster.runtime.worker_ipc import WorkerCommandError
+from quantmaster.server.settings_jobs import get_settings_jobs, shutdown_settings_jobs
+from quantmaster.server.worker_hooks import (
+    register_server_worker_hooks,
+    server_worker_hooks,
+    server_worker_hooks_registered,
+)
 from quantmaster.settings_control import settings_manager
-from quantmaster.settings_jobs import get_settings_jobs, shutdown_settings_jobs
 
 logger = logging.getLogger(__name__)
 

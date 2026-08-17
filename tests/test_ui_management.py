@@ -446,7 +446,7 @@ def live_server(module_config):
         request_server_stop()
         thread.join(timeout=20)
         raise
-    from quantmaster.bootstrap import get_runtime_worker
+    from quantmaster.server.bootstrap import get_runtime_worker
 
     owned_worker = get_runtime_worker()
     heartbeat_path = cfg.data_root / "runtime-worker.json"

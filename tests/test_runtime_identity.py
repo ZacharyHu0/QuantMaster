@@ -94,12 +94,12 @@ def test_malformed_explicit_identity_fails_closed(
 def test_worker_composition_root_establishes_identity_before_spawn(
     monkeypatch, isolated_config,
 ):
-    from quantmaster.bootstrap import get_worker_supervisor
     from quantmaster.runtime.identity import (
         BUILD_SHA_ENV,
         RUNTIME_GENERATION_ENV,
         SLOT_ID_ENV,
     )
+    from quantmaster.server.bootstrap import get_worker_supervisor
 
     for name in (BUILD_SHA_ENV, SLOT_ID_ENV, RUNTIME_GENERATION_ENV):
         monkeypatch.delenv(name, raising=False)
