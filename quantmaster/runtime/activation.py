@@ -445,10 +445,26 @@ class SubprocessGenerationController:
             result = call_worker_command(
                 "maintenance.enter",
                 {"reason": "application activation", "timeout": drain_timeout},
-                timeout=drain_timeout,
+                timeout=timeout,
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            try:
+                status = call_worker_command(
+                    "maintenance.status",
+                    {"token": ""},
+                    timeout=timeout,
+                    application_identity=identity,
+                )
+            except (OSError, RuntimeError, ValueError, TypeError):
+                status = {}
+            if (
+                status.get("state") == "frozen"
+                and status.get("reason") == "application activation"
+            ):
+                self._drain_identity = identity
+                self._drain_token = ""
+                return
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法排空") from exc
         self._drain_identity = identity
         self._drain_token = str(result.get("token") or "")
