@@ -10,6 +10,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_SESSION_CODE_BY_COMPLETION = {
+    "current_session_partial": "SESSION_PARTIAL",
+    "current_session_closed_waiting_provider": "SESSION_CLOSED_WAIT_PROVIDER",
+    "current_session_provider_published_waiting_ingest": "SESSION_WAITING_INGEST",
+    "calendar_unavailable": "CALENDAR_UNVERIFIED",
+}
+
 
 def _parse_exact_timestamp(
     value: object, field: str,
@@ -26,6 +33,115 @@ def _parse_exact_timestamp(
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None, {"field": field, "diagnostic_code": "TIME_UNZONED"}
     return parsed, None
+
+
+def _valid_session_date(value: str) -> date | None:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.isoformat() == value else None
+
+
+def _completion_state(
+    validation: dict[str, Any], calendar: dict[str, Any], *, complete: bool, accepted: bool,
+) -> str:
+    if not validation:
+        return str(calendar.get("completion") or "calendar_unavailable")
+    if complete:
+        return "current_session_complete"
+    return "current_session_partial" if accepted else "current_session_closed_waiting_provider"
+
+
+def _session_diagnostic_codes(
+    completion_state: str, target_session: str, actual_session: str,
+) -> list[str]:
+    codes = [code] if (code := _SESSION_CODE_BY_COMPLETION.get(completion_state)) else []
+    target_date = _valid_session_date(target_session)
+    actual_date = _valid_session_date(actual_session)
+    if target_date is not None and actual_date is not None and actual_date < target_date:
+        codes.append("DATA_LATE")
+    return codes
+
+
+def _append_timestamp_codes(
+    codes: list[str], timestamp_diagnostics: list[dict[str, str]],
+) -> None:
+    for diagnostic in timestamp_diagnostics:
+        code = diagnostic["diagnostic_code"]
+        if code not in codes:
+            codes.append(code)
+
+
+def _timestamp_metrics(
+    validation: dict[str, Any], stockdb_status: dict[str, Any], diagnostic_codes: list[str],
+) -> tuple[str, str, list[dict[str, str]], int | None, int | None]:
+    provider_published_at = str(validation.get("provider_published_at") or "")
+    ingested_at = str(stockdb_status.get("updated_at") or "")
+    provider_time, provider_time_issue = _parse_exact_timestamp(
+        provider_published_at, "provider_published_at",
+    )
+    ingest_time, ingest_time_issue = _parse_exact_timestamp(ingested_at, "ingested_at")
+    timestamp_diagnostics = [
+        item for item in (provider_time_issue, ingest_time_issue) if item is not None
+    ]
+    _append_timestamp_codes(diagnostic_codes, timestamp_diagnostics)
+    if provider_time is None or ingest_time is None:
+        return provider_published_at, ingested_at, timestamp_diagnostics, None, None
+    latency = int((ingest_time - provider_time).total_seconds())
+    if latency < 0:
+        diagnostic_codes.append("PROVIDER_CLOCK_SKEW")
+        return provider_published_at, ingested_at, timestamp_diagnostics, None, abs(latency)
+    return provider_published_at, ingested_at, timestamp_diagnostics, latency, None
+
+
+def _market_states(
+    completion_state: str,
+    provider_published_at: str,
+    ingested_at: str,
+    *,
+    complete: bool,
+    accepted: bool,
+) -> tuple[str, str]:
+    if completion_state == "current_session_closed_waiting_provider":
+        provider_state = "waiting"
+    elif provider_published_at:
+        provider_state = "published"
+    elif accepted or complete:
+        provider_state = "published_time_unavailable"
+    else:
+        provider_state = "unavailable"
+    if completion_state == "current_session_provider_published_waiting_ingest":
+        ingest_state = "waiting"
+    elif completion_state == "current_session_partial":
+        ingest_state = "partial"
+    elif complete and ingested_at:
+        ingest_state = "complete"
+    else:
+        ingest_state = "unavailable"
+    return provider_state, ingest_state
+
+
+def _unavailable_market(timezone: str) -> dict[str, Any]:
+    return {
+        "market_timezone": timezone,
+        "session_date": "",
+        "session_phase": "unavailable",
+        "latest_complete_session": "",
+        "next_session": "",
+        "next_session_reason": "未提供经验证的未来交易日历",
+        "completion_state": "calendar_unavailable",
+        "provider_state": "unavailable",
+        "ingest_state": "unavailable",
+        "provider_published_at": "",
+        "ingested_at": "",
+        "ingest_latency_seconds": None,
+        "provider_clock_skew_seconds": None,
+        "late_record_count": None,
+        "diagnostic_code": "CALENDAR_UNVERIFIED",
+        "diagnostic_codes": ["CALENDAR_UNVERIFIED"],
+        "timestamp_diagnostics": [],
+    }
 
 
 def _market_session_metrics(
@@ -50,96 +166,26 @@ def _market_session_metrics(
     )
     if not latest_complete and bool(calendar.get("ready")):
         latest_complete = str(calendar.get("session") or "")
-    if validation:
-        completion_state = (
-            "current_session_complete" if complete else
-            "current_session_partial" if accepted else
-            "current_session_closed_waiting_provider"
-        )
-    else:
-        completion_state = str(calendar.get("completion") or "calendar_unavailable")
-
-    diagnostic_codes: list[str] = []
-    if completion_state == "current_session_partial":
-        diagnostic_codes.append("SESSION_PARTIAL")
-    elif completion_state == "current_session_closed_waiting_provider":
-        diagnostic_codes.append("SESSION_CLOSED_WAIT_PROVIDER")
-    elif completion_state == "current_session_provider_published_waiting_ingest":
-        diagnostic_codes.append("SESSION_WAITING_INGEST")
-    elif completion_state == "calendar_unavailable":
-        diagnostic_codes.append("CALENDAR_UNVERIFIED")
-    try:
-        target_date = date.fromisoformat(target_session)
-        actual_date = date.fromisoformat(actual_session)
-    except ValueError:
-        target_date = actual_date = None
-    if target_date is not None and target_date.isoformat() != target_session:
-        target_date = None
-    if actual_date is not None and actual_date.isoformat() != actual_session:
-        actual_date = None
-    if target_date is not None and actual_date is not None and actual_date < target_date:
-        diagnostic_codes.append("DATA_LATE")
-
-    provider_published_at = str(validation.get("provider_published_at") or "")
-    ingested_at = str(stockdb_status.get("updated_at") or "")
-    provider_time, provider_time_issue = _parse_exact_timestamp(
-        provider_published_at, "provider_published_at",
+    completion_state = _completion_state(
+        validation, calendar, complete=complete, accepted=accepted,
     )
-    ingest_time, ingest_time_issue = _parse_exact_timestamp(ingested_at, "ingested_at")
-    timestamp_diagnostics = [
-        item for item in (provider_time_issue, ingest_time_issue) if item is not None
-    ]
-    diagnostic_codes.extend(
-        item["diagnostic_code"] for item in timestamp_diagnostics
-        if item["diagnostic_code"] not in diagnostic_codes
+    diagnostic_codes = _session_diagnostic_codes(
+        completion_state, target_session, actual_session,
     )
-    ingest_latency_seconds: int | None = None
-    provider_clock_skew_seconds: int | None = None
-    if provider_time is not None and ingest_time is not None:
-        latency = int((ingest_time - provider_time).total_seconds())
-        if latency < 0:
-            diagnostic_codes.append("PROVIDER_CLOCK_SKEW")
-            provider_clock_skew_seconds = abs(latency)
-        else:
-            ingest_latency_seconds = latency
-
-    if completion_state == "current_session_closed_waiting_provider":
-        provider_state = "waiting"
-    elif provider_published_at:
-        provider_state = "published"
-    elif accepted or complete:
-        provider_state = "published_time_unavailable"
-    else:
-        provider_state = "unavailable"
-    if completion_state == "current_session_provider_published_waiting_ingest":
-        ingest_state = "waiting"
-    elif completion_state == "current_session_partial":
-        ingest_state = "partial"
-    elif complete and ingested_at:
-        ingest_state = "complete"
-    else:
-        ingest_state = "unavailable"
-
-    def unavailable_market(timezone: str) -> dict[str, Any]:
-        return {
-            "market_timezone": timezone,
-            "session_date": "",
-            "session_phase": "unavailable",
-            "latest_complete_session": "",
-            "next_session": "",
-            "next_session_reason": "未提供经验证的未来交易日历",
-            "completion_state": "calendar_unavailable",
-            "provider_state": "unavailable",
-            "ingest_state": "unavailable",
-            "provider_published_at": "",
-            "ingested_at": "",
-            "ingest_latency_seconds": None,
-            "provider_clock_skew_seconds": None,
-            "late_record_count": None,
-            "diagnostic_code": "CALENDAR_UNVERIFIED",
-            "diagnostic_codes": ["CALENDAR_UNVERIFIED"],
-            "timestamp_diagnostics": [],
-        }
+    (
+        provider_published_at,
+        ingested_at,
+        timestamp_diagnostics,
+        ingest_latency_seconds,
+        provider_clock_skew_seconds,
+    ) = _timestamp_metrics(validation, stockdb_status, diagnostic_codes)
+    provider_state, ingest_state = _market_states(
+        completion_state,
+        provider_published_at,
+        ingested_at,
+        complete=complete,
+        accepted=accepted,
+    )
     return {
         "CN": {
             "market_timezone": "Asia/Shanghai",
@@ -162,8 +208,8 @@ def _market_session_metrics(
             "diagnostic_codes": diagnostic_codes,
             "timestamp_diagnostics": timestamp_diagnostics,
         },
-        "HK": unavailable_market("Asia/Hong_Kong"),
-        "US": unavailable_market("America/New_York"),
+        "HK": _unavailable_market("Asia/Hong_Kong"),
+        "US": _unavailable_market("America/New_York"),
     }
 
 
