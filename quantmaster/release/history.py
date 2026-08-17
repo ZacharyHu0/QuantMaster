@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.3"
+VERSION = "1.17.4"
 RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,25 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "更新排空与恢复",
+                "items": (
+                    (
+                        "更新 helper 以完整 activation 窗口等待 runtime-worker 的维护回包，"
+                        "同时保持十秒排空上限；排空恰好抵达预算边界不再丢失租约并误回滚。"
+                    ),
+                    (
+                        "若上一次应用更新已确认令 worker 进入切换维护冻结，"
+                        "重试可安全接管该状态继续切换；非更新来源的维护冻结仍明确拒绝。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.3",
+        "date": "2026-08-18",
         "sections": (
             {
                 "title": "本机更新自举",
