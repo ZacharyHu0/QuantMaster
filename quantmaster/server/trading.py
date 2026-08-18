@@ -304,7 +304,7 @@ def recover_paper_order_fill(
                 side=payload.side,
             ),
         }
-    except Exception as exc:
+    except (KeyError, ValueError) as exc:
         raise _error(exc) from None
 
 
