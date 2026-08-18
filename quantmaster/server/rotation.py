@@ -262,8 +262,165 @@ def refresh_market_analytics(value: RotationRefreshRequest) -> dict[str, Any]:
 
 
 @router.get("/rotation/overview")
-def rotation_overview(request: Request, response: Response) -> Any:
-    return _snapshot_etag(request, response, get_rotation_service(read_only=True).overview())
+def rotation_overview(
+    request: Request, response: Response, window: int = 5,
+) -> Any:
+    selected = _rotation_window(window)
+    return _snapshot_etag(
+        request, response, get_rotation_service(read_only=True).overview(selected),
+    )
+
+
+BoardIndexCategory = Literal["all", "sw1", "sw2", "theme"]
+BoardIndexMethod = Literal["equal", "float_mv", "amount", "volume", "total_mv"]
+
+
+def _board_index_key(category: str, code: str) -> str:
+    if category not in {"sw1", "sw2", "theme"}:
+        raise HTTPException(422, "板块类别仅支持 sw1、sw2 或 theme")
+    return f"{category}:{code}".upper()
+
+
+def _board_index_item(item: dict[str, Any], method: str, window: int) -> dict[str, Any]:
+    methods = item.get("methods") if isinstance(item.get("methods"), dict) else {}
+    selected = methods.get(method) if isinstance(methods.get(method), dict) else {}
+    changes = selected.get("changes") if isinstance(selected.get("changes"), dict) else {}
+    return {
+        key: value for key, value in item.items() if key != "methods"
+    } | {
+        "method": method,
+        "status": str(selected.get("status") or "unavailable"),
+        "last": selected.get("last"),
+        "change": changes.get(str(window)),
+        "changes": changes,
+        "sessions": int(selected.get("sessions") or 0),
+        "reason": str(selected.get("reason") or ""),
+    }
+
+
+@router.get("/rotation/board-indexes")
+def rotation_board_indexes(
+    request: Request,
+    response: Response,
+    category: BoardIndexCategory = "all",
+    method: BoardIndexMethod = "equal",
+    window: int = 5,
+    query: str = Query("", max_length=80),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    sort: Literal["change", "name", "coverage", "member_count"] = "change",
+    order: Literal["asc", "desc"] = "desc",
+) -> Any:
+    """Read one compact page; StockDB calculation is never part of this route."""
+
+    window = _rotation_window(window)
+    selected_size = _page_size(page_size)
+    service = get_rotation_service(read_only=True)
+    header, values, _pagination_meta = service.store.snapshot_items_page(
+        "board_indexes",
+        query=query,
+        category="" if category == "all" else category,
+        page=1,
+        page_size=500,
+    )
+    if header is None:
+        raise HTTPException(503, "板块指数快照尚未发布")
+    items = [_board_index_item(item, method, window) for item in values]
+
+    def sort_key(item: dict[str, Any]) -> tuple[Any, str]:
+        value = item.get(sort)
+        if sort == "name":
+            value = str(value or "").casefold()
+        else:
+            value = _number(value)
+        return value, str(item.get("code") or "")
+
+    available = [item for item in items if item.get(sort) is not None]
+    unavailable = [item for item in items if item.get(sort) is None]
+    available.sort(key=sort_key, reverse=order == "desc")
+    items = available + unavailable
+    items, pagination = _pagination(items, page, selected_size)
+    data = dict(header.get("data") or {})
+    data.update({
+        "items": items,
+        "pagination": pagination,
+        "category": category,
+        "method": method,
+        "window": window,
+    })
+    return _snapshot_etag(request, response, {"meta": header["meta"], "data": data})
+
+
+@router.get("/rotation/board-indexes/{category}/{code}/constituents")
+def rotation_board_index_constituents(
+    category: Literal["sw1", "sw2", "theme"],
+    code: str,
+    request: Request,
+    response: Response,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    sort: Literal["change", "amount", "name"] = "change",
+    order: Literal["asc", "desc"] = "desc",
+) -> Any:
+    service = get_rotation_service(read_only=True)
+    header = service.store.snapshot_header("board_indexes")
+    detail = service.store.snapshot_detail("board_indexes", _board_index_key(category, code))
+    if header is None or detail is None:
+        raise HTTPException(404, f"板块指数不存在或尚未发布: {category}/{code}")
+    values = list(detail.get("constituents") or [])
+    field = {"change": "change_pct", "amount": "amount", "name": "name"}[sort]
+    available = [item for item in values if item.get(field) is not None]
+    unavailable = [item for item in values if item.get(field) is None]
+    available.sort(
+        key=lambda item: (
+            str(item.get(field) or "").casefold()
+            if field == "name" else _number(item.get(field)),
+            str(item.get("symbol") or ""),
+        ),
+        reverse=order == "desc",
+    )
+    values = available + unavailable
+    values, pagination = _pagination(values, page, _page_size(page_size))
+    return _snapshot_etag(request, response, {
+        "meta": header["meta"],
+        "data": {
+            "code": detail.get("code"),
+            "board_code": detail.get("board_code"),
+            "name": detail.get("name"),
+            "items": values,
+            "pagination": pagination,
+            "membership_semantics": detail.get("membership_semantics"),
+        },
+    })
+
+
+@router.get("/rotation/board-indexes/{category}/{code}")
+def rotation_board_index_detail(
+    category: Literal["sw1", "sw2", "theme"],
+    code: str,
+    request: Request,
+    response: Response,
+    method: BoardIndexMethod = "equal",
+) -> Any:
+    service = get_rotation_service(read_only=True)
+    header = service.store.snapshot_header("board_indexes")
+    detail = service.store.snapshot_detail("board_indexes", _board_index_key(category, code))
+    if header is None or detail is None:
+        raise HTTPException(404, f"板块指数不存在或尚未发布: {category}/{code}")
+    series = detail.get("series") if isinstance(detail.get("series"), dict) else {}
+    methods = detail.get("methods") if isinstance(detail.get("methods"), dict) else {}
+    data = {
+        key: value for key, value in detail.items()
+        if key not in {"series", "constituents", "methods"}
+    }
+    data.update({
+        "method": method,
+        "method_status": methods.get(method, {"status": "unavailable"}),
+        "comparison": methods,
+        "series": list(series.get(method) or []),
+        "constituent_count": len(detail.get("constituents") or []),
+    })
+    return _snapshot_etag(request, response, {"meta": header["meta"], "data": data})
 
 
 @router.get("/rotation/industries")
@@ -272,24 +429,27 @@ def rotation_industries(
     response: Response,
     level: Literal["all", "L1", "L2"] = "all",
     query: str = Query("", max_length=80),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
     window: int = 5,
 ) -> Any:
     window = _rotation_window(window)
+    selected_size = _page_size(page_size)
     service = get_rotation_service(read_only=True)
     selected_l2 = set(service.store.preferences()["l2_codes"])
-    _header, values, _pagination_meta = service.store.snapshot_items_page(
+    _header, values, pagination = service.store.snapshot_items_page(
         "industries",
         query=query,
         level="" if level == "all" else level,
         allowed_keys=selected_l2,
         include_l1=True,
-        page=1,
-        page_size=100,
+        page=page,
+        page_size=selected_size,
     )
     snapshot = service.snapshot_header("industries")
     items = [_materialize_group_score(item, window) for item in values]
     data = dict(snapshot.get("data") or {})
-    data.update({"items": items, "window": window})
+    data.update({"items": items, "pagination": pagination, "window": window})
     return _snapshot_etag(request, response, {"meta": snapshot["meta"], "data": data})
 
 

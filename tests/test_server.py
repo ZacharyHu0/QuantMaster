@@ -1316,7 +1316,10 @@ class TestBasics:
 
         assert len(partials) == final_count
         assert all(partial["kind"] == "market_item" for partial in partials)
-        assert all(partial["item"]["nav"] for partial in partials)
+        assert all("nav" not in partial["item"] for partial in partials)
+        assert all("rsi_history" not in partial["item"] for partial in partials)
+        assert all("data_quality" not in partial["item"] for partial in partials)
+        assert len(json.dumps(result, ensure_ascii=False).encode()) <= 120 * 1024
 
     def test_market_overview_includes_tech_focused_major_indexes(self):
         from quantmaster.market import overview as market_overview
@@ -1532,8 +1535,7 @@ class TestBasics:
         assert result["groups"]["商品与汇率"][0]["message"] == "Yahoo 正在限流"
         assert result["group_statuses"]["商品与汇率"]["unavailable"] == 1
         assert result["group_statuses"]["商品与汇率"]["issues"][0]["symbol"] == symbol
-        assert result["unavailable_items"][0]["symbol"] == symbol
-        assert result["unavailable_items"][0]["message"] == "Yahoo 正在限流"
+        assert "unavailable_items" not in result
 
     def test_market_fear_greed_refresh_is_explicit_and_forced(self, monkeypatch):
         calls = []

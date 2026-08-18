@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -29,6 +31,8 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert overview["meta"]["quality"]["available_dimensions"] == 0
     assert overview["meta"]["quality"]["total_dimensions"] == 4
     assert overview["data"]["windows"] == [1, 3, 5, 20]
+    assert overview["data"]["window"] == 5
+    assert "etf_context" not in overview["data"]
     assert set(overview["data"]["dimensions"]) == {
         "market", "industries", "themes", "etf",
     }
@@ -142,6 +146,127 @@ def test_rotation_preferences_validate_known_l2_codes():
         json={"l2_codes": ["999999.SI"]},
     )
     assert unknown.status_code == 422
+
+
+def test_board_index_routes_read_only_the_published_detail_and_page(monkeypatch):
+    service = get_rotation_service()
+    methods = {
+        name: {
+            "status": "ready", "last": 1005.0,
+            "changes": {"1": 1.0, "3": 2.0, "5": 3.0, "20": 4.0},
+            "sessions": 30,
+        }
+        for name in ("equal", "float_mv", "amount", "volume", "total_mv")
+    }
+    item = {
+        "code": "SW1:801010.SI", "board_code": "801010.SI", "name": "农林牧渔",
+        "category": "sw1", "level": "L1", "member_count": 2,
+        "eligible_count": 2, "coverage": 1.0, "methods": methods,
+    }
+    service.store.save_snapshots({
+        "board_indexes": {
+            "meta": {
+                "snapshot_id": "board-index-sample", "as_of": "2026-08-17",
+                "generated_at": "2026-08-17T10:00:00+00:00",
+                "algorithm_version": "QM_BOARD_INDEX_V1",
+                "input_fingerprint": "fixture", "quality": {"status": "complete"},
+            },
+            "data": {
+                "items": [item],
+                "details": {
+                    "SW1:801010.SI": {
+                        **item,
+                        "membership_semantics": "current_constituents_backcast",
+                        "frequency": "1d", "base": 1000,
+                        "series": {
+                            name: [{"date": "2026-08-17", "close": 1005.0}]
+                            for name in methods
+                        },
+                        "constituents": [
+                            {
+                                "symbol": "000001.SZ", "name": "平安银行", "last": 11,
+                                "change_pct": 2.0, "amount": 100, "as_of": "2026-08-17",
+                            },
+                            {
+                                "symbol": "600000.SH", "name": "浦发银行", "last": 8,
+                                "change_pct": -1.0, "amount": 200, "as_of": "2026-08-17",
+                            },
+                        ],
+                    }
+                },
+                "summary": {"board_count": 1},
+            },
+        }
+    })
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source.FreeStockDBSource.native_board_index",
+        lambda *_args, **_kwargs: pytest.fail("GET route attempted board-index calculation"),
+    )
+    client = _client()
+
+    page = client.get(
+        "/api/v1/rotation/board-indexes",
+        params={"category": "sw1", "method": "float_mv", "window": 20},
+    )
+    assert page.status_code == 200
+    assert page.json()["data"]["items"][0]["change"] == 4.0
+    assert page.json()["data"]["items"][0]["method"] == "float_mv"
+    assert "methods" not in page.json()["data"]["items"][0]
+    assert len(page.content) <= 64 * 1024
+    assert client.get(
+        "/api/v1/rotation/board-indexes",
+        params={"category": "sw1", "method": "float_mv", "window": 20},
+        headers={"If-None-Match": page.headers["etag"]},
+    ).status_code == 304
+    changed_query = client.get(
+        "/api/v1/rotation/board-indexes",
+        params={"category": "sw1", "method": "float_mv", "window": 5},
+        headers={"If-None-Match": page.headers["etag"]},
+    )
+    assert changed_query.status_code == 200
+    assert changed_query.headers["etag"] != page.headers["etag"]
+
+    detail = client.get(
+        "/api/v1/rotation/board-indexes/sw1/801010.SI",
+        params={"method": "amount"},
+    )
+    assert detail.status_code == 200
+    assert detail.json()["data"]["series"] == [
+        {"date": "2026-08-17", "close": 1005.0}
+    ]
+    assert "constituents" not in detail.json()["data"]
+    assert len(detail.content) <= 96 * 1024
+    assert client.get(
+        "/api/v1/rotation/board-indexes/sw1/801010.SI",
+        params={"method": "amount"},
+        headers={"If-None-Match": detail.headers["etag"]},
+    ).status_code == 304
+
+    constituents = client.get(
+        "/api/v1/rotation/board-indexes/sw1/801010.SI/constituents",
+        params={"sort": "amount", "page_size": 25},
+    )
+    assert constituents.status_code == 200
+    assert constituents.json()["data"]["items"][0]["symbol"] == "600000.SH"
+    assert constituents.json()["data"]["membership_semantics"] == (
+        "current_constituents_backcast"
+    )
+    assert client.get(
+        "/api/v1/rotation/board-indexes/sw1/801010.SI/constituents",
+        params={"sort": "amount", "page_size": 25},
+        headers={"If-None-Match": constituents.headers["etag"]},
+    ).status_code == 304
+
+    samples = []
+    for _ in range(20):
+        started = time.perf_counter()
+        response = client.get(
+            "/api/v1/rotation/board-indexes",
+            params={"category": "sw1", "method": "equal", "window": 5},
+        )
+        samples.append(time.perf_counter() - started)
+        assert response.status_code == 200
+    assert sorted(samples)[18] <= 0.150
 
 
 def test_rotation_refresh_returns_unified_job_contract(monkeypatch):

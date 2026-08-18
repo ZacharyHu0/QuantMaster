@@ -35,6 +35,7 @@ from quantmaster.rotation.analytics import (
     map_theme_industries,
     market_temperature_reference_dates,
 )
+from quantmaster.rotation.board_indexes import build_board_index_data
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.session import expected_market_session
 from quantmaster.rotation.status import (
@@ -1102,11 +1103,18 @@ class RotationService:
     @staticmethod
     def _scope_snapshot_kinds(scope: str) -> tuple[str, ...]:
         return {
-            "all": ("temperature", "structure", "industries", "themes", "etf_flows", "taxonomy"),
-            "close": ("temperature", "structure", "industries", "themes", "taxonomy"),
+            "all": (
+                "temperature", "structure", "industries", "themes", "board_indexes",
+                "etf_flows", "taxonomy",
+            ),
+            "close": (
+                "temperature", "structure", "industries", "themes", "board_indexes",
+                "taxonomy",
+            ),
             "market": ("temperature", "structure"),
-            "industries": ("industries", "taxonomy"),
-            "themes": ("themes",),
+            "industries": ("industries", "board_indexes", "taxonomy"),
+            "themes": ("themes", "board_indexes"),
+            "indexes": ("board_indexes",),
             "etf": ("etf_flows",),
         }.get(str(scope), ())
 
@@ -1222,6 +1230,7 @@ class RotationService:
             "structure": (True, ()),
             "industries": (True, ("rotation.taxonomy",)),
             "themes": (True, ("rotation.taxonomy", "rotation.themes")),
+            "board_indexes": (True, ("rotation.taxonomy", "rotation.themes")),
             "taxonomy": (False, ("rotation.taxonomy",)),
             "etf_flows": (False, ("rotation.etf_observations", "rotation.etf_metadata")),
         }
@@ -1270,7 +1279,9 @@ class RotationService:
         """Remote is a supplement only when local evidence is absent or stale."""
 
         scope = spec.scope
-        need_market = scope in {"all", "close", "market", "industries", "themes"}
+        need_market = scope in {
+            "all", "close", "market", "industries", "themes", "indexes",
+        }
         expected_as_of = self._expected_for_spec(spec)
         market_missing = not bool(local_state.get("available"))
         market_stale = bool(
@@ -1582,7 +1593,9 @@ class RotationService:
             "data": data,
         }
 
-    def overview(self) -> dict[str, Any]:
+    def overview(self, window: int = 5) -> dict[str, Any]:
+        if window not in ROTATION_WINDOWS:
+            raise ValueError("轮动观察窗口仅支持 1、3、5、20 日")
         temperature = self.snapshot("temperature")
         structure = self.snapshot("structure")
         industries = self.snapshot("industries")
@@ -1590,7 +1603,9 @@ class RotationService:
         etf = self.snapshot("etf_flows")
         snapshots = (temperature, structure, industries, themes, etf)
         metas = [value["meta"] for value in snapshots]
-        cache_key = tuple(str(meta.get("snapshot_id") or "") for meta in metas)
+        cache_key = (
+            *(str(meta.get("snapshot_id") or "") for meta in metas), str(window),
+        )
         if self._overview_cache is not None and cache_key == self._overview_cache_key:
             return copy.deepcopy(self._overview_cache)
         generated = max((str(meta.get("generated_at") or "") for meta in metas), default="")
@@ -1630,28 +1645,19 @@ class RotationService:
         ]
         theme_items = list(themes["data"].get("items", []))
         rankings = {
-            str(window): {
-                "industries": _rank_window(l1_industries, window),
-                "themes": _rank_window(theme_items, window),
-            }
-            for window in ROTATION_WINDOWS
+            "industries": _rank_window(l1_industries, window),
+            "themes": _rank_window(theme_items, window),
         }
-        resonance = {
-            str(window): _resonance_rows(l1_industries, theme_items, window)
-            for window in ROTATION_WINDOWS
-        }
+        resonance = _resonance_rows(l1_industries, theme_items, window)
         temperature_history = list(temperature["data"].get("history") or [])
-        temperature_changes = {}
-        for window in ROTATION_WINDOWS:
-            if len(temperature_history) > window:
-                latest = temperature_history[-1].get("temperature")
-                previous = temperature_history[-1 - window].get("temperature")
-                temperature_changes[str(window)] = (
-                    round(float(latest) - float(previous), 2)
-                    if latest is not None and previous is not None else None
-                )
-            else:
-                temperature_changes[str(window)] = None
+        temperature_change = None
+        if len(temperature_history) > window:
+            latest = temperature_history[-1].get("temperature")
+            previous = temperature_history[-1 - window].get("temperature")
+            temperature_change = (
+                round(float(latest) - float(previous), 2)
+                if latest is not None and previous is not None else None
+            )
 
         def dimension_meta(value: dict[str, Any]) -> dict[str, Any]:
             meta = value.get("meta") or {}
@@ -1676,12 +1682,16 @@ class RotationService:
             ])),
         })
 
+        etf_summary = dict(etf["data"].get("summary") or {})
+        etf_windows = etf_summary.pop("windows", {})
+        etf_summary["window"] = (
+            etf_windows.get(str(window), {}) if isinstance(etf_windows, dict) else {}
+        )
         data = {
             "as_of": as_of,
-            "temperature": temperature["data"].get("current"),
+            "window": window,
             "industries": visible_industries[:8],
             "themes": theme_items[:8],
-            "etf": etf["data"].get("summary", {}),
             "windows": list(ROTATION_WINDOWS),
             "dimensions": {
                 "market": market_dimension,
@@ -1691,7 +1701,7 @@ class RotationService:
             },
             "market": {
                 "temperature": temperature["data"].get("current"),
-                "temperature_changes": temperature_changes,
+                "temperature_change": temperature_change,
                 "structure": structure["data"].get("current"),
             },
             "distributions": {
@@ -1700,10 +1710,7 @@ class RotationService:
             },
             "rankings": rankings,
             "resonance": resonance,
-            "etf_context": {
-                "summary": etf["data"].get("summary", {}),
-                "benchmarks": etf["data"].get("benchmarks", []),
-            },
+            "etf_summary": etf_summary,
         }
         overview_quality = _status_quality(status, issues=(
             [
@@ -1758,7 +1765,9 @@ class _RotationBuildRun:
         job_id: str,
         checkpoint: Callable[[str, dict[str, Any]], None] | None,
     ) -> None:
-        need_market = spec.scope in {"all", "close", "market", "industries", "themes"}
+        need_market = spec.scope in {
+            "all", "close", "market", "industries", "themes", "indexes",
+        }
         local_state = (
             service._local_input_state()
             if need_market else {
@@ -1826,13 +1835,15 @@ class _RotationBuildRun:
         self._compute_structure(temperature_quality)
         self._compute_industries()
         self._compute_themes()
+        self._compute_board_indexes()
         self._compute_etf_flows()
         return self._publish()
 
     def _capture_previous_snapshots(self) -> None:
         state = self.state
         for kind in (
-            "temperature", "structure", "industries", "themes", "etf_flows", "taxonomy",
+            "temperature", "structure", "industries", "themes", "board_indexes",
+            "etf_flows", "taxonomy",
         ):
             try:
                 previous = self.service.store.snapshot_header(kind)
@@ -2048,7 +2059,9 @@ class _RotationBuildRun:
     def _load_compute_inputs(self) -> None:
         state = self.state
         load_market_matrix = bool(
-            state.compute_kinds & {"temperature", "structure", "industries", "themes"}
+            state.compute_kinds & {
+                "temperature", "structure", "industries", "themes", "board_indexes",
+            }
         )
         state.etf_observations = self._load_etf_observations()
         state.expected_count = int(state.local_state.get("expected_count") or 0)
@@ -2064,9 +2077,9 @@ class _RotationBuildRun:
                     str((header.get("meta") or {}).get("as_of") or "")
                     for header in current_headers
                 ),
-                default="",
+                default=str(state.local_state.get("as_of") or ""),
             )
-        )
+        ) or str(state.local_state.get("as_of") or "")
         if not state.etf_observations.empty:
             state.etf_observations, state.etf_price_source = _overlay_stockdb_etf_prices(
                 state.etf_observations, as_of=state.as_of,
@@ -2439,6 +2452,81 @@ class _RotationBuildRun:
             "as_of": state.as_of,
             "groups": count,
             "input_fingerprint": state.snapshot_fingerprints.get("themes", ""),
+        })
+
+    def _compute_board_indexes(self) -> None:
+        state = self.state
+        if "board_indexes" not in state.compute_kinds:
+            return
+        if not state.as_of:
+            raise RuntimeError("没有可用于板块指数的本地交易日证据")
+        state.progress(88, "准备板块指数", "读取 StockDB 当前成分目录")
+        theme_items = list(
+            (state.computed.get("themes", {}).get("data") or {}).get("items") or []
+        )
+        if not theme_items:
+            _header, theme_items, _page = self.service.store.snapshot_items_page(
+                "themes", page=1, page_size=500,
+            )
+        theme_codes = {
+            str(item.get("code") or "").upper() for item in theme_items
+            if str(item.get("code") or "")
+        }
+        selected_l2 = {
+            str(code).upper() for code in self.service.store.preferences()["l2_codes"]
+        }
+        try:
+            from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+            data, quality = build_board_index_data(
+                FreeStockDBSource(),
+                close=state.close,
+                amount=state.amount,
+                names=state.names,
+                as_of=state.as_of,
+                selected_l2=selected_l2,
+                theme_codes=theme_codes,
+                progress=state.progress,
+                cancelled=state.cancelled,
+            )
+        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            if state.previous_snapshot_ids.get("board_indexes"):
+                state.provider_warnings.append(
+                    f"板块指数刷新失败，继续保留旧快照：{str(exc)[:160]}"
+                )
+                return
+            issue = f"本地 StockDB 板块指数不可用：{str(exc)[:160]}"
+            data = {
+                "as_of": state.as_of,
+                "items": [],
+                "details": {},
+                "summary": {
+                    "board_count": 0, "method_count": 5,
+                    "unavailable_method_count": 0,
+                },
+                "definition": {
+                    "methods": ["equal", "float_mv", "amount", "volume", "total_mv"],
+                    "membership_semantics": "current_constituents_backcast",
+                    "frequency": "1d", "base": 1000.0, "sessions": 120,
+                },
+            }
+            quality = {
+                "status": "cold", "eligible_count": 0, "expected_count": 0,
+                "coverage": None, "issues": [issue],
+            }
+        state.computed["board_indexes"] = self.service._envelope(
+            data,
+            snapshot_id=state.snapshot_id,
+            generated_at=state.generated_at,
+            quality=quality,
+            sources=["free-stockdb:boards", "free-stockdb:zhishu"],
+            expected_as_of=state.expected_as_of,
+            purpose=state.spec.purpose,
+        )
+        state.checkpoint_node("board_indexes", {
+            "as_of": state.as_of,
+            "boards": len(data.get("items") or []),
+            "input_fingerprint": state.snapshot_fingerprints.get("board_indexes", ""),
         })
 
     def _etf_sources(self, data: dict[str, Any]) -> list[str]:

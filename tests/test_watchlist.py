@@ -89,7 +89,8 @@ def test_market_overview_groups_personal_stocks_with_memberships(monkeypatch):
     assert items[0]["symbol"] == "600519.SH"
     assert items[0]["name"] == "贵州茅台"
     assert items[0]["memberships"] == ["favorites", "following", "holdings"]
-    assert items[0]["nav"]
+    assert "nav" not in items[0]
+    assert "rsi_history" not in items[0]
 
 
 def test_personal_market_replaces_code_only_labels_with_security_names(monkeypatch):

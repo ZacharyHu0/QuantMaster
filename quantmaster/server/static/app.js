@@ -2370,6 +2370,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.item = item;
     const unavailable = item.state === 'unavailable' || item.freshness === 'unavailable';
     const changeSeries = marketChangeSeries(item.nav);
+    const hasHistory = changeSeries.length > 1;
     const sparkSummary = marketSparkSummary(changeSeries);
     const sparkTone = sparkSummary.last > 0 ? MARKET_TONES.up
       : sparkSummary.last < 0 ? MARKET_TONES.down : MARKET_TONES.neutral;
@@ -2380,7 +2381,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     entry.element.style.setProperty('--market-tone',sparkTone);
     entry.element.querySelector('.nm').innerHTML =
       `${esc(item.name)} <span class="badge">${esc(item.symbol)}</span>`;
-    entry.element.querySelector('.mkt-window').textContent = unavailable ? '暂无' : `${changeSeries.length}D`;
+    entry.element.querySelector('.mkt-window').textContent = unavailable ? '暂无' : hasHistory ? `${changeSeries.length}D` : '按需';
     entry.element.querySelector('.px').className = `px ${unavailable ? 'unavailable' : cls(item.change_pct)}`;
     entry.element.querySelector('.px').innerHTML = unavailable
       ? '暂无行情'
@@ -2400,8 +2401,11 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     const rsiSpark = entry.element.querySelector('.mkt-rsi-spark');
     const recentRsi = rsiSparkPoints(item.rsi_history);
     rsiSpark.innerHTML = rsiSparkMarkup(recentRsi,item.rsi_14);
-    bindRsiSparkInteraction(rsiSpark,recentRsi);
-    rsiSpark.setAttribute('aria-label',`${item.name} 最近三个月日线 RSI 曲线，共 ${recentRsi.length} 个交易日，当前 ${fixed(item.rsi_14,1)}，参考线 22；鼠标悬停可查看日期和数值`);
+    rsiSpark.hidden = recentRsi.length === 0;
+    if (recentRsi.length) {
+      bindRsiSparkInteraction(rsiSpark,recentRsi);
+      rsiSpark.setAttribute('aria-label',`${item.name} 最近三个月日线 RSI 曲线，共 ${recentRsi.length} 个交易日，当前 ${fixed(item.rsi_14,1)}，参考线 22；鼠标悬停可查看日期和数值`);
+    }
     const opportunity = entry.element.querySelector('[data-opportunity-rsi]');
     opportunity.dataset.opportunityRsi = item.rsi_14 == null ? '' : String(item.rsi_14);
     refreshSentimentBindings(entry.element);
@@ -2415,6 +2419,9 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       : `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
     entry.element.onclick = unavailable ? null : () => showKline(item.symbol, item.name);
     if (unavailable) return;
+    entry.element.querySelector('.mkt-spark-shell').hidden = !hasHistory;
+    entry.element.querySelector('.mkt-spark-foot').hidden = !hasHistory;
+    if (!hasHistory) return;
     const generation = todayRenderGeneration;
     const renderSpark = () => {
       if (generation !== todayRenderGeneration) return;
@@ -2462,9 +2469,12 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     },
     addAll(data) {
       const unavailableByGroup = new Map();
-      for (const item of data.unavailable_items || []) {
-        if (!unavailableByGroup.has(item.group)) unavailableByGroup.set(item.group, []);
-        unavailableByGroup.get(item.group).push(item);
+      for (const [group, items] of Object.entries(data.groups || {})) {
+        for (const item of items) {
+          if (item.state !== 'unavailable' && item.freshness !== 'unavailable') continue;
+          if (!unavailableByGroup.has(group)) unavailableByGroup.set(group, []);
+          unavailableByGroup.get(group).push(item);
+        }
       }
       for (const [group, items] of Object.entries(data.groups || {})) {
         for (const item of items) this.add(group, item);

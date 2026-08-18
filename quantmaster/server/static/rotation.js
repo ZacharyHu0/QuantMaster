@@ -818,17 +818,16 @@ const rotationFeature = (() => {
   function renderOverview(payload) {
     const meta = payload.meta || {}, data = payload.data || {}, out = document.getElementById('rotation-overview-content');
     updateMeta('overview',meta);
-    const ranking = data.rankings?.[String(activeWindow)];
+    const ranking = data.rankings;
     if (!ranking) {
       out.innerHTML = emptyMarkup(meta,'当前快照尚未包含多周期信号，请刷新升级。');
       return;
     }
     const temp = data.market?.temperature;
-    const tempChange = data.market?.temperature_changes?.[String(activeWindow)];
+    const tempChange = data.market?.temperature_change;
     const industryRank = ranking.industries || {}, themeRank = ranking.themes || {};
-    const etfWindow = data.etf_context?.summary?.windows?.[String(activeWindow)] || {};
-    const resonance = data.resonance?.[String(activeWindow)] || [];
-    const benchmarks = [...(data.etf_context?.benchmarks || [])].sort((left,right) => Math.abs(Number(right.flows?.[String(activeWindow)] || 0)) - Math.abs(Number(left.flows?.[String(activeWindow)] || 0))).slice(0,12);
+    const etfWindow = data.etf_summary?.window || {};
+    const resonance = data.resonance || [];
     out.innerHTML = `
       <div class="rotation-commandbar"><div><strong>观察窗口</strong><span>阶段固定 3 日；窗口影响变化、收益、宽度与资金统计</span></div>${windowControl('轮动总览观察窗口')}</div>
       ${dimensionStrip(data.dimensions)}
@@ -847,9 +846,6 @@ const rotationFeature = (() => {
       </div>
       <section class="rotation-section"><div class="rotation-section-head"><div><h3>行业—题材共振</h3><p>至少两个题材映射到同一一级行业才判定；不合成总分</p></div><output>${resonance.filter(row => row.status !== 'insufficient').length}/${resonance.length} 可判定</output></div>
         <div class="rotation-table-wrap"><table class="rotation-table rotation-resonance-table"><thead><tr><th>行业</th><th>一致性</th><th class="numeric">行业变化</th><th class="numeric">行业超额</th><th class="numeric">题材中位</th><th>关联题材</th></tr></thead><tbody>${resonance.map(row => `<tr><td><button type="button" data-rotation-jump="industry" data-code="${esc(row.code)}">${esc(row.name)}</button></td><td><span class="rotation-resonance" data-status="${esc(row.status)}">${{improving:'同步改善',retreating:'同步转弱',diverging:'证据分歧',insufficient:'题材不足'}[row.status] || '待核查'}</span></td><td class="numeric ${tone(row.industry_change_pp)}">${pp(row.industry_change_pp)}</td><td class="numeric ${tone(row.industry_excess_return)}">${returnPct(row.industry_excess_return)}</td><td class="numeric ${tone(row.theme_median_change_pp)}">${pp(row.theme_median_change_pp)}</td><td>${row.themes?.map(theme => `<button type="button" class="rotation-inline-link" data-rotation-jump="theme" data-code="${esc(theme.code)}">${esc(theme.name)}</button>`).join('') || '<span class="hint">不足 2 个</span>'}<div class="hint">${row.improving_theme_count || 0} 改善 · ${row.retreating_theme_count || 0} 转弱</div></td></tr>`).join('')}</tbody></table></div>
-      </section>
-      <section class="rotation-section"><div class="rotation-section-head"><div><h3>ETF 跟踪基准背景</h3><p>只解释整体风险偏好，不作为行业资金流</p></div><output>${data.etf_context?.benchmarks?.length || 0} 个基准</output></div>
-        <div class="rotation-benchmark-grid">${benchmarks.map(item => `<div><strong>${esc(item.benchmark)}</strong><span>${item.fund_count} 只 · ${esc(item.category)}</span><output class="${tone(item.flows?.[String(activeWindow)])}">${money(item.flows?.[String(activeWindow)])}</output></div>`).join('') || '<div class="rotation-empty compact"><p>等待 ETF 跟踪基准快照。</p></div>'}</div>
       </section>${issuesMarkup(meta)}`;
   }
 
@@ -1334,7 +1330,7 @@ const rotationFeature = (() => {
         payload = await fetchView('structure','/api/v1/market/structure',force);
         if (stillCurrent()) renderStructure(payload);
       } else if (rotationActive && rotationPage === 'overview') {
-        payload = await fetchView('overview','/api/v1/rotation/overview',force);
+        payload = await fetchView(`overview:${activeWindow}`,`/api/v1/rotation/overview?window=${activeWindow}`,force);
         if (stillCurrent()) renderOverview(payload);
       } else if (rotationActive && rotationPage === 'industry') {
         payload = await fetchView(`industries:${activeWindow}`,`/api/v1/rotation/industries?window=${activeWindow}`,force);

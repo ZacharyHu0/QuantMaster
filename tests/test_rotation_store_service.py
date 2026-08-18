@@ -1231,7 +1231,8 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
 
     assert result["tracked_count"] == 40
     assert set(result["updated"]) == {
-        "etf_flows", "industries", "structure", "taxonomy", "temperature", "themes",
+        "board_indexes", "etf_flows", "industries", "structure", "taxonomy",
+        "temperature", "themes",
     }
     assert len(sentiment_calls) == 5
     knowledge_cutoffs = {value for _, value in sentiment_calls}
@@ -1262,10 +1263,13 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
     assert "tushare:fund_nav" in etf_flows["meta"]["sources"]
     assert etf_flows["meta"]["quality"]["status"] == "complete"
     overview = service.overview()
-    assert overview["data"]["temperature"] is not None
-    assert overview["data"]["rankings"]["5"]["industries"]["available"] == 4
-    assert len(overview["data"]["resonance"]["5"]) == 4
-    assert overview["data"]["etf_context"]["summary"]["windows"]["1"]["net_flow"] == 20.5
+    assert overview["data"]["market"]["temperature"] is not None
+    assert overview["data"]["window"] == 5
+    assert overview["data"]["rankings"]["industries"]["available"] == 4
+    assert len(overview["data"]["resonance"]) == 4
+    assert overview["data"]["etf_summary"]["window"]["net_flow"] is None
+    assert "benchmarks" not in overview["data"]
+    assert len(strict_json_dumps(overview).encode()) <= 80 * 1024
     assert updates[-1][0] == 96
     assert trend_calls == [len(close)]
 
