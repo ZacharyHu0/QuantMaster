@@ -98,7 +98,8 @@ function renderCandidates(data) {
     heading.className = 'operations-candidate-heading';
     const version = document.createElement('strong');
     const versionLabel = text(candidate?.version);
-    version.textContent = versionLabel ? `v${versionLabel}` : (text(candidate?.build_sha) || '未知版本');
+    const candidateTitle = text(candidate?.title);
+    version.textContent = candidateTitle || (versionLabel ? `v${versionLabel}` : '未标注版本');
     heading.appendChild(version);
     const date = document.createElement('span');
     date.textContent = text(candidate?.release_date);

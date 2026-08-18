@@ -77,7 +77,7 @@ def test_update_status_reports_exact_identity_and_local_main_eligibility(tmp_pat
     }
     assert [item["build_sha"] for item in status["staged"]] == [SHA_A, SHA_B]
     assert all("path" not in item for item in status["staged"])
-    assert all("version" in item and "release_date" in item and "changelog" in item
+    assert all("version" in item and "release_date" in item and "title" in item and "changelog" in item
                for item in status["staged"])
     assert all("path" not in str(item) for item in status["staged"])
 
@@ -162,10 +162,12 @@ def test_launcher_target_is_one_validated_line(tmp_path):
         read_launcher_target(tmp_path)
 
 
-def _slot_meta(root: Path, sha: str, *, version: str, release_date: str) -> None:
+def _slot_meta(
+    root: Path, sha: str, *, version: str, release_date: str, title: str = "",
+) -> None:
     (root / "slots" / sha / "slot_meta.json").write_text(
         json.dumps({"schema": 1, "build_sha": sha, "version": version,
-                    "release_date": release_date}),
+                    "release_date": release_date, "title": title}),
         encoding="utf-8",
     )
 
@@ -173,8 +175,16 @@ def _slot_meta(root: Path, sha: str, *, version: str, release_date: str) -> None
 def test_update_status_attaches_version_metadata_to_active_and_candidates(tmp_path):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
-    _slot_meta(tmp_path, SHA_A, version="1.16.0", release_date="2026-08-15")
-    _slot_meta(tmp_path, SHA_B, version="1.16.1", release_date="2026-08-16")
+    _slot_meta(
+        tmp_path, SHA_A, version="1.16.0", release_date="2026-08-15", title="v1.16.0",
+    )
+    _slot_meta(
+        tmp_path,
+        SHA_B,
+        version="1.16.1",
+        release_date="2026-08-16",
+        title="v1.16.1 · fix(update): keep staging metadata",
+    )
     _state(tmp_path, active=SHA_A)
 
     status = update_status(tmp_path)
@@ -184,8 +194,10 @@ def test_update_status_attaches_version_metadata_to_active_and_candidates(tmp_pa
     by_sha = {item["build_sha"]: item for item in status["staged"]}
     assert by_sha[SHA_A]["version"] == "1.16.0"
     assert by_sha[SHA_A]["release_date"] == "2026-08-15"
+    assert by_sha[SHA_A]["title"] == "v1.16.0"
     assert by_sha[SHA_B]["version"] == "1.16.1"
     assert by_sha[SHA_B]["release_date"] == "2026-08-16"
+    assert by_sha[SHA_B]["title"] == "v1.16.1 · fix(update): keep staging metadata"
     assert by_sha[SHA_B]["changelog"] == []
     assert str(tmp_path) not in json.dumps(status, ensure_ascii=False)
 

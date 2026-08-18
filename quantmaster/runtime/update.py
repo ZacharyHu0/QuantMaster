@@ -97,8 +97,9 @@ def _slot_metadata(registry: SlotRegistry, build_sha: str) -> dict[str, object] 
         return None
     meta_version = str(payload.get("version") or "")
     meta_date = str(payload.get("release_date") or "")
-    if meta_version or meta_date:
-        return {"version": meta_version, "release_date": meta_date}
+    meta_title = str(payload.get("title") or "").strip()
+    if meta_version or meta_date or meta_title:
+        return {"version": meta_version, "release_date": meta_date, "title": meta_title}
     return None
 
 
@@ -114,6 +115,7 @@ def _candidate_release_metadata(registry: SlotRegistry, build_sha: str) -> dict[
     return {
         "version": str(meta.get("version") or ""),
         "release_date": str(meta.get("release_date") or ""),
+        "title": str(meta.get("title") or ""),
         "changelog": sections[:3],
     }
 
@@ -200,6 +202,7 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
         "blockers": blockers,
         "version": metadata["version"],
         "release_date": metadata["release_date"],
+        "title": metadata["title"],
         "changelog": metadata["changelog"],
     }
 
