@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from quantmaster.backtest import BacktestConfig, run_backtest
+from quantmaster.backtest.execution import quote_open
 from quantmaster.backtest.jobs import BacktestJobManager, get_backtest_job_manager
 from quantmaster.backtest.paper_accounts import (
     PaperService,
@@ -30,6 +31,7 @@ from quantmaster.backtest.spec import (
 from quantmaster.backtest.workbench import (
     BacktestStore,
 )
+from quantmaster.config import get_config
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality, DataEvidenceNotReady
 from quantmaster.portfolio import TradeRecord
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
@@ -289,7 +291,9 @@ def make_paper_service(tmp_path, name="日频验证", *, rebalance="D"):
     return PaperService(store), account
 
 
-def validated_panel(panel):
+def validated_panel(panel, *, execution_price_type="raw"):
+    if execution_price_type is not None:
+        panel["open"].attrs["execution_price_type"] = execution_price_type
     sessions = sorted({
         pd.Timestamp(value).date()
         for frame in panel.values()
@@ -330,10 +334,6 @@ def test_paper_process_waits_safely_on_accepted_local_stockdb(tmp_path, monkeypa
     signal_panel = price_panel(dates)
     proposal = service.propose(account["id"], panel=signal_panel)
     service.store.confirm(proposal["id"])
-    degraded = BarDataQuality(
-        "degraded", "2024-01-01", "2024-01-08",
-        issues=("managed cache unavailable",), partial=True,
-    )
     calls = []
 
     def accepted_evidence(symbols, start, end):
@@ -350,7 +350,7 @@ def test_paper_process_waits_safely_on_accepted_local_stockdb(tmp_path, monkeypa
 
     monkeypatch.setattr(
         "quantmaster.data.read_panel",
-        lambda *_args, **_kwargs: BarDataEnvelope(signal_panel, degraded),
+        lambda *_args, **_kwargs: pytest.fail("matching must require raw StockDB evidence"),
     )
     monkeypatch.setattr(
         PaperService,
@@ -370,6 +370,97 @@ def test_paper_process_waits_safely_on_accepted_local_stockdb(tmp_path, monkeypa
     assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
         "waiting_market_data"
     }
+
+
+def test_paper_process_never_uses_adjusted_prices_as_raw_execution(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+    adjusted = price_panel(dates)
+    adjusted["open"].attrs["adjustment"] = "qfq"
+
+    result = service.process(
+        account["id"],
+        **validated_panel(adjusted, execution_price_type=None),
+    )
+
+    assert result["status"] == "waiting_market_data"
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
+def test_paper_process_waits_when_execution_price_semantics_are_undeclared(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+
+    result = service.process(
+        account["id"],
+        **validated_panel(price_panel(dates), execution_price_type=None),
+    )
+
+    assert result["status"] == "waiting_market_data"
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
+def test_paper_process_uses_raw_accepted_stockdb_open(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+    raw = price_panel(dates)
+    raw["open"].attrs.update({
+        "execution_price_type": "raw",
+        "execution_source": "free-stockdb:accepted-v2-raw",
+        "execution_provider": "free-stockdb",
+        "execution_provider_interface": "stock_sdk:daily_cross_section",
+    })
+    def accepted_evidence(*_args):
+        return (
+            raw,
+            CalendarEvidence.build(
+                PaperMarket.CN,
+                [value.date() for value in dates],
+                source="free-stockdb:accepted-v2",
+            ),
+            datetime(2024, 1, 9, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: pytest.fail("matching must require raw StockDB evidence"),
+    )
+    monkeypatch.setattr(
+        PaperService,
+        "_accepted_stockdb_execution_evidence",
+        staticmethod(accepted_evidence),
+    )
+
+    result = service.process(account["id"])
+    trades = service.store.ledger(account["id"]).trades()
+
+    assert result["status"] == "completed"
+    assert not trades.empty
+    expected_open = raw["open"].loc[dates[-1]]
+    assert all(
+        float(row.price) == pytest.approx(
+            quote_open(
+                str(row.symbol),
+                str(row.side),
+                float(expected_open[str(row.symbol)]),
+                None,
+                get_config().trade,
+            ).execution_price,
+        )
+        for row in trades.itertuples()
+    )
 
 
 def test_paper_proposal_bootstraps_from_accepted_local_stockdb(tmp_path, monkeypatch):
