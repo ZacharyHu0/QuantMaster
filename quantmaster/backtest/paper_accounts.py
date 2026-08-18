@@ -2314,6 +2314,10 @@ class PaperService:
             if lease_guard is not None and not lease_guard():
                 raise RuntimeError("paper_auto_lease_lost")
 
+        account = self.store.account(account_id)
+        if account is None:
+            raise KeyError("模拟账户不存在")
+
         def clear_resolved_execution_warning() -> None:
             if str(account.get("runtime_warning") or "").startswith((
                 "待撮合行情证据未通过成交门禁：",
@@ -2321,9 +2325,6 @@ class PaperService:
             )):
                 self.store.clear_runtime_warning(account_id)
 
-        account = self.store.account(account_id)
-        if account is None:
-            raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             return {
                 "status": "paused",
