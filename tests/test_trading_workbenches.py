@@ -324,6 +324,54 @@ def test_paper_confirmation_does_not_write_before_next_open(tmp_path):
     assert ledger.trades().empty
 
 
+def test_paper_process_waits_safely_on_accepted_local_stockdb(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=5)
+    signal_panel = price_panel(dates)
+    proposal = service.propose(account["id"], panel=signal_panel)
+    service.store.confirm(proposal["id"])
+    degraded = BarDataQuality(
+        "degraded", "2024-01-01", "2024-01-08",
+        issues=("managed cache unavailable",), partial=True,
+    )
+    calls = []
+
+    def accepted_evidence(symbols, start, end):
+        calls.append((symbols, start, end))
+        return (
+            signal_panel,
+            CalendarEvidence.build(
+                PaperMarket.CN,
+                [value.date() for value in dates],
+                source="free-stockdb:accepted-v2",
+            ),
+            datetime(2024, 1, 8, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: BarDataEnvelope(signal_panel, degraded),
+    )
+    monkeypatch.setattr(
+        PaperService,
+        "_accepted_stockdb_execution_evidence",
+        staticmethod(accepted_evidence),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_panel",
+        lambda *_args, **_kwargs: pytest.fail("matching must not fall back to a provider refresh"),
+    )
+
+    result = service.process(account["id"])
+
+    assert result["status"] == "waiting_market_data"
+    assert calls
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
 def test_paper_proposal_bootstraps_from_accepted_local_stockdb(tmp_path, monkeypatch):
     service, account = make_paper_service(tmp_path)
     panel = price_panel(pd.bdate_range("2024-01-01", periods=5))

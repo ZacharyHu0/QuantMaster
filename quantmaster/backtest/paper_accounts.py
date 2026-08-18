@@ -1860,6 +1860,66 @@ class PaperService:
             )
         return panels
 
+    @staticmethod
+    def _accepted_stockdb_execution_evidence(
+        symbols: list[str],
+        start: str,
+        end: str,
+    ) -> tuple[dict[str, pd.DataFrame], CalendarEvidence, datetime]:
+        """Build matching evidence from the accepted local StockDB frontier.
+
+        The acceptance record fixes both the latest available session and the
+        time at which that local snapshot became available.  It therefore lets
+        a confirmed order wait safely for a later open without guessing a
+        weekday or asking a remote provider to fill the gap.
+        """
+
+        from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
+
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        requested_end = pd.Timestamp(end).normalize()
+        if acceptance is None:
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                sources=("free-stockdb",),
+                issues=("没有覆盖撮合日期的 accepted StockDB v2 验收记录",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        available_end = min(requested_end, pd.Timestamp(acceptance.session).normalize())
+        if available_end < pd.Timestamp(start).normalize():
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                observed_end=available_end.date().isoformat(),
+                sources=("free-stockdb",),
+                issues=("accepted StockDB 的最新会话早于待撮合窗口",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        panel = PaperService._accepted_stockdb_panel(
+            symbols,
+            start,
+            available_end.date().isoformat(),
+        )
+        sessions = [pd.Timestamp(value).date() for value in panel["close"].index]
+        calendar = CalendarEvidence.build(
+            market_for_symbol(symbols[0]),
+            sessions,
+            source="free-stockdb:accepted-v2",
+            verified=True,
+        )
+        return panel, calendar, acceptance.updated_at.astimezone(UTC)
+
     def propose(
         self,
         account_id: str,
@@ -2112,42 +2172,63 @@ class PaperService:
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
             end = market_date().isoformat()
             market_envelope = data_api.read_panel(symbols, start, end)
-            if market_envelope.quality.partial or market_envelope.quality.missing_symbols:
+            cache_ready = (
+                market_envelope.quality.status == "verified"
+                and not market_envelope.quality.stale
+                and not market_envelope.quality.partial
+            )
+            if not cache_ready and calendar is None:
+                try:
+                    panel, calendar, decision_at = self._accepted_stockdb_execution_evidence(
+                        symbols,
+                        start,
+                        end,
+                    )
+                except DataEvidenceNotReady as exc:
+                    self.store.set_warning(
+                        account_id,
+                        "待撮合行情证据未通过成交门禁：" + "；".join(exc.quality.issues),
+                    )
+                    raise
+            else:
+                if market_envelope.quality.partial or market_envelope.quality.missing_symbols:
+                    if calendar is None:
+                        raise ValueError("本地行情存在缺口，但缺少已验证交易日历，拒绝远程补齐")
+                    for symbol in symbols:
+                        gap = inspect_local_daily_bars(symbol, start, end, calendar)
+                        missing = [value.isoformat() for value in gap.missing_sessions]
+                        if missing:
+                            data_api.refresh_panel(
+                                [symbol], min(missing), max(missing), mode="incremental",
+                            )
+                    market_envelope = data_api.read_panel(symbols, start, end)
+                panel = market_envelope.require_data()
+                if (
+                    market_envelope.quality.status != "verified"
+                    or market_envelope.quality.stale
+                    or market_envelope.quality.partial
+                ):
+                    message = (
+                        "待撮合行情证据未通过成交门禁："
+                        + "；".join(market_envelope.quality.issues)
+                    )
+                    self.store.set_warning(account_id, message)
+                    raise DataEvidenceNotReady(
+                        market_envelope.quality, market_envelope.provenance
+                    )
                 if calendar is None:
-                    raise ValueError("本地行情存在缺口，但缺少已验证交易日历，拒绝远程补齐")
-                for symbol in symbols:
-                    gap = inspect_local_daily_bars(symbol, start, end, calendar)
-                    missing = [value.isoformat() for value in gap.missing_sessions]
-                    if missing:
-                        data_api.refresh_panel(
-                            [symbol], min(missing), max(missing), mode="incremental",
-                        )
-                market_envelope = data_api.read_panel(symbols, start, end)
-            panel = market_envelope.require_data()
-            if (
-                market_envelope.quality.status != "verified"
-                or market_envelope.quality.stale
-                or market_envelope.quality.partial
-            ):
-                message = (
-                    "待撮合行情证据未通过成交门禁："
-                    + "；".join(market_envelope.quality.issues)
-                )
-                self.store.set_warning(account_id, message)
-                raise ValueError(message)
-            if calendar is None:
-                quality = market_envelope.quality
-                sessions = sorted({
-                    pd.Timestamp(value).date()
-                    for frame in panel.values()
-                    for value in frame.index
-                })
-                calendar = CalendarEvidence.build(
-                    market_for_symbol(symbols[0]), sessions,
-                    source=str(quality.calendar_source or ""),
-                    verified=quality.status == "verified" and not quality.partial,
-                )
-            decision_at = datetime.now(UTC)
+                    quality = market_envelope.quality
+                    sessions = sorted({
+                        pd.Timestamp(value).date()
+                        for frame in panel.values()
+                        for value in frame.index
+                    })
+                    calendar = CalendarEvidence.build(
+                        market_for_symbol(symbols[0]), sessions,
+                        source=str(quality.calendar_source or ""),
+                        verified=quality.status == "verified" and not quality.partial,
+                    )
+                decision_at = datetime.now(UTC)
         elif calendar is None or observed_at is None:
             raise ValueError("注入 panel 必须同时提供已验证 calendar_evidence 与 observed_at")
         if calendar is None or not calendar.verified or not calendar.source:
