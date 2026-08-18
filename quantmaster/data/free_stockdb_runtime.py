@@ -919,10 +919,16 @@ class FreeStockDBRuntime:
     def _target_session(self, *, force_notice: bool = False) -> tuple[str, str]:
         self.check_vendor_notice(force=force_notice)
         try:
+            from quantmaster.data.free_stockdb_source import register_free_stockdb_calendar
             from quantmaster.trading_sessions import resolve_session_target
 
+            register_free_stockdb_calendar()
             expectation = resolve_session_target()
-            if expectation.ready and expectation.session:
+            calendar_target = (
+                getattr(expectation, "completion", "")
+                == "current_session_closed_waiting_provider"
+            )
+            if expectation.session and (expectation.ready or calendar_target):
                 return expectation.session, expectation.source
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
