@@ -102,38 +102,54 @@ class XiaoshiPublicationStore:
         response.raise_for_status()
         return response
 
+    def _manifest_changes(
+        self, stored: dict[str, Any], *, force: bool,
+    ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+        manifest = self._get(f"{API_BASE}{MANIFEST_PATH}").json()
+        if not isinstance(manifest, dict):
+            raise XiaoshiError("小石 Manifest 不是对象")
+        checksums = manifest.get("checksums")
+        if not isinstance(checksums, dict):
+            raise XiaoshiError("小石 Manifest 缺少校验和")
+        changed = []
+        stored_checksums = stored.get("checksums") or {}
+        for name, (url_field, version_field, checksum_field, filename) in _RESOURCE_FIELDS.items():
+            checksum = str(checksums.get(checksum_field) or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+                raise XiaoshiError(f"小石 {name} 校验和无效")
+            current_checksum = str(stored_checksums.get(checksum_field) or "")
+            version_changed = str(stored.get(version_field) or "") != str(
+                manifest.get(version_field) or "",
+            )
+            if force or current_checksum != checksum or version_changed:
+                changed.append((filename, self._resource_url(manifest.get(url_field)), checksum))
+        return manifest, changed
+
+    def _store_changed(self, changed: list[tuple[str, str, str]]) -> None:
+        candidates = []
+        for filename, url, checksum in changed:
+            body = self._get(url).content
+            if hashlib.sha256(body).hexdigest() != checksum:
+                raise XiaoshiError(f"小石资源 {filename} 校验失败")
+            candidates.append((filename, checksum, body))
+        for filename, checksum, body in candidates:
+            _atomic_write(self._resource_path(filename, checksum), body)
+
+    def _has_complete_fallback(self, stored: dict[str, Any]) -> bool:
+        checksums = stored.get("checksums") or {}
+        return bool(stored) and all(
+            self._resource_path(item[3], str(checksums.get(item[2]) or "")).is_file()
+            for item in _RESOURCE_FIELDS.values()
+        )
+
     def ensure_current(self, *, force: bool = False) -> dict[str, Any]:
         with self._lock:
             if self._checked and not force:
                 return self._stored_manifest()
             stored = self._stored_manifest()
             try:
-                response = self._get(f"{API_BASE}{MANIFEST_PATH}")
-                manifest = response.json()
-                if not isinstance(manifest, dict):
-                    raise XiaoshiError("小石 Manifest 不是对象")
-                checksums = manifest.get("checksums")
-                if not isinstance(checksums, dict):
-                    raise XiaoshiError("小石 Manifest 缺少校验和")
-                changed: list[tuple[str, str, str]] = []
-                for name, (url_field, version_field, checksum_field, filename) in _RESOURCE_FIELDS.items():
-                    checksum = str(checksums.get(checksum_field) or "")
-                    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
-                        raise XiaoshiError(f"小石 {name} 校验和无效")
-                    current_checksum = str((stored.get("checksums") or {}).get(checksum_field) or "")
-                    current_version = str(stored.get(version_field) or "")
-                    target_version = str(manifest.get(version_field) or "")
-                    if force or current_checksum != checksum or current_version != target_version:
-                        changed.append((filename, self._resource_url(manifest.get(url_field)), checksum))
-                candidates: dict[str, bytes] = {}
-                for filename, url, checksum in changed:
-                    body = self._get(url).content
-                    if hashlib.sha256(body).hexdigest() != checksum:
-                        raise XiaoshiError(f"小石资源 {filename} 校验失败")
-                    candidates[filename] = body
-                for filename, body in candidates.items():
-                    checksum = hashlib.sha256(body).hexdigest()
-                    _atomic_write(self._resource_path(filename, checksum), body)
+                manifest, changed = self._manifest_changes(stored, force=force)
+                self._store_changed(changed)
                 _atomic_write(
                     self.metadata_path,
                     json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode("utf-8"),
@@ -142,13 +158,7 @@ class XiaoshiPublicationStore:
                 return manifest
             except (httpx.HTTPError, ValueError, TypeError, XiaoshiError) as exc:
                 self._checked = True
-                required = [
-                    self._resource_path(
-                        item[3], str((stored.get("checksums") or {}).get(item[2]) or ""),
-                    )
-                    for item in _RESOURCE_FIELDS.values()
-                ]
-                if stored and all(path.is_file() for path in required):
+                if self._has_complete_fallback(stored):
                     return stored
                 if isinstance(exc, XiaoshiError):
                     raise
@@ -468,6 +478,31 @@ def _symbol_identity(symbol: str) -> tuple[str, str, str]:
     raise ValueError("小石当前仅支持 CN/HK/US 股票")
 
 
+def _matching_minutes(frame: pd.DataFrame, code: str, canonical: str) -> pd.DataFrame:
+    if "ts_code" not in frame:
+        return frame
+    return frame[frame["ts_code"].astype(str).str.upper().isin({code, canonical})]
+
+
+def _resample_cn_minutes(minute: pd.DataFrame, rule: str) -> pd.DataFrame:
+    sessions = []
+    aggregation = {
+        "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum",
+    }
+    if "amount" in minute:
+        aggregation["amount"] = "sum"
+    for _date, day in minute.groupby(minute.index.date):
+        for left, right in (("09:30", "11:30"), ("13:00", "15:00")):
+            part = day.between_time(left, right, inclusive="both")
+            if not part.empty:
+                sessions.append(
+                    part.resample(rule, origin=part.index[0])
+                    .agg(aggregation)
+                    .dropna(subset=["open", "high", "low", "close"]),
+                )
+    return pd.concat(sessions).sort_index() if sessions else pd.DataFrame()
+
+
 class XiaoshiSource(DataSource):
     name = "xiaoshi"
     markets = (Market.CN, Market.HK, Market.US)
@@ -527,9 +562,7 @@ class XiaoshiSource(DataSource):
         frames = []
         for year in range(pd.Timestamp(start).year, pd.Timestamp(end).year + 1):
             frame = self.client.history_frame("min1", code=code, year=year)
-            if "ts_code" in frame:
-                frame = frame[frame["ts_code"].astype(str).str.upper().isin({code, canonical})]
-            frames.append(frame)
+            frames.append(_matching_minutes(frame, code, canonical))
         if not frames:
             return pd.DataFrame()
         raw = pd.concat(frames, ignore_index=True)
@@ -538,18 +571,7 @@ class XiaoshiSource(DataSource):
         minute = normalize_bars(raw)
         minute = minute[~minute.index.duplicated(keep="last")]
         if normalized != "1m":
-            rule = normalized
-            sessions = []
-            for _date, day in minute.groupby(minute.index.date):
-                for left, right in (("09:30", "11:30"), ("13:00", "15:00")):
-                    part = day.between_time(left, right, inclusive="both")
-                    if part.empty:
-                        continue
-                    sessions.append(part.resample(rule, origin=part.index[0]).agg({
-                        "open": "first", "high": "max", "low": "min", "close": "last",
-                        "volume": "sum", **({"amount": "sum"} if "amount" in part else {}),
-                    }).dropna(subset=["open", "high", "low", "close"]))
-            minute = pd.concat(sessions).sort_index() if sessions else pd.DataFrame()
+            minute = _resample_cn_minutes(minute, normalized)
         return minute.loc[pd.Timestamp(start):pd.Timestamp(end)]
 
     def spot(self, symbols: list[str]) -> pd.DataFrame:

@@ -675,7 +675,7 @@ def _framework_text() -> str:
             from quantmaster.skills import load_xiaoshi_quant_skill
 
             framework += "\n\n" + load_xiaoshi_quant_skill()
-        except Exception as exc:
+        except RuntimeError as exc:
             logger.warning("小石量化 Skill 暂不可用，继续使用已内置研究框架: %s", type(exc).__name__)
     return framework
 

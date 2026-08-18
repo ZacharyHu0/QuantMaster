@@ -308,22 +308,24 @@ def check_xiaoshi(api_key: str) -> dict[str, Any]:
             provider_status="auth_invalid", capability="provider_auth",
         )
     try:
-        from quantmaster.data.xiaoshi_source import XiaoshiClient
+        from quantmaster.data.xiaoshi_source import (
+            XiaoshiClient,
+            XiaoshiError,
+            XiaoshiRateLimited,
+        )
 
         XiaoshiClient(api_key).check_api_key()
         return _result(
             "success", "小石 API Key 可用；只读数据接口已授权", started,
             provider_status="available", capability="read_only_finance",
         )
-    except Exception as exc:
-        from quantmaster.data.xiaoshi_source import XiaoshiRateLimited
-
-        if isinstance(exc, XiaoshiRateLimited):
-            return _result(
-                "warning", str(exc), started,
-                provider_status="rate_limited", retry_after=exc.retry_after,
-                report_as_bug=False,
-            )
+    except XiaoshiRateLimited as exc:
+        return _result(
+            "warning", str(exc), started,
+            provider_status="rate_limited", retry_after=exc.retry_after,
+            report_as_bug=False,
+        )
+    except XiaoshiError as exc:
         return _result(
             "error", "小石鉴权或连接检测失败", started,
             provider_status="auth_or_network_error", error_type=type(exc).__name__,
