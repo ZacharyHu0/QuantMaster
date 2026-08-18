@@ -894,6 +894,8 @@ class TestBasics:
         assert 'id="free-stockdb-reset-retry"' in resp.text
         assert "['failed', 'manual_required'].includes(stockdb.update_result)" in settings_script.text
         assert "stockdb.target_session" in settings_script.text
+        assert "更新尝试 ${stockdb.attempt}/${stockdb.max_attempts}" in settings_script.text
+        assert "stockdb.attempt && stockdb.max_attempts > 1" in settings_script.text
         assert "succeededWithWarnings" in after_close_script.text
         assert '[data-tone="warning"]' in after_close_styles.text
         help_content = client.get("/static/help-content.html")

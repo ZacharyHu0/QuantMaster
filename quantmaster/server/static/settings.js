@@ -239,8 +239,8 @@ const settingsFeature = (() => {
       const sessions = stockdb.target_session
         ? ` · 目标 ${stockdb.target_session} / 实际 ${stockdb.actual_session || '待验收'}`
         : stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : '';
-      const attempts = stockdb.attempt
-        ? ` · 第 ${stockdb.attempt}/${stockdb.max_attempts || 1} 次` : '';
+      const attempts = stockdb.attempt && stockdb.max_attempts > 1
+        ? ` · 更新尝试 ${stockdb.attempt}/${stockdb.max_attempts}` : '';
       const retry = stockdb.next_retry_at
         ? ` · 下次 ${new Date(stockdb.next_retry_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}` : '';
       const serviceAttempt = stockdb.service_restart_attempt
