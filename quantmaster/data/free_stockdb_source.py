@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
+import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
@@ -92,6 +93,33 @@ def _canonical_cn_symbol(value: Any) -> str:
         return ""
     suffix = "BJ" if code.startswith(("4", "8", "920")) else "SH" if code.startswith(("6", "9")) else "SZ"
     return f"{code}.{suffix}"
+
+
+def normalize_stockdb_no_trade_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize StockDB's zero-OHLC no-trade placeholder to a flat close bar."""
+
+    required = {"open", "high", "low", "close", "volume"}
+    if frame is None or frame.empty or not required.issubset(frame.columns):
+        return frame
+    result = frame.copy()
+    numeric = result[["open", "high", "low", "close", "volume"]].apply(
+        pd.to_numeric, errors="coerce",
+    )
+    no_trade = (
+        numeric["volume"].eq(0)
+        & numeric["close"].gt(0)
+        & numeric[["open", "high", "low"]].eq(0).all(axis=1)
+    )
+    if no_trade.any():
+        carried = np.repeat(
+            numeric.loc[no_trade, ["close"]].to_numpy(), 3, axis=1,
+        )
+        result.loc[no_trade, ["open", "high", "low"]] = carried
+    result.attrs["stockdb_no_trade_rows_normalized"] = (
+        int(frame.attrs.get("stockdb_no_trade_rows_normalized") or 0)
+        + int(no_trade.sum())
+    )
+    return result
 
 
 class FreeStockDBSource(DataSource):
@@ -465,6 +493,7 @@ class FreeStockDBSource(DataSource):
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
         if acceptance is None or acceptance.session < end:
             return frame
+        frame = normalize_stockdb_no_trade_bars(frame)
         frame.attrs.update({
             "adjustment_status": "stockdb_accepted",
             "factor_coverage": "complete",

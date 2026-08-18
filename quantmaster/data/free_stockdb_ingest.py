@@ -25,7 +25,10 @@ from quantmaster.data.free_stockdb_contracts import (
     StockDBFieldCoverage,
     StockDBIngestSnapshot,
 )
-from quantmaster.data.free_stockdb_source import FreeStockDBSource
+from quantmaster.data.free_stockdb_source import (
+    FreeStockDBSource,
+    normalize_stockdb_no_trade_bars,
+)
 from quantmaster.data.resilience import remote_io_allowed
 from quantmaster.runtime.derived import DerivedArtifactCatalog
 from quantmaster.runtime.json import content_hash
@@ -963,11 +966,15 @@ class StockDBIngestService:
             raise InterruptedError("free-stockdb 正式研究读取已取消")
         values = self.source.daily_many(ordered, start, end)
         frames: list[pd.DataFrame] = []
+        normalized_no_trade_rows = 0
         for symbol in ordered:
             frame = values.get(symbol)
             if frame is None or frame.empty:
                 continue
-            value = frame.copy()
+            value = normalize_stockdb_no_trade_bars(frame)
+            normalized_no_trade_rows += int(
+                value.attrs.get("stockdb_no_trade_rows_normalized") or 0
+            )
             if "date" not in value:
                 value = value.rename_axis("date").reset_index()
             value["symbol"] = symbol
@@ -999,9 +1006,12 @@ class StockDBIngestService:
         progress(
             53,
             "读取已验收 StockDB qfq",
-            f"已读取 {result['symbol'].nunique()}/{len(ordered)} 只股票",
+            f"已读取 {result['symbol'].nunique()}/{len(ordered)} 只股票；"
+            f"规范化 {normalized_no_trade_rows} 行停牌占位",
         )
-        return result.sort_values(["symbol", "date"]).reset_index(drop=True)
+        result = result.sort_values(["symbol", "date"]).reset_index(drop=True)
+        result.attrs["stockdb_no_trade_rows_normalized"] = normalized_no_trade_rows
+        return result
 
     @staticmethod
     def cross_validation_sample(frame: pd.DataFrame) -> dict[str, Any]:
@@ -1569,6 +1579,12 @@ class StockDBIngestService:
                 progress=progress,
                 cancelled=cancelled,
             )
+            coverage["native_qfq"] = {
+                "source": "free-stockdb:native-qfq",
+                "no_trade_rows_normalized": int(
+                    native.attrs.get("stockdb_no_trade_rows_normalized") or 0
+                ),
+            }
             research_frame = self._native_research_prices(frame, native)
             cross_validation = {
                 "schema_version": STOCKDB_CROSS_VALIDATION_SCHEMA_VERSION,

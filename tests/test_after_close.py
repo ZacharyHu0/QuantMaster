@@ -224,6 +224,12 @@ def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
         "_cross_source_validation",
         lambda *_args, **_kwargs: pytest.fail("accepted StockDB must not require online audit"),
     )
+    placeholder_date = sorted(service.source.frame["date"].unique())[-2]
+    placeholder = (
+        service.source.frame["symbol"].eq("600001.SH")
+        & service.source.frame["date"].eq(placeholder_date)
+    )
+    service.source.frame.loc[placeholder, ["open", "high", "low", "volume", "amount"]] = 0
 
     snapshot = service.scan()
     ingest = service.ingest.store.get(snapshot.ingest_id)
@@ -235,6 +241,10 @@ def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
         "evidence": "stockdb_accepted_v2",
     }
     assert snapshot.coverage["cross_source_validation"]["remote_fetches"] == 0
+    assert snapshot.coverage["native_qfq"] == {
+        "source": "free-stockdb:native-qfq",
+        "no_trade_rows_normalized": 1,
+    }
     assert ingest is not None
     assert ingest.status == "complete"
     assert ingest.provenance["research_price_formula"] == (
@@ -244,6 +254,13 @@ def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
     assert set(frozen["price_adjustment"]) == {
         "forward_adjusted_from_stockdb_accepted_v2"
     }
+    normalized = frozen.loc[
+        frozen["symbol"].eq("600001.SH")
+        & frozen["date"].eq(placeholder_date)
+    ].iloc[0]
+    assert normalized[["open", "high", "low"]].tolist() == [
+        normalized["close"], normalized["close"], normalized["close"],
+    ]
 
 
 def test_gate_failure_keeps_previous_snapshot_and_marks_it_stale(service) -> None:

@@ -152,6 +152,8 @@ def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
             "amount": "CNY",
         },
     )
+    placeholder_date = local.index[0]
+    local.loc[placeholder_date, ["open", "high", "low", "volume"]] = 0
     root = isolated_config.data_root / "stockdb-runtime"
     root.mkdir(parents=True)
     isolated_config.data.free_stockdb_root = str(root)
@@ -187,6 +189,12 @@ def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
     )
 
     assert quality.status == "verified", quality.issues
+    assert bound.attrs["stockdb_no_trade_rows_normalized"] == 1
+    assert bound.loc[placeholder_date, ["open", "high", "low"]].tolist() == [
+        bound.loc[placeholder_date, "close"],
+        bound.loc[placeholder_date, "close"],
+        bound.loc[placeholder_date, "close"],
+    ]
     assert quality.adjustment == "forward_adjusted"
     assert quality.formal_eligible is True
     assert quality.semantics is not None
