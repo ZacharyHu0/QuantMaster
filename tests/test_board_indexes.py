@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quantmaster.rotation.board_indexes import (
+    BOARD_INDEX_ALGORITHM_VERSION,
     BOARD_INDEX_MEMBERSHIP,
     BOARD_INDEX_METHODS,
     build_board_index_data,
@@ -84,6 +85,7 @@ def test_board_index_snapshot_uses_current_membership_and_all_five_methods():
     assert set(detail["series"]) == set(BOARD_INDEX_METHODS)
     assert detail["constituents"][0]["name"] == "平安银行"
     assert data["definition"]["frequency"] == "1d"
+    assert data["definition"]["algorithm_version"] == BOARD_INDEX_ALGORITHM_VERSION
     assert progress[-1][0] == 95
 
 
@@ -122,3 +124,64 @@ def test_board_index_snapshot_marks_one_method_unavailable_without_fabricating_d
         "reason": "缺少流通市值",
     }
     assert quality["status"] == "partial"
+
+
+def test_board_index_batches_publish_partial_and_resume_only_pending_boards():
+    source = _StockDB()
+    source.boards = lambda: [
+        {
+            "code": f"801{index:03d}.SI",
+            "name": f"行业{index}",
+            "category": "申万一级",
+            "symbols": ["000001.SZ"],
+        }
+        for index in range(14)
+    ]
+    dates = pd.date_range("2026-08-10", periods=2, freq="B")
+    close = pd.DataFrame({"000001.SZ": [10.0, 10.5]}, index=dates)
+    amount = pd.DataFrame({"000001.SZ": [1, 2]}, index=dates)
+    checkpoints = []
+
+    data, quality = build_board_index_data(
+        source,
+        close=close,
+        amount=amount,
+        names={},
+        as_of="2026-08-17",
+        selected_l2=set(),
+        theme_codes=set(),
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        checkpoint=lambda value, state: checkpoints.append((value, state)),
+    )
+
+    partial_data, partial_quality = checkpoints[0]
+    assert partial_quality["status"] == "partial"
+    assert partial_data["summary"] == {
+        "board_count": 12,
+        "expected_board_count": 14,
+        "pending_board_count": 2,
+        "method_count": 5,
+        "unavailable_method_count": 0,
+    }
+    assert quality["status"] == "complete"
+    assert data["summary"]["pending_board_count"] == 0
+
+    resumed_source = _StockDB()
+    resumed_source.boards = source.boards
+    resumed, resumed_quality = build_board_index_data(
+        resumed_source,
+        close=close,
+        amount=amount,
+        names={},
+        as_of="2026-08-17",
+        selected_l2=set(),
+        theme_codes=set(),
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        resume_details=partial_data["details"],
+    )
+
+    assert len(resumed_source.calls) == 2 * len(BOARD_INDEX_METHODS)
+    assert resumed_quality["status"] == "complete"
+    assert len(resumed["details"]) == 14

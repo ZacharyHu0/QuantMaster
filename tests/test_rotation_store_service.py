@@ -1370,6 +1370,134 @@ def test_rotation_provider_plan_preserves_historical_theme_contract(tmp_path, mo
     assert calls == [{"purpose": "historical_replay", "as_of": "2024-01-02"}]
 
 
+def _board_index_checkpoint_payload(as_of="2026-08-17"):
+    methods = {
+        name: {
+            "status": "ready", "last": 1001.0,
+            "changes": {"1": 1.0, "3": None, "5": None, "20": None},
+            "sessions": 2,
+        }
+        for name in ("equal", "float_mv", "amount", "volume", "total_mv")
+    }
+    item = {
+        "code": "SW1:801010.SI", "board_code": "801010.SI",
+        "name": "农林牧渔", "category": "sw1", "level": "L1",
+        "member_count": 1, "eligible_count": 1, "coverage": 1.0,
+        "methods": methods,
+    }
+    return {
+        "as_of": as_of,
+        "items": [item],
+        "details": {"SW1:801010.SI": {
+            **item,
+            "membership_semantics": "current_constituents_backcast",
+            "frequency": "1d", "base": 1000.0,
+            "series": {name: [] for name in methods},
+            "constituents": [],
+        }},
+        "summary": {
+            "board_count": 1, "expected_board_count": 2,
+            "pending_board_count": 1, "method_count": 5,
+            "unavailable_method_count": 0,
+        },
+        "definition": {
+            "methods": list(methods),
+            "membership_semantics": "current_constituents_backcast",
+            "frequency": "1d", "base": 1000.0, "sessions": 120,
+            "algorithm_version": "QM_BOARD_INDEX_V1",
+        },
+    }
+
+
+def _board_index_run(service, fingerprint="board-input"):
+    run = _RotationBuildRun(
+        service,
+        RotationJobSpec(scope="indexes", source="local"),
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        job_id="",
+        checkpoint=None,
+    )
+    dates = pd.date_range("2026-08-14", periods=2, freq="B")
+    run.state.compute_kinds = {"board_indexes"}
+    run.state.as_of = "2026-08-17"
+    run.state.expected_as_of = "2026-08-17"
+    run.state.snapshot_fingerprints["board_indexes"] = fingerprint
+    run.state.close = pd.DataFrame({"000001.SZ": [10.0, 10.1]}, index=dates)
+    run.state.amount = run.state.close * 100
+    run.state.names = {"000001.SZ": "平安银行"}
+    return run
+
+
+def test_cold_board_index_batch_survives_later_background_failure(tmp_path, monkeypatch):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    run = _board_index_run(service)
+    partial = _board_index_checkpoint_payload()
+    quality = {
+        "status": "partial", "eligible_count": 5, "expected_count": 10,
+        "coverage": 0.5, "issues": ["1 个板块等待后台补齐"],
+    }
+
+    def fail_after_checkpoint(*_args, checkpoint, **_kwargs):
+        checkpoint(partial, quality)
+        raise RuntimeError("后台批次失败")
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.service.build_board_index_data",
+        fail_after_checkpoint,
+    )
+    run._compute_board_indexes()
+
+    published = store.snapshot("board_indexes")
+    assert published["meta"]["quality"]["status"] == "partial"
+    assert published["meta"]["as_of"] == "2026-08-17"
+    assert published["data"]["summary"]["pending_board_count"] == 1
+    assert not run.state.computed
+    assert "继续保留旧快照" in run.state.provider_warnings[0]
+
+
+def test_complete_board_index_stays_visible_until_new_full_snapshot(tmp_path, monkeypatch):
+    store = RotationStore(tmp_path / "rotation")
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    old = _board_index_checkpoint_payload("2026-08-16")
+    old["summary"]["expected_board_count"] = 1
+    old["summary"]["pending_board_count"] = 0
+    store.save_snapshots({"board_indexes": {
+        "meta": {
+            "snapshot_id": "old-complete", "as_of": "2026-08-16",
+            "generated_at": "2026-08-16T10:00:00+00:00",
+            "algorithm_version": "QM_ROTATION_V7", "input_fingerprint": "old-input",
+            "quality": {
+                "status": "complete", "eligible_count": 5, "expected_count": 5,
+                "coverage": 1.0, "issues": [],
+            },
+        },
+        "data": old,
+    }})
+    run = _board_index_run(service, "new-input")
+
+    def fail_after_checkpoint(*_args, checkpoint, **_kwargs):
+        checkpoint(
+            _board_index_checkpoint_payload(),
+            {
+                "status": "partial", "eligible_count": 5, "expected_count": 10,
+                "coverage": 0.5, "issues": ["1 个板块等待后台补齐"],
+            },
+        )
+        raise RuntimeError("新批次失败")
+
+    monkeypatch.setattr(
+        "quantmaster.rotation.service.build_board_index_data",
+        fail_after_checkpoint,
+    )
+    run._compute_board_indexes()
+
+    published = store.snapshot_header("board_indexes")
+    assert published["meta"]["snapshot_id"] == "old-complete"
+    assert published["meta"]["as_of"] == "2026-08-16"
+
+
 def test_partial_theme_provider_uses_catalog_denominator_and_deduplicates_issues(
     tmp_path, monkeypatch,
 ):

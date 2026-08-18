@@ -257,16 +257,29 @@ def test_board_index_routes_read_only_the_published_detail_and_page(monkeypatch)
         headers={"If-None-Match": constituents.headers["etag"]},
     ).status_code == 304
 
-    samples = []
-    for _ in range(20):
-        started = time.perf_counter()
-        response = client.get(
+    sampled_routes = (
+        (
             "/api/v1/rotation/board-indexes",
-            params={"category": "sw1", "method": "equal", "window": 5},
-        )
-        samples.append(time.perf_counter() - started)
-        assert response.status_code == 200
-    assert sorted(samples)[18] <= 0.150
+            {"category": "sw1", "method": "equal", "window": 5},
+        ),
+        (
+            "/api/v1/rotation/board-indexes/sw1/801010.SI",
+            {"method": "equal"},
+        ),
+        (
+            "/api/v1/rotation/board-indexes/sw1/801010.SI/constituents",
+            {"page_size": 25},
+        ),
+    )
+    for path, params in sampled_routes:
+        assert client.get(path, params=params).status_code == 200
+        samples = []
+        for _ in range(20):
+            started = time.perf_counter()
+            response = client.get(path, params=params)
+            samples.append(time.perf_counter() - started)
+            assert response.status_code == 200
+        assert sorted(samples)[18] <= 0.150
 
 
 def test_rotation_refresh_returns_unified_job_contract(monkeypatch):

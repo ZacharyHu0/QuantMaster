@@ -35,7 +35,10 @@ from quantmaster.rotation.analytics import (
     map_theme_industries,
     market_temperature_reference_dates,
 )
-from quantmaster.rotation.board_indexes import build_board_index_data
+from quantmaster.rotation.board_indexes import (
+    BOARD_INDEX_ALGORITHM_VERSION,
+    build_board_index_data,
+)
 from quantmaster.rotation.contracts import RotationJobSpec
 from quantmaster.rotation.session import expected_market_session
 from quantmaster.rotation.status import (
@@ -1262,11 +1265,20 @@ class RotationService:
                 return False
             meta = snapshot.get("meta") or {}
             quality = meta.get("quality") or {}
+            pending_board_indexes = (
+                kind == "board_indexes"
+                and int(
+                    ((snapshot.get("data") or {}).get("summary") or {}).get(
+                        "pending_board_count"
+                    ) or 0
+                ) > 0
+            )
             if (
                 str(meta.get("algorithm_version") or "") != ALGORITHM_VERSION
                 or str(meta.get("input_fingerprint") or "")
                 != str(snapshot_fingerprints.get(kind) or "")
                 or str(quality.get("status") or "") in {"cold", "corrupt", "empty"}
+                or pending_board_indexes
             ):
                 return False
         return True
@@ -1349,10 +1361,19 @@ class RotationService:
             except RotationIntegrityError:
                 header = None
             meta = (header or {}).get("meta") or {}
+            pending_board_indexes = (
+                kind == "board_indexes"
+                and int(
+                    (((header or {}).get("data") or {}).get("summary") or {}).get(
+                        "pending_board_count"
+                    ) or 0
+                ) > 0
+            )
             if (
                 str(meta.get("algorithm_version") or "") == ALGORITHM_VERSION
                 and str(meta.get("input_fingerprint") or "")
                 == str(snapshot_fingerprints.get(kind) or "")
+                and not pending_board_indexes
             ):
                 matched.add(kind)
         return matched
@@ -2475,6 +2496,60 @@ class _RotationBuildRun:
         selected_l2 = {
             str(code).upper() for code in self.service.store.preferences()["l2_codes"]
         }
+        previous_header = self.service.store.snapshot_header("board_indexes") or {}
+        previous_meta = previous_header.get("meta") or {}
+        previous_quality = previous_meta.get("quality") or {}
+        current_fingerprint = state.snapshot_fingerprints.get("board_indexes", "")
+        resume_details: dict[str, dict[str, Any]] = {}
+        previous_summary = (previous_header.get("data") or {}).get("summary") or {}
+        if (
+            str(previous_meta.get("input_fingerprint") or "") == current_fingerprint
+            and int(previous_summary.get("pending_board_count") or 0) > 0
+        ):
+            previous_snapshot = self.service.store.snapshot("board_indexes") or {}
+            resume_details = dict(
+                (previous_snapshot.get("data") or {}).get("details") or {}
+            )
+
+        allow_checkpoint_publish = str(previous_quality.get("status") or "") != "complete"
+
+        def publish_checkpoint(
+            checkpoint_data: dict[str, Any], checkpoint_quality: dict[str, Any],
+        ) -> None:
+            if not allow_checkpoint_publish:
+                return
+            envelope = self.service._envelope(
+                checkpoint_data,
+                snapshot_id="",
+                generated_at=state.generated_at,
+                quality=checkpoint_quality,
+                sources=["free-stockdb:boards", "free-stockdb:zhishu"],
+                expected_as_of=state.expected_as_of,
+                purpose=state.spec.purpose,
+            )
+            digest = hashlib.sha256(
+                strict_json_dumps(checkpoint_data, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            checkpoint_id = _snapshot_id(
+                state.as_of, [digest], "board_indexes",
+            )
+            envelope["meta"].update({
+                "snapshot_id": checkpoint_id,
+                "batch_id": checkpoint_id,
+                "schema_version": 2,
+                "input_fingerprint": current_fingerprint,
+                "board_index_algorithm_version": BOARD_INDEX_ALGORITHM_VERSION,
+            })
+            self.service.store.save_snapshots({"board_indexes": envelope})
+            state.checkpoint_node("board_indexes_batch", {
+                "as_of": state.as_of,
+                "boards": len(checkpoint_data.get("items") or []),
+                "pending": int(
+                    (checkpoint_data.get("summary") or {}).get("pending_board_count") or 0
+                ),
+                "snapshot_id": checkpoint_id,
+                "input_fingerprint": current_fingerprint,
+            })
         try:
             from quantmaster.data.free_stockdb_source import FreeStockDBSource
 
@@ -2488,9 +2563,11 @@ class _RotationBuildRun:
                 theme_codes=theme_codes,
                 progress=state.progress,
                 cancelled=state.cancelled,
+                checkpoint=publish_checkpoint,
+                resume_details=resume_details,
             )
         except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            if state.previous_snapshot_ids.get("board_indexes"):
+            if self.service.store.snapshot_header("board_indexes") is not None:
                 state.provider_warnings.append(
                     f"板块指数刷新失败，继续保留旧快照：{str(exc)[:160]}"
                 )
@@ -2501,13 +2578,15 @@ class _RotationBuildRun:
                 "items": [],
                 "details": {},
                 "summary": {
-                    "board_count": 0, "method_count": 5,
+                    "board_count": 0, "expected_board_count": 0,
+                    "pending_board_count": 0, "method_count": 5,
                     "unavailable_method_count": 0,
                 },
                 "definition": {
                     "methods": ["equal", "float_mv", "amount", "volume", "total_mv"],
                     "membership_semantics": "current_constituents_backcast",
                     "frequency": "1d", "base": 1000.0, "sessions": 120,
+                    "algorithm_version": BOARD_INDEX_ALGORITHM_VERSION,
                 },
             }
             quality = {
@@ -2523,6 +2602,9 @@ class _RotationBuildRun:
             expected_as_of=state.expected_as_of,
             purpose=state.spec.purpose,
         )
+        state.computed["board_indexes"]["meta"][
+            "board_index_algorithm_version"
+        ] = BOARD_INDEX_ALGORITHM_VERSION
         state.checkpoint_node("board_indexes", {
             "as_of": state.as_of,
             "boards": len(data.get("items") or []),

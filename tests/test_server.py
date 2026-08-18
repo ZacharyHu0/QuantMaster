@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -1455,6 +1456,18 @@ class TestBasics:
         assert body["snapshot"]["state"] == "fresh"
         assert response.headers["etag"]
         assert response.headers["content-type"].startswith("application/json")
+        sample_client = TestClient(app)
+        assert sample_client.get(
+            "/api/v1/market/overview",
+            headers={"If-None-Match": response.headers["etag"]},
+        ).status_code == 304
+        samples = []
+        for _ in range(20):
+            started = time.perf_counter()
+            sampled = sample_client.get("/api/v1/market/overview")
+            samples.append(time.perf_counter() - started)
+            assert sampled.status_code == 200
+        assert sorted(samples)[18] <= 0.150
 
     def test_market_overview_reports_structured_cold_snapshot_state(self, monkeypatch, isolated_config):
         from quantmaster.market import overview_snapshot
