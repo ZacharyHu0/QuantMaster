@@ -30,7 +30,7 @@ from quantmaster.backtest.spec import (
 from quantmaster.backtest.workbench import (
     BacktestStore,
 )
-from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+from quantmaster.data.base import BarDataEnvelope, BarDataQuality, DataEvidenceNotReady
 from quantmaster.portfolio import TradeRecord
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.server.app import app
@@ -323,6 +323,37 @@ def test_paper_confirmation_does_not_write_before_next_open(tmp_path):
     assert ledger.trades().empty
 
 
+def test_paper_proposal_reads_local_formal_evidence_without_remote_refresh(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
+    quality = BarDataQuality(
+        "degraded", "2023-01-01", "2024-01-05",
+        issues=("本地证据尚未通过正式验收",), partial=True,
+    )
+    calls = []
+
+    def read_panel(symbols, start, end, **kwargs):
+        calls.append((symbols, start, end, kwargs))
+        return BarDataEnvelope(panel, quality)
+
+    monkeypatch.setattr("quantmaster.data.read_panel", read_panel)
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.resolve_session_target",
+        lambda: SessionExpectation("2024-01-05", "fixture-clock", True, "fixture"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_panel",
+        lambda *_args, **_kwargs: pytest.fail("提案门禁不得触发远端刷新"),
+    )
+
+    with pytest.raises(DataEvidenceNotReady, match="本地证据"):
+        service.propose(account["id"])
+
+    assert calls[0][3]["purpose"] == "formal_research"
+    assert service.store.cycles(account["id"]) == []
+    assert service.store.ledger(account["id"]).trades().empty
+
+
 def test_paper_executes_t_plus_one_open_and_never_overdraws(tmp_path):
     service, account = make_paper_service(tmp_path)
     dates = pd.bdate_range("2024-01-01", periods=6)
@@ -480,7 +511,7 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
         provenance=({"source": "fixture"},),
     )
     monkeypatch.setattr(
-        "quantmaster.data.refresh_panel", lambda *_args, **_kwargs: recent_envelope,
+        "quantmaster.data.read_panel", lambda *_args, **_kwargs: recent_envelope,
     )
     changed_strategy = same_strategy.model_copy(update={"top_n": 2})
     changed = service.update_account(account["id"], strategy=changed_strategy)
@@ -1432,6 +1463,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "后台撮合任务" in trading_script
     assert "订单业务状态" in trading_script
     assert "核心数量冲突" in trading_script
+    assert "const PAPER_PROPOSAL_TIMEOUT_MS = 60_000;" in trading_script
+    assert "timeoutMs: PAPER_PROPOSAL_TIMEOUT_MS" in trading_script
     assert 'class="trading-history-row" role="row"' in trading_script
     assert trading_script.count('class="trading-history-cell') == 6
     assert trading_script.count('role="cell"') >= 6
@@ -1492,6 +1525,36 @@ def test_trading_route_suppresses_internal_exception_chain(monkeypatch) -> None:
     assert response.json()["detail"] == "交易请求执行失败，请查看本机日志"
     assert "private" not in response.text
     assert "secret-value" not in response.text
+
+
+def test_paper_proposal_returns_structured_evidence_problem(monkeypatch) -> None:
+    from quantmaster.server import trading
+
+    quality = BarDataQuality(
+        "degraded", "2026-08-01", "2026-08-18",
+        issues=("本地行情证据尚未通过正式验收",), partial=True,
+    )
+
+    class PendingEvidencePaperService:
+        @staticmethod
+        def propose(*_args, **_kwargs):
+            raise DataEvidenceNotReady(quality)
+
+    monkeypatch.setattr(trading, "get_paper_service", PendingEvidencePaperService)
+    token = _issue_csrf()
+    client = TestClient(app)
+    client.cookies.set("qm_csrf", token)
+
+    response = client.post(
+        "/api/v1/paper/accounts/account-1/proposals",
+        headers={"X-CSRF-Token": token},
+    )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["problem"]["code"] == "evidence_not_ready"
+    assert payload["data_quality"]["formal_eligible"] is False
+    assert "本地行情证据" in payload["problem"]["message"]
 
 
 def test_management_snapshot_and_migration_errors_are_redacted(monkeypatch) -> None:
