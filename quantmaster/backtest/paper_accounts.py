@@ -25,7 +25,6 @@ from quantmaster.backtest.execution import (
 from quantmaster.backtest.paper_market import (
     CalendarEvidence,
     DailyBarEvidence,
-    inspect_local_daily_bars,
     market_for_symbol,
     market_timezone,
     select_next_open_bar,
@@ -1811,8 +1810,28 @@ class PaperService:
                 ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
             ) from exc
 
+        return PaperService._stockdb_frame_to_panel(
+            native,
+            symbols,
+            start,
+            end,
+            evidence="accepted-v2-native-qfq",
+        )
+
+    @staticmethod
+    def _stockdb_frame_to_panel(
+        frame: pd.DataFrame,
+        symbols: list[str],
+        start: str,
+        end: str,
+        *,
+        evidence: str,
+    ) -> dict[str, pd.DataFrame]:
+        """Convert one accepted StockDB frame without changing its price contract."""
+
+        requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
         fields = ("open", "high", "low", "close", "volume")
-        value = native.copy()
+        value = frame.copy()
         value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
         value["symbol"] = value["symbol"].astype(str).str.upper()
         value = value.dropna(subset=["date", "symbol"])
@@ -1856,7 +1875,7 @@ class PaperService:
             )
             raise DataEvidenceNotReady(
                 quality,
-                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+                ({"source": "free-stockdb", "evidence": evidence},),
             )
         return panels
 
@@ -1889,7 +1908,7 @@ class PaperService:
             )
             raise DataEvidenceNotReady(
                 quality,
-                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+                ({"source": "free-stockdb", "evidence": "accepted-v2-raw-execution"},),
             )
         available_end = min(requested_end, pd.Timestamp(acceptance.session).normalize())
         if available_end < pd.Timestamp(start).normalize():
@@ -1904,13 +1923,46 @@ class PaperService:
             )
             raise DataEvidenceNotReady(
                 quality,
-                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+                ({"source": "free-stockdb", "evidence": "accepted-v2-raw-execution"},),
             )
-        panel = PaperService._accepted_stockdb_panel(
+        from quantmaster.data.free_stockdb_ingest import StockDBIngestService
+
+        covered_end = available_end.date().isoformat()
+        try:
+            raw = StockDBIngestService().read_cross_section_history(
+                symbols,
+                start,
+                covered_end,
+                progress=lambda *_args: None,
+                cancelled=lambda: False,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                observed_end=covered_end,
+                sources=("free-stockdb",),
+                issues=(f"已验收本地 StockDB 不能提供 raw 成交行情：{exc}",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-raw-execution"},),
+            ) from exc
+        panel = PaperService._stockdb_frame_to_panel(
+            raw,
             symbols,
             start,
-            available_end.date().isoformat(),
+            covered_end,
+            evidence="accepted-v2-raw-execution",
         )
+        panel["open"].attrs.update({
+            "execution_price_type": PriceType.RAW.value,
+            "execution_source": "free-stockdb:accepted-v2-raw",
+            "execution_provider": "free-stockdb",
+            "execution_provider_interface": "stock_sdk:daily_cross_section",
+        })
         sessions = [pd.Timestamp(value).date() for value in panel["close"].index]
         calendar = CalendarEvidence.build(
             market_for_symbol(symbols[0]),
@@ -2167,68 +2219,21 @@ class PaperService:
         )
         decision_at = observed_at
         if panel is None:
-            from quantmaster import data as data_api
-
             start = str((pd.Timestamp(cycle["signal_date"]) - pd.Timedelta(days=7)).date())
             end = market_date().isoformat()
-            market_envelope = data_api.read_panel(symbols, start, end)
-            cache_ready = (
-                market_envelope.quality.status == "verified"
-                and not market_envelope.quality.stale
-                and not market_envelope.quality.partial
-            )
-            if not cache_ready and calendar is None:
-                try:
-                    panel, calendar, decision_at = self._accepted_stockdb_execution_evidence(
-                        symbols,
-                        start,
-                        end,
-                    )
-                except DataEvidenceNotReady as exc:
-                    self.store.set_warning(
-                        account_id,
-                        "待撮合行情证据未通过成交门禁：" + "；".join(exc.quality.issues),
-                    )
-                    raise
-            else:
-                if market_envelope.quality.partial or market_envelope.quality.missing_symbols:
-                    if calendar is None:
-                        raise ValueError("本地行情存在缺口，但缺少已验证交易日历，拒绝远程补齐")
-                    for symbol in symbols:
-                        gap = inspect_local_daily_bars(symbol, start, end, calendar)
-                        missing = [value.isoformat() for value in gap.missing_sessions]
-                        if missing:
-                            data_api.refresh_panel(
-                                [symbol], min(missing), max(missing), mode="incremental",
-                            )
-                    market_envelope = data_api.read_panel(symbols, start, end)
-                panel = market_envelope.require_data()
-                if (
-                    market_envelope.quality.status != "verified"
-                    or market_envelope.quality.stale
-                    or market_envelope.quality.partial
-                ):
-                    message = (
-                        "待撮合行情证据未通过成交门禁："
-                        + "；".join(market_envelope.quality.issues)
-                    )
-                    self.store.set_warning(account_id, message)
-                    raise DataEvidenceNotReady(
-                        market_envelope.quality, market_envelope.provenance
-                    )
-                if calendar is None:
-                    quality = market_envelope.quality
-                    sessions = sorted({
-                        pd.Timestamp(value).date()
-                        for frame in panel.values()
-                        for value in frame.index
-                    })
-                    calendar = CalendarEvidence.build(
-                        market_for_symbol(symbols[0]), sessions,
-                        source=str(quality.calendar_source or ""),
-                        verified=quality.status == "verified" and not quality.partial,
-                    )
-                decision_at = datetime.now(UTC)
+            try:
+                panel, calendar, decision_at = self._accepted_stockdb_execution_evidence(
+                    symbols,
+                    start,
+                    end,
+                )
+                observed_at = decision_at
+            except DataEvidenceNotReady as exc:
+                self.store.set_warning(
+                    account_id,
+                    "待撮合行情证据未通过成交门禁：" + "；".join(exc.quality.issues),
+                )
+                raise
         elif calendar is None or observed_at is None:
             raise ValueError("注入 panel 必须同时提供已验证 calendar_evidence 与 observed_at")
         if calendar is None or not calendar.verified or not calendar.source:
@@ -2238,13 +2243,52 @@ class PaperService:
         close, open_prices = panel.get("close"), panel.get("open")
         if close is None or open_prices is None or close.empty or open_prices.empty:
             raise ValueError("缺少开盘价或昨收价，订单继续等待")
-        dates = pd.DatetimeIndex(close.index).sort_values()
         orders = [
             order for order in cycle["orders"]
             if order["status"] in {
                 "queued", "blocked", "partially_filled", *ORDER_WAITING_STATUSES,
             }
         ]
+        declared_price_type = str(
+            open_prices.attrs.get("execution_price_type")
+            or open_prices.attrs.get("adjustment")
+            or (PriceType.RAW.value if observed_at is not None else "unknown")
+        ).lower()
+        execution_price_type = {
+            "none": PriceType.RAW.value,
+            "qfq": PriceType.FORWARD_ADJUSTED.value,
+            "hfq": PriceType.BACKWARD_ADJUSTED.value,
+        }.get(declared_price_type, declared_price_type)
+        if execution_price_type != PriceType.RAW.value:
+            reason = f"execution_price_semantics={execution_price_type}"
+            for order in orders:
+                require_lease()
+                self.store.transition_order(
+                    order["id"],
+                    "waiting_market_data",
+                    waiting_reason=reason,
+                    next_check_at=decision_at.isoformat(),
+                    event_code="execution_price_semantics",
+                )
+            self.store.set_warning(
+                account_id,
+                "待撮合行情不是已验证 raw 开盘价，订单继续等待。",
+            )
+            return {
+                "status": "waiting_market_data",
+                "cycle": cycle,
+                "message": "待撮合行情缺少真实 raw 开盘价，订单继续等待。",
+            }
+        dates = pd.DatetimeIndex(close.index).sort_values()
+        execution_source = str(
+            open_prices.attrs.get("execution_source")
+            or ("panel-fixture" if observed_at is not None else "local-cache")
+        )
+        execution_provider = str(open_prices.attrs.get("execution_provider") or execution_source)
+        execution_interface = str(
+            open_prices.attrs.get("execution_provider_interface")
+            or ("test_fixture" if observed_at is not None else "bar_store")
+        )
         ready_orders, selected_sessions = [], set()
         for order in orders:
             symbol = str(order["symbol"])
@@ -2263,7 +2307,7 @@ class PaperService:
                         observed_values.get((symbol, pd.Timestamp(value).date()))
                         or observed_values.get(f"{symbol}:{pd.Timestamp(value).date()}")
                     ).to_pydatetime(),
-                    "panel-fixture" if observed_at is not None else "local-cache",
+                    execution_source,
                     NumericSemantics(
                         instrument=symbol,
                         observation_time="exchange_session_open",
@@ -2280,10 +2324,8 @@ class PaperService:
                         amount_unit={"cn": "CNY", "hk": "HKD", "us": "USD"}[
                             market_for_symbol(symbol).value
                         ],
-                        provider=("panel-fixture" if observed_at is not None else "local-cache"),
-                        provider_interface=(
-                            "test_fixture" if observed_at is not None else "bar_store"
-                        ),
+                        provider=execution_provider,
+                        provider_interface=execution_interface,
                         intended_use="paper_trading",
                     ),
                 )
