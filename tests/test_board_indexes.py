@@ -85,7 +85,9 @@ def test_board_index_snapshot_uses_current_membership_and_all_five_methods():
     assert set(detail["series"]) == set(BOARD_INDEX_METHODS)
     assert detail["constituents"][0]["name"] == "平安银行"
     assert data["definition"]["frequency"] == "1d"
+    assert data["definition"]["base"] == 1000.0
     assert data["definition"]["algorithm_version"] == BOARD_INDEX_ALGORITHM_VERSION
+    assert data["definition"]["initial_seed_row"] == "removed_by_stockdb_zb_get"
     assert progress[-1][0] == 95
 
 
@@ -124,6 +126,40 @@ def test_board_index_snapshot_marks_one_method_unavailable_without_fabricating_d
         "reason": "缺少流通市值",
     }
     assert quality["status"] == "partial"
+
+
+def test_board_index_methods_share_one_deduplicated_date_axis():
+    source = _StockDB()
+    original = source.native_board_index
+
+    def calculate(symbols, start, end, *, method, base):
+        rows = original(symbols, start, end, method=method, base=base)
+        if method == 5:
+            rows = rows[1:]
+        return [*rows, dict(rows[-1])]
+
+    source.native_board_index = calculate
+    dates = pd.date_range("2026-08-10", periods=2, freq="B")
+    close = pd.DataFrame({"000001.SZ": [10.0, 10.5]}, index=dates)
+    amount = pd.DataFrame({"000001.SZ": [1, 2]}, index=dates)
+
+    data, _quality = build_board_index_data(
+        source,
+        close=close,
+        amount=amount,
+        names={},
+        as_of="2026-08-17",
+        selected_l2=set(),
+        theme_codes=set(),
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+    )
+
+    series = data["details"]["SW1:801010.SI"]["series"]
+    axes = [[row["date"] for row in series[name]] for name in BOARD_INDEX_METHODS]
+    assert len({tuple(axis) for axis in axes}) == 1
+    assert len(axes[0]) == 5
+    assert len(axes[0]) == len(set(axes[0]))
 
 
 def test_board_index_batches_publish_partial_and_resume_only_pending_boards():

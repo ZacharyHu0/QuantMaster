@@ -44,16 +44,16 @@ def _date(value: Any) -> str:
 
 def _series(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     fields = ("open", "high", "low", "close", "pct_chg", "volume", "amount")
-    result = [
-        {
-            "date": _date(row.get("date")),
+    by_date = {
+        date: {
+            "date": date,
             **{field: _number(row.get(field)) for field in fields},
             "stock_count": int(row.get("stock_count") or 0),
         }
         for row in rows
-        if _date(row.get("date"))
-    ]
-    result.sort(key=lambda row: row["date"])
+        if (date := _date(row.get("date")))
+    }
+    result = [by_date[date] for date in sorted(by_date)]
     return result[-BOARD_INDEX_SESSIONS:]
 
 
@@ -171,6 +171,7 @@ def _snapshot_payload(
             "base": BOARD_INDEX_BASE,
             "sessions": BOARD_INDEX_SESSIONS,
             "algorithm_version": BOARD_INDEX_ALGORITHM_VERSION,
+            "initial_seed_row": "removed_by_stockdb_zb_get",
         },
     }, quality
 
@@ -191,6 +192,26 @@ def _unavailable_method_count(detail: dict[str, Any]) -> int:
         str(methods.get(name, {}).get("status") or "unavailable") != "ready"
         for name in BOARD_INDEX_METHODS
     )
+
+
+def _align_method_dates(
+    method_series: dict[str, list[dict[str, Any]]],
+    methods: dict[str, dict[str, Any]],
+) -> None:
+    available = [rows for rows in method_series.values() if rows]
+    if not available:
+        return
+    common_dates = set.intersection(*(
+        {str(row["date"]) for row in rows} for rows in available
+    ))
+    for name, rows in method_series.items():
+        if not rows:
+            continue
+        aligned = [row for row in rows if str(row["date"]) in common_dates]
+        method_series[name] = aligned
+        methods[name] = _method_summary(aligned)
+        if not aligned:
+            methods[name]["reason"] = "五种算法没有共同交易日"
 
 
 def build_board_index_data(
@@ -248,7 +269,6 @@ def build_board_index_data(
                 methods[name] = _method_summary(rows)
                 if not rows:
                     methods[name]["reason"] = "StockDB 未返回可用交易日"
-                    unavailable += 1
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 methods[name] = {
                     "status": "unavailable", "last": None,
@@ -256,7 +276,7 @@ def build_board_index_data(
                     "sessions": 0, "reason": str(exc)[:160],
                 }
                 method_series[name] = []
-                unavailable += 1
+        _align_method_dates(method_series, methods)
         quotes = _constituents(symbols, close, amount, names)
         observed = sum(item["last"] is not None for item in quotes)
         item = {
@@ -279,6 +299,7 @@ def build_board_index_data(
             "series": method_series,
             "constituents": quotes,
         }
+        unavailable += _unavailable_method_count(details[item_key])
         progress(
             88 + round((position + 1) / len(boards) * 7),
             "计算板块指数",

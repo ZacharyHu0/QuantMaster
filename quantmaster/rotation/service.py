@@ -2587,6 +2587,7 @@ class _RotationBuildRun:
                     "membership_semantics": "current_constituents_backcast",
                     "frequency": "1d", "base": 1000.0, "sessions": 120,
                     "algorithm_version": BOARD_INDEX_ALGORITHM_VERSION,
+                    "initial_seed_row": "removed_by_stockdb_zb_get",
                 },
             }
             quality = {

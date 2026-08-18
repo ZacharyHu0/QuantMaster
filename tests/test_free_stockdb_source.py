@@ -107,6 +107,47 @@ def test_free_stockdb_native_error_is_normalized_for_source_fallback(monkeypatch
         source.daily_cross_section(["600519.SH"], "2026-08-10", "2026-08-10")
 
 
+def test_native_board_index_maps_all_public_zhishu_methods(monkeypatch) -> None:
+    source = FreeStockDBSource()
+    calls = []
+
+    def calculate(name, codes, **kwargs):
+        calls.append((name, codes, kwargs))
+        return [{
+            "date": 20260817,
+            "open": 1000.0,
+            "high": 1001.0,
+            "low": 999.0,
+            "close": 1000.5,
+            "pct_chg": 0.05,
+            "volume": 100,
+            "amount": 200,
+            "stock_count": 2,
+        }]
+
+    monkeypatch.setattr(
+        source,
+        "_load_sdk_module",
+        lambda: SimpleNamespace(zb=SimpleNamespace(get=calculate)),
+    )
+
+    for method in range(1, 6):
+        rows = source.native_board_index(
+            ["000001.SZ", "600000.SH"],
+            "2026-08-01",
+            "2026-08-17",
+            method=method,
+            base=1000,
+        )
+        assert rows[0]["date"] == 20260817
+
+    assert [value[2]["method"] for value in calls] == [1, 2, 3, 4, 5]
+    assert all(value[0] == "zhishu" for value in calls)
+    assert all(value[1] == ["000001", "600000"] for value in calls)
+    assert all(value[2]["frequency"] == "1d" for value in calls)
+    assert all(value[2]["base"] == 1000.0 for value in calls)
+
+
 def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None:
     source = FreeStockDBSource()
     source._sdk_checked = True
