@@ -12,6 +12,7 @@ from quantmaster.data.free_stockdb_source import (
     FreeStockDBProviderError,
     FreeStockDBSource,
 )
+from quantmaster.data.resilience import local_only_data_access
 
 
 class _FakeReader:
@@ -421,7 +422,9 @@ def test_sdk_module_and_client_are_reused_until_runtime_reset(tmp_path) -> None:
     sdk.write_text(
         "class StockDBClient:\n"
         "    def __init__(self, **kwargs):\n"
-        "        self.options = kwargs\n",
+        "        self.options = kwargs\n"
+        "    def get_data(self, **kwargs):\n"
+        "        return []\n",
         encoding="utf-8",
     )
     first_source = FreeStockDBSource(sdk_path=str(sdk))
@@ -440,6 +443,21 @@ def test_sdk_module_and_client_are_reused_until_runtime_reset(tmp_path) -> None:
     first_source.reset_runtime()
     refreshed = FreeStockDBSource(sdk_path=str(sdk))._sdk_client()
     assert refreshed is not first_client
+
+
+def test_native_sdk_rejects_client_without_data_method(tmp_path) -> None:
+    sdk = tmp_path / "stock_sdk.py"
+    sdk.write_text(
+        "class StockDBClient:\n"
+        "    def __init__(self, **kwargs):\n"
+        "        self.options = kwargs\n",
+        encoding="utf-8",
+    )
+
+    source = FreeStockDBSource(sdk_path=str(sdk))
+
+    assert source._sdk_client() is None
+    assert "get_data" in str(source._sdk_error)
 
 
 def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None:
@@ -463,6 +481,19 @@ def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None
 
     assert list(result) == ["600519.SH"]
     assert client.calls[0]["code"] == ["600519", "000858"]
+
+
+def test_local_page_read_allows_native_loopback_stockdb_snapshot() -> None:
+    source = FreeStockDBSource()
+    client = _FakeClient()
+    source._sdk_checked = True
+    source._client = client
+
+    with local_only_data_access():
+        result = source.daily_many(["600519.SH"], "2026-08-05", "2026-08-05")
+
+    assert list(result) == ["600519.SH"]
+    assert client.calls[0]["code"] == ["600519"]
 
 
 def test_online_source_is_only_in_interactive_request_factories(monkeypatch) -> None:

@@ -267,6 +267,8 @@ class FreeStockDBSource(DataSource):
             client = clients.get(key)
             if client is None:
                 client = client_class(host=host, port=port, password="")
+                if not callable(getattr(client, "get_data", None)):
+                    raise AttributeError("StockDBClient 缺少 get_data 方法")
                 for cached_key in tuple(clients):
                     if cached_key[0] != generation:
                         clients.pop(cached_key, None)
@@ -326,6 +328,7 @@ class FreeStockDBSource(DataSource):
                 key,
                 lambda: client.get_data(**arguments),
                 probe=probe,
+                local_snapshot=self.name == "free-stockdb" and not self._trust_env,
             )
         except self._sdk_provider_errors(client) as exc:
             raise FreeStockDBProviderError(
