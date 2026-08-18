@@ -17,9 +17,13 @@ from quantmaster.runtime.update import (
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
+SHA_C = "c" * 40
+SHA_D = "d" * 40
 
 
-def _candidate(root: Path, sha: str, *, complete: bool = True) -> None:
+def _candidate(
+    root: Path, sha: str, *, complete: bool = True, staged_at: str | None = None,
+) -> None:
     slot = root / "slots" / sha
     slot.mkdir(parents=True, exist_ok=True)
     (slot / "QuantMaster.exe").write_bytes(b"candidate")
@@ -43,6 +47,8 @@ def _candidate(root: Path, sha: str, *, complete: bool = True) -> None:
             "slot_id": sha,
         },
     }
+    if staged_at is not None:
+        marker["staged_at"] = staged_at
     (slot / ".quantmaster-stage.json").write_text(
         json.dumps(marker), encoding="utf-8",
     )
@@ -80,6 +86,22 @@ def test_update_status_reports_exact_identity_and_local_main_eligibility(tmp_pat
     assert all("version" in item and "release_date" in item and "title" in item and "changelog" in item
                for item in status["staged"])
     assert all("path" not in str(item) for item in status["staged"])
+
+
+def test_update_status_orders_staged_slots_by_time_and_marks_current_and_previous(tmp_path):
+    _candidate(tmp_path, SHA_A, staged_at="2026-08-16T08:00:00+00:00")
+    _candidate(tmp_path, SHA_B, staged_at="2026-08-16T10:00:00+00:00")
+    _candidate(tmp_path, SHA_C, staged_at="not-a-time")
+    _candidate(tmp_path, SHA_D)
+    _state(tmp_path, active=SHA_A, previous=SHA_C)
+
+    status = update_status(tmp_path)
+
+    assert [item["build_sha"] for item in status["staged"]] == [SHA_B, SHA_A, SHA_C, SHA_D]
+    by_sha = {item["build_sha"]: item for item in status["staged"]}
+    assert by_sha[SHA_A]["current"] is True and by_sha[SHA_A]["previous"] is False
+    assert by_sha[SHA_C]["current"] is False and by_sha[SHA_C]["previous"] is True
+    assert status["eligibility"]["eligible_sha"] == SHA_B
 
 
 def test_update_status_fails_closed_on_pointer_mismatch(tmp_path):

@@ -9,6 +9,7 @@ import sys
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +26,7 @@ from quantmaster.runtime.activation import (
 OPERATION_SCHEMA = 1
 OPERATION_FILE = ".activation-operation.json"
 _UPDATE_FAILURES = (ActivationBlocked, OSError, subprocess.SubprocessError, ValueError, TypeError)
+_STAGED_AT_FALLBACK = datetime.min.replace(tzinfo=UTC)
 
 
 def operation_path(app_root: str | Path | None = None) -> Path:
@@ -207,6 +209,28 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
     }
 
 
+def _staged_at(registry: SlotRegistry, build_sha: str) -> datetime:
+    """Read a slot's immutable UTC staging time, with a deterministic low fallback."""
+
+    try:
+        marker = registry.slot(build_sha) / ".quantmaster-stage.json"
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (ActivationBlocked, OSError, UnicodeError, json.JSONDecodeError):
+        return _STAGED_AT_FALLBACK
+    if not isinstance(payload, Mapping) or (
+        payload.get("build_sha") != build_sha or payload.get("slot_id") != build_sha
+    ):
+        return _STAGED_AT_FALLBACK
+    value = payload.get("staged_at")
+    if not isinstance(value, str):
+        return _STAGED_AT_FALLBACK
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else _STAGED_AT_FALLBACK
+    except (OverflowError, ValueError):
+        return _STAGED_AT_FALLBACK
+
+
 def update_status(app_root: str | Path | None = None) -> dict[str, object]:
     """Return a local-only, path-free snapshot of activation eligibility."""
 
@@ -247,7 +271,7 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
     active = str(state.get("active") or "")
     previous = str(state.get("previous") or "")
     pending = str(state.get("pending") or "")
-    staged: list[dict[str, object]] = []
+    staged_with_time: list[tuple[datetime, dict[str, object]]] = []
     blockers: list[dict[str, str]] = []
     pointer_blocker = _pointer_blocker(registry, active)
     if pointer_blocker is not None:
@@ -257,13 +281,14 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
             if not path.is_dir() or path.is_symlink() or FULL_SHA.fullmatch(path.name) is None:
                 continue
             item = _candidate(registry, path.name, active=active, previous=previous)
-            staged.append(item)
+            staged_with_time.append((_staged_at(registry, path.name), item))
             item_blockers = item.get("blockers")
             if isinstance(item_blockers, list):
                 blockers.extend(
                     blocker for blocker in item_blockers
                     if isinstance(blocker, dict) and all(isinstance(key, str) for key in blocker)
                 )
+    staged = [item for _, item in sorted(staged_with_time, key=lambda entry: entry[0], reverse=True)]
     eligible = [] if pointer_blocker is not None else [
         str(item["build_sha"]) for item in staged if item.get("eligible") is True
     ]
