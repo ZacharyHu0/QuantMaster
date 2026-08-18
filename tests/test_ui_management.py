@@ -4157,23 +4157,30 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
 
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
-        page = browser.new_page(viewport={"width": 1280, "height": 720}, reduced_motion="reduce")
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.route("**/api/v1/rotation/etfs**", route_api)
         page_errors = []
         page.on("pageerror", lambda error: page_errors.append(str(error)))
         page.goto(f"{url}/#today/etfs")
         page.locator("#rotation-etf-view").wait_for(state="visible")
         playwright_sync.expect(page.locator(".etf-summary")).to_have_count(3)
+        assert page.locator(".etf-summary:not([disabled])").evaluate_all(
+            "nodes => nodes.every(node => node.getAttribute('aria-haspopup') === 'dialog')"
+        )
         playwright_sync.expect(page.locator("#rotation-etf-map")).to_be_visible()
         playwright_sync.expect(page.locator(".etf-queues")).to_contain_text("领涨")
         assert page.locator("#rotation-etf-map").bounding_box()["height"] == 320
-        assert page.locator(".etf-queues").evaluate(
-            "node => getComputedStyle(node).flexDirection"
-        ) == "column"
-        queue_items = page.locator(".etf-queues section > div")
-        assert queue_items.count() > 0
-        assert queue_items.first.evaluate("node => getComputedStyle(node).flexDirection") == "column"
-        assert queue_items.first.evaluate("node => getComputedStyle(node).overflowX") == "visible"
+        queue = page.locator(".etf-queues")
+        queue_groups = queue.locator(".etf-queue-group")
+        playwright_sync.expect(queue_groups).to_have_count(6)
+        assert queue.locator(".etf-queue-group[open]").count() == 1
+        assert queue.bounding_box()["height"] <= 436
+        queue_groups.nth(1).locator("summary").click()
+        playwright_sync.expect(queue_groups.nth(1)).to_have_attribute("open", "")
+        assert queue.locator(".etf-queue-group[open]").count() == 1
+        assert queue_groups.nth(1).locator(":scope > div").evaluate(
+            "node => getComputedStyle(node).overflowY"
+        ) == "auto"
         assert page.locator("#rotation-etf-product-results tbody tr").count() <= 50
         product_results = page.locator("#rotation-etf-product-results")
         playwright_sync.expect(product_results).to_contain_text("+1.20 亿份（+3.20%）· 估算净申购3.10 亿元")
@@ -4182,6 +4189,34 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         for selector in (".etf-freshness", ".etf-summary-grid"):
             box = page.locator(selector).bounding_box()
             assert box and box["y"] + box["height"] <= 720, (selector, box)
+
+        drawer = page.locator("#rotation-etf-detail")
+        summary_titles = ("半导体", "医药", "半导体")
+        for index, title in enumerate(summary_titles):
+            trigger = page.locator(".etf-summary:not([disabled])").nth(index)
+            trigger.click()
+            playwright_sync.expect(drawer).to_be_visible()
+            playwright_sync.expect(drawer.locator("h3")).to_have_text(title)
+            playwright_sync.expect(drawer.locator('[data-etf-drawer-panel="conclusion"]')).to_be_visible()
+            playwright_sync.expect(drawer.locator(".etf-drawer-close")).to_be_visible()
+            drawer_box = drawer.bounding_box()
+            assert drawer_box and drawer_box["x"] >= 0 and drawer_box["y"] >= 0
+            assert drawer_box["x"] + drawer_box["width"] <= 1280
+            assert drawer_box["y"] + drawer_box["height"] <= 720
+            assert drawer.locator("[data-etf-drawer-body]").evaluate(
+                "node => getComputedStyle(node).overflowY"
+            ) == "auto"
+            drawer.locator(".etf-drawer-close").click()
+            playwright_sync.expect(drawer).to_be_hidden()
+            assert trigger.evaluate("node => document.activeElement === node")
+
+        queue_groups.first.locator("summary").click()
+        queue_trigger = queue_groups.first.locator("[data-etf-sector]").first
+        queue_trigger.click()
+        playwright_sync.expect(drawer.locator("h3")).to_have_text("半导体")
+        page.keyboard.press("Escape")
+        playwright_sync.expect(drawer).to_be_hidden()
+        assert queue_trigger.evaluate("node => document.activeElement === node")
 
         category_filter = page.locator("[data-rotation-etf-category]")
         category_filter.select_option("行业主题")
@@ -4201,7 +4236,6 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         map_select = page.locator("[data-etf-map-select]")
         map_select.focus()
         map_select.select_option("semi")
-        drawer = page.locator("#rotation-etf-detail")
         drawer.wait_for(state="visible")
         conclusion_tab = drawer.locator('[data-etf-drawer-tab="conclusion"]')
         playwright_sync.expect(conclusion_tab).to_be_visible()
@@ -4248,6 +4282,15 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
 
         page.set_viewport_size({"width": 390, "height": 844})
         _wait_for_document_fit(page)
+        mobile_trigger = page.locator(".etf-summary:not([disabled])").first
+        mobile_trigger.click()
+        playwright_sync.expect(drawer).to_be_visible()
+        mobile_box = drawer.bounding_box()
+        assert mobile_box and mobile_box["x"] >= 0 and mobile_box["y"] >= 0
+        assert mobile_box["x"] + mobile_box["width"] <= 390
+        assert mobile_box["y"] + mobile_box["height"] <= 844
+        drawer.locator(".etf-drawer-close").click()
+        playwright_sync.expect(drawer).to_be_hidden()
         assert page_errors == []
         browser.close()
 

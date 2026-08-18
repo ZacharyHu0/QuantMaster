@@ -980,12 +980,6 @@ html[data-qm-theme="ink"] #tab-rotation .etf-sector-library{
   max-height:420px;
   overflow:auto;
 }
-html[data-qm-theme="ink"] #tab-rotation .etf-queues{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
-  gap:22px;
-  align-items:start;
-}
 html[data-qm-theme="ink"] #tab-rotation .etf-drawer-panel{
   background:var(--surface);
   border-left:1px solid var(--ink-hairline-strong);
@@ -1504,8 +1498,7 @@ html[data-qm-theme="ink"] :is(.candidate-list,.decision-history-panel,.etf-secto
   html[data-qm-theme="ink"] #tab-market .mkt-grid{
     grid-template-columns:repeat(2,minmax(0,1fr));
   }
-  html[data-qm-theme="ink"] #tab-rotation .etf-radar-grid,
-  html[data-qm-theme="ink"] #tab-rotation .etf-queues{
+  html[data-qm-theme="ink"] #tab-rotation .etf-radar-grid{
     grid-template-columns:minmax(0,1fr);
   }
   html[data-qm-theme="ink"] #tab-candidates .candidate-shell{

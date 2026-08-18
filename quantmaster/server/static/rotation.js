@@ -322,6 +322,34 @@ const rotationFeature = (() => {
     return `<div class="rotation-callout" data-tone="error"><strong>页面数据未能读取</strong><span>${esc(error?.message || '请稍后重试')}</span></div>`;
   }
 
+  function showEtfPanel({eyebrow, title, meta, tabs = []}) {
+    const target = document.getElementById('rotation-etf-detail');
+    if (!target) return null;
+    if (!target.open || !target.contains(document.activeElement)) etfDrawerReturnFocus = document.activeElement;
+    const tabMarkup = tabs.length ? `<div class="etf-drawer-tabs" role="tablist" aria-label="ETF 研究详情">${tabs.map(([value,label],index) => `<button type="button" role="tab" data-etf-drawer-tab="${esc(value)}" aria-selected="${String(index === 0)}" tabindex="${index === 0 ? 0 : -1}">${esc(label)}</button>`).join('')}</div>` : '';
+    target.innerHTML = `<div class="etf-drawer-chrome"><div class="rotation-detail-head"><div><span class="rotation-eyebrow">${esc(eyebrow)}</span><h3 id="rotation-etf-drawer-title" data-etf-drawer-title>${esc(title)}</h3><p data-etf-drawer-meta>${esc(meta)}</p></div><button class="etf-drawer-close" type="button" data-close-etf-panel aria-label="关闭 ${esc(title)} 研究抽屉"><span aria-hidden="true">×</span></button></div>${tabMarkup}</div><div class="etf-drawer-body" data-etf-drawer-body aria-live="polite" aria-busy="true"><div class="rotation-skeleton"><span></span><span></span></div></div>`;
+    target.setAttribute('aria-labelledby','rotation-etf-drawer-title');
+    if (!target.open) target.showModal();
+    return target;
+  }
+
+  function renderEtfPanel(target, {title, meta, content}) {
+    const heading = target.querySelector('[data-etf-drawer-title]');
+    const description = target.querySelector('[data-etf-drawer-meta]');
+    const close = target.querySelector('[data-close-etf-panel]');
+    const body = target.querySelector('[data-etf-drawer-body]');
+    if (heading) heading.textContent = title;
+    if (description) description.textContent = meta;
+    if (close) close.setAttribute('aria-label',`关闭 ${title} 研究抽屉`);
+    if (body) { body.innerHTML = content; body.setAttribute('aria-busy','false'); }
+  }
+
+  function failEtfPanel(target, error) {
+    const body = target?.querySelector('[data-etf-drawer-body]');
+    if (body) { body.innerHTML = errorMarkup(error); body.setAttribute('aria-busy','false'); }
+    target?.querySelector('[data-close-etf-panel]')?.focus({preventScroll:true});
+  }
+
   async function fetchView(key, path, force = false) {
     if (!force && cache.has(key)) return cache.get(key);
     const task = api(path);
@@ -1047,12 +1075,12 @@ const rotationFeature = (() => {
     const visible = etfSectorCatalog.slice(start,start + etfSectorPageSize);
     const pagination = {page:etfSectorPage,page_size:etfSectorPageSize,total,pages,has_previous:etfSectorPage>1,has_next:etfSectorPage<pages};
     const positionLabel = etfOverview.map?.label || '60 日阶段位置';
-    target.innerHTML = visible.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-etf-research-table"><thead><tr><th>板块 / 代表 ETF</th><th>状态</th><th class="numeric">5 / 20 / 60 日</th><th class="numeric">趋势</th><th class="numeric">${esc(positionLabel)}</th><th class="numeric">活跃度 / 量比</th><th>申赎证据</th></tr></thead><tbody>${visible.map(item => { const m=item.metrics||{}; return `<tr><td data-label="板块"><button type="button" data-etf-sector="${esc(item.sector_id)}">${esc(item.sector_name)}</button><div class="hint">${esc(item.representative?.name || '—')} · ${item.index_count || 0} 指数 / ${item.member_count || 0} 产品</div></td><td data-label="状态">${etfStateBadge(item)}${etfCandidateMarkup(item)}${(item.risk_badges||[]).map(badge => `<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</td><td data-label="收益" class="numeric ${tone(m.return_20d)}">${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}</td><td data-label="趋势" class="numeric">${number(item.trend_strength,0)}</td><td data-label="位置" class="numeric">${item.display_position == null ? '— · 暂不可评估' : percent(item.display_position,0)}</td><td data-label="活跃度" class="numeric">${number(item.activity_score,0)} / ${number(m.amount_ratio_5v20,2)}×</td><td data-label="申赎证据" class="etf-fund-cell ${tone(item.funds?.estimated_flow)}">${esc(fundEvidenceText(item.funds))}<small>${esc(item.funds?.coverage_level ? `${{high:'高',medium:'中',low:'低'}[item.funds.coverage_level] || '低'}覆盖 · ${item.funds.interpretation_note || ''}` : '')}</small></td></tr>`; }).join('')}</tbody></table></div>${pageControl('etf-sector',pagination,etfSectorPageSize)}` : '<div class="rotation-empty compact"><strong>当前资产类没有板块</strong><p>切换资产标签，或更新研究证据。</p></div>';
+    target.innerHTML = visible.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-etf-research-table"><thead><tr><th>板块 / 代表 ETF</th><th>状态</th><th class="numeric">5 / 20 / 60 日</th><th class="numeric">趋势</th><th class="numeric">${esc(positionLabel)}</th><th class="numeric">活跃度 / 量比</th><th>申赎证据</th></tr></thead><tbody>${visible.map(item => { const m=item.metrics||{}; return `<tr><td data-label="板块"><button type="button" data-etf-sector="${esc(item.sector_id)}" aria-haspopup="dialog">${esc(item.sector_name)}</button><div class="hint">${esc(item.representative?.name || '—')} · ${item.index_count || 0} 指数 / ${item.member_count || 0} 产品</div></td><td data-label="状态">${etfStateBadge(item)}${etfCandidateMarkup(item)}${(item.risk_badges||[]).map(badge => `<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</td><td data-label="收益" class="numeric ${tone(m.return_20d)}">${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}</td><td data-label="趋势" class="numeric">${number(item.trend_strength,0)}</td><td data-label="位置" class="numeric">${item.display_position == null ? '— · 暂不可评估' : percent(item.display_position,0)}</td><td data-label="活跃度" class="numeric">${number(item.activity_score,0)} / ${number(m.amount_ratio_5v20,2)}×</td><td data-label="申赎证据" class="etf-fund-cell ${tone(item.funds?.estimated_flow)}">${esc(fundEvidenceText(item.funds))}<small>${esc(item.funds?.coverage_level ? `${{high:'高',medium:'中',low:'低'}[item.funds.coverage_level] || '低'}覆盖 · ${item.funds.interpretation_note || ''}` : '')}</small></td></tr>`; }).join('')}</tbody></table></div>${pageControl('etf-sector',pagination,etfSectorPageSize)}` : '<div class="rotation-empty compact"><strong>当前资产类没有板块</strong><p>切换资产标签，或更新研究证据。</p></div>';
   }
 
   function drawEtfProductTable() {
     const target = document.getElementById('rotation-etf-product-results'); if (!target) return;
-    target.innerHTML = etfProductCatalog.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-etf-research-table"><thead><tr><th>ETF</th><th>板块 / 指数</th><th>板块状态</th><th class="numeric">20 日收益</th><th class="numeric">日均成交额</th><th class="numeric">研究位置</th><th>份额变化</th></tr></thead><tbody>${etfProductCatalog.map(item => { const m=item.metrics||{}; return `<tr><td data-label="ETF"><button type="button" data-etf-detail="${esc(item.symbol)}">${esc(item.name)}</button><div class="hint">${esc(item.symbol)}${item.is_representative ? ' · 代表产品' : ''}</div></td><td data-label="板块 / 指数">${esc(item.sector_name)}<div class="hint">${esc(item.normalized_index || '指数待补')}</div></td><td data-label="板块状态">${etfStateBadge(item)}${etfCandidateMarkup(item)}</td><td data-label="20 日收益" class="numeric ${tone(m.return_20d)}">${returnPct(m.return_20d)}</td><td data-label="日均成交额" class="numeric">${amountMoney(m.avg_amount_20d)}</td><td data-label="研究位置" class="numeric">${m.display_position == null ? '—' : `${percent(m.display_position,0)}<small>${esc(item.position_label || '')}</small>`}</td><td data-label="份额变化" class="etf-fund-cell ${tone(item.funds?.estimated_flow)}">${esc(fundEvidenceText(item.funds))}</td></tr>`; }).join('')}</tbody></table></div>${pageControl('etf-product',etfProductPagination,etfProductPageSize)}` : '<div class="rotation-empty compact"><strong>没有匹配产品</strong><p>缩短关键词或清除状态、类别筛选。</p></div>';
+    target.innerHTML = etfProductCatalog.length ? `<div class="rotation-table-wrap"><table class="rotation-table rotation-etf-research-table"><thead><tr><th>ETF</th><th>板块 / 指数</th><th>板块状态</th><th class="numeric">20 日收益</th><th class="numeric">日均成交额</th><th class="numeric">研究位置</th><th>份额变化</th></tr></thead><tbody>${etfProductCatalog.map(item => { const m=item.metrics||{}; return `<tr><td data-label="ETF"><button type="button" data-etf-detail="${esc(item.symbol)}" aria-haspopup="dialog">${esc(item.name)}</button><div class="hint">${esc(item.symbol)}${item.is_representative ? ' · 代表产品' : ''}</div></td><td data-label="板块 / 指数">${esc(item.sector_name)}<div class="hint">${esc(item.normalized_index || '指数待补')}</div></td><td data-label="板块状态">${etfStateBadge(item)}${etfCandidateMarkup(item)}</td><td data-label="20 日收益" class="numeric ${tone(m.return_20d)}">${returnPct(m.return_20d)}</td><td data-label="日均成交额" class="numeric">${amountMoney(m.avg_amount_20d)}</td><td data-label="研究位置" class="numeric">${m.display_position == null ? '—' : `${percent(m.display_position,0)}<small>${esc(item.position_label || '')}</small>`}</td><td data-label="份额变化" class="etf-fund-cell ${tone(item.funds?.estimated_flow)}">${esc(fundEvidenceText(item.funds))}</td></tr>`; }).join('')}</tbody></table></div>${pageControl('etf-product',etfProductPagination,etfProductPageSize)}` : '<div class="rotation-empty compact"><strong>没有匹配产品</strong><p>缩短关键词或清除状态、类别筛选。</p></div>';
   }
 
   function drawEtfMap() {
@@ -1099,6 +1127,7 @@ const rotationFeature = (() => {
       ['▼ 走弱',overview.queues?.weakening||[]],
       ['! 风险 / 候选',mergeQueueIds(overview.queues?.risk||[],overview.candidate_queues?.stage_high_activity||[])],
     ];
+    const defaultQueueIndex = Math.max(0,queueGroups.findIndex(([,ids]) => ids.length));
     const sectorLookup = new Map(etfSectorCatalog.map(item => [item.sector_id,item]));
     const categories = products.categories || [];
     const map = overview.map || {}, mapItems = (map.sector_ids || []).map(id => sectorLookup.get(id)).filter(Boolean);
@@ -1109,9 +1138,9 @@ const rotationFeature = (() => {
     out.innerHTML = `${stale}${sandbox}${warningMarkup}${etfFreshnessMarkup(overview.freshness)}
       <div class="etf-asset-tabs" role="tablist" aria-label="ETF 资产类别">${assets.map(([value,label]) => `<button type="button" role="tab" data-etf-asset="${value}" aria-selected="${String(etfAsset===value)}" tabindex="${etfAsset===value?0:-1}">${label}</button>`).join('')}</div>
       <div class="sr-only" aria-live="polite">当前为${esc(assets.find(([value])=>value===etfAsset)?.[1] || '')}，${etfSectorCatalog.length} 个板块，位置口径为${esc(map.label || '待补')}</div>
-      <section class="etf-summary-grid" aria-label="本期研究结论">${summaries.map(item => `<button type="button" class="etf-summary" data-kind="${esc(item.kind)}" data-evaluation="${esc(item.evaluation_status || 'unavailable')}" ${item.sector_id ? `data-etf-sector="${esc(item.sector_id)}"` : 'disabled'}><span>${esc(item.title)} · ${{confirmed:'已确认',candidate:'候选',unavailable:'暂不可评估'}[item.evaluation_status] || '待核查'}</span><strong>${esc(item.sector_name || (item.evaluation_status === 'unavailable' ? '证据待补' : '本期无'))}</strong><small>${esc(item.text)}</small></button>`).join('')}</section>
+      <section class="etf-summary-grid" aria-label="本期研究结论">${summaries.map(item => `<button type="button" class="etf-summary" data-kind="${esc(item.kind)}" data-evaluation="${esc(item.evaluation_status || 'unavailable')}" ${item.sector_id ? `data-etf-sector="${esc(item.sector_id)}" aria-haspopup="dialog"` : 'disabled'}><span>${esc(item.title)} · ${{confirmed:'已确认',candidate:'候选',unavailable:'暂不可评估'}[item.evaluation_status] || '待核查'}</span><strong>${esc(item.sector_name || (item.evaluation_status === 'unavailable' ? '证据待补' : '本期无'))}</strong><small>${esc(item.text)}</small></button>`).join('')}</section>
       <section class="etf-radar-grid"><div class="etf-radar-panel"><div class="rotation-section-head"><div><h3>板块地图</h3><p>横轴趋势强度 · 纵轴 ${esc(map.label || '研究位置')} · 面积为活跃度 · 红涨绿跌</p></div><output>${mapItems.length} 个重点 / ${etfSectorCatalog.length} 个全部</output></div><div class="rotation-chart etf-map" id="rotation-etf-map" role="img" aria-label="ETF 板块趋势与位置地图"></div><label class="etf-map-select">键盘选择重点板块<select data-etf-map-select><option value="">选择板块查看研究证据</option>${mapItems.map(item => `<option value="${esc(item.sector_id)}">${esc(item.sector_name)} · ${esc(item.state_label)} · ${number(item.trend_strength,0)}</option>`).join('')}</select></label></div>
-      <aside class="etf-queues"><div class="rotation-section-head"><div><h3>状态队列</h3><p>“候选”只表示阶段条件成立，不冒充严格确认。</p></div></div>${queueGroups.map(([label,ids]) => `<section><h4>${label}<span>${ids.length}</span></h4><div>${ids.map(id => { const item=sectorLookup.get(id); return item ? `<button type="button" data-etf-sector="${esc(id)}"><strong>${esc(item.sector_name)}</strong><span>趋势 ${number(item.trend_strength,0)} · ${item.display_position==null?'位置待补':percent(item.display_position,0)}</span></button>` : ''; }).join('') || '<p>本期无满足条件的板块</p>'}</div></section>`).join('')}</aside></section>
+      <aside class="etf-queues"><div class="rotation-section-head"><div><h3>状态队列</h3><p>“候选”只表示阶段条件成立，不冒充严格确认。</p></div></div>${queueGroups.map(([label,ids],index) => `<details class="etf-queue-group" name="etf-status-queue" ${index === defaultQueueIndex ? 'open' : ''}><summary><span>${label}</span><strong>${ids.length}</strong></summary><div>${ids.map(id => { const item=sectorLookup.get(id); return item ? `<button type="button" data-etf-sector="${esc(id)}" aria-haspopup="dialog"><strong>${esc(item.sector_name)}</strong><span>趋势 ${number(item.trend_strength,0)} · ${item.display_position==null?'位置待补':percent(item.display_position,0)}</span></button>` : ''; }).join('') || '<p>本期无满足条件的板块</p>'}</div></details>`).join('')}</aside></section>
       <section class="rotation-section etf-sector-library"><div class="rotation-section-head"><div><h3>板块研究表</h3><p>完整板块保留在表格；地图只展示确认、候选、风险及活跃度优先的重点板块。</p></div><output>${etfSectorCatalog.length} 个</output></div><div id="rotation-etf-sector-results"></div></section>
       <section class="rotation-section etf-product-library"><div class="rotation-section-head"><div><h3>ETF 产品库</h3><p>与板块表独立搜索、筛选和分页；每页最多 50 行。</p></div><output>${etfProductPagination.total || 0} 只</output></div><div class="rotation-filterbar etf-product-filters"><label>搜索产品<input data-rotation-etf-query type="search" value="${esc(etfQuery)}" placeholder="名称、代码、板块或指数"></label><label>类别<select data-rotation-etf-category><option value="">全部类别</option>${categories.map(value => `<option value="${esc(value)}" ${etfCategory===value?'selected':''}>${esc(value)}</option>`).join('')}</select></label><label>状态<select data-rotation-etf-state><option value="">全部状态</option>${Object.entries(ETF_STATE_LABELS).filter(([key])=>key!=='not_applicable').map(([value,label]) => `<option value="${value}" ${etfState===value?'selected':''}>${label}</option>`).join('')}</select></label><label>排序<select data-rotation-etf-sort><option value="trend" ${etfSort==='trend'?'selected':''}>趋势强度</option><option value="activity" ${etfSort==='activity'?'selected':''}>活跃度</option><option value="position" ${etfSort==='position'?'selected':''}>研究位置</option><option value="amount" ${etfSort==='amount'?'selected':''}>成交额</option><option value="return" ${etfSort==='return'?'selected':''}>20 日收益</option><option value="name" ${etfSort==='name'?'selected':''}>名称</option></select></label></div><div id="rotation-etf-product-results"></div></section>${issuesMarkup(meta)}`;
       drawEtfSectorTable(); drawEtfProductTable(); drawEtfMap();
@@ -1132,10 +1161,13 @@ const rotationFeature = (() => {
   }
 
   async function openEtfDetail(symbol) {
-    const target = document.getElementById('rotation-etf-detail'); if (!target) return;
-    if (target.hidden || !target.contains(document.activeElement)) etfDrawerReturnFocus = document.activeElement;
-    target.hidden = false; target.setAttribute('aria-hidden','false'); target.setAttribute('aria-modal','true');
-    target.innerHTML = '<div class="rotation-skeleton"><span></span><span></span></div>';
+    const preview = etfProductCatalog.find(item => item.symbol === symbol) || {};
+    const target = showEtfPanel({
+      eyebrow:'ETF PRODUCT RESEARCH', title:preview.name || symbol,
+      meta:`${preview.symbol || symbol} · ${preview.sector_name || '板块待补'} · ${preview.normalized_index || '指数待补'}`,
+      tabs:[['conclusion','结论'],['trend','趋势与分钟'],['funds','资金证据'],['products','同指数产品']],
+    });
+    if (!target) return;
     try {
       const params = new URLSearchParams();
       if (displayedEtfSnapshotId) params.set('snapshot_id',displayedEtfSnapshotId);
@@ -1145,21 +1177,19 @@ const rotationFeature = (() => {
       const eligibleCandidates = Object.values(item.candidates||{}).filter(value=>value.eligible);
       target.dataset.etfIntradaySymbol = item.symbol || symbol;
       target.dataset.etfIntradayLoaded = 'false';
-      target.innerHTML = `<div class="rotation-detail-head"><div><span class="rotation-eyebrow">ETF PRODUCT RESEARCH</span><h3>${esc(item.name || symbol)}</h3><p>${esc(item.symbol || symbol)} · ${esc(item.sector_name || '板块待补')} · ${esc(item.normalized_index || '指数待补')}</p></div><button class="rotation-link" type="button" data-close-etf-panel aria-label="关闭 ${esc(item.name || symbol)} 研究抽屉">关闭</button></div>
-        <div class="etf-drawer-tabs" role="tablist" aria-label="单只 ETF 研究详情"><button type="button" role="tab" data-etf-drawer-tab="conclusion" aria-selected="true" tabindex="0">结论</button><button type="button" role="tab" data-etf-drawer-tab="trend" aria-selected="false" tabindex="-1">趋势与分钟</button><button type="button" role="tab" data-etf-drawer-tab="funds" aria-selected="false" tabindex="-1">资金证据</button><button type="button" role="tab" data-etf-drawer-tab="products" aria-selected="false" tabindex="-1">同指数产品</button></div>
-        <div class="etf-drawer-panel" data-etf-drawer-panel="conclusion"><div class="etf-conclusion"><span>所属板块主状态</span>${etfStateBadge(item)}${etfCandidateMarkup(item)}<strong>趋势 ${number(item.trend_strength,0)} · 活跃度 ${number(item.activity_score,0)}</strong><p>5 / 20 / 60 日收益：${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}；量能比 ${number(m.amount_ratio_5v20,2)}×。</p><p class="etf-invalidation"><b>下一快照失效条件</b>${esc(item.invalidation||'—')}</p>${eligibleCandidates.map(value=>`<details><summary>${esc(value.label)} · 尚缺 ${value.unmet_conditions?.length||0} 项严格确认条件</summary><p>已满足：${esc((value.met_conditions||[]).join('、')||'—')}</p><p>未满足：${esc((value.unmet_conditions||[]).join('、')||'—')}</p></details>`).join('')}${(item.risk_badges||[]).map(badge=>`<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</div></div>
+      renderEtfPanel(target,{title:item.name || symbol,meta:`${item.symbol || symbol} · ${item.sector_name || '板块待补'} · ${item.normalized_index || '指数待补'}`,content:`<div class="etf-drawer-panel" data-etf-drawer-panel="conclusion"><div class="etf-conclusion"><span>所属板块主状态</span>${etfStateBadge(item)}${etfCandidateMarkup(item)}<strong>趋势 ${number(item.trend_strength,0)} · 活跃度 ${number(item.activity_score,0)}</strong><p>5 / 20 / 60 日收益：${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}；量能比 ${number(m.amount_ratio_5v20,2)}×。</p><p class="etf-invalidation"><b>下一快照失效条件</b>${esc(item.invalidation||'—')}</p>${eligibleCandidates.map(value=>`<details><summary>${esc(value.label)} · 尚缺 ${value.unmet_conditions?.length||0} 项严格确认条件</summary><p>已满足：${esc((value.met_conditions||[]).join('、')||'—')}</p><p>未满足：${esc((value.unmet_conditions||[]).join('、')||'—')}</p></details>`).join('')}${(item.risk_badges||[]).map(badge=>`<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</div></div>
         <div class="etf-drawer-panel" data-etf-drawer-panel="trend" hidden><div class="rotation-detail-signals"><div><span>20 日位置</span><strong>${m.position_20d==null?'—':percent(m.position_20d,0)}</strong></div><div><span>60 日阶段位置</span><strong>${m.position_60d==null?'—':percent(m.position_60d,0)}</strong></div><div><span>250 日复权位置</span><strong>${m.position_250d==null?'—':percent(m.position_250d,0)}</strong><small>${m.position_250d==null?'可核查复权证据不足，不做长期判断':`距高点 ${returnPct(m.drawdown_250d)}`}</small></div></div><h4 class="etf-chart-label">复权研究价格</h4><div class="rotation-chart compact" id="rotation-etf-product-price"></div><h4 class="etf-chart-label">成交额</h4><div class="rotation-chart compact etf-amount-chart" id="rotation-etf-product-amount"></div><div class="etf-intraday-head"><h4>当日分钟走势</h4><span data-etf-intraday-status>打开此标签后按需读取，不参与日终状态</span></div><div class="rotation-chart compact" id="rotation-etf-product-intraday"></div></div>
         <div class="etf-drawer-panel" data-etf-drawer-panel="funds" hidden><div class="etf-fund-proof"><span>${esc(funds.period_label || '份额变化')}</span><strong class="${tone(funds.estimated_flow)}">${esc(fundEvidenceText(funds))}</strong><p>来源 ${esc(funds.source||'—')} · 有效日 ${esc(funds.effective_date||'—')}</p><p>${esc(funds.interpretation_note || '份额变化只代表一级市场净申购或赎回；二级市场有成交不必然改变份额。')}</p></div></div>
-        <div class="etf-drawer-panel" data-etf-drawer-panel="products" hidden><p class="hint">只比较同一规范化指数；当前点击产品始终保留在首行。</p><div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>产品</th><th class="numeric">20日额</th><th class="numeric">规模</th><th class="numeric">管理费</th><th>资金状态</th></tr></thead><tbody>${[item,...peers].map((member,index)=>`<tr ${index===0?'data-selected-product="true"':''}><td>${esc(member.name)}<div class="hint">${esc(member.symbol)}${index===0?' · 当前产品':member.is_representative?' · 代表产品':''}</div></td><td class="numeric">${amountMoney(member.metrics?.avg_amount_20d)}</td><td class="numeric">${amountMoney(member.metadata?.total_size)}</td><td class="numeric">${member.metadata?.management_fee==null?'—':percent(Number(member.metadata.management_fee),2)}</td><td>${esc(fundEvidenceText(member.funds))}</td></tr>`).join('')}</tbody></table></div></div>`;
+        <div class="etf-drawer-panel" data-etf-drawer-panel="products" hidden><p class="hint">只比较同一规范化指数；当前点击产品始终保留在首行。</p><div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>产品</th><th class="numeric">20日额</th><th class="numeric">规模</th><th class="numeric">管理费</th><th>资金状态</th></tr></thead><tbody>${[item,...peers].map((member,index)=>`<tr ${index===0?'data-selected-product="true"':''}><td>${esc(member.name)}<div class="hint">${esc(member.symbol)}${index===0?' · 当前产品':member.is_representative?' · 代表产品':''}</div></td><td class="numeric">${amountMoney(member.metrics?.avg_amount_20d)}</td><td class="numeric">${amountMoney(member.metadata?.total_size)}</td><td class="numeric">${member.metadata?.management_fee==null?'—':percent(Number(member.metadata.management_fee),2)}</td><td>${esc(fundEvidenceText(member.funds))}</td></tr>`).join('')}</tbody></table></div></div>`});
       const price=mkChart('rotation-etf-product-price'); if (price) price.setOption(baseOpt({grid:{left:48,right:16,top:16,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',scale:true,axisLabel:{color:MUTED},splitLine:{lineStyle:{color:GRID}}},series:[{type:'line',showSymbol:false,data:history.map(row=>[row.date,row.price]),lineStyle:{color:CHART_COLORS.primary,width:1.6}}]}));
       const amount=mkChart('rotation-etf-product-amount'); if (amount) amount.setOption(baseOpt({grid:{left:62,right:16,top:14,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value=>amountMoney(value)},splitLine:{lineStyle:{color:GRID}}},series:[{type:'bar',barMaxWidth:7,data:history.map(row=>[row.date,row.amount]),itemStyle:{color:CHART_COLORS.secondary}}]}));
       target.querySelector('[role="tab"]')?.focus({preventScroll:true});
-    } catch (error) { target.innerHTML = errorMarkup(error); }
+    } catch (error) { failEtfPanel(target,error); }
   }
 
   function closeEtfPanel() {
     const panel = document.getElementById('rotation-etf-detail'); if (!panel) return;
-    panel.hidden = true; panel.setAttribute('aria-hidden','true'); panel.setAttribute('aria-modal','false');
+    if (panel.open) panel.close();
     if (etfDrawerReturnFocus?.isConnected) etfDrawerReturnFocus.focus({preventScroll:true});
     etfDrawerReturnFocus = null;
   }
@@ -1189,12 +1219,15 @@ const rotationFeature = (() => {
   }
 
   async function openEtfSectorDetail(sectorId, memberPage = 1, indexKey = '') {
-    const target = document.getElementById('rotation-etf-detail'); if (!target) return;
-    if (target.hidden || !target.contains(document.activeElement)) etfDrawerReturnFocus = document.activeElement;
-    target.hidden = false; target.setAttribute('aria-hidden','false'); target.setAttribute('aria-modal','true');
+    const preview = etfSectorCatalog.find(item => item.sector_id === sectorId) || {};
+    const target = showEtfPanel({
+      eyebrow:'SECTOR RESEARCH', title:preview.sector_name || '板块研究',
+      meta:`${preview.category || '类别待补'} · ${preview.index_count || 0} 个指数 · ${preview.member_count || 0} 只产品`,
+      tabs:[['conclusion','结论'],['trend','趋势位置'],['funds','资金证据'],['products','指数与产品']],
+    });
+    if (!target) return;
     target.dataset.etfSectorId = sectorId;
     target.dataset.etfSectorIndex = indexKey;
-    target.innerHTML = '<div class="rotation-skeleton"><span></span><span></span></div>';
     try {
       const params = new URLSearchParams({page:String(memberPage),page_size:'25'});
       if (displayedEtfSnapshotId) params.set('snapshot_id',displayedEtfSnapshotId);
@@ -1203,19 +1236,17 @@ const rotationFeature = (() => {
       const payload = await api(`/api/v1/rotation/etfs/sectors/${encodeURIComponent(sectorId)}?${params}`);
       const item=payload.data||{}, m=item.metrics||{}, funds=item.funds||{}, members=item.members||[], groups=item.index_groups||[], pagination=item.member_pagination||{};
       const eligibleCandidates = Object.values(item.candidates||{}).filter(value=>value.eligible);
-      target.innerHTML = `<div class="rotation-detail-head"><div><span class="rotation-eyebrow">SECTOR RESEARCH</span><h3>${esc(item.sector_name)}</h3><p>${esc(item.category)} · ${item.index_count||0} 个指数 · ${item.member_count||0} 只产品</p></div><button class="rotation-link" type="button" data-close-etf-panel aria-label="关闭 ${esc(item.sector_name)} 研究抽屉">关闭</button></div>
-        <div class="etf-drawer-tabs" role="tablist" aria-label="板块研究详情"><button type="button" role="tab" data-etf-drawer-tab="conclusion" aria-selected="true" tabindex="0">结论</button><button type="button" role="tab" data-etf-drawer-tab="trend" aria-selected="false" tabindex="-1">趋势位置</button><button type="button" role="tab" data-etf-drawer-tab="funds" aria-selected="false" tabindex="-1">资金证据</button><button type="button" role="tab" data-etf-drawer-tab="products" aria-selected="false" tabindex="-1">指数与产品</button></div>
-        <div class="etf-drawer-panel" data-etf-drawer-panel="conclusion"><div class="etf-conclusion"><span>主状态</span>${etfStateBadge(item)}${etfCandidateMarkup(item)}<strong>趋势 ${number(item.trend_strength,0)} · 活跃度 ${number(item.activity_score,0)}</strong><p>5 / 20 / 60 日收益：${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}；量能比 ${number(m.amount_ratio_5v20,2)}×。</p><p class="etf-invalidation"><b>下一快照失效条件</b>${esc(item.invalidation||'—')}</p>${eligibleCandidates.map(value=>`<details><summary>${esc(value.label)} · 候选</summary><p>已满足：${esc((value.met_conditions||[]).join('、')||'—')}</p><p>尚缺严格确认：${esc((value.unmet_conditions||[]).join('、')||'—')}</p></details>`).join('')}${(item.risk_badges||[]).map(badge=>`<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</div></div>
+      renderEtfPanel(target,{title:item.sector_name || preview.sector_name || '板块研究',meta:`${item.category || '类别待补'} · ${item.index_count||0} 个指数 · ${item.member_count||0} 只产品`,content:`<div class="etf-drawer-panel" data-etf-drawer-panel="conclusion"><div class="etf-conclusion"><span>主状态</span>${etfStateBadge(item)}${etfCandidateMarkup(item)}<strong>趋势 ${number(item.trend_strength,0)} · 活跃度 ${number(item.activity_score,0)}</strong><p>5 / 20 / 60 日收益：${returnPct(m.return_5d)} / ${returnPct(m.return_20d)} / ${returnPct(m.return_60d)}；量能比 ${number(m.amount_ratio_5v20,2)}×。</p><p class="etf-invalidation"><b>下一快照失效条件</b>${esc(item.invalidation||'—')}</p>${eligibleCandidates.map(value=>`<details><summary>${esc(value.label)} · 候选</summary><p>已满足：${esc((value.met_conditions||[]).join('、')||'—')}</p><p>尚缺严格确认：${esc((value.unmet_conditions||[]).join('、')||'—')}</p></details>`).join('')}${(item.risk_badges||[]).map(badge=>`<span class="etf-risk-badge">${esc(badge.label)}</span>`).join('')}</div></div>
         <div class="etf-drawer-panel" data-etf-drawer-panel="trend" hidden><div class="rotation-detail-signals"><div><span>20 日位置</span><strong>${m.position_20d==null?'—':percent(m.position_20d,0)}</strong></div><div><span>60 日阶段位置</span><strong>${m.position_60d==null?'—':percent(m.position_60d,0)}</strong></div><div><span>250 日复权位置</span><strong>${m.position_250d==null?'—':percent(m.position_250d,0)}</strong><small>${m.position_250d==null?'可核查复权证据不足，不做长期判断':`距高点 ${returnPct(m.drawdown_250d)}`}</small></div></div><h4 class="etf-chart-label">板块复权研究价格</h4><div class="rotation-chart compact" id="rotation-etf-sector-price"></div><h4 class="etf-chart-label">板块成交额</h4><div class="rotation-chart compact etf-amount-chart" id="rotation-etf-sector-amount"></div></div>
         <div class="etf-drawer-panel" data-etf-drawer-panel="funds" hidden><div class="etf-fund-proof"><span>${esc(funds.period_label || '份额变化')}</span><strong class="${tone(funds.estimated_flow)}">${esc(fundEvidenceText(funds))}</strong><p>来源 ${esc(funds.source||'—')} · 有效日 ${esc(funds.effective_date||'—')} · 覆盖 ${finite(funds.coverage)==null?'—':percent(Number(funds.coverage)*100,0)}（${{high:'高',medium:'中',low:'低'}[funds.coverage_level]||'低'}）</p><p>${esc(funds.interpretation_note||funds.provenance_note||'份额变化只代表一级市场净申购或赎回。')}</p></div><div class="rotation-chart compact" id="rotation-etf-sector-funds"></div></div>
-        <div class="etf-drawer-panel" data-etf-drawer-panel="products" hidden><label class="rotation-compact-field">规范化指数<select data-etf-sector-index><option value="">全部指数</option>${groups.map(group=>`<option value="${esc(group.index_key)}" ${item.selected_index_key===group.index_key?'selected':''}>${esc(group.normalized_index)} · ${group.member_count} 只</option>`).join('')}</select></label><div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>产品</th><th class="numeric">20日额</th><th class="numeric">规模</th><th class="numeric">60 / 250日位置</th><th class="numeric">管理费</th><th>资金状态</th></tr></thead><tbody>${members.map(member=>`<tr><td><button type="button" data-etf-detail="${esc(member.symbol)}">${esc(member.name)}</button><div class="hint">${esc(member.symbol)}${member.is_representative?' · 代表':''}</div></td><td class="numeric">${amountMoney(member.metrics?.avg_amount_20d)}</td><td class="numeric">${amountMoney(member.metadata?.total_size)}</td><td class="numeric">${member.metrics?.position_60d==null?'—':percent(member.metrics.position_60d,0)} / ${member.metrics?.position_250d==null?'—':percent(member.metrics.position_250d,0)}</td><td class="numeric">${member.metadata?.management_fee==null?'—':percent(Number(member.metadata.management_fee),2)}</td><td>${esc(fundEvidenceText(member.funds))}</td></tr>`).join('')}</tbody></table></div><div class="rotation-pagination"><span>第 ${pagination.page||1}/${pagination.pages||1} 页 · ${pagination.total||0} 只</span><div class="rotation-pagination-actions"><button type="button" data-etf-sector-member-page="${Math.max(1,(pagination.page||1)-1)}" ${pagination.has_previous?'':'disabled'}>上一页</button><button type="button" data-etf-sector-member-page="${Math.min(pagination.pages||1,(pagination.page||1)+1)}" ${pagination.has_next?'':'disabled'}>下一页</button></div></div></div>`;
+        <div class="etf-drawer-panel" data-etf-drawer-panel="products" hidden><label class="rotation-compact-field">规范化指数<select data-etf-sector-index><option value="">全部指数</option>${groups.map(group=>`<option value="${esc(group.index_key)}" ${item.selected_index_key===group.index_key?'selected':''}>${esc(group.normalized_index)} · ${group.member_count} 只</option>`).join('')}</select></label><div class="rotation-table-wrap"><table class="rotation-table"><thead><tr><th>产品</th><th class="numeric">20日额</th><th class="numeric">规模</th><th class="numeric">60 / 250日位置</th><th class="numeric">管理费</th><th>资金状态</th></tr></thead><tbody>${members.map(member=>`<tr><td><button type="button" data-etf-detail="${esc(member.symbol)}" aria-haspopup="dialog">${esc(member.name)}</button><div class="hint">${esc(member.symbol)}${member.is_representative?' · 代表':''}</div></td><td class="numeric">${amountMoney(member.metrics?.avg_amount_20d)}</td><td class="numeric">${amountMoney(member.metadata?.total_size)}</td><td class="numeric">${member.metrics?.position_60d==null?'—':percent(member.metrics.position_60d,0)} / ${member.metrics?.position_250d==null?'—':percent(member.metrics.position_250d,0)}</td><td class="numeric">${member.metadata?.management_fee==null?'—':percent(Number(member.metadata.management_fee),2)}</td><td>${esc(fundEvidenceText(member.funds))}</td></tr>`).join('')}</tbody></table></div><div class="rotation-pagination"><span>第 ${pagination.page||1}/${pagination.pages||1} 页 · ${pagination.total||0} 只</span><div class="rotation-pagination-actions"><button type="button" data-etf-sector-member-page="${Math.max(1,(pagination.page||1)-1)}" ${pagination.has_previous?'':'disabled'}>上一页</button><button type="button" data-etf-sector-member-page="${Math.min(pagination.pages||1,(pagination.page||1)+1)}" ${pagination.has_next?'':'disabled'}>下一页</button></div></div></div>`});
       const history=item.history||[];
       const price=mkChart('rotation-etf-sector-price'); if (price) price.setOption(baseOpt({grid:{left:48,right:16,top:16,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',scale:true,axisLabel:{color:MUTED},splitLine:{lineStyle:{color:GRID}}},series:[{type:'line',showSymbol:false,data:history.map(row=>[row.date,row.price]),lineStyle:{color:CHART_COLORS.primary,width:1.6},areaStyle:{opacity:.04}}]}));
       const amount=mkChart('rotation-etf-sector-amount'); if (amount) amount.setOption(baseOpt({grid:{left:62,right:16,top:14,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value=>amountMoney(value)},splitLine:{lineStyle:{color:GRID}}},series:[{type:'bar',barMaxWidth:7,data:history.map(row=>[row.date,row.amount]),itemStyle:{color:CHART_COLORS.secondary}}]}));
       const fundHistory=funds.history||[], fundChart=mkChart('rotation-etf-sector-funds');
       if (fundChart) fundChart.setOption(baseOpt({grid:{left:66,right:16,top:14,bottom:30},xAxis:timeAxis(),yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value=>money(value)},splitLine:{lineStyle:{color:GRID}}},series:[{type:'bar',barMaxWidth:8,data:fundHistory.map(row=>[row.date,row.estimated_flow]),itemStyle:{color:params=>finite(params.value[1])>=0?CHART_COLORS.up:CHART_COLORS.down}}]}));
       target.querySelector('[role="tab"]')?.focus({preventScroll:true});
-    } catch (error) { target.innerHTML = errorMarkup(error); }
+    } catch (error) { failEtfPanel(target,error); }
   }
 
   async function loadEtfCoverage() {
@@ -1245,18 +1276,19 @@ const rotationFeature = (() => {
   }
 
   async function openEtfFundHistory() {
-    const target=document.getElementById('rotation-etf-detail'); if (!target) return;
-    etfDrawerReturnFocus=document.activeElement; target.hidden=false;
-    target.setAttribute('aria-hidden','false'); target.setAttribute('aria-modal','true');
-    target.innerHTML='<div class="rotation-skeleton"><span></span><span></span></div>';
+    const target=showEtfPanel({
+      eyebrow:'SECONDARY EVIDENCE', title:'宽基 ETF 资金历史',
+      meta:'保留原有三年宽基申赎历史，仅作附加资金证据，不改变板块主状态。',
+    });
+    if (!target) return;
     try {
       const payload=await api('/api/v1/rotation/etf-flows?include_items=false');
       const data=payload.data||{}, daily=data.daily||[];
-      target.innerHTML=`<div class="rotation-detail-head"><div><span class="rotation-eyebrow">SECONDARY EVIDENCE</span><h3>宽基 ETF 资金历史</h3><p>保留原有三年宽基申赎历史，仅作附加资金证据，不改变板块主状态。</p></div><button class="rotation-link" type="button" data-close-etf-panel>关闭</button></div><div class="rotation-chart tall" id="rotation-etf-fund-history-chart"></div>`;
+      renderEtfPanel(target,{title:'宽基 ETF 资金历史',meta:'保留原有三年宽基申赎历史，仅作附加资金证据，不改变板块主状态。',content:'<div class="rotation-chart tall" id="rotation-etf-fund-history-chart"></div>'});
       const chart=mkChart('rotation-etf-fund-history-chart');
       if (chart) chart.setOption(baseOpt({legend:{top:0,textStyle:{color:INK2,fontSize:10}},grid:{left:70,right:18,top:38,bottom:54},xAxis:timeAxis(),yAxis:{type:'value',axisLabel:{color:MUTED,formatter:value=>money(value)},splitLine:{lineStyle:{color:GRID}}},dataZoom:chartZoom(daily.length,{initialPoints:260}),series:[{name:'当日净流',type:'bar',barMaxWidth:7,data:daily.map(row=>[row.date,row.flow]),itemStyle:{color:params=>finite(params.value[1])>=0?CHART_COLORS.up:CHART_COLORS.down}},{name:'累计净流',type:'line',showSymbol:false,data:daily.map(row=>[row.date,row.cumulative]),lineStyle:{color:CHART_COLORS.primary,width:1.5}}]}));
       target.querySelector('[data-close-etf-panel]')?.focus({preventScroll:true});
-    } catch (error) { target.innerHTML=errorMarkup(error); }
+    } catch (error) { failEtfPanel(target,error); }
   }
 
   async function openGroupDetail(kind, code) {
@@ -1672,17 +1704,9 @@ const rotationFeature = (() => {
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       const drawer = document.getElementById('rotation-etf-detail');
-      if (drawer && !drawer.hidden) {
+      if (drawer?.open) {
+        event.preventDefault();
         closeEtfPanel(); return;
-      }
-    }
-    const openDrawer = document.getElementById('rotation-etf-detail');
-    if (event.key === 'Tab' && openDrawer && !openDrawer.hidden) {
-      const focusable=[...openDrawer.querySelectorAll('button:not([disabled]),select:not([disabled]),input:not([disabled]),a[href],summary,[tabindex]:not([tabindex="-1"])')].filter(value=>value.getClientRects().length);
-      if (focusable.length) {
-        const first=focusable[0], last=focusable[focusable.length-1];
-        if (event.shiftKey && document.activeElement===first) { event.preventDefault(); last.focus(); return; }
-        if (!event.shiftKey && document.activeElement===last) { event.preventDefault(); first.focus(); return; }
       }
     }
     const drawerTab = event.target.closest('[data-etf-drawer-tab]');
@@ -1796,6 +1820,7 @@ const rotationFeature = (() => {
     clearTimeout(searchTimer);
     searchTimer = 0;
     activeJob = null;
+    closeEtfPanel();
     window.QuantCharts?.activateTab('');
   }
 
