@@ -2107,6 +2107,13 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             raise ValueError("账户已暂停或归档，不能生成新提案")
+
+        def clear_resolved_proposal_warning() -> None:
+            if str(account.get("runtime_warning") or "").startswith(
+                "提案行情证据未通过正式门禁："
+            ):
+                self.store.clear_runtime_warning(account_id)
+
         eligible_symbols = list(account["universe_snapshot"].get("symbols") or [])
         symbols = list(eligible_symbols)
         symbols.extend(
@@ -2189,6 +2196,7 @@ class PaperService:
             close.index,
             len(close.index) - 1,
         ):
+            clear_resolved_proposal_warning()
             return {
                 "status": "not_due",
                 "account_id": account_id,
@@ -2216,6 +2224,7 @@ class PaperService:
         weights_frame = signal_bundle.weights
         latest_signal = weights_frame.iloc[-1]
         if not latest_signal.notna().any():
+            clear_resolved_proposal_warning()
             return {
                 "status": "signal_withheld",
                 "account_id": account_id,
@@ -2276,6 +2285,8 @@ class PaperService:
         if force_transition and cycle.get("id"):
             self.store.clear_strategy_transition(account_id, account["strategy_hash"])
             self.store.clear_runtime_warning(account_id)
+        else:
+            clear_resolved_proposal_warning()
         cycle["created"] = created
         cycle["ledger_written"] = False
         return cycle
