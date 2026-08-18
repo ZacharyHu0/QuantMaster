@@ -123,6 +123,36 @@ def normalize_stockdb_no_trade_bars(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _normalize_official_trade_days(payload: Any, start: date, end: date) -> list[str]:
+    if isinstance(payload, dict):
+        detail = str(payload.get("error") or "返回对象不是交易日数组")
+        raise FreeStockDBProviderError(f"free-stockdb 官方交易日历错误：{detail}")
+    if isinstance(payload, (str, bytes)) or payload is None:
+        raise FreeStockDBProviderError("free-stockdb 官方交易日历合同错误：预期日期数组")
+    try:
+        values = list(payload)
+    except TypeError as exc:
+        raise FreeStockDBProviderError(
+            "free-stockdb 官方交易日历合同错误：预期日期数组"
+        ) from exc
+    sessions: set[date] = set()
+    for raw in values:
+        try:
+            session = date.fromisoformat(str(raw)[:10])
+        except ValueError as exc:
+            raise FreeStockDBProviderError(
+                f"free-stockdb 官方交易日历包含无效日期：{str(raw)[:32]}"
+            ) from exc
+        if not start <= session <= end:
+            raise FreeStockDBProviderError(
+                f"free-stockdb 官方交易日历返回越界日期：{session.isoformat()}"
+            )
+        sessions.add(session)
+    if not sessions:
+        raise FreeStockDBProviderError("free-stockdb 官方交易日历返回空数组")
+    return [item.isoformat() for item in sorted(sessions)]
+
+
 class FreeStockDBSource(DataSource):
     """Read A-share bars and board metadata from user-managed free-stockdb."""
 
@@ -1260,33 +1290,7 @@ class FreeStockDBOnlineSource(FreeStockDBSource):
             raise FreeStockDBProviderError(
                 str(exc).strip() or "free-stockdb 官方交易日历调用失败"
             ) from exc
-        if isinstance(payload, dict):
-            detail = str(payload.get("error") or "返回对象不是交易日数组")
-            raise FreeStockDBProviderError(f"free-stockdb 官方交易日历错误：{detail}")
-        if isinstance(payload, (str, bytes)) or payload is None:
-            raise FreeStockDBProviderError("free-stockdb 官方交易日历合同错误：预期日期数组")
-        try:
-            values = list(payload)
-        except TypeError as exc:
-            raise FreeStockDBProviderError(
-                "free-stockdb 官方交易日历合同错误：预期日期数组"
-            ) from exc
-        sessions: set[date] = set()
-        for raw in values:
-            try:
-                session = date.fromisoformat(str(raw)[:10])
-            except ValueError as exc:
-                raise FreeStockDBProviderError(
-                    f"free-stockdb 官方交易日历包含无效日期：{str(raw)[:32]}"
-                ) from exc
-            if not start <= session <= end:
-                raise FreeStockDBProviderError(
-                    f"free-stockdb 官方交易日历返回越界日期：{session.isoformat()}"
-                )
-            sessions.add(session)
-        if not sessions:
-            raise FreeStockDBProviderError("free-stockdb 官方交易日历返回空数组")
-        return [item.isoformat() for item in sorted(sessions)]
+        return _normalize_official_trade_days(payload, start, end)
 
 
 def register_free_stockdb_calendar() -> None:
