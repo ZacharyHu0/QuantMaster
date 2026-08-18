@@ -411,7 +411,8 @@
 .trading-status.failed,
 .trading-status.stalled,
 .trading-status.orphaned,
-.trading-status.manual_recovery { border-color: color-mix(in oklch, var(--bad) 48%, transparent); color: color-mix(in oklch, var(--bad) 75%, var(--ink)); }
+.trading-status.manual_recovery,
+.trading-status.unproven { border-color: color-mix(in oklch, var(--bad) 48%, transparent); color: color-mix(in oklch, var(--bad) 75%, var(--ink)); }
 .trading-status.blocked,
 .trading-status.waiting_market_open,
 .trading-status.waiting_price,

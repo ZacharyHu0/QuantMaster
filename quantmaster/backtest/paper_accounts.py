@@ -54,9 +54,9 @@ from quantmaster.trading_sessions import (
 )
 
 logger = logging.getLogger(__name__)
-PAPER_SCHEMA_VERSION = 5
+PAPER_SCHEMA_VERSION = 6
 ORDER_TERMINAL_STATUSES = frozenset({
-    "filled", "cancelled", "expired", "rejected", "superseded", "skipped",
+    "filled", "cancelled", "expired", "rejected", "superseded", "skipped", "unproven",
 })
 ORDER_WAITING_STATUSES = frozenset({
     "waiting_market_open", "waiting_price", "waiting_market_data", "waiting_external",
@@ -331,6 +331,12 @@ class PaperStore:
                 "AND integrity_code=''"
             )
 
+        def schema_v6(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE paper_orders SET status='unproven' "
+                "WHERE status='filled' AND integrity_code='legacy_fill_unproven'"
+            )
+
         with self._conn() as conn:
             migrate_schema(
                 conn,
@@ -338,7 +344,8 @@ class PaperStore:
                     (1, schema_v1),
                     (2, schema_v2),
                     (4, schema_v4),
-                    (PAPER_SCHEMA_VERSION, schema_v5),
+                    (5, schema_v5),
+                    (6, schema_v6),
                 ),
             )
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION
 from scripts.paper_recovery import (
     apply_recovery,
     inspect_database,
@@ -97,7 +98,7 @@ def test_true_v4_42_plan_and_apply_is_noop_on_second_run(tmp_path):
         database, tmp_path / "backups", confirmed_path=str(database), test_db=True,
     )
     assert first["before"]["user_version"] == 4
-    assert first["after"]["user_version"] == 5
+    assert first["after"]["user_version"] == PAPER_SCHEMA_VERSION
     assert first["affected_rows"] == 24
     assert second["noop"] is True and second["affected_rows"] == 0
     with sqlite3.connect(database) as conn:

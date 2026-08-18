@@ -4,6 +4,7 @@ import json
 import os
 from types import SimpleNamespace
 
+from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION
 from quantmaster.runtime.identity import get_application_identity
 from quantmaster.server.cli import main
 from quantmaster.server.doctor import _api_issues, _route_paths, run_doctor
@@ -38,7 +39,7 @@ def test_deep_doctor_checks_runtime_storage_architecture_and_api(isolated_config
         "status": "ok", "current": 8, "expected": 8,
     }
     assert operations["database_schemas"]["paper"] == {
-        "status": "ok", "current": 5, "expected": 5,
+        "status": "ok", "current": PAPER_SCHEMA_VERSION, "expected": PAPER_SCHEMA_VERSION,
     }
 
 
