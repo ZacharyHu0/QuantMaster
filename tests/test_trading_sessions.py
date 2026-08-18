@@ -222,6 +222,36 @@ def test_newer_strict_stockdb_marker_advances_stale_research_lake(
     assert result.source == "stockdb:validated"
 
 
+def test_one_session_stockdb_lag_uses_explicit_previous_accepted_session(
+    isolated_config,
+):
+    isolated_config.data.free_stockdb_root = str(isolated_config.data_root / "stockdb-runtime")
+    root = isolated_config.free_stockdb_root
+    root.mkdir(parents=True, exist_ok=True)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": "2026-08-13",
+        "target_session": "2026-08-13",
+        "updated_at": "2026-08-13T18:33:49+08:00",
+        "validation": {
+            "accepted": True,
+            "complete": True,
+            "target_session": "2026-08-13",
+            "actual_session": "2026-08-13",
+        },
+    }), encoding="utf-8")
+
+    result = FixtureResolver(["2026-08-13", "2026-08-14"]).resolve(
+        datetime(2026, 8, 14, 20, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.ready is True
+    assert result.session == "2026-08-13"
+    assert result.source == "stockdb:validated"
+    assert result.completion == "previous_session_complete"
+    assert "上一已验收会话" in result.reason
+
+
 def test_stockdb_marker_is_fail_closed_and_obeys_close_cutoff(
     isolated_config, monkeypatch,
 ):
