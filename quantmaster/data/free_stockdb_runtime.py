@@ -657,6 +657,96 @@ class FreeStockDBRuntime:
         except OSError:
             return
 
+    @staticmethod
+    def _post_windows_close(pid: int) -> bool:
+        """Post WM_CLOSE only to top-level windows owned by one tracked PID."""
+        if os.name != "nt":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL(  # type: ignore[attr-defined]
+                "user32", use_last_error=True,
+            )
+            callback_type = ctypes.WINFUNCTYPE(  # type: ignore[attr-defined]
+                wintypes.BOOL, wintypes.HWND, wintypes.LPARAM,
+            )
+            handles = []
+
+            @callback_type
+            def visit(window, _parameter):
+                owner = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+                if int(owner.value) == int(pid):
+                    handles.append(window)
+                return True
+
+            user32.EnumWindows(visit, 0)
+            posted = False
+            for window in handles:
+                posted = bool(user32.PostMessageW(window, 0x0010, 0, 0)) or posted
+            return posted
+        except (AttributeError, OSError, TypeError, ValueError):
+            logger.warning("无法向 free-stockdb 更新器发送正常关闭请求", exc_info=True)
+            return False
+
+    @classmethod
+    def _close_process_window(
+        cls, process: subprocess.Popen[bytes], *, timeout: float = 3,
+    ) -> bool:
+        """Request a normal window close without terminating the process."""
+        if process.poll() is not None:
+            return True
+        if not cls._post_windows_close(int(process.pid)):
+            return process.poll() is not None
+        try:
+            process.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return process.poll() is not None
+        except OSError:
+            return process.poll() is not None
+
+    def _check_stable_updater_data(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        target: str,
+        trigger: str,
+        baseline: tuple[tuple[str, int, int], ...],
+        current: tuple[tuple[str, int, int], ...],
+        stable_for: float,
+        validated: tuple[tuple[str, int, int], ...] | None,
+        accepted: tuple[tuple[str, int, int], ...] | None,
+    ) -> tuple[
+        tuple[tuple[str, int, int], ...] | None,
+        tuple[tuple[str, int, int], ...] | None,
+        bool,
+    ]:
+        if current == baseline or stable_for < _DATA_STABILITY_SECONDS:
+            return validated, accepted, False
+        if validated != current:
+            from quantmaster.data.free_stockdb_source import _invalidate_sdk_clients
+
+            self._set_status(
+                "updating", f"数据已稳定，正在验收 {target}",
+                phase="validating", trigger=trigger, update_result="validating",
+                target_session=target,
+            )
+            _invalidate_sdk_clients()
+            validation = self._validate_data(target)
+            validated = current
+            accepted = current if validation.get("accepted") else None
+            if accepted is None:
+                self._set_status(
+                    "updating", "数据已变化，但目标日尚未通过验收，继续等待",
+                    phase="syncing", trigger=trigger, update_result="running",
+                    target_session=target, validation=validation,
+                )
+        closed = accepted == current and self._close_process_window(process)
+        return validated, accepted, closed
+
     def _stop_service(self) -> bool:
         process = self._process
         if not self._daemon_started and process is None:
@@ -673,9 +763,12 @@ class FreeStockDBRuntime:
             self._clear_process_owner()
         return stopped
 
-    def _run_updater(self, updater: Path, root: Path, *, trigger: str) -> int:
-        # 当前发行包没有公开、可验证的静默参数。手动触发时保留原生窗口，
-        # 避免隐藏的模态完成框令 sidecar 永久等待。
+    def _run_updater(
+        self, updater: Path, root: Path, *, trigger: str, target: str,
+    ) -> int:
+        # 当前发行包没有公开、可验证的静默参数，因此保留原生窗口；只有
+        # 本地目标日验收通过后才按本次 PID 请求正常关闭。
+        baseline = self._data_fingerprint(root)
         process = subprocess.Popen(
             [str(updater)], cwd=root, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -684,11 +777,21 @@ class FreeStockDBRuntime:
             self._updater_process = process
         deadline = time.monotonic() + _UPDATER_TIMEOUT_SECONDS
         started = time.monotonic()
+        previous = baseline
+        stable_since = started
+        next_data_check = started
+        validated_fingerprint = None
+        accepted_fingerprint = None
         try:
             while process.poll() is None:
+                accepted = accepted_fingerprint == previous
                 self._set_status(
-                    "updating", "正在同步 free-stockdb 本地数据",
-                    phase="syncing", elapsed_seconds=int(time.monotonic() - started),
+                    "updating", (
+                        "本地数据已验收，正在等待更新器窗口正常关闭"
+                        if accepted else "正在同步 free-stockdb 本地数据"
+                    ),
+                    phase="closing" if accepted else "syncing",
+                    elapsed_seconds=int(time.monotonic() - started),
                     trigger=trigger, update_result="running",
                 )
                 if self._stop.wait(0.5):
@@ -697,6 +800,28 @@ class FreeStockDBRuntime:
                 if time.monotonic() >= deadline:
                     self._terminate_process(process, timeout=5)
                     raise subprocess.TimeoutExpired(str(updater), _UPDATER_TIMEOUT_SECONDS)
+                now = time.monotonic()
+                if now < next_data_check:
+                    continue
+                next_data_check = now + _DATA_QUIESCENCE_POLL_SECONDS
+                current = self._data_fingerprint(root)
+                if current != previous:
+                    previous = current
+                    stable_since = now
+                    validated_fingerprint = None
+                    accepted_fingerprint = None
+                    continue
+                validated_fingerprint, accepted_fingerprint, closed = (
+                    self._check_stable_updater_data(
+                        process, target=target, trigger=trigger,
+                        baseline=baseline, current=current,
+                        stable_for=now - stable_since,
+                        validated=validated_fingerprint,
+                        accepted=accepted_fingerprint,
+                    )
+                )
+                if closed:
+                    return int(process.returncode or 0)
             return int(process.returncode or 0)
         finally:
             with self._lock:
@@ -705,11 +830,16 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _data_roots(root: Path) -> tuple[Path, ...]:
-        return tuple(
-            base for base in (
-                root / "data", root / "data1", root / "mydb", root / "数据库",
-            ) if base.is_dir()
-        )
+        try:
+            partitions = [
+                path for path in root.iterdir()
+                if path.is_dir() and re.fullmatch(r"data\d*", path.name, re.IGNORECASE)
+            ]
+        except OSError:
+            return ()
+        return tuple(sorted(
+            partitions, key=lambda path: int(path.name[4:] or 0),
+        ))
 
     @classmethod
     def _data_fingerprint(cls, root: Path) -> tuple[tuple[str, int, int], ...]:
@@ -1256,7 +1386,7 @@ class FreeStockDBRuntime:
         code = -1
         updater_error = ""
         try:
-            code = self._run_updater(updater, root, trigger=trigger)
+            code = self._run_updater(updater, root, trigger=trigger, target=target)
         except subprocess.TimeoutExpired:
             updater_error = "原生更新器运行超过 30 分钟，已终止"
             logger.error(updater_error)
