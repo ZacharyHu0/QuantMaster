@@ -1814,7 +1814,7 @@ class PaperService:
             native,
             symbols,
             start,
-            end,
+            covered_end,
             evidence="accepted-v2-native-qfq",
         )
 
@@ -1849,17 +1849,13 @@ class PaperService:
                     str(symbol) for symbol in matrix.columns[matrix.loc[available_end].isna()]
                 )
         latest = panels["close"].index.max() if not panels["close"].empty else None
-        if (
-            missing_symbols
-            or latest is None
-            or pd.Timestamp(latest).normalize() < available_end
-        ):
+        if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < pd.Timestamp(end):
             issues = []
             if missing_symbols:
                 issues.append("缺少标的：" + "、".join(sorted(missing_symbols)))
             if latest is None:
                 issues.append("没有可用收盘行情")
-            elif pd.Timestamp(latest).normalize() < available_end:
+            elif pd.Timestamp(latest).normalize() < pd.Timestamp(end):
                 issues.append(f"最新行情仅到 {pd.Timestamp(latest).date()}")
             quality = BarDataQuality(
                 "unavailable",
