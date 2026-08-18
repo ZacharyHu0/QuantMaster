@@ -137,8 +137,9 @@ def test_etf_generation_only_recomputes_temperature_and_etf_nodes(tmp_path, monk
     names = {symbol: f"股票{index}" for index, symbol in enumerate(symbols)}
     market_reads: list[str] = []
 
-    def load_values(*, progress, cancelled, target_as_of=""):
+    def load_values(*, progress, cancelled, target_as_of="", purpose="display"):
         assert target_as_of == ""
+        assert purpose == "current_analysis"
         assert not cancelled()
         market_reads.append("read")
         return close, amount, names, len(symbols), ["test:local"]
