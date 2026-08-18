@@ -1890,6 +1890,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "后台撮合任务" in trading_script
     assert "订单业务状态" in trading_script
     assert "核心数量冲突" in trading_script
+    assert "const PAPER_EPOCH_MILLISECONDS_THRESHOLD = 100_000_000_000;" in trading_script
+    assert "epoch < PAPER_EPOCH_MILLISECONDS_THRESHOLD ? epoch * 1000 : epoch" in trading_script
     assert "unproven: '成交待核验'" in trading_script
     assert "历史订单没有可验证的 fill 明细" in trading_script
     assert "收益报告待核验" in trading_script

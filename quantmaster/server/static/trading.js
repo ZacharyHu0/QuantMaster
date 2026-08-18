@@ -839,9 +839,16 @@ const tradingFeature = (() => {
     return `${statusLabel[order.status] || order.status}${reason}`;
   }
 
+  const PAPER_EPOCH_MILLISECONDS_THRESHOLD = 100_000_000_000;
+
   function timeValue(value) {
-    if (!value) return '—';
-    const parsed = new Date(value);
+    const raw = String(value ?? '').trim();
+    if (!raw) return '—';
+    const epoch = /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : Number.NaN;
+    if (epoch === 0) return '—';
+    const parsed = Number.isFinite(epoch)
+      ? new Date(epoch < PAPER_EPOCH_MILLISECONDS_THRESHOLD ? epoch * 1000 : epoch)
+      : new Date(raw);
     return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', {hour12: false});
   }
 
