@@ -243,6 +243,25 @@ class SessionExpectationResolver:
                 expected, "research_lake", True, "已验证本地交易分区",
                 "current_session_complete", "Asia/Shanghai", cutoff_iso, coverage,
             )
+        previous_official = _latest_not_after(
+            official_sessions,
+            date.fromisoformat(expected) - timedelta(days=1),
+        ) if expected else ""
+        if (
+            stockdb_session
+            and stockdb_completion == "current_session_complete"
+            and stockdb_session == previous_official
+        ):
+            return SessionExpectation(
+                stockdb_session,
+                "stockdb:validated",
+                True,
+                "当前官方会话等待本地验收；使用上一已验收会话",
+                "previous_session_complete",
+                "Asia/Shanghai",
+                cutoff_iso,
+                coverage,
+            )
         if expected:
             return SessionExpectation(
                 expected, self._official_source_name(), False,
