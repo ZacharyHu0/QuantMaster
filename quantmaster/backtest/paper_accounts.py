@@ -1749,18 +1749,51 @@ class PaperService:
         A new paper account has no managed-bar cache yet.  Rebuilding that cache
         through the ordinary provider path would require independent calendar
         evidence a StockDB-accepted native qfq snapshot already carries.  Read
-        the native contract directly instead; it is local-only and fails closed
-        unless the accepted marker covers ``end``.
+        the native contract directly instead.  It is local-only, preserves the
+        accepted frontier exactly, and leaves the caller to enforce its normal
+        freshness window when that frontier precedes ``end``.
         """
 
         from quantmaster.data.free_stockdb_ingest import StockDBIngestService
+        from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
         requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        requested_end = pd.Timestamp(end).normalize()
+        if acceptance is None:
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                sources=("free-stockdb",),
+                issues=("没有覆盖正式提案窗口的 accepted StockDB v2 验收记录",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        available_end = min(requested_end, pd.Timestamp(acceptance.session).normalize())
+        if available_end < pd.Timestamp(start).normalize():
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                observed_end=available_end.date().isoformat(),
+                sources=("free-stockdb",),
+                issues=("accepted StockDB 的最新会话早于正式提案窗口",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        covered_end = available_end.date().isoformat()
         try:
             native = StockDBIngestService().read_native_research_history(
                 list(requested),
                 start,
-                end,
+                covered_end,
                 progress=lambda *_args: None,
                 cancelled=lambda: False,
             )
@@ -1791,13 +1824,17 @@ class PaperService:
             panels[field] = matrix
             missing_symbols.update(str(symbol) for symbol in matrix.columns[matrix.isna().all()])
         latest = panels["close"].index.max() if not panels["close"].empty else None
-        if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < pd.Timestamp(end):
+        if (
+            missing_symbols
+            or latest is None
+            or pd.Timestamp(latest).normalize() < available_end
+        ):
             issues = []
             if missing_symbols:
                 issues.append("缺少标的：" + "、".join(sorted(missing_symbols)))
             if latest is None:
                 issues.append("没有可用收盘行情")
-            elif pd.Timestamp(latest).normalize() < pd.Timestamp(end):
+            elif pd.Timestamp(latest).normalize() < available_end:
                 issues.append(f"最新行情仅到 {pd.Timestamp(latest).date()}")
             quality = BarDataQuality(
                 "unavailable",
