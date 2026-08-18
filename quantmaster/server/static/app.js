@@ -200,6 +200,7 @@ function humanSourceName(value) {
   if (lower.startsWith('tushare')) return 'Tushare';
   if (lower.startsWith('akshare')) return 'AKShare';
   if (lower.startsWith('yfinance') || lower.startsWith('yahoo')) return 'Yahoo Finance';
+  if (lower.startsWith('xiaoshi')) return '小石大数据';
   if (lower.startsWith('ths')) return '同花顺';
   if (lower.startsWith('eastmoney')) return '东方财富';
   return raw.replace(/[-_:]+/g, ' ');

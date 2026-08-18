@@ -480,6 +480,11 @@ class NewsSourceStore:
         now = _utc_iso()
         with self._conn() as conn:
             for item in BUILTIN_SOURCES:
+                enabled = (
+                    get_config().data.xiaoshi_news_enabled
+                    if item["id"] == "xiaoshi"
+                    else item.get("enabled", True)
+                )
                 conn.execute(
                     "INSERT INTO news_sources "
                     "(id,name,kind,enabled,group_name,url,item_limit,max_age_hours,factor_weight,is_official,"
@@ -489,9 +494,10 @@ class NewsSourceStore:
                     "ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind='builtin',"
                     "url=excluded.url,is_official=excluded.is_official,"
                     "needs_credentials=excluded.needs_credentials,built_in=1,"
-                    "enabled=CASE WHEN excluded.needs_credentials=1 THEN 0 ELSE enabled END",
+                    "enabled=CASE WHEN excluded.id='xiaoshi' THEN excluded.enabled "
+                    "WHEN excluded.needs_credentials=1 THEN 0 ELSE enabled END",
                     (item["id"], item["name"], item["kind"],
-                     int(item.get("enabled", True)), item["group_name"],
+                     int(enabled), item["group_name"],
                      item["url"], int(item.get("item_limit", 30)),
                      float(item["max_age_hours"]), 1.0,
                      int(item["is_official"]), int(item.get("needs_credentials", False)),

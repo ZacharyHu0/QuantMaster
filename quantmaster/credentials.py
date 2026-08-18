@@ -35,6 +35,10 @@ class CredentialStore:
         return "data:tushare"
 
     @staticmethod
+    def xiaoshi_target() -> str:
+        return "data:xiaoshi"
+
+    @staticmethod
     def settings_check_fingerprint_target() -> str:
         """Return the private key slot used to authenticate persisted check fingerprints."""
         return "settings:check-fingerprint-key"

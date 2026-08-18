@@ -4,7 +4,7 @@ const settingsFeature = (() => {
   const state = {
     loaded: false,
     config: null,
-    secretActions: { llm: 'keep', tushare: 'keep' },
+    secretActions: { llm: 'keep', tushare: 'keep', xiaoshi: 'keep' },
     migrationTimer: null,
     migrationId: '',
     dataRefreshTimer: null,
@@ -179,7 +179,7 @@ const settingsFeature = (() => {
     document.getElementById('settings-config-path').textContent = config.config_path;
     renderFieldSources(config.field_sources || {});
     updateSecretStates(config);
-    for (const name of ['llm', 'tushare']) {
+    for (const name of ['llm', 'tushare', 'xiaoshi']) {
       document.getElementById(`${name}-secret`).value = '';
       state.secretActions[name] = 'keep';
     }
@@ -280,7 +280,7 @@ const settingsFeature = (() => {
   }
 
   function updateSecretStates(config) {
-    for (const name of ['llm', 'tushare']) {
+    for (const name of ['llm', 'tushare', 'xiaoshi']) {
       const secret = config.secrets[name];
       const suffix = secret.tail ? ` · 末尾 ${secret.tail}` : '';
       const label = `${secret.present ? '已配置' : '未配置'} · ${secret.source || secret.state}${suffix}`;
@@ -366,11 +366,15 @@ const settingsFeature = (() => {
       'data.free_stockdb_sdk_path', 'data.free_stockdb_online_enabled',
       'data.free_stockdb_online_url', 'data.free_stockdb_online_timeout',
       'data.akshare_enabled', 'data.tushare_enabled',
-      'data.yfinance_enabled'].includes(name)) markCheckStale('data-sources');
+      'data.yfinance_enabled', 'data.xiaoshi_realtime_enabled',
+      'data.xiaoshi_history_enabled', 'data.xiaoshi_minute_enabled',
+      'data.xiaoshi_news_enabled', 'data.xiaoshi_timeline_enabled']
+      .includes(name)) markCheckStale('data-sources');
     if (input.id === 'tushare-secret') {
       markCheckStale('tushare');
       markCheckStale('lab');
     }
+    if (input.id === 'xiaoshi-secret') markCheckStale('xiaoshi');
     if (['lab.universe', 'lab.device'].includes(name)) markCheckStale('lab');
     if (name.startsWith('server.')) markCheckStale('server');
   }
@@ -379,9 +383,9 @@ const settingsFeature = (() => {
     const input = event.target;
     if (input.id === 'plaintext-confirm' || input.id === 'feishu-app-secret' ||
         input.id === 'weixin-verify-code') return;
-    if (!input.name && !['llm-secret', 'tushare-secret'].includes(input.id)) return;
+    if (!input.name && !['llm-secret', 'tushare-secret', 'xiaoshi-secret'].includes(input.id)) return;
     markDependentChecksStale(input);
-    if (input.id === 'llm-secret' || input.id === 'tushare-secret') {
+    if (['llm-secret', 'tushare-secret', 'xiaoshi-secret'].includes(input.id)) {
       const name = input.id.replace('-secret', '');
       state.secretActions[name] = input.value ? 'replace' : 'keep';
       if (input.id === 'llm-secret') scheduleAutomaticModelCheck();
@@ -412,17 +416,17 @@ const settingsFeature = (() => {
         return;
       }
     }
-    if (input.name || ['llm-secret', 'tushare-secret'].includes(input.id)) scheduleAutosave(0);
+    if (input.name || ['llm-secret', 'tushare-secret', 'xiaoshi-secret'].includes(input.id)) scheduleAutosave(0);
   });
 
   form.addEventListener('focusout', event => {
     const input = event.target;
     if (input.id === 'feishu-app-secret' || input.id === 'weixin-verify-code') return;
-    if (input.name || ['llm-secret', 'tushare-secret'].includes(input.id)) scheduleAutosave(0);
+    if (input.name || ['llm-secret', 'tushare-secret', 'xiaoshi-secret'].includes(input.id)) scheduleAutosave(0);
   });
 
   form.addEventListener('keydown', event => {
-    if (event.key !== 'Enter' || !['llm-secret', 'tushare-secret'].includes(event.target.id)) return;
+    if (event.key !== 'Enter' || !['llm-secret', 'tushare-secret', 'xiaoshi-secret'].includes(event.target.id)) return;
     event.preventDefault();
     event.target.blur();
   });
@@ -482,7 +486,7 @@ const settingsFeature = (() => {
     });
     if (includeSecrets) {
       payload.secrets = {};
-      for (const name of ['llm', 'tushare']) {
+      for (const name of ['llm', 'tushare', 'xiaoshi']) {
         const action = state.secretActions[name];
         payload.secrets[name] = {action};
         if (action === 'replace') payload.secrets[name].value = document.getElementById(`${name}-secret`).value;
@@ -820,7 +824,7 @@ const settingsFeature = (() => {
         state.config = {...result.settings, runtime: result.runtime};
         updateSecretStates(state.config);
       }
-      for (const name of ['llm', 'tushare']) {
+      for (const name of ['llm', 'tushare', 'xiaoshi']) {
         const sent = secretPayload.secrets[name];
         const input = document.getElementById(`${name}-secret`);
         const unchangedReplace = sent.action === 'replace' &&

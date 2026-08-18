@@ -8,7 +8,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode, urljoin
 from zoneinfo import ZoneInfo
@@ -1012,7 +1012,79 @@ def fetch_nbs_rss(
     )
 
 
+def fetch_xiaoshi(
+    source: dict[str, Any], store: NewsSourceStore, watermark: str, limit: int,
+) -> FetchBatch:
+    """Consume Xiaoshi's durable ``after_id`` cursor without offset scans."""
+    from quantmaster.config import get_config
+    from quantmaster.data.xiaoshi_source import get_xiaoshi_client
+
+    if not get_config().data.xiaoshi_news_enabled:
+        raise NewsProviderError("小石新闻已在设置中关闭", code="source_disabled", retryable=False)
+    try:
+        after_id = int(watermark or 0)
+    except ValueError as exc:
+        raise NewsContractError("小石新闻水位不是整数", code="xiaoshi_watermark") from exc
+    page_size = max(1, min(100, int(source.get("item_limit") or limit or 100)))
+    window: dict[str, str] = {}
+    if after_id == 0:
+        now = datetime.now(UTC)
+        window = {
+            "since": (now - timedelta(days=7)).isoformat(),
+            "until": now.isoformat(),
+        }
+    payload = get_xiaoshi_client().news(after_id=after_id, page_size=page_size, **window)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        raise NewsContractError("小石新闻响应缺少 data 列表", code="xiaoshi_contract")
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    raw_key = store.save_response(
+        source["id"], source["url"], raw, httpx.Headers(), 200, official=False,
+    )
+    articles: list[FetchedArticle] = []
+    latest_published_at = float(source.get("_state_latest_published_at") or 0.0)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        provider_id = str(row.get("id") or "").strip()
+        title = _clean_text(row.get("title"))
+        if not provider_id or not title:
+            continue
+        published, published_epoch = normalize_published_at(row.get("pub_time"))
+        latest_published_at = max(latest_published_at, published_epoch)
+        content = _clean_text(row.get("content") or row.get("ai_summary") or title)
+        articles.append(FetchedArticle(
+            source=source["id"],
+            title=title,
+            content=content,
+            url=str(row.get("original_url") or row.get("source_url") or row.get("url") or ""),
+            published_at=published,
+            published_at_epoch=published_epoch,
+            fetched_at=time.time(),
+            provider_item_id=provider_id,
+            raw_cache_key=raw_key,
+            content_scope="provider_excerpt",
+        ))
+    next_after_id = str(payload.get("next_after_id") or after_id)
+    if not articles:
+        return _unchanged_batch(source, next_after_id, [raw_key], latest_published_at)
+    health, error_code, message = _freshness(source, latest_published_at, watermark)
+    return FetchBatch(
+        source_id=source["id"],
+        articles=articles,
+        watermark=next_after_id,
+        previous_watermark=watermark,
+        health=health,
+        complete=True,
+        raw_cache_keys=[raw_key],
+        error_code=error_code,
+        message=message,
+        latest_published_at=latest_published_at,
+    )
+
+
 BUILTIN_PROVIDERS: dict[str, Provider] = {
+    "xiaoshi": fetch_xiaoshi,
     "sina_live": fetch_sina_live,
     "eastmoney_fast": fetch_eastmoney_fast,
     "csrc": fetch_csrc,

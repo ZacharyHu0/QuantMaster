@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.analysis.stock_protocol import run_stock_analysis_v2
+from quantmaster.config import get_config
 from quantmaster.data.base import BarDataEnvelope
 from quantmaster.trading_sessions import market_date
 
@@ -658,10 +659,25 @@ def _default_industry(symbol: str) -> str:
 
 def _framework_text() -> str:
     try:
-        return resources.files("quantmaster.skills").joinpath(
+        framework = resources.files("quantmaster.skills").joinpath(
             "stock-analysis-framework/SKILL.md").read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):
-        return "六维股票分析：基本面、技术面、消息面、资金面、心理面、宏观政策面。"
+        framework = "六维股票分析：基本面、技术面、消息面、资金面、心理面、宏观政策面。"
+    cfg = get_config().data
+    if cfg.xiaoshi_api_key and any((
+        cfg.xiaoshi_realtime_enabled,
+        cfg.xiaoshi_history_enabled,
+        cfg.xiaoshi_minute_enabled,
+        cfg.xiaoshi_news_enabled,
+        cfg.xiaoshi_timeline_enabled,
+    )):
+        try:
+            from quantmaster.skills import load_xiaoshi_quant_skill
+
+            framework += "\n\n" + load_xiaoshi_quant_skill()
+        except Exception as exc:
+            logger.warning("小石量化 Skill 暂不可用，继续使用已内置研究框架: %s", type(exc).__name__)
+    return framework
 
 
 def _rule_conclusion(dimensions: list[dict[str, Any]], quote: dict[str, Any]) -> dict[str, Any]:
