@@ -623,6 +623,9 @@ def test_paper_proposal_blocks_when_local_stockdb_bootstrap_is_unverified(tmp_pa
         service.propose(account["id"])
 
     assert stockdb_calls
+    assert service.store.account(account["id"])["runtime_warning"].startswith(
+        "提案行情证据未通过正式门禁："
+    )
     assert service.store.cycles(account["id"]) == []
     assert service.store.ledger(account["id"]).trades().empty
 
@@ -753,6 +756,20 @@ def test_weekly_paper_signal_is_not_fabricated_midweek(tmp_path):
     result = service.propose(account["id"], panel=price_panel(dates))
     assert result["status"] == "not_due"
     assert service.store.cycles(account["id"]) == []
+
+
+def test_weekly_not_due_clears_resolved_proposal_gate_warning(tmp_path):
+    service, account = make_paper_service(tmp_path, rebalance="W")
+    service.store.set_runtime_warning(
+        account["id"], "提案行情证据未通过正式门禁：本地快照不完整",
+    )
+
+    result = service.propose(
+        account["id"], panel=price_panel(pd.bdate_range("2024-01-01", periods=3)),
+    )
+
+    assert result["status"] == "not_due"
+    assert service.store.account(account["id"])["runtime_warning"] == ""
 
 
 def test_paper_accounts_are_isolated_and_strategy_snapshot_is_immutable(tmp_path):
