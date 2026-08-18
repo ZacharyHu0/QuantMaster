@@ -40,7 +40,7 @@ from quantmaster.backtest.spec import (
     signal_is_due,
 )
 from quantmaster.config import get_config
-from quantmaster.data.base import DataEvidenceNotReady
+from quantmaster.data.base import BarDataQuality, DataEvidenceNotReady
 from quantmaster.data.cache_freshness import CachePurpose
 from quantmaster.data.schema_access import register_paper_store, register_schema_target
 from quantmaster.data.semantics import NumericSemantics, PriceType
@@ -1738,6 +1738,128 @@ class PaperService:
             if value is not None and math.isfinite(float(value)) and float(value) > 0
         }
 
+    @staticmethod
+    def _accepted_stockdb_panel(
+        symbols: list[str],
+        start: str,
+        end: str,
+    ) -> dict[str, pd.DataFrame]:
+        """Read a formal panel directly from an accepted local StockDB v2 snapshot.
+
+        A new paper account has no managed-bar cache yet.  Rebuilding that cache
+        through the ordinary provider path would require independent calendar
+        evidence a StockDB-accepted native qfq snapshot already carries.  Read
+        the native contract directly instead.  It is local-only, preserves the
+        accepted frontier exactly, and leaves the caller to enforce its normal
+        freshness window when that frontier precedes ``end``.
+        """
+
+        from quantmaster.data.free_stockdb_ingest import StockDBIngestService
+        from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
+
+        requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        requested_end = pd.Timestamp(end).normalize()
+        if acceptance is None:
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                sources=("free-stockdb",),
+                issues=("没有覆盖正式提案窗口的 accepted StockDB v2 验收记录",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        available_end = min(requested_end, pd.Timestamp(acceptance.session).normalize())
+        if available_end < pd.Timestamp(start).normalize():
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                observed_end=available_end.date().isoformat(),
+                sources=("free-stockdb",),
+                issues=("accepted StockDB 的最新会话早于正式提案窗口",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        covered_end = available_end.date().isoformat()
+        try:
+            native = StockDBIngestService().read_native_research_history(
+                list(requested),
+                start,
+                covered_end,
+                progress=lambda *_args: None,
+                cancelled=lambda: False,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                sources=("free-stockdb",),
+                issues=(f"已验收本地 StockDB 不能提供正式行情：{exc}",),
+                partial=True,
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            ) from exc
+
+        fields = ("open", "high", "low", "close", "volume")
+        value = native.copy()
+        value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
+        value["symbol"] = value["symbol"].astype(str).str.upper()
+        value = value.dropna(subset=["date", "symbol"])
+        panels: dict[str, pd.DataFrame] = {}
+        missing_symbols: set[str] = set()
+        for field in fields:
+            matrix = value.pivot(index="date", columns="symbol", values=field)
+            matrix = matrix.reindex(columns=requested).sort_index()
+            panels[field] = matrix
+            missing_symbols.update(str(symbol) for symbol in matrix.columns[matrix.isna().all()])
+            if available_end not in matrix.index:
+                missing_symbols.update(requested)
+            else:
+                missing_symbols.update(
+                    str(symbol) for symbol in matrix.columns[matrix.loc[available_end].isna()]
+                )
+        latest = panels["close"].index.max() if not panels["close"].empty else None
+        if (
+            missing_symbols
+            or latest is None
+            or pd.Timestamp(latest).normalize() < available_end
+        ):
+            issues = []
+            if missing_symbols:
+                issues.append("缺少标的：" + "、".join(sorted(missing_symbols)))
+            if latest is None:
+                issues.append("没有可用收盘行情")
+            elif pd.Timestamp(latest).normalize() < available_end:
+                issues.append(f"最新行情仅到 {pd.Timestamp(latest).date()}")
+            quality = BarDataQuality(
+                "unavailable",
+                start,
+                end,
+                observed_end=("" if latest is None else pd.Timestamp(latest).date().isoformat()),
+                sources=("free-stockdb",),
+                issues=tuple(issues),
+                partial=True,
+                requested_symbols=requested,
+                observed_symbols=tuple(str(symbol) for symbol in panels["close"].columns),
+                missing_symbols=tuple(sorted(missing_symbols)),
+            )
+            raise DataEvidenceNotReady(
+                quality,
+                ({"source": "free-stockdb", "evidence": "accepted-v2-native-qfq"},),
+            )
+        return panels
+
     def propose(
         self,
         account_id: str,
@@ -1774,19 +1896,28 @@ class PaperService:
                 str(end.date()),
                 purpose=CachePurpose.FORMAL_RESEARCH,
             )
-            panel = market_envelope.require_data()
             if (
-                market_envelope.quality.status != "verified"
-                or market_envelope.quality.stale
-                or market_envelope.quality.partial
+                market_envelope.quality.status == "verified"
+                and not market_envelope.quality.stale
+                and not market_envelope.quality.partial
             ):
-                message = "提案行情证据未通过正式门禁：" + "；".join(
-                    market_envelope.quality.issues
-                )
-                self.store.set_warning(account_id, message)
-                raise DataEvidenceNotReady(
-                    market_envelope.quality, market_envelope.provenance
-                )
+                panel = market_envelope.require_data()
+            else:
+                # A new account has no managed-bar cache.  The accepted native
+                # StockDB reader is deliberately local-only; it cannot select a
+                # remote fallback while attempting a formal paper proposal.
+                try:
+                    panel = self._accepted_stockdb_panel(
+                        symbols,
+                        str(start.date()),
+                        str(end.date()),
+                    )
+                except DataEvidenceNotReady as exc:
+                    self.store.set_warning(
+                        account_id,
+                        "提案行情证据未通过正式门禁：" + "；".join(exc.quality.issues),
+                    )
+                    raise
         close = panel.get("close")
         if close is None or close.empty:
             raise ValueError("没有可用于生成信号的收盘行情")
