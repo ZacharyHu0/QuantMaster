@@ -1805,14 +1805,16 @@ def _factories() -> dict[Market, list]:
         FreeStockDBSource,
     )
     from quantmaster.data.tushare_source import TushareSource
+    from quantmaster.data.xiaoshi_source import XiaoshiSource
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    ak, free, free_online, yf, tu = (
+    ak, free, free_online, yf, tu, xs = (
         AkshareSource,
         FreeStockDBSource,
         FreeStockDBOnlineSource,
         YFinanceSource,
         TushareSource,
+        XiaoshiSource,
     )
     cfg = get_config().data
 
@@ -1821,17 +1823,22 @@ def _factories() -> dict[Market, list]:
             ak: cfg.akshare_enabled,
             tu: cfg.tushare_enabled,
             yf: cfg.yfinance_enabled,
+            xs: any((
+                cfg.xiaoshi_realtime_enabled,
+                cfg.xiaoshi_history_enabled,
+                cfg.xiaoshi_minute_enabled,
+            )),
         }
         return [factory for factory in factories if switches.get(factory, True)]
 
     # The public endpoint is an explicitly enabled, last-resort interactive
     # supplement. _request_factories removes it from normal/background work.
     online_tail = [free_online] if cfg.free_stockdb_online_enabled else []
-    local_first = [free, *enabled(tu, ak), *online_tail]
+    local_first = [free, *enabled(xs, tu, ak), *online_tail]
     orders = {
         "free-stockdb": local_first,
-        "akshare": [*enabled(ak, tu), free, *online_tail],
-        "tushare": [*enabled(tu, ak), free, *online_tail],
+        "akshare": [*enabled(ak, tu), free, *enabled(xs), *online_tail],
+        "tushare": [*enabled(tu, ak), free, *enabled(xs), *online_tail],
     }
     selected = str(get_config().data.primary_provider).strip().lower()
     if selected not in orders:
@@ -1841,8 +1848,8 @@ def _factories() -> dict[Market, list]:
     cn = orders[selected]
     return {
         Market.CN: cn,
-        Market.HK: enabled(ak, yf),
-        Market.US: enabled(yf),
+        Market.HK: enabled(xs, ak, yf),
+        Market.US: enabled(xs, yf),
         Market.JP: enabled(yf),
         Market.KR: enabled(yf),
         Market.FUTURES: enabled(ak, yf),
@@ -1869,6 +1876,11 @@ def _request_factories(
         enabled = {
             "free-stockdb-online": cfg.free_stockdb_online_enabled,
             "tushare": cfg.tushare_enabled,
+            "xiaoshi": any((
+                cfg.xiaoshi_realtime_enabled,
+                cfg.xiaoshi_history_enabled,
+                cfg.xiaoshi_minute_enabled,
+            )),
         }
         if selected_provider in enabled and not enabled[selected_provider]:
             raise ValueError(f"数据源 {selected_provider} 已在设置中关闭")
@@ -1877,11 +1889,13 @@ def _request_factories(
             FreeStockDBSource,
         )
         from quantmaster.data.tushare_source import TushareSource
+        from quantmaster.data.xiaoshi_source import XiaoshiSource
 
         selected = {
             "free-stockdb": FreeStockDBSource,
             "free-stockdb-online": FreeStockDBOnlineSource,
             "tushare": TushareSource,
+            "xiaoshi": XiaoshiSource,
         }.get(selected_provider)
         if selected is None:
             raise ValueError(f"不支持的数据源: {selected_provider}")

@@ -906,7 +906,7 @@ def _check_document(body: dict[str, Any]) -> tuple[SettingsDocument, SecretMutat
 
 def _diagnostic_secrets(
     document: SettingsDocument, mutations: SecretMutations,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     current = settings_manager.load()
     same_llm_target = (
         document.llm.provider == current.llm.provider
@@ -922,12 +922,20 @@ def _diagnostic_secrets(
         "clear": "",
         "keep": current.data.tushare_token,
     }[mutations.tushare.action]
-    return llm_secret, tushare_secret
+    xiaoshi_secret = {
+        "replace": mutations.xiaoshi.value or "",
+        "clear": "",
+        "keep": current.data.xiaoshi_api_key,
+    }[mutations.xiaoshi.action]
+    return llm_secret, tushare_secret, xiaoshi_secret
 
 
 @router.post("/settings/check/{kind}")
 def check_setting(
-    kind: Literal["llm-models", "llm-web-search", "tushare", "storage", "data-sources", "server", "lab"],
+    kind: Literal[
+        "llm-models", "llm-web-search", "tushare", "xiaoshi", "storage",
+        "data-sources", "server", "lab",
+    ],
     request: Request,
     response: Response,
     body: Annotated[dict[str, Any] | None, Body()] = None,
@@ -939,10 +947,11 @@ def check_setting(
         check_server,
         check_storage,
         check_tushare,
+        check_xiaoshi,
     )
 
     document, mutations = _check_document(body or {})
-    llm_secret, tushare_secret = _diagnostic_secrets(document, mutations)
+    llm_secret, tushare_secret, xiaoshi_secret = _diagnostic_secrets(document, mutations)
     if kind in {"llm-models", "llm-web-search"}:
         from quantmaster.server.settings_jobs import get_settings_jobs
 
@@ -955,6 +964,8 @@ def check_setting(
         return jobs.public(task)
     if kind == "tushare":
         result = check_tushare(tushare_secret)
+    elif kind == "xiaoshi":
+        result = check_xiaoshi(xiaoshi_secret)
     elif kind == "storage":
         result = check_storage(document.data)
     elif kind == "data-sources":
@@ -966,7 +977,7 @@ def check_setting(
     return settings_manager.record_check_result(
         kind,
         document,
-        {"llm": llm_secret, "tushare": tushare_secret},
+        {"llm": llm_secret, "tushare": tushare_secret, "xiaoshi": xiaoshi_secret},
         result,
     )
 

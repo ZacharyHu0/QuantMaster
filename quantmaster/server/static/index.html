@@ -1269,6 +1269,10 @@
               <div class="diagnostic-heading"><div><h4>Tushare 凭据</h4><p>验证 Token 与当前账号可用能力。</p></div><button class="ghost check-button" type="button" data-check="tushare">检测 Tushare</button></div>
               <div class="check-result" data-check-result="tushare" aria-live="polite"><div class="check-summary">Tushare 尚未检测</div></div>
             </section>
+            <section class="settings-diagnostic" data-diagnostic="xiaoshi">
+              <div class="diagnostic-heading"><div><h4>小石大数据凭据</h4><p>先校验 API Key，再启用只读行情、历史与资讯能力。</p></div><button class="ghost check-button" type="button" data-check="xiaoshi">检测小石</button></div>
+              <div class="check-result" data-check-result="xiaoshi" aria-live="polite"><div class="check-summary">小石尚未检测</div></div>
+            </section>
           </div>
           <div class="field-grid settings-subsection">
             <div class="field-wide section-divider"><strong>在线请求开关</strong><small>关闭后统一行情调度不会向该来源发起请求；已有本地缓存仍可读取。</small></div>
@@ -1276,11 +1280,17 @@
             <label class="toggle-field"><span><strong>AKShare</strong><small>A 股、港股、指数与期货的免费在线来源。</small></span><input name="data.akshare_enabled" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>Tushare</strong><small>使用已配置 Token 的 A 股与指数在线来源。</small></span><input name="data.tushare_enabled" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>Yahoo Finance</strong><small>美股、日韩市场及部分海外行情来源。</small></span><input name="data.yfinance_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>小石实时行情</strong><small>A 股、港股、美股点名行情；多股自动使用批量接口。</small></span><input name="data.xiaoshi_realtime_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>小石历史日线</strong><small>通过鉴权会话下载并校验 R2 历史文件，本地缓存优先。</small></span><input name="data.xiaoshi_history_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>小石历史分钟线</strong><small>下载 1 分钟底座后在本地按交易时段聚合。</small></span><input name="data.xiaoshi_minute_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>小石全球新闻</strong><small>使用 after_id 增量水位，不用页码扫描历史。</small></span><input name="data.xiaoshi_news_enabled" type="checkbox" role="switch"></label>
+            <label class="toggle-field"><span><strong>小石金融时间轴</strong><small>未来因子仅作为金融事件研究输入；旧事件走 R2 归档。</small></span><input name="data.xiaoshi_timeline_enabled" type="checkbox" role="switch"></label>
             <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required placeholder="http://8.138.149.215:7899"><small>参考服务当前提供远程 stock_sdk 通道；高频或正式研究应使用本地库。</small></label>
             <label>free-stockdb-online 超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
             <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
             <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源。</small></label>
             <label class="field-wide secret-field">Tushare Token<div><input id="tushare-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="tushare">清除</button></div><small id="tushare-secret-state"></small></label>
+            <label class="field-wide secret-field">小石 API Key<div><input id="xiaoshi-secret" type="password" autocomplete="new-password" placeholder="留空即保留当前凭据"><button type="button" class="ghost" data-clear-secret="xiaoshi">清除</button></div><small id="xiaoshi-secret-state"></small></label>
             <label>AKShare 重试<input name="data.akshare_retries" type="number" min="1" max="20" required></label>
             <label>退避初始秒数<input name="data.akshare_retry_backoff" type="number" min="0" max="60" step="0.1" required></label>
             <label>日线缓存（天）<input name="data.cache_days" type="number" min="0" required></label>

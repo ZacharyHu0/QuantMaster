@@ -300,6 +300,38 @@ def check_tushare(token: str) -> dict[str, Any]:
         )
 
 
+def check_xiaoshi(api_key: str) -> dict[str, Any]:
+    started = time.perf_counter()
+    if not api_key:
+        return _result(
+            "error", "尚未配置小石 API Key", started,
+            provider_status="auth_invalid", capability="provider_auth",
+        )
+    try:
+        from quantmaster.data.xiaoshi_source import (
+            XiaoshiClient,
+            XiaoshiError,
+            XiaoshiRateLimited,
+        )
+
+        XiaoshiClient(api_key).check_api_key()
+        return _result(
+            "success", "小石 API Key 可用；只读数据接口已授权", started,
+            provider_status="available", capability="read_only_finance",
+        )
+    except XiaoshiRateLimited as exc:
+        return _result(
+            "warning", str(exc), started,
+            provider_status="rate_limited", retry_after=exc.retry_after,
+            report_as_bug=False,
+        )
+    except XiaoshiError as exc:
+        return _result(
+            "error", "小石鉴权或连接检测失败", started,
+            provider_status="auth_or_network_error", error_type=type(exc).__name__,
+        )
+
+
 def check_storage(data: DataSettings) -> dict[str, Any]:
     started = time.perf_counter()
     root = Path(data.root).expanduser().resolve()

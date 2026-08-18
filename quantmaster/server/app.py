@@ -352,7 +352,10 @@ async def request_context_and_migration_lock(request: Request, call_next):
                         path.startswith("/api/v1/diagnostics/providers/")
                         and path.endswith("/probe")
                     )
-                    or path == "/api/v1/settings/check/data-sources"
+                    or path in {
+                        "/api/v1/settings/check/data-sources",
+                        "/api/v1/settings/check/xiaoshi",
+                    }
                 )
             )
             access = nullcontext() if provider_probe else local_only_data_access()

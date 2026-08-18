@@ -82,6 +82,11 @@ class DataConfig:
     akshare_enabled: bool = True
     tushare_enabled: bool = True
     yfinance_enabled: bool = True
+    xiaoshi_realtime_enabled: bool = False
+    xiaoshi_history_enabled: bool = False
+    xiaoshi_minute_enabled: bool = False
+    xiaoshi_news_enabled: bool = False
+    xiaoshi_timeline_enabled: bool = False
     free_stockdb_ingest_retain: int = 30
     free_stockdb_stock_history_sessions: int = 180
     free_stockdb_stock_initial_lookback_days: int = 300
@@ -93,6 +98,7 @@ class DataConfig:
     free_stockdb_experimental_daily_quota: int = 20
     free_stockdb_native_acceleration_enabled: bool = False
     tushare_token: str = ""
+    xiaoshi_api_key: str = ""
     cache_days: int = 1                   # 日线缓存有效期（天）
     intraday_cache_minutes: int = 5       # 当日分钟线再次触网前的最短间隔
     akshare_retries: int = 3              # 单次 AKShare 请求总尝试次数
@@ -292,6 +298,7 @@ def _apply_env(cfg: Config) -> None:
         "QM_NEWS_ANNOTATION_MAX_CONCURRENCY", cfg.news.annotation_max_concurrency,
     ))
     cfg.data.tushare_token = env.get("TUSHARE_TOKEN", cfg.data.tushare_token)
+    cfg.data.xiaoshi_api_key = env.get("XIAOSHI_API_KEY", cfg.data.xiaoshi_api_key)
     cfg.data.root = env.get("QM_DATA_ROOT", cfg.data.root)
     cfg.data.primary_provider = env.get(
         "QM_DATA_PRIMARY_PROVIDER", cfg.data.primary_provider).strip().lower()
@@ -327,6 +334,19 @@ def _apply_env(cfg: Config) -> None:
     cfg.data.yfinance_enabled = env.get(
         "QM_YFINANCE_ENABLED", str(cfg.data.yfinance_enabled)
     ).strip().lower() in {"1", "true", "yes", "on"}
+    for setting_field, variable in (
+        ("xiaoshi_realtime_enabled", "QM_XIAOSHI_REALTIME_ENABLED"),
+        ("xiaoshi_history_enabled", "QM_XIAOSHI_HISTORY_ENABLED"),
+        ("xiaoshi_minute_enabled", "QM_XIAOSHI_MINUTE_ENABLED"),
+        ("xiaoshi_news_enabled", "QM_XIAOSHI_NEWS_ENABLED"),
+        ("xiaoshi_timeline_enabled", "QM_XIAOSHI_TIMELINE_ENABLED"),
+    ):
+        setattr(
+            cfg.data,
+            setting_field,
+            env.get(variable, str(getattr(cfg.data, setting_field))).strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
     cfg.data.akshare_retries = int(
         env.get("QM_AKSHARE_RETRIES", cfg.data.akshare_retries))
     cfg.data.akshare_retry_backoff = float(
@@ -379,6 +399,7 @@ def _apply_managed_secrets(cfg: Config, raw: dict) -> None:
         ("llm", cfg.llm, "api_key",
          CredentialStore.llm_target(cfg.llm.provider, cfg.llm.base_url)),
         ("tushare", cfg.data, "tushare_token", CredentialStore.tushare_target()),
+        ("xiaoshi", cfg.data, "xiaoshi_api_key", CredentialStore.xiaoshi_target()),
     )
     for name, owner, attr, default_target in pairs:
         item = metadata.get(name) or {}
@@ -393,7 +414,11 @@ def _apply_managed_secrets(cfg: Config, raw: dict) -> None:
         elif state == "plaintext":
             # 明文值已经随 YAML 应用；缺失时也不得回落到环境变量。
             section = raw.get("llm" if name == "llm" else "data") or {}
-            key = "api_key" if name == "llm" else "tushare_token"
+            key = {
+                "llm": "api_key",
+                "tushare": "tushare_token",
+                "xiaoshi": "xiaoshi_api_key",
+            }[name]
             setattr(owner, attr, str(section.get(key) or ""))
 
 

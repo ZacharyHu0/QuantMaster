@@ -104,6 +104,12 @@ class FetchBatch:
 
 BUILTIN_SOURCES: tuple[dict[str, Any], ...] = (
     {
+        "id": "xiaoshi", "name": "小石全球金融资讯", "kind": "builtin",
+        "group_name": "fast", "url": "https://api.shizixi.com/api/v3/news",
+        "is_official": False, "item_limit": 100, "max_age_hours": 6,
+        "enabled": False,
+    },
+    {
         "id": "sina_live", "name": "新浪财经 7×24", "kind": "builtin",
         "group_name": "fast", "url": "https://zhibo.sina.com.cn/api/zhibo/feed",
         "is_official": False, "item_limit": 50, "max_age_hours": 6,

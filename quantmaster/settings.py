@@ -33,6 +33,7 @@ SETTINGS_CHECK_KINDS = frozenset(
         "llm-models",
         "llm-web-search",
         "tushare",
+        "xiaoshi",
         "storage",
         "data-sources",
         "server",
@@ -111,6 +112,11 @@ class DataSettings(StrictModel):
     akshare_enabled: bool = True
     tushare_enabled: bool = True
     yfinance_enabled: bool = True
+    xiaoshi_realtime_enabled: bool = False
+    xiaoshi_history_enabled: bool = False
+    xiaoshi_minute_enabled: bool = False
+    xiaoshi_news_enabled: bool = False
+    xiaoshi_timeline_enabled: bool = False
     free_stockdb_ingest_retain: int = Field(default=30, ge=5, le=365)
     free_stockdb_stock_history_sessions: int = Field(default=180, ge=60, le=500)
     free_stockdb_stock_initial_lookback_days: int = Field(default=300, ge=180, le=720)
@@ -356,6 +362,7 @@ class SecretMutation(StrictModel):
 class SecretMutations(StrictModel):
     llm: SecretMutation = Field(default_factory=SecretMutation)
     tushare: SecretMutation = Field(default_factory=SecretMutation)
+    xiaoshi: SecretMutation = Field(default_factory=SecretMutation)
 
 
 class SettingsDocument(StrictModel):
@@ -427,6 +434,8 @@ def _setting_check_fingerprint(
         }
     elif kind == "tushare":
         subject = {"credential": secret_fingerprints.get("tushare", "")}
+    elif kind == "xiaoshi":
+        subject = {"credential": secret_fingerprints.get("xiaoshi", "")}
     elif kind == "storage":
         subject = {"root": document.data.root}
     elif kind == "data-sources":
@@ -443,6 +452,11 @@ def _setting_check_fingerprint(
                 "akshare_enabled": document.data.akshare_enabled,
                 "tushare_enabled": document.data.tushare_enabled,
                 "yfinance_enabled": document.data.yfinance_enabled,
+                "xiaoshi_realtime_enabled": document.data.xiaoshi_realtime_enabled,
+                "xiaoshi_history_enabled": document.data.xiaoshi_history_enabled,
+                "xiaoshi_minute_enabled": document.data.xiaoshi_minute_enabled,
+                "xiaoshi_news_enabled": document.data.xiaoshi_news_enabled,
+                "xiaoshi_timeline_enabled": document.data.xiaoshi_timeline_enabled,
             },
         }
     elif kind == "server":
@@ -505,6 +519,7 @@ def _sanitize(raw: dict[str, Any]) -> dict[str, Any]:
         safe["llm"].pop("api_key", None)
     if isinstance(safe.get("data"), dict):
         safe["data"].pop("tushare_token", None)
+        safe["data"].pop("xiaoshi_api_key", None)
     safe.pop("_secrets", None)
     safe.pop("secrets", None)
     safe.pop("allow_plaintext_secrets", None)
@@ -536,6 +551,7 @@ _ENVIRONMENT_FIELDS = {
     "llm.queue_timeout": ("QM_LLM_QUEUE_TIMEOUT",),
     "news.annotation_max_concurrency": ("QM_NEWS_ANNOTATION_MAX_CONCURRENCY",),
     "data.tushare_token": ("TUSHARE_TOKEN",),
+    "data.xiaoshi_api_key": ("XIAOSHI_API_KEY",),
     "data.root": ("QM_DATA_ROOT",),
     "data.primary_provider": ("QM_DATA_PRIMARY_PROVIDER",),
     "data.free_stockdb_sdk_path": ("QM_FREE_STOCKDB_SDK_PATH",),
@@ -551,6 +567,11 @@ _ENVIRONMENT_FIELDS = {
     "data.akshare_enabled": ("QM_AKSHARE_ENABLED",),
     "data.tushare_enabled": ("QM_TUSHARE_ENABLED",),
     "data.yfinance_enabled": ("QM_YFINANCE_ENABLED",),
+    "data.xiaoshi_realtime_enabled": ("QM_XIAOSHI_REALTIME_ENABLED",),
+    "data.xiaoshi_history_enabled": ("QM_XIAOSHI_HISTORY_ENABLED",),
+    "data.xiaoshi_minute_enabled": ("QM_XIAOSHI_MINUTE_ENABLED",),
+    "data.xiaoshi_news_enabled": ("QM_XIAOSHI_NEWS_ENABLED",),
+    "data.xiaoshi_timeline_enabled": ("QM_XIAOSHI_TIMELINE_ENABLED",),
     "data.akshare_retries": ("QM_AKSHARE_RETRIES",),
     "data.akshare_retry_backoff": ("QM_AKSHARE_RETRY_BACKOFF",),
     "data.provider_retry_attempts": ("QM_PROVIDER_RETRY_ATTEMPTS",),
@@ -585,7 +606,7 @@ def _field_sources(path: Path, effective: SettingsDocument) -> dict[str, dict[st
     for field, effective_value in effective_values.items():
         env_name = next((name for name in _ENVIRONMENT_FIELDS.get(field, ()) if name in os.environ), "")
         source = "environment" if env_name else "yaml" if field in raw_values else "default"
-        sensitive = field in {"llm.api_key", "data.tushare_token"}
+        sensitive = field in {"llm.api_key", "data.tushare_token", "data.xiaoshi_api_key"}
         item: dict[str, Any] = {
             "source": source,
             "override": bool(env_name),
@@ -664,6 +685,7 @@ class ConfigManager:
         pairs = (
             ("llm", cfg.llm, "api_key", CredentialStore.llm_target(cfg.llm.provider, cfg.llm.base_url)),
             ("tushare", cfg.data, "tushare_token", CredentialStore.tushare_target()),
+            ("xiaoshi", cfg.data, "xiaoshi_api_key", CredentialStore.xiaoshi_target()),
         )
         for name, owner, attr, default_target in pairs:
             item = metadata.get(name) or {}
@@ -693,10 +715,15 @@ class ConfigManager:
                 "secrets": {
                     "llm": self._secret_public("llm", effective_cfg.llm.api_key, meta),
                     "tushare": self._secret_public("tushare", effective_cfg.data.tushare_token, meta),
+                    "xiaoshi": self._secret_public("xiaoshi", effective_cfg.data.xiaoshi_api_key, meta),
                 },
                 "checks": self.check_results(
                     document,
-                    {"llm": effective_cfg.llm.api_key, "tushare": effective_cfg.data.tushare_token},
+                    {
+                        "llm": effective_cfg.llm.api_key,
+                        "tushare": effective_cfg.data.tushare_token,
+                        "xiaoshi": effective_cfg.data.xiaoshi_api_key,
+                    },
                     allow_keyring_write=False,
                 ),
                 "field_sources": _field_sources(
@@ -933,6 +960,8 @@ class ConfigManager:
                 changed.append("llm.api_key")
             if value.secrets.tushare.action != "keep":
                 changed.append("data.tushare_token")
+            if value.secrets.xiaoshi.action != "keep":
+                changed.append("data.xiaoshi_api_key")
             changed = sorted(set(changed))
             restart = [
                 f"server.{name}"
@@ -985,6 +1014,26 @@ class ConfigManager:
                     allow_plaintext=value.allow_plaintext_secrets,
                     warnings=warnings,
                 )
+        except CredentialError:
+            self._cleanup_staged_targets(staged_targets)
+            raise
+        if staged:
+            staged_targets.append(staged)
+        xiaoshi_target = CredentialStore.xiaoshi_target()
+        try:
+            staged = self._apply_secret(
+                name="xiaoshi",
+                mutation=value.secrets.xiaoshi,
+                current_raw=current_raw,
+                current_value=current_cfg.data.xiaoshi_api_key,
+                old_target=xiaoshi_target,
+                new_target=xiaoshi_target,
+                payload=payload,
+                section="data",
+                field="xiaoshi_api_key",
+                allow_plaintext=value.allow_plaintext_secrets,
+                warnings=warnings,
+            )
         except CredentialError:
             self._cleanup_staged_targets(staged_targets)
             raise
@@ -1174,7 +1223,11 @@ class ConfigManager:
             merged["managed_by_gui"] = True
             merged["_revision"] = self._next_revision(current)
             merged["_secrets"] = copy.deepcopy(current.get("_secrets") or {})
-            for section, field in (("llm", "api_key"), ("data", "tushare_token")):
+            for section, field in (
+                ("llm", "api_key"),
+                ("data", "tushare_token"),
+                ("data", "xiaoshi_api_key"),
+            ):
                 if isinstance(current.get(section), dict) and field in current[section]:
                     merged[section][field] = current[section][field]
             _atomic_write(self.path, yaml.safe_dump(merged, allow_unicode=True, sort_keys=False))

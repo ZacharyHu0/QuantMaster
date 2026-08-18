@@ -94,6 +94,11 @@ def test_settings_page_exposes_online_provider_switches():
         "data.akshare_enabled",
         "data.tushare_enabled",
         "data.yfinance_enabled",
+        "data.xiaoshi_realtime_enabled",
+        "data.xiaoshi_history_enabled",
+        "data.xiaoshi_minute_enabled",
+        "data.xiaoshi_news_enabled",
+        "data.xiaoshi_timeline_enabled",
     ):
         assert f'name="{name}"' in source
 
@@ -105,6 +110,11 @@ def test_online_provider_switches_round_trip_through_settings(tmp_path):
     update.data.akshare_enabled = False
     update.data.tushare_enabled = False
     update.data.yfinance_enabled = False
+    update.data.xiaoshi_realtime_enabled = True
+    update.data.xiaoshi_history_enabled = True
+    update.data.xiaoshi_minute_enabled = True
+    update.data.xiaoshi_news_enabled = True
+    update.data.xiaoshi_timeline_enabled = True
 
     result = manager.save(update)
     public = manager.public()["data"]
@@ -114,6 +124,26 @@ def test_online_provider_switches_round_trip_through_settings(tmp_path):
     assert public["akshare_enabled"] is False
     assert public["tushare_enabled"] is False
     assert public["yfinance_enabled"] is False
+    assert public["xiaoshi_realtime_enabled"] is True
+    assert public["xiaoshi_history_enabled"] is True
+    assert public["xiaoshi_minute_enabled"] is True
+    assert public["xiaoshi_news_enabled"] is True
+    assert public["xiaoshi_timeline_enabled"] is True
+
+
+def test_xiaoshi_secret_stays_in_credential_store(tmp_path):
+    credentials = FakeCredentials()
+    path = tmp_path / "config.yaml"
+    manager = ConfigManager(path, tmp_path / "backups", credentials)
+    update = _update(manager)
+    update.secrets.xiaoshi.action = "replace"
+    update.secrets.xiaoshi.value = "xs-test-secret-value"
+
+    manager.save(update)
+
+    assert manager.load().data.xiaoshi_api_key == "xs-test-secret-value"
+    assert manager.public()["secrets"]["xiaoshi"]["present"] is True
+    assert "xs-test-secret-value" not in path.read_text(encoding="utf-8")
 
 
 def test_monotonic_revision_and_field_source_override(tmp_path, monkeypatch):

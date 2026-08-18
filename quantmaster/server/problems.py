@@ -31,6 +31,7 @@ _PROVIDER_NAMES = {
     "akshare": "AKShare",
     "yfinance": "Yahoo Finance",
     "yahoo": "Yahoo Finance",
+    "xiaoshi": "小石大数据",
     "ths": "同花顺",
 }
 
