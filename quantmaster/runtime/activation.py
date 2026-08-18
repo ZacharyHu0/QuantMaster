@@ -25,6 +25,7 @@ STAGE_SCHEMA = 1
 STAGE_MARKER = ".quantmaster-stage.json"
 LIFECYCLE_LOCK = ".lifecycle.lock"
 LAUNCHER_TARGET = "launcher.target"
+RECOVERY_HANDOFF_MARKER = ".schema-handoff.json"
 DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
 READY_TIMEOUT_SECONDS = 15.0
 ROLLBACK_TIMEOUT_SECONDS = 15.0
@@ -196,6 +197,7 @@ class SlotRegistry:
         self.launcher_target = Path(launcher_target).resolve() if launcher_target else (
             self.app_root / LAUNCHER_TARGET
         )
+        self.handoff_path = self.app_root / RECOVERY_HANDOFF_MARKER
         if not self.launcher_target.is_relative_to(self.app_root):
             raise ActivationBlocked("unsafe_launcher_target", "launcher target 必须位于应用根目录")
 
@@ -297,7 +299,46 @@ class SlotRegistry:
             "last_error": "",
         }
         self._commit_pair(committed, candidate)
+        self._clear_handoff(candidate)
         return committed
+
+    def _handoff_candidate(self) -> str:
+        if not self.handoff_path.exists():
+            return ""
+        if _is_link(self.handoff_path) or not self.handoff_path.is_file():
+            raise ActivationBlocked("recovery_handoff_invalid", "schema handoff 标记不是普通文件")
+        try:
+            value = json.loads(self.handoff_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ActivationBlocked("recovery_handoff_invalid", "schema handoff 标记不可读") from exc
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"schema", "candidate", "previous"}
+            or value.get("schema") != 1
+            or FULL_SHA.fullmatch(str(value.get("candidate") or "")) is None
+            or (value.get("previous") and FULL_SHA.fullmatch(str(value["previous"])) is None)
+        ):
+            raise ActivationBlocked("recovery_handoff_invalid", "schema handoff 标记无效")
+        return str(value["candidate"])
+
+    def begin_schema_handoff(self, candidate: str, previous: str) -> None:
+        if self._handoff_candidate():
+            raise ActivationBlocked("recovery_handoff_pending", "已有未完成的 schema handoff")
+        _atomic_bytes(self.handoff_path, _json_bytes({
+            "schema": 1,
+            "candidate": _require_sha(candidate, label="候选槽"),
+            "previous": str(previous or ""),
+        }))
+        if _is_link(self.launcher_target):
+            raise ActivationBlocked("unsafe_launcher_target", "launcher target 不能是 link/junction")
+        self.launcher_target.unlink(missing_ok=True)
+
+    def _clear_handoff(self, candidate: str) -> None:
+        if self._handoff_candidate() == candidate:
+            self.handoff_path.unlink(missing_ok=True)
+
+    def pending_schema_handoff(self, candidate: str) -> bool:
+        return self._handoff_candidate() == candidate
 
     def rollback(self, error: str) -> dict[str, object]:
         state = self.read()
@@ -647,6 +688,7 @@ class ActivationCoordinator:
         ready_timeout: float = READY_TIMEOUT_SECONDS,
         rollback_timeout: float = ROLLBACK_TIMEOUT_SECONDS,
         generation_factory: Callable[[str], ApplicationIdentity] | None = None,
+        allow_unrecoverable_current: bool = False,
     ) -> None:
         self.registry = registry
         self.controller = controller
@@ -655,6 +697,8 @@ class ActivationCoordinator:
         self.generation_factory = generation_factory or (
             lambda sha: ApplicationIdentity(sha, sha, uuid.uuid4().hex)
         )
+        self.allow_unrecoverable_current = bool(allow_unrecoverable_current)
+        self._schema_handoff = False
 
     def _failure(self, exc: BaseException) -> str:
         if isinstance(exc, ActivationBlocked):
@@ -678,6 +722,16 @@ class ActivationCoordinator:
         return generation, health
 
     def _recover_interrupted(self, state: Mapping[str, object]) -> None:
+        pending = str(state.get("pending") or "")
+        if pending and self.registry.pending_schema_handoff(pending):
+            current = self.controller.current_identity()
+            if _mapping_identity(current) == (pending, pending):
+                self.registry.commit(pending)
+                return
+            self.registry.mark_blocked(
+                "interrupted_schema_handoff: 旧槽已停止；请重新激活已验证候选或从离线备份恢复"
+            )
+            return
         fallback = str(state.get("active") or state.get("previous") or "")
         if not fallback:
             self.registry.mark_blocked("pending_without_previous: 无可恢复的 previous 槽")
@@ -691,7 +745,22 @@ class ActivationCoordinator:
     def _stop_previous(self, previous: str) -> bool:
         if not previous:
             return False
-        self.controller.drain_current(self.ready_timeout)
+        if self.controller.current_identity() is None:
+            return False
+        try:
+            self.controller.drain_current(self.ready_timeout)
+        except ActivationBlocked as exc:
+            if not (
+                self.allow_unrecoverable_current
+                and exc.code == "worker_drain_unconfirmed"
+            ):
+                raise
+            pending = self.registry.read()
+            self.registry.begin_schema_handoff(
+                previous=str(pending["active"]),
+                candidate=str(pending["pending"]),
+            )
+            self._schema_handoff = True
         self.controller.stop_current(self.ready_timeout)
         return True
 
@@ -713,6 +782,17 @@ class ActivationCoordinator:
     ) -> dict[str, object]:
         failure = self._failure(exc)
         self._stop_candidate(generation)
+        if self._schema_handoff:
+            blocked = self.registry.mark_blocked(
+                "schema_handoff_candidate_failed: " + failure
+                + "；旧槽不会重启，请重新激活候选或从离线备份恢复"
+            )
+            return {
+                "status": "blocked",
+                "active": blocked["active"],
+                "previous": blocked["previous"],
+                "last_error": blocked["last_error"],
+            }
         if not previous:
             self.registry.mark_blocked(failure)
             if isinstance(exc, ActivationBlocked):
@@ -785,6 +865,7 @@ def installed_app_root() -> Path:
 
 def activate_installed_slot(
     build_sha: str, *, root_pid: int | None = None, ready_timeout: float = READY_TIMEOUT_SECONDS,
+    recover_unavailable_current: bool = False,
 ) -> dict[str, object]:
     """Activate one pre-staged installed slot from the packaged helper."""
 
@@ -794,4 +875,5 @@ def activate_installed_slot(
         registry,
         controller,
         ready_timeout=ready_timeout,
+        allow_unrecoverable_current=recover_unavailable_current,
     ).activate(build_sha)
