@@ -422,7 +422,9 @@ def test_sdk_module_and_client_are_reused_until_runtime_reset(tmp_path) -> None:
     sdk.write_text(
         "class StockDBClient:\n"
         "    def __init__(self, **kwargs):\n"
-        "        self.options = kwargs\n",
+        "        self.options = kwargs\n"
+        "    def get_data(self, **kwargs):\n"
+        "        return []\n",
         encoding="utf-8",
     )
     first_source = FreeStockDBSource(sdk_path=str(sdk))
@@ -441,6 +443,21 @@ def test_sdk_module_and_client_are_reused_until_runtime_reset(tmp_path) -> None:
     first_source.reset_runtime()
     refreshed = FreeStockDBSource(sdk_path=str(sdk))._sdk_client()
     assert refreshed is not first_client
+
+
+def test_native_sdk_rejects_client_without_data_method(tmp_path) -> None:
+    sdk = tmp_path / "stock_sdk.py"
+    sdk.write_text(
+        "class StockDBClient:\n"
+        "    def __init__(self, **kwargs):\n"
+        "        self.options = kwargs\n",
+        encoding="utf-8",
+    )
+
+    source = FreeStockDBSource(sdk_path=str(sdk))
+
+    assert source._sdk_client() is None
+    assert "get_data" in str(source._sdk_error)
 
 
 def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None:
