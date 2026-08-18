@@ -113,6 +113,7 @@ def cmd_activate(args) -> int:
         args.build_sha,
         root_pid=args.root_pid,
         ready_timeout=args.ready_timeout,
+        recover_unavailable_current=bool(args.recover_unavailable_current),
     )
     if os.environ.get("QM_ACTIVATION_RESULT_PATH"):
         from quantmaster.runtime.update import write_activation_result
@@ -1229,6 +1230,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("build_sha", help="候选槽对应的完整 lowercase main SHA")
     p.add_argument("--root-pid", type=int, default=None, help="当前 QuantMaster root Job Object 的 PID")
     p.add_argument("--ready-timeout", type=float, default=15.0, help="候选健康检查期限（最多 15 秒）")
+    p.add_argument(
+        "--recover-unavailable-current",
+        action="store_true",
+        help="仅在已完成带备份的离线 schema 迁移、旧 worker 无法排空时停止旧槽",
+    )
     p.set_defaults(func=cmd_activate)
 
     p = sub.add_parser("app", help="桌面模式：启动服务并自动打开浏览器（等价 serve --open）")

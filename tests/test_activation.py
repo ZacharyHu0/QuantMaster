@@ -171,6 +171,69 @@ def test_stop_failure_releases_drain_before_retry(tmp_path):
     assert ActivationCoordinator(registry, controller).activate(SHA_B)["status"] == "activated"
 
 
+def test_schema_handoff_stops_an_unrecoverable_worker_and_activates_candidate(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    registry.launcher_target.write_text(f"{SHA_A}\n", encoding="ascii")
+    controller = FakeController(SHA_A)
+
+    def fail_drain(_timeout: float) -> None:
+        raise ActivationBlocked("worker_drain_unconfirmed", "fixture worker unavailable")
+
+    controller.drain_current = fail_drain
+    result = ActivationCoordinator(
+        registry, controller, allow_unrecoverable_current=True,
+    ).activate(SHA_B)
+
+    assert result["status"] == "activated"
+    assert registry.read()["active"] == SHA_B
+    assert registry.launcher_target.read_text(encoding="ascii") == f"{SHA_B}\n"
+    assert not registry.handoff_path.exists()
+    assert controller.calls == [("stop-current", SHA_A), ("start", SHA_B), ("ready", SHA_B)]
+
+
+def test_schema_handoff_blocks_without_relaunching_incompatible_previous_slot(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+    registry = SlotRegistry(tmp_path)
+    registry.launcher_target.write_text(f"{SHA_A}\n", encoding="ascii")
+    controller = FakeController(SHA_A, fail=SHA_B)
+
+    def fail_drain(_timeout: float) -> None:
+        raise ActivationBlocked("worker_drain_unconfirmed", "fixture worker unavailable")
+
+    controller.drain_current = fail_drain
+    result = ActivationCoordinator(
+        registry, controller, allow_unrecoverable_current=True,
+    ).activate(SHA_B)
+
+    assert result["status"] == "blocked"
+    assert registry.read()["status"] == "blocked"
+    assert not registry.launcher_target.exists()
+    assert registry.pending_schema_handoff(SHA_B)
+    assert ("start", SHA_A) not in controller.calls
+
+
+def test_interrupted_schema_handoff_retries_candidate_without_relaunching_previous(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A, pending=SHA_B, status="pending")
+    registry = SlotRegistry(tmp_path)
+    registry.begin_schema_handoff(candidate=SHA_B, previous=SHA_A)
+    controller = FakeController()
+
+    result = ActivationCoordinator(registry, controller).activate(SHA_B)
+
+    assert result["status"] == "activated"
+    assert registry.read()["active"] == SHA_B
+    assert not registry.handoff_path.exists()
+    assert ("start", SHA_A) not in controller.calls
+    assert controller.calls == [("start", SHA_B), ("ready", SHA_B)]
+
+
 def test_drain_reconciliation_failure_records_its_phase(tmp_path):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
