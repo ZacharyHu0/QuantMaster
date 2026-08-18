@@ -1130,7 +1130,7 @@ class PaperStore:
             row = conn.execute("SELECT * FROM paper_cycles WHERE id=?", (cycle_id,)).fetchone()
         value = self._cycle_value(row)
         if value is not None:
-            value["orders"] = self.orders(cycle_id=cycle_id)
+            self._attach_cycle_orders(value)
         return value
 
     def cycles(self, account_id: str, limit: int = 30) -> list[dict]:
@@ -1142,9 +1142,35 @@ class PaperStore:
         result = []
         for row in rows:
             value = self._cycle_value(row) or {}
-            value["orders"] = self.orders(cycle_id=value["id"])
+            self._attach_cycle_orders(value)
             result.append(value)
         return result
+
+    @staticmethod
+    def _order_evidence_unproven(order: dict) -> bool:
+        return (
+            str(order.get("status") or "") == "unproven"
+            or str(order.get("integrity_code") or "").endswith("_unproven")
+        )
+
+    def _attach_cycle_orders(self, cycle: dict) -> None:
+        cycle["orders"] = self.orders(cycle_id=str(cycle["id"]))
+        if not any(self._order_evidence_unproven(order) for order in cycle["orders"]):
+            return
+        cycle["status"] = "unproven"
+        message = "本周期包含未证明成交，不能作为已完成调仓或收益事实。"
+        if message not in cycle["warnings"]:
+            cycle["warnings"].append(message)
+
+    def unproven_orders(self, account_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_orders WHERE account_id=? AND "
+                "(status='unproven' OR integrity_code LIKE '%_unproven') "
+                "ORDER BY created_at,id",
+                (account_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def orders(self, *, cycle_id: str = "", account_id: str = "", limit: int = 500) -> list[dict]:
         if cycle_id:
@@ -1257,6 +1283,8 @@ class PaperStore:
         rule_version: str = "",
         requested_qty: float | None = None,
         processed_session: str = "",
+        recovery_of_unproven: bool = False,
+        side: str = "",
     ) -> tuple[dict, bool]:
         quantity, price, fee = float(quantity), float(price), float(fee)
         self._validate_fill_values(fill_key, quantity, price, fee)
@@ -1283,8 +1311,21 @@ class PaperStore:
                 )
                 return dict(row), False
             current = str(row["status"])
-            if current in ORDER_TERMINAL_STATUSES:
+            is_recovery = (
+                recovery_of_unproven
+                and current == "unproven"
+                and str(row["integrity_code"] or "") == "legacy_fill_unproven"
+            )
+            if current in ORDER_TERMINAL_STATUSES and not is_recovery:
                 raise ValueError(f"终态订单 {current} 不能新增成交")
+            if recovery_of_unproven and (
+                not is_recovery
+                or not filled_at
+                or not market_ref.strip()
+                or not rule_version.strip()
+                or side not in {"buy", "sell"}
+            ):
+                raise ValueError("待核验历史成交必须提供完整的人工核验明细")
             existing_requested = row["requested_qty"]
             total_requested = (
                 float(existing_requested) if existing_requested is not None
@@ -1312,15 +1353,17 @@ class PaperStore:
             remaining_qty = max(0.0, total_requested - filled_qty)
             avg_price = float(aggregate[1] or 0) / filled_qty
             next_status = "filled" if remaining_qty <= 1e-9 else "partially_filled"
-            self._validate_order_transition(current, next_status)
+            if not is_recovery:
+                self._validate_order_transition(current, next_status)
             conn.execute(
                 "UPDATE paper_orders SET status=?,requested_qty=?,filled_qty=?,remaining_qty=?,"
-                "avg_fill_price=?,shares=?,price=?,fee=?,waiting_reason='',next_check_at='',"
+                "avg_fill_price=?,shares=?,price=?,fee=?,side=CASE WHEN ?='' THEN side ELSE ? END,"
+                "waiting_reason='',next_check_at='',"
                 "last_progress_at=?,last_processed_at=?,integrity_code='',updated_at=?,"
                 "version=version+1 WHERE id=?",
                 (
                     next_status, total_requested, filled_qty, remaining_qty, avg_price,
-                    filled_qty, avg_price, float(aggregate[2] or 0), now,
+                    filled_qty, avg_price, float(aggregate[2] or 0), side, side, now,
                     processed_session or str(filled_at or now)[:10], now, order_id,
                 ),
             )
@@ -1328,12 +1371,88 @@ class PaperStore:
                 "INSERT INTO paper_order_events(order_id,from_status,to_status,event_code,"
                 "details_json,created_at) VALUES (?,?,?,?,?,?)",
                 (
-                    order_id, current, next_status, "fill_recorded",
+                    order_id, current, next_status,
+                    "manual_legacy_fill_verified" if is_recovery else "fill_recorded",
                     canonical_json({"fill_key": fill_key, "quantity": quantity}), now,
                 ),
             )
             updated = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
         return dict(updated), True
+
+    def recover_unproven_order(
+        self,
+        order_id: str,
+        *,
+        fill_key: str,
+        quantity: float,
+        price: float,
+        fee: float,
+        filled_at: str,
+        market_ref: str,
+        rule_version: str,
+        side: str,
+    ) -> dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM paper_orders WHERE id=?", (order_id,)).fetchone()
+        if row is None:
+            raise KeyError("模拟订单不存在")
+        order = dict(row)
+        if (
+            str(order["status"]) != "unproven"
+            or str(order["integrity_code"] or "") != "legacy_fill_unproven"
+        ):
+            raise ValueError("只有待核验的历史成交可以人工恢复")
+        if side not in {"buy", "sell"}:
+            raise ValueError("人工核验成交方向必须为买入或卖出")
+
+        quantity, price, fee = float(quantity), float(price), float(fee)
+        self._validate_fill_values(fill_key, quantity, price, fee)
+        if not filled_at or not market_ref.strip() or not rule_version.strip():
+            raise ValueError("人工核验必须提供成交时间、凭据引用和核验规则")
+
+        ledger = self.ledger(str(order["account_id"]))
+        trades = ledger.trades()
+        existing = trades.loc[
+            trades["idempotency_key"].astype(str) == str(order["idempotency_key"])
+        ]
+        if len(existing) > 1:
+            raise ValueError("历史账本存在多笔同一订单成交，不能自动恢复")
+        if len(existing) == 1:
+            trade = existing.iloc[0]
+            if (
+                str(trade["symbol"]) != str(order["symbol"])
+                or str(trade["side"]) != side
+                or abs(float(trade["shares"]) - quantity) > 1e-9
+                or abs(float(trade["price"]) - price) > 1e-9
+                or abs(float(trade["fee"]) - fee) > 1e-9
+            ):
+                raise ValueError("历史账本成交与人工核验明细不一致")
+        else:
+            written = ledger.add_trade(
+                TradeRecord(
+                    date=str(filled_at)[:10], symbol=str(order["symbol"]), side=side,
+                    price=price, shares=quantity, fee=fee,
+                    note=f"manual paper verification: {market_ref}",
+                ),
+                idempotency_key=str(order["idempotency_key"]),
+            )
+            if not written:
+                raise ValueError("历史账本成交刚刚变化，请重新读取后再核验")
+        recovered, _ = self.record_fill(
+            order_id,
+            fill_key=fill_key,
+            quantity=quantity,
+            price=price,
+            fee=fee,
+            filled_at=filled_at,
+            market_ref=market_ref,
+            rule_version=rule_version,
+            requested_qty=quantity,
+            processed_session=str(filled_at)[:10],
+            recovery_of_unproven=True,
+            side=side,
+        )
+        return recovered
 
     @staticmethod
     def _validate_fill_values(fill_key: str, quantity: float, price: float, fee: float) -> None:
@@ -2599,6 +2718,63 @@ class PaperService:
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
+        automation = self.store.latest_auto_run(account_id)
+        if automation is not None:
+            automation["health"] = (
+                "needs_manual_recovery"
+                if automation.get("status") == "manual_recovery"
+                else "healthy"
+                if automation.get("status") == "completed"
+                else "retrying"
+                if automation.get("status") in {"failed", "running"}
+                else "idle"
+            )
+        unproven_orders = self.store.unproven_orders(account_id)
+        if unproven_orders:
+            message = (
+                f"有 {len(unproven_orders)} 笔历史成交缺少可验证 fill；"
+                "已停止计算持仓、净值和收益，需人工核验后恢复。"
+            )
+            account = self._with_management(account)
+            warnings = [message]
+            if account["warning"]:
+                warnings.append(account["warning"])
+            return {
+                "account": account,
+                "report": {
+                    "evidence_status": "unproven",
+                    "evidence_message": message,
+                    "total_assets": None,
+                    "cash": None,
+                    "total_return": None,
+                    "fees": None,
+                    "positions": [],
+                    "trade_count": None,
+                    "data_quality": {
+                        "status": "unavailable",
+                        "stale": False,
+                        "partial": True,
+                        "coverage_ratio": 0.0,
+                        "requested_symbols": [],
+                        "observed_symbols": [],
+                        "missing_symbols": [],
+                        "observed_start": "",
+                        "observed_end": "",
+                        "issues": [message],
+                        "by_symbol": {},
+                    },
+                    "market_provenance": {},
+                },
+                "dates": [],
+                "twr": [],
+                "warnings": list(dict.fromkeys(warnings)),
+                "data_freshness": [],
+                "cycles": self.store.cycles(account_id),
+                "warning": account["warning"],
+                "strategy_warning": account["strategy_warning"],
+                "runtime_warning": account["runtime_warning"],
+                "automation": automation,
+            }
         ledger = self.store.ledger(account_id)
         trades = ledger.trades()
         store = BarStore(read_only=self.read_only)
@@ -2642,17 +2818,6 @@ class PaperService:
                 warnings.extend(nav_warnings(nav))
         if account["warning"]:
             warnings.insert(0, account["warning"])
-        automation = self.store.latest_auto_run(account_id)
-        if automation is not None:
-            automation["health"] = (
-                "needs_manual_recovery"
-                if automation.get("status") == "manual_recovery"
-                else "healthy"
-                if automation.get("status") == "completed"
-                else "retrying"
-                if automation.get("status") in {"failed", "running"}
-                else "idle"
-            )
         account = self._with_management(account)
         return {
             "account": account,

@@ -250,6 +250,18 @@ class PaperAccountUpdate(ContractModel):
     universe: str | None = Field(None, min_length=1, max_length=40)
 
 
+class PaperVerifiedFill(ContractModel):
+    model_config = ConfigDict(extra="forbid")
+    fill_key: str = Field(..., min_length=1, max_length=160)
+    quantity: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
+    fee: float = Field(0, ge=0)
+    filled_at: str = Field(..., min_length=10, max_length=80)
+    market_ref: str = Field(..., min_length=1, max_length=500)
+    rule_version: str = Field(..., min_length=1, max_length=80)
+    side: Literal["buy", "sell"]
+
+
 @router.patch("/paper/accounts/{account_id}")
 def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: Request) -> dict:
     _require_csrf(request)
@@ -268,6 +280,31 @@ def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: 
         )
         return _wake_auto_account(account)
     except Exception as exc:
+        raise _error(exc) from None
+
+
+@router.post("/paper/orders/{order_id}/verified-fill")
+def recover_paper_order_fill(
+    order_id: str,
+    payload: PaperVerifiedFill,
+    request: Request,
+) -> dict:
+    _require_csrf(request)
+    try:
+        return {
+            "order": get_paper_service().store.recover_unproven_order(
+                order_id,
+                fill_key=payload.fill_key,
+                quantity=payload.quantity,
+                price=payload.price,
+                fee=payload.fee,
+                filled_at=payload.filled_at,
+                market_ref=payload.market_ref,
+                rule_version=payload.rule_version,
+                side=payload.side,
+            ),
+        }
+    except (KeyError, ValueError) as exc:
         raise _error(exc) from None
 
 

@@ -822,6 +822,9 @@ const tradingFeature = (() => {
   }
 
   function renderPaperSummary(report) {
+    if (report.evidence_status === 'unproven') {
+      return `<section class="trading-empty" role="alert"><strong>收益报告待核验</strong><span>${escapeHtml(report.evidence_message)}</span></section>`;
+    }
     return `<div class="paper-summary" aria-label="账户摘要">
       <div><span>总资产</span><strong>${number(report.total_assets)}</strong></div>
       <div><span>现金</span><strong>${number(report.cash)}</strong></div>
@@ -874,6 +877,18 @@ const tradingFeature = (() => {
     const integrity = order.integrity_code || order.diagnostic_code || '';
     const legacyFillUnproven = integrity === 'legacy_fill_unproven';
     const progress = order.market_data_progress || order.last_progress || '';
+    const recovery = legacyFillUnproven ? `<details class="paper-fills"><summary>录入人工核验的成交</summary>
+      <form data-paper-verify-fill data-order-id="${escapeHtml(order.id)}">
+        <label>成交凭据编号<input name="fill_key" required maxlength="160"></label>
+        <label>方向<select name="side"><option value="buy">买入</option><option value="sell">卖出</option></select></label>
+        <label>数量<input name="quantity" type="number" min="0.00000001" step="any" required></label>
+        <label>价格<input name="price" type="number" min="0.00000001" step="any" required></label>
+        <label>费用<input name="fee" type="number" min="0" step="any" value="0" required></label>
+        <label>成交时间<input name="filled_at" type="datetime-local" required></label>
+        <label>行情或交割单引用<input name="market_ref" required maxlength="500"></label>
+        <label>核验规则或版本<input name="rule_version" required maxlength="80"></label>
+        <button class="trading-primary" type="submit">写入已核验成交</button>
+      </form></details>` : '';
     return `<article class="paper-order" data-status="${escapeHtml(order.status)}" data-integrity="${integrity ? 'conflict' : 'ok'}">
       <div class="paper-order-main"><div><strong>${escapeHtml(order.symbol || '未知标的')}</strong><span>${percent(order.target_weight)} · ${order.side === 'buy' ? '买入' : order.side === 'sell' ? '卖出' : '调仓'}</span></div><span class="trading-status ${escapeHtml(order.status)}">${escapeHtml(orderStatus(order))}</span></div>
       <dl class="paper-order-facts">${legacyFillUnproven
@@ -886,6 +901,7 @@ const tradingFeature = (() => {
         : `核心数量冲突：<code>${escapeHtml(integrity)}</code>。未补造成交，需要人工核对。`
       }</p>` : ''}
       ${fills.length ? `<details class="paper-fills"><summary>${fills.length} 笔 fill 明细</summary><ol>${fills.map(renderFill).join('')}</ol></details>` : ''}
+      ${recovery}
     </article>`;
   }
 
@@ -1258,6 +1274,27 @@ const tradingFeature = (() => {
       paperStatus.innerHTML = '<div class="trading-success">提案已确认并进入待开盘；此刻仍未写入成交。</div>';
       await openPaperAccount(paperState.activeId);
     } catch (error) { renderError(paperStatus, error, '确认失败'); }
+    finally { setButtonBusy(button, false); }
+  });
+
+  paperOut?.addEventListener('submit', async event => {
+    const form = event.target.closest('[data-paper-verify-fill]');
+    if (!form) return;
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const button = form.querySelector('[type="submit"]');
+    const values = Object.fromEntries(new FormData(form).entries());
+    setButtonBusy(button, true, '正在写入…');
+    try {
+      await mutate(`/api/v1/paper/orders/${form.dataset.orderId}/verified-fill`, 'POST', {
+        ...values,
+        quantity: Number(values.quantity),
+        price: Number(values.price),
+        fee: Number(values.fee),
+      });
+      paperStatus.innerHTML = '<div class="trading-success">已写入人工核验的成交；报告已恢复计算。</div>';
+      await openPaperAccount(paperState.activeId);
+    } catch (error) { renderError(paperStatus, error, '人工核验成交写入失败'); }
     finally { setButtonBusy(button, false); }
   });
 
