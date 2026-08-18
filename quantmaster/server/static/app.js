@@ -1675,6 +1675,7 @@ function renderAssetList() {
     button.setAttribute('aria-pressed', String(active));
   });
   const out = document.getElementById('asset-list');
+  if (!out) return;
   if (!items.length) {
     out.innerHTML = `<div class="msg">${assetListEmpty[activeAssetList]}</div>`;
     return;
@@ -1720,7 +1721,8 @@ async function loadAssetLists(showError = true) {
   } catch (error) {
     assetListsLoaded = false;
     assetListsError = error.message || '无法读取列表状态';
-    if (showError) document.getElementById('asset-list').innerHTML = `<div class="err">${esc(error.message)}</div>`;
+    const output = document.getElementById('asset-list');
+    if (showError && output) output.innerHTML = `<div class="err">${esc(error.message)}</div>`;
     if (typeof updateDecisionAssetButtons === 'function') updateDecisionAssetButtons();
     return null;
   } finally {
@@ -1728,13 +1730,13 @@ async function loadAssetLists(showError = true) {
   }
 }
 
-document.getElementById('asset-tabs').addEventListener('click', event => {
+document.getElementById('asset-tabs')?.addEventListener('click', event => {
   const button = event.target.closest('[data-asset-list]');
   if (!button) return;
   activeAssetList = button.dataset.assetList;
   renderAssetList();
 });
-document.getElementById('asset-add-form').addEventListener('submit', async event => {
+document.getElementById('asset-add-form')?.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget, button = form.querySelector('button[type=submit]');
   const values = new FormData(form), listName = values.get('list_name');
@@ -1752,7 +1754,7 @@ document.getElementById('asset-add-form').addEventListener('submit', async event
   } catch (error) { reportLocalError('我的标的', '添加标的失败', error); }
   button.disabled = false;
 });
-document.getElementById('asset-list').addEventListener('click', async event => {
+document.getElementById('asset-list')?.addEventListener('click', async event => {
   const remove = event.target.closest('[data-remove-asset]');
   if (remove) {
     remove.disabled = true;
@@ -2619,7 +2621,8 @@ async function waitForMarketRefresh(job) {
     await loadMarket();
   }
 }
-document.getElementById('mkt-refresh').onsubmit = async e => {
+const marketRefreshForm = document.getElementById('mkt-refresh');
+if (marketRefreshForm) marketRefreshForm.onsubmit = async e => {
   e.preventDefault(); busy(e.target, true, '已提交…');
   try {
     const job = await post('/api/v1/data/refresh', {scope:'market'});
@@ -2813,6 +2816,12 @@ function renderKlineSeries(chart, data) {
 
 let activeKline = {symbol:'', name:'', frequency:'1d', request:0, controller:null};
 async function showKline(symbol, name, frequency = '1d') {
+  if (!document.getElementById('kline-panel')) {
+    try { sessionStorage.setItem('quantmaster.market.pending-stock.v1', JSON.stringify({symbol,name})); }
+    catch (_) {}
+    document.dispatchEvent(new CustomEvent('quantmaster:navigate', {detail:{tab:'market'}}));
+    return;
+  }
   const {loadAdvancedCharts} = await import('./advanced-charts.js');
   await loadAdvancedCharts();
   const previousController = activeKline.controller;
@@ -2844,7 +2853,7 @@ async function showKline(symbol, name, frequency = '1d') {
     reportLocalError('K 线', '行情加载失败', error);
   }
 }
-document.getElementById('kline-frequency').addEventListener('click', e => {
+document.getElementById('kline-frequency')?.addEventListener('click', e => {
   const frequency = e.target.dataset.frequency;
   if (!frequency || !activeKline.symbol || frequency === activeKline.frequency) return;
   showKline(activeKline.symbol, activeKline.name, frequency);

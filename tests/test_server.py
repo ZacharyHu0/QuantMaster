@@ -536,28 +536,26 @@ class TestBasics:
         charts_script = client.get("/static/charts.js").text
         news_script = client.get("/static/news.js").text
         stock_analysis_script = client.get("/static/stock-analysis.js").text
-        today_charts = client.get("/static/today-charts.js").text
+        market_script = client.get("/static/market-workbench.js").text
+        market_styles = client.get("/static/market-workbench.css").text
         app_styles = client.get("/static/app.css").text
         settings_script = client.get("/static/settings.js").text
         settings_styles = client.get("/static/settings.css").text
         assert resp.status_code == 200
         assert "QuantMaster" in resp.text
         assert 'data-tab="decision"' in resp.text
-        assert 'id="kline-frequency"' in resp.text
-        assert 'class="panel market-detail-panel" id="kline-panel"' in resp.text
-        assert 'id="major-indexes" data-market-group="A股指数"' in resp.text
-        assert 'id="market-fear-greed"' in resp.text
-        assert "{'A股指数':majorIndexes}" in app_script
-        assert "主要指数区块已保留" in app_script
-        assert "function marketChangeSeries" in app_script
-        assert "function marketSparkParsedDate" in app_script
-        assert "function marketSparkOption" not in app_script
-        assert "function month" in today_charts
-        assert "区间涨跌" in today_charts
-        assert "当日涨跌" in today_charts
-        assert "PERSONAL_MARKET_GROUP = '我的股票'" in app_script
-        assert "market-section-title" in resp.text
-        assert "mkt-memberships" in app_script
+        assert 'data-workspace-page="market"' in resp.text
+        assert 'id="market-workbench-root"' in resp.text
+        assert 'id="market-route-removed"' in resp.text
+        assert 'data-workspace-page="quotes"' not in resp.text
+        assert 'data-workspace-page="temperature"' not in resp.text
+        assert 'data-workspace-page="style"' not in resp.text
+        assert 'data-workspace-page="rotation"' not in resp.text
+        assert "/api/v1/rotation/board-indexes" in market_script
+        assert "current_constituents_backcast" in market_script
+        assert "data-market-method" in market_script
+        assert "prefers-reduced-motion:reduce" in market_styles
+        assert "grid-template-columns:minmax(230px,.72fr)" in market_styles
         assert "名称与代码 · 标注提及次数" in resp.text
         assert "/static/settings.css" not in resp.text
         assert "/static/settings.js" not in resp.text
@@ -571,9 +569,6 @@ class TestBasics:
         assert "/static/news.js" not in resp.text
         for stylesheet in ("app", "lab", "after-close"):
             assert (f"/static/{stylesheet}.css" in resp.text) is (stylesheet == "app")
-        assert "queueMarketReload" in app_script
-        assert "context.setLineDash([3, 3])" in today_charts
-        assert "context.setLineDash([4, 3])" in today_charts
         assert "result.itemStyle.color = result.lineStyle.color" in charts_script
         assert "formatter:params =>" in app_script
         assert "point.seriesName === '牛熊分' ? fixed(numeric,1)" in app_script
@@ -591,68 +586,16 @@ class TestBasics:
         assert "scrollbar-gutter:stable" in app_styles
         assert ".segmented {" in app_styles
         assert "overflow-x:auto; overflow-y:hidden" in app_styles
-        assert "createLoadProgress" in app_script
-        assert "createMarketStreamRenderer" in app_script
-        assert "/api/v1/market/fear-greed" in app_script
-        assert "/api/v1/market/fear-greed/refresh" in app_script
+        assert "/api/v1/market/fear-greed" in market_script
+        assert "/api/v1/market/ashare-fear-greed" in market_script
+        assert "/api/v1/market/temperature" in market_script
+        assert "/api/v1/rotation/overview" in market_script
         assert "/api/v1/settings/free-stockdb/update" in app_script
         assert "/api/v1/after-close/scan" in app_script
-        assert 'id="market-after-close-sync"' in resp.text
-        assert 'id="market-stale-banner"' in resp.text
-        assert 'id="market-fear-greed-refresh"' in resp.text
-        assert "/api/v1/market/ashare-fear-greed?symbol=" in app_script
-        assert 'id="market-fear-greed-time"' in resp.text
-        assert 'id="market-ashare-fear-greed"' in resp.text
-        assert 'id="market-ashare-fear-greed-symbol"' in resp.text
-        assert 'value="沪深300"' in resp.text
-        assert 'id="market-ashare-fear-greed-benchmark"' in resp.text
-        assert "encodeURIComponent(selected)" in app_script
-        assert "function loadAshareMarketFearGreed" in app_script
-        assert "FundDB A股恐贪指数" in resp.text
-        assert "function renderAshareFearGreedVisuals" in app_script
-        assert "function fearGreedAsOf" in app_script
-        assert ".formatToParts(parsed)" in app_script
-        assert "`${year}${Number(parts.month)}月${Number(parts.day)}日" in app_script
-        assert "export function renderFearGreedGauge" in today_charts
-        assert "export function renderFearGreedHistory" in today_charts
-        assert "export function renderMarketSpark" in today_charts
-        assert 'class="eyebrow market-sentiment-title"' in resp.text
-        assert 'class="market-sentiment-value"' not in resp.text
-        assert "CNN 当日恐贪指数 ${scoreText}，${label}" in app_script
-        assert ".market-sentiment-panel { display:grid; gap:var(--space-sm)" in app_styles
-        assert ".fear-greed-gauge { position:relative" in app_styles
-        assert ".fear-greed-history { position:relative" in app_styles
-        assert ".mkt-spark-shell { position:relative" in app_styles
-        assert "getContext('2d')" in today_charts
-        assert "new ResizeObserver" in today_charts
-        assert "prefers-reduced-motion: reduce" in today_charts
-        assert "黄色虚线：CNN ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
-        assert "黄色虚线：A股恐贪 ≤10，属于罕见恐惧区间；分数越低越恐惧" in resp.text
-        assert "黄色虚线表示 10 分罕见恐惧参考阈值" in resp.text
-        assert "requestAnimationFrame" in today_charts
-        assert "disposeTodayCharts" in today_charts
-        assert "data-opportunity-rsi" in app_script
-        assert 'class="mkt-rsi-label"><span>RSI(14)</span><small>日线</small>' in app_script
-        assert "function rsiSparkPoints" in app_script
-        assert "function rsiSparkMarkup" in app_script
-        assert "function bindRsiSparkInteraction" in app_script
-        assert "getUTCMonth() - 3" in app_script
-        assert "mkt-rsi-date-label" in app_script
-        assert "mkt-rsi-tooltip" in app_script
-        assert "root.onpointermove" in app_script
-        assert "dotRadius * width / bounds.width" in app_script
-        assert "dotRadius * chartHeight / bounds.height" in app_script
         assert "createDecisionStreamRenderer" in app_script
-        assert "function loadKlineSeries" in app_script
-        assert "function renderKlineSeries" in app_script
-        assert "const KLINE_CACHE_LIMIT = 64" in app_script
-        assert "KLINE_DAILY_TTL_MS = 5 * 60 * 1000" in app_script
-        assert "panel.scrollIntoView({behavior:'auto',block:'start'})" in app_script
-        assert "previousController?.abort()" in app_script
-        assert "const klineSeriesInflight = new Map()" in app_script
-        assert "new IntersectionObserver" in app_script
-        assert "requestIdleCallback" in app_script
-        assert "2023-01-01" not in app_script.split("function klineStartDate", 1)[1].split("function", 1)[0]
+        assert "controllers.get(owner)?.abort()" in market_script
+        assert "QuantCharts?.dispose('market-board-chart')" in market_script
+        assert "QuantCharts?.dispose('market-stock-chart')" in market_script
         assert "id:'market-kline-x-wheel'" in app_script
         assert "id:'market-kline-x-slider'" in app_script
         assert "xAxisIndex:[0,1],filterMode:'none'" in app_script
@@ -690,7 +633,7 @@ class TestBasics:
         assert '.snapshot-validation[data-status="completed"]' in app_styles
         assert "event.partial" in app_script
         assert "/api/v1/research/decision/dashboard/stream" in app_script
-        assert 'id="asset-workbench"' in resp.text
+        assert 'id="asset-workbench"' not in resp.text
         assert 'id="tab-candidates"' in resp.text
         assert 'id="candidate-workspace"' in resp.text
         assert 'href="/static/candidates.css"' not in resp.text
@@ -717,8 +660,8 @@ class TestBasics:
         assert 'id="contract-migration-status"' in resp.text
         assert 'data-contract-count="blank"' in resp.text
         assert 'id="contract-migration-investigation"' in resp.text
-        assert "同步观察行情" in resp.text
-        assert "不更新全市场 free-stockdb" in resp.text
+        assert "从市场状态进入板块" in market_script
+        assert "历史曲线仅在选中后读取" in market_script
         assert "自动更新本地库" in resp.text
         assert "立即更新并验证" in resp.text
         assert resp.text.count('class="settings-nav-group"') == 5
@@ -828,7 +771,7 @@ class TestBasics:
             "today", "research", "account", "runtime",
         ]
         workspace_pages = (
-            "quotes", "temperature", "style", "rotation", "industry", "themes", "etfs", "news",
+            "market", "industry", "themes", "etfs", "news",
             "after-close", "candidates", "stock-analysis", "decision", "lab", "backtest", "paper",
             "ledger", "automation", "operations",
         )

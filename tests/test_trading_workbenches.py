@@ -35,6 +35,7 @@ from quantmaster.portfolio import TradeRecord
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.server.app import app
 from quantmaster.server.management import _issue_csrf
+from quantmaster.stockdb_acceptance import StockDBSessionAcceptance
 from quantmaster.trading_sessions import SessionExpectation
 
 
@@ -323,18 +324,79 @@ def test_paper_confirmation_does_not_write_before_next_open(tmp_path):
     assert ledger.trades().empty
 
 
-def test_paper_proposal_reads_local_formal_evidence_without_remote_refresh(tmp_path, monkeypatch):
+def test_paper_process_waits_safely_on_accepted_local_stockdb(tmp_path, monkeypatch):
     service, account = make_paper_service(tmp_path)
-    panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
-    quality = BarDataQuality(
-        "degraded", "2023-01-01", "2024-01-05",
-        issues=("本地证据尚未通过正式验收",), partial=True,
+    dates = pd.bdate_range("2024-01-01", periods=5)
+    signal_panel = price_panel(dates)
+    proposal = service.propose(account["id"], panel=signal_panel)
+    service.store.confirm(proposal["id"])
+    degraded = BarDataQuality(
+        "degraded", "2024-01-01", "2024-01-08",
+        issues=("managed cache unavailable",), partial=True,
     )
     calls = []
 
+    def accepted_evidence(symbols, start, end):
+        calls.append((symbols, start, end))
+        return (
+            signal_panel,
+            CalendarEvidence.build(
+                PaperMarket.CN,
+                [value.date() for value in dates],
+                source="free-stockdb:accepted-v2",
+            ),
+            datetime(2024, 1, 8, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: BarDataEnvelope(signal_panel, degraded),
+    )
+    monkeypatch.setattr(
+        PaperService,
+        "_accepted_stockdb_execution_evidence",
+        staticmethod(accepted_evidence),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_panel",
+        lambda *_args, **_kwargs: pytest.fail("matching must not fall back to a provider refresh"),
+    )
+
+    result = service.process(account["id"])
+
+    assert result["status"] == "waiting_market_data"
+    assert calls
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
+def test_paper_proposal_bootstraps_from_accepted_local_stockdb(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
+    cache_quality = BarDataQuality(
+        "degraded", "2023-01-01", "2024-01-05",
+        issues=("本地证据尚未通过正式验收",), partial=True,
+    )
+    read_calls = []
+    stockdb_calls = []
+
     def read_panel(symbols, start, end, **kwargs):
-        calls.append((symbols, start, end, kwargs))
-        return BarDataEnvelope(panel, quality)
+        read_calls.append((symbols, start, end, kwargs))
+        return BarDataEnvelope(panel, cache_quality)
+
+    def accepted_history(_service, symbols, start, end, **kwargs):
+        stockdb_calls.append((symbols, start, end, kwargs))
+        result = None
+        for field, matrix in panel.items():
+            values = matrix.rename_axis("date").reset_index().melt(
+                id_vars="date", var_name="symbol", value_name=field,
+            )
+            result = values if result is None else result.merge(
+                values, on=["date", "symbol"], validate="one_to_one",
+            )
+        return result
 
     monkeypatch.setattr("quantmaster.data.read_panel", read_panel)
     monkeypatch.setattr(
@@ -342,16 +404,184 @@ def test_paper_proposal_reads_local_formal_evidence_without_remote_refresh(tmp_p
         lambda: SessionExpectation("2024-01-05", "fixture-clock", True, "fixture"),
     )
     monkeypatch.setattr(
+        "quantmaster.stockdb_acceptance.read_stockdb_session_acceptance",
+        lambda _root: StockDBSessionAcceptance(
+            "2024-01-05", False,
+            datetime(2024, 1, 5, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService.read_native_research_history",
+        accepted_history,
+    )
+    monkeypatch.setattr(
         "quantmaster.data.refresh_panel",
-        lambda *_args, **_kwargs: pytest.fail("提案门禁不得触发远端刷新"),
+        lambda *_args, **_kwargs: pytest.fail("proposal must not fall back to a provider refresh"),
+    )
+
+    result = service.propose(account["id"])
+
+    assert result["status"] == "proposed"
+    assert read_calls[0][3]["purpose"] == "formal_research"
+    assert stockdb_calls[0][0] == ["000001.SZ", "600000.SH"]
+    assert stockdb_calls[0][1:3] == ("2022-12-01", "2024-01-05")
+    assert callable(stockdb_calls[0][3]["progress"])
+    assert callable(stockdb_calls[0][3]["cancelled"])
+    assert [cycle["id"] for cycle in service.store.cycles(account["id"])] == [result["id"]]
+    assert service.store.ledger(account["id"]).trades().empty
+
+
+def test_paper_proposal_blocks_when_stockdb_misses_requested_symbol_at_frontier(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
+    quality = BarDataQuality(
+        "degraded", "2023-01-01", "2024-01-05",
+        issues=("本地证据尚未通过正式验收",), partial=True,
+    )
+
+    def accepted_history(_service, symbols, start, end, **kwargs):
+        result = None
+        for field, matrix in panel.items():
+            values = matrix.rename_axis("date").reset_index().melt(
+                id_vars="date", var_name="symbol", value_name=field,
+            )
+            result = values if result is None else result.merge(
+                values, on=["date", "symbol"], validate="one_to_one",
+            )
+        return result.loc[
+            ~(
+                (result["symbol"] == "000001.SZ")
+                & (result["date"] == pd.Timestamp("2024-01-05"))
+            )
+        ]
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: BarDataEnvelope(panel, quality),
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.resolve_session_target",
+        lambda: SessionExpectation("2024-01-05", "fixture-clock", True, "fixture"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.stockdb_acceptance.read_stockdb_session_acceptance",
+        lambda _root: StockDBSessionAcceptance(
+            "2024-01-05", False,
+            datetime(2024, 1, 5, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService.read_native_research_history",
+        accepted_history,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_panel",
+        lambda *_args, **_kwargs: pytest.fail("proposal must not fall back to a provider refresh"),
+    )
+
+    with pytest.raises(DataEvidenceNotReady, match=r"000001\.SZ"):
+        service.propose(account["id"])
+
+    assert service.store.cycles(account["id"]) == []
+    assert service.store.ledger(account["id"]).trades().empty
+
+
+def test_paper_proposal_blocks_when_local_stockdb_bootstrap_is_unverified(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
+    quality = BarDataQuality(
+        "degraded", "2023-01-01", "2024-01-05",
+        issues=("本地证据尚未通过正式验收",), partial=True,
+    )
+    stockdb_calls = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: BarDataEnvelope(panel, quality),
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.resolve_session_target",
+        lambda: SessionExpectation("2024-01-05", "fixture-clock", True, "fixture"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.stockdb_acceptance.read_stockdb_session_acceptance",
+        lambda _root: StockDBSessionAcceptance(
+            "2024-01-05", False,
+            datetime(2024, 1, 5, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+            {},
+        ),
+    )
+
+    def unavailable_history(*args, **kwargs):
+        stockdb_calls.append((args, kwargs))
+        raise ValueError("本地证据尚未通过正式验收")
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService.read_native_research_history",
+        unavailable_history,
     )
 
     with pytest.raises(DataEvidenceNotReady, match="本地证据"):
         service.propose(account["id"])
 
-    assert calls[0][3]["purpose"] == "formal_research"
+    assert stockdb_calls
     assert service.store.cycles(account["id"]) == []
     assert service.store.ledger(account["id"]).trades().empty
+
+
+def test_paper_proposal_uses_accepted_frontier_inside_freshness_window(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path)
+    panel = price_panel(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]))
+    quality = BarDataQuality(
+        "degraded", "2023-01-01", "2024-01-05",
+        issues=("managed cache unavailable",), partial=True,
+    )
+    stockdb_calls = []
+
+    def accepted_history(_service, symbols, start, end, **kwargs):
+        stockdb_calls.append((symbols, start, end, kwargs))
+        result = None
+        for field, matrix in panel.items():
+            values = matrix.rename_axis("date").reset_index().melt(
+                id_vars="date", var_name="symbol", value_name=field,
+            )
+            result = values if result is None else result.merge(
+                values, on=["date", "symbol"], validate="one_to_one",
+            )
+        return result
+
+    monkeypatch.setattr(
+        "quantmaster.data.read_panel",
+        lambda *_args, **_kwargs: BarDataEnvelope(panel, quality),
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.resolve_session_target",
+        lambda: SessionExpectation("2024-01-05", "fixture-clock", True, "fixture"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.stockdb_acceptance.read_stockdb_session_acceptance",
+        lambda _root: StockDBSessionAcceptance(
+            "2024-01-04", False,
+            datetime(2024, 1, 4, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService.read_native_research_history",
+        accepted_history,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.refresh_panel",
+        lambda *_args, **_kwargs: pytest.fail("proposal must not fall back to a provider refresh"),
+    )
+
+    result = service.propose(account["id"])
+
+    assert result["status"] == "proposed"
+    assert result["signal_date"] == "2024-01-04"
+    assert stockdb_calls[0][1:3] == ("2022-12-01", "2024-01-04")
 
 
 def test_paper_executes_t_plus_one_open_and_never_overdraws(tmp_path):
