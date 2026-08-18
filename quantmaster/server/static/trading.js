@@ -43,11 +43,14 @@ const tradingFeature = (() => {
     return strategy?.factor || '因子策略';
   };
 
-  async function mutate(path, method = 'POST', body) {
+  const PAPER_PROPOSAL_TIMEOUT_MS = 60_000;
+
+  async function mutate(path, method = 'POST', body, options = {}) {
     return window.QuantMasterAPI(path, {
       method, cache: 'no-store',
       headers: {'Content-Type': 'application/json'},
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(options.timeoutMs == null ? {} : {timeoutMs: options.timeoutMs}),
     });
   }
 
@@ -1190,7 +1193,12 @@ const tradingFeature = (() => {
     setButtonBusy(button, true, '正在生成…');
     paperStatus.innerHTML = '<div class="trading-progress"><strong>正在计算最新收盘信号</strong><span>此步骤不会写入成交账本</span><div class="trading-progress-track"><i style="width:55%"></i></div></div>';
     try {
-      const result = await mutate(`/api/v1/paper/accounts/${paperState.activeId}/proposals`, 'POST');
+      const result = await mutate(
+        `/api/v1/paper/accounts/${paperState.activeId}/proposals`,
+        'POST',
+        undefined,
+        {timeoutMs: PAPER_PROPOSAL_TIMEOUT_MS},
+      );
       if (result.status === 'not_due') {
         paperStatus.innerHTML = `<div class="trading-warning">${escapeHtml(result.message)}</div>`;
       } else {

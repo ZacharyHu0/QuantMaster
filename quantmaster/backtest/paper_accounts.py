@@ -40,12 +40,19 @@ from quantmaster.backtest.spec import (
     signal_is_due,
 )
 from quantmaster.config import get_config
+from quantmaster.data.base import DataEvidenceNotReady
+from quantmaster.data.cache_freshness import CachePurpose
 from quantmaster.data.schema_access import register_paper_store, register_schema_target
 from quantmaster.data.semantics import NumericSemantics, PriceType
 from quantmaster.portfolio.ledger import Ledger, TradeRecord
 from quantmaster.portfolio.performance import ledger_report
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
-from quantmaster.trading_sessions import SHANGHAI, market_date, resolve_session_target
+from quantmaster.trading_sessions import (
+    SHANGHAI,
+    SessionTargetUnavailable,
+    market_date,
+    resolve_session_target,
+)
 
 logger = logging.getLogger(__name__)
 PAPER_SCHEMA_VERSION = 5
@@ -1753,37 +1760,39 @@ class PaperService:
         if not eligible_symbols:
             raise ValueError("账户候选快照为空")
         loaded_live = panel is None
-        market_quality = None
         if panel is None:
             from quantmaster import data as data_api
 
             expectation = resolve_session_target()
             if not expectation.ready or not expectation.session:
-                raise ValueError(
-                    "无法确认最近完成交易日："
-                    + (expectation.reason or "交易日历证据不可用")
-                )
+                raise SessionTargetUnavailable(expectation)
             end = pd.Timestamp(expectation.session)
             start = end - pd.Timedelta(days=lookback_days)
-            market_envelope = data_api.refresh_panel(
-                symbols, str(start.date()), str(end.date()), work_class="normal",
+            market_envelope = data_api.read_panel(
+                symbols,
+                str(start.date()),
+                str(end.date()),
+                purpose=CachePurpose.FORMAL_RESEARCH,
             )
             panel = market_envelope.require_data()
-            market_quality = market_envelope.quality
+            if (
+                market_envelope.quality.status != "verified"
+                or market_envelope.quality.stale
+                or market_envelope.quality.partial
+            ):
+                message = "提案行情证据未通过正式门禁：" + "；".join(
+                    market_envelope.quality.issues
+                )
+                self.store.set_warning(account_id, message)
+                raise DataEvidenceNotReady(
+                    market_envelope.quality, market_envelope.provenance
+                )
         close = panel.get("close")
         if close is None or close.empty:
             raise ValueError("没有可用于生成信号的收盘行情")
         close = close.sort_index()
         latest_date = pd.Timestamp(close.index[-1])
         warnings: list[dict[str, str]] = []
-        if market_quality is not None and (
-            market_quality.status != "verified"
-            or market_quality.stale
-            or market_quality.partial
-        ):
-            message = "行情证据未通过正式提案门禁：" + "；".join(market_quality.issues)
-            self.store.set_warning(account_id, message)
-            raise ValueError(message)
         if loaded_live and (pd.Timestamp(end).normalize() - latest_date.normalize()).days > 7:
             message = f"最新行情停留在 {latest_date.date()}，账户已暂停以避免使用过期数据。"
             self.store.set_warning(account_id, message)
