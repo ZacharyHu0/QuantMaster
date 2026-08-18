@@ -149,6 +149,14 @@ class TestReport:
         report = ledger_report(ledger, prices={})
         assert report["missing_price"] == ["000001.SZ"]
 
+    def test_same_day_valuation_has_no_annualized_xirr(self, tmp_path):
+        ledger = Ledger(path=tmp_path / "l.sqlite")
+        ledger.add_cashflow("2024-01-01", 100_000, "deposit")
+
+        report = ledger_report(ledger, prices={}, as_of="2024-01-01")
+
+        assert report["xirr"] is None
+
 
 class TestXIRR:
     def test_simple_doubling(self):
@@ -159,3 +167,6 @@ class TestXIRR:
     def test_no_solution(self):
         assert xirr([("2023-01-01", -100.0)]) is None
         assert xirr([("2023-01-01", -100.0), ("2024-01-01", -50.0)]) is None
+
+    def test_same_day_cashflows_are_not_annualized(self):
+        assert xirr([("2024-01-01", -100.0), ("2024-01-01", 100.0)]) is None

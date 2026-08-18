@@ -33,6 +33,10 @@ def xirr(cashflows: list[tuple[str, float]], guess: float = 0.1) -> float | None
         return None
     t0 = min(dates)
     years = np.array([(d - t0).days / 365.0 for d in dates])
+    if not np.any(years > 0):
+        # 同一自然日内没有年化所需的时间跨度。若现金流恰好相抵，
+        # 每个利率都会让 NPV 为零，二分法的中点并不是收益率。
+        return None
 
     def npv(rate: float) -> float:
         return float(np.sum(amounts / (1 + rate) ** years))
