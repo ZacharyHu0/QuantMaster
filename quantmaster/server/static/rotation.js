@@ -545,35 +545,20 @@ const rotationFeature = (() => {
   function structurePathChart(history) {
     const chart = mkChart('rotation-style-path-chart');
     if (!chart) return;
-    const recent = (history || []).slice(-10);
-    const levels = {weak_rebound:-1,balanced:0,strong_dominant:1};
-    const levelLabels = {'-1':'低位修复','0':'均衡','1':'强势占优'};
-    const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};
-    const pathColor = state => state === 'strong_dominant'
-      ? CHART_COLORS.up
-      : state === 'weak_rebound'
-        ? CHART_COLORS.down
-        : state === 'balanced' ? CHART_COLORS.primary : MUTED;
-    const points = recent.map(row => {
-      const confirmed = row.confirmed !== 'pending' && row.confirmed !== 'unavailable';
-      const state = confirmed ? row.confirmed : row.candidate;
-      const value = Number(levels[state]);
-      const color = pathColor(state);
+    const spreads = (history || []).map(row => finite(row.spread));
+    const points = (history || []).map((row,index) => {
+      const window = spreads.slice(Math.max(0,index - 2),index + 1);
       return {
-        value:Number.isFinite(value) ? value : null,
-        pathRow:row,
-        symbol:'circle',
-        symbolSize:confirmed ? 7 : 6,
-        itemStyle:{
-          color:confirmed ? color : CHART_COLORS.surface,
-          borderColor:color,
-          borderWidth:confirmed ? 0 : 2,
-        },
+        row,
+        spread:spreads[index],
+        average:window.length === 3 && window.every(value => value !== null)
+          ? window.reduce((sum,value) => sum + value,0) / 3 : null,
       };
-    });
-    const hasPath = points.some(point => point.value !== null);
+    }).slice(-15);
+    const hasPath = points.some(point => point.spread !== null || point.average !== null);
     chart.setOption(baseOpt({
-      grid:{left:62,right:8,top:8,bottom:24},
+      legend:{top:0,textStyle:{color:INK2,fontSize:10}},
+      grid:{left:50,right:12,top:30,bottom:24},
       tooltip:{
         trigger:'axis',
         axisPointer:{type:'line'},
@@ -581,47 +566,38 @@ const rotationFeature = (() => {
         borderColor:AXIS,
         textStyle:{color:CHART_COLORS.ink,fontSize:10},
         formatter:params => {
-          const row = (params || []).find(item => item.data?.pathRow)?.data?.pathRow;
-          if (!row) return '';
-          const candidate = STYLE_LABELS[row.candidate] || '待判定';
-          const confirmed = row.confirmed === 'pending'
+          const point = (params || []).find(item => item.data?.pathPoint)?.data?.pathPoint;
+          if (!point) return '';
+          const candidate = STYLE_LABELS[point.row.candidate] || '待判定';
+          const confirmed = point.row.confirmed === 'pending'
             ? '待确认'
-            : STYLE_LABELS[row.confirmed] || '样本不足';
-          return `${esc(row.date || '')}<br>候选 ${esc(candidate)}<br>确认 ${esc(confirmed)}`;
+            : STYLE_LABELS[point.row.confirmed] || '样本不足';
+          return `${esc(point.row.date || '')}<br>当日强弱差 ${returnPct(point.spread)}<br>三日均值 ${returnPct(point.average)}<br>候选 ${esc(candidate)}<br>确认 ${esc(confirmed)}`;
         },
       },
       xAxis:{
         type:'category',
         boundaryGap:false,
-        data:recent.map(row => row.date),
+        data:points.map(point => point.row.date),
         axisLine:{lineStyle:{color:AXIS}},
         axisTick:{show:false},
         axisLabel:{
           color:MUTED,
           fontSize:9,
-          interval:recent.length > 6 ? 2 : 0,
+          interval:index => index === 0 || index === points.length - 1 || index % 3 === 0,
           formatter:value => String(value || '').slice(5),
         },
       },
       yAxis:{
         type:'value',
-        min:-1,
-        max:1,
-        interval:1,
+        scale:true,
+        splitNumber:3,
         axisLine:{show:false},
         axisTick:{show:false},
         axisLabel:{
           color:MUTED,
           fontSize:9,
-          formatter:value => {
-            const key = levelStyles[String(value)];
-            return key ? `{${key}|${levelLabels[String(value)]}}` : '';
-          },
-          rich:{
-            strong:{color:CHART_COLORS.up,fontSize:9},
-            balanced:{color:CHART_COLORS.primary,fontSize:9},
-            weak:{color:CHART_COLORS.down,fontSize:9},
-          },
+          formatter:value => returnPct(value,1),
         },
         splitLine:{lineStyle:{color:GRID}},
       },
@@ -629,26 +605,22 @@ const rotationFeature = (() => {
         type:'text',
         left:'center',
         top:'middle',
-        style:{text:'暂无确认路径',fill:MUTED,font:'10px sans-serif'},
+        style:{text:'暂无强弱差数据',fill:MUTED,font:'10px sans-serif'},
       }],
-      series:[{
-        name:'确认路径',
-        type:'line',
-        step:'end',
-        connectNulls:false,
-        data:points,
-        lineStyle:{color:MUTED,width:1.4},
-        markArea:{
-          silent:true,
-          label:{show:false},
-          data:[
-            [{yAxis:-1,itemStyle:{color:'rgba(36,160,107,.055)'}},{yAxis:-.5}],
-            [{yAxis:-.5,itemStyle:{color:'rgba(79,143,216,.055)'}},{yAxis:.5}],
-            [{yAxis:.5,itemStyle:{color:'rgba(230,103,103,.055)'}},{yAxis:1}],
-          ],
+      series:[
+        {
+          name:'当日强弱差',type:'line',showSymbol:true,symbol:'circle',symbolSize:4,connectNulls:false,
+          data:points.map(point => ({value:point.spread,pathPoint:point})),
+          lineStyle:{color:CHART_COLORS.primary,width:1.5},itemStyle:{color:CHART_COLORS.primary},
+          markLine:{silent:true,symbol:'none',label:{show:false},lineStyle:{color:AXIS,type:'dashed'},data:[{yAxis:0}]},
+          markArea:{silent:true,label:{show:false},itemStyle:{color:'rgba(201,150,66,.07)'},data:[[{yAxis:-.0025},{yAxis:.0025}]]},
         },
-        emphasis:{focus:'series'},
-      }],
+        {
+          name:'三日均值',type:'line',showSymbol:false,connectNulls:false,
+          data:points.map(point => ({value:point.average,pathPoint:point})),
+          lineStyle:{color:CHART_COLORS.warning,width:1.7},itemStyle:{color:CHART_COLORS.warning},
+        },
+      ],
     }));
   }
 
@@ -684,7 +656,7 @@ const rotationFeature = (() => {
           <section class="rotation-section"><div class="rotation-section-head"><div><h3>当前分布</h3><p>上涨比例与收益中位数同时核查</p></div></div>
             <div class="rotation-state-list rotation-style-distribution">${(data.distribution || []).map(row => `<div class="rotation-state-row" data-state="${esc(row.state || 'unavailable')}"><strong>${esc(row.label)}</strong><span>${row.count} 只 · ${row.share == null ? '—' : percent(row.share * 100)} · 上涨 ${row.positive_ratio == null ? '—' : percent(row.positive_ratio * 100)}</span><output class="${tone(row.median_return)}">${returnPct(row.median_return)}</output></div>`).join('')}</div>
           </section>
-          <section class="rotation-section"><div class="rotation-section-head"><div><h3>最近 10 日确认路径</h3><p>阶梯线为候选方向；实心点已确认，空心点待确认</p></div></div><div class="rotation-chart rotation-style-path-chart" id="rotation-style-path-chart" aria-label="最近 10 日市场风格确认路径折线图"></div></section>
+          <section class="rotation-section"><div class="rotation-section-head"><div><h3>最近 15 日强弱差路径</h3><p>蓝线为当日强弱差，黄线为三日均值；悬停核查候选与确认状态</p></div></div><div class="rotation-chart rotation-style-path-chart" id="rotation-style-path-chart" aria-label="最近 15 日市场风格当日强弱差和三日均值折线图"></div></section>
         </div>
       </div>
       <div class="rotation-layout equal">
