@@ -2941,6 +2941,12 @@ def test_market_style_confirmation_path_chart_layout(live_server):
         ("strong_dominant", "strong_dominant"),
         ("balanced", "pending"),
         ("balanced", "pending"),
+        ("weak_rebound", "pending"),
+        ("weak_rebound", "weak_rebound"),
+        ("strong_dominant", "pending"),
+        ("strong_dominant", "strong_dominant"),
+        ("balanced", "pending"),
+        ("balanced", "balanced"),
     ]
     history = []
     spread_by_state = {
@@ -2962,7 +2968,7 @@ def test_market_style_confirmation_path_chart_layout(live_server):
         )
     payload = {
         "meta": {
-            "as_of": "2026-07-12",
+            "as_of": "2026-07-18",
             "algorithm_version": "QM_ROTATION_V7",
             "sources": ["local:bars"],
             "quality": {"status": "complete", "issues": []},
@@ -3088,12 +3094,14 @@ def test_market_style_confirmation_path_chart_layout(live_server):
                 }]),
                 deadZone: spread.markArea.data[0].map(point => point.yAxis),
                 deadZoneColor: spread.markArea.itemStyle.color,
-                pathBandCount: path.series[0].markArea.data.length,
-                pathAxisColors: {
-                  weak: path.yAxis.axisLabel.rich.weak.color,
-                  balanced: path.yAxis.axisLabel.rich.balanced.color,
-                  strong: path.yAxis.axisLabel.rich.strong.color,
-                },
+                pathSeries: path.series.map(series => ({
+                  name: series.name, type: series.type, color: series.lineStyle.color,
+                  showSymbol: series.showSymbol,
+                })),
+                pathDeadZone: path.series[0].markArea.data[0].map(point => point.yAxis),
+                pathTooltip: path.tooltip.formatter(path.series.map(series => ({
+                  data: series.data[0],
+                }))),
               };
             }"""
         )
@@ -3119,12 +3127,13 @@ def test_market_style_confirmation_path_chart_layout(live_server):
         assert "低位样本 +0.50%" in chart_colors["tooltipText"]
         assert chart_colors["deadZone"] == [-0.0025, 0.0025]
         assert chart_colors["deadZoneColor"] == "rgba(201,150,66,.07)"
-        assert chart_colors["pathBandCount"] == 3
-        assert chart_colors["pathAxisColors"] == {
-            "weak": "#24a06b",
-            "balanced": "#4f8fd8",
-            "strong": "#e66767",
-        }
+        assert chart_colors["pathSeries"] == [
+            {"name": "当日强弱差", "type": "line", "color": "#4f8fd8", "showSymbol": True},
+            {"name": "三日均值", "type": "line", "color": "#c99642", "showSymbol": False},
+        ]
+        assert chart_colors["pathDeadZone"] == [-0.0025, 0.0025]
+        assert "当日强弱差 +0.10%" in chart_colors["pathTooltip"]
+        assert "三日均值 -0.23%" in chart_colors["pathTooltip"]
         distribution = page.locator(".rotation-structure-aside .rotation-section").nth(0)
         path_section = page.locator(".rotation-structure-aside .rotation-section").nth(1)
         main_box = main_chart.bounding_box()
@@ -3140,17 +3149,19 @@ def test_market_style_confirmation_path_chart_layout(live_server):
               const option = charts['rotation-style-path-chart'].__qmLastOption;
               return {
                 pointCount: option.series[0].data.length,
-                step: option.series[0].step,
-                minimum: option.yAxis.min,
-                maximum: option.yAxis.max,
+                seriesCount: option.series.length,
+                yAxisType: option.yAxis.type,
+                firstSpread: option.series[0].data[0].value,
+                firstAverage: option.series[1].data[0].value,
               };
             }"""
         )
         assert chart_state == {
-            "pointCount": 10,
-            "step": "end",
-            "minimum": -1,
-            "maximum": 1,
+            "pointCount": 15,
+            "seriesCount": 2,
+            "yAxisType": "value",
+            "firstSpread": pytest.approx(0.001),
+            "firstAverage": pytest.approx(-0.0023333333333333335),
         }
 
         page.set_viewport_size({"width": 390, "height": 844})
