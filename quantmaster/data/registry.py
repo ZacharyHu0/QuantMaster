@@ -427,6 +427,7 @@ def _assess_daily_frame(
     if (
         source.startswith("free-stockdb")
         and isinstance(stockdb_units, dict)
+        and df is not None
         and df.attrs.get("unit_status") in {"verified", "verified_local_stockdb_schema_v1"}
     ):
         resolved = tuple(
