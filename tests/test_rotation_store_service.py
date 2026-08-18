@@ -1012,7 +1012,7 @@ def test_rotation_charts_use_adaptive_axes_and_scoped_zoom():
     assert ".rotation-ranking-table th:nth-child(n+3)" in stylesheet
 
 
-def test_market_style_confirmation_path_uses_compact_chart_layout():
+def test_market_style_spread_path_uses_compact_chart_layout():
     script = (
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "rotation.js"
     ).read_text(encoding="utf-8")
@@ -1022,7 +1022,13 @@ def test_market_style_confirmation_path_uses_compact_chart_layout():
 
     assert script.count('id="rotation-style-path-chart"') == 1
     assert "structurePathChart(data.history || [])" in script
-    assert "step:'end'" in script
+    assert "const spreads = (history || []).map(row => finite(row.spread));" in script
+    assert "}).slice(-15);" in script
+    assert "window.length === 3 && window.every(value => value !== null)" in script
+    assert "name:'当日强弱差',type:'line',showSymbol:true" in script
+    assert "name:'三日均值',type:'line',showSymbol:false" in script
+    assert "formatter:value => returnPct(value,1)" in script
+    assert "step:'end'" not in script
     assert "const structureBarPoint = (row, key, direction) =>" in script
     assert "direction * Math.abs(rawReturn)" in script
     assert "name:'强势样本',type:'bar'" in script
@@ -1035,10 +1041,7 @@ def test_market_style_confirmation_path_uses_compact_chart_layout():
     assert "min:-structureExtent,max:structureExtent" in script
     assert "rgba(201,150,66,.07)" in script
     assert "data:[[{yAxis:-.0025},{yAxis:.0025}]]" in script
-    assert "const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};" in script
-    assert "rgba(36,160,107,.055)" in script
-    assert "rgba(79,143,216,.055)" in script
-    assert "rgba(230,103,103,.055)" in script
+    assert "const levelStyles = {'-1':'weak','0':'balanced','1':'strong'};" not in script
     assert 'data-style="${esc(style)}" data-confirmation="${confirmation}"' in script
     assert 'data-state="${esc(row.state || \'unavailable\')}"' in script
     assert 'class="rotation-structure-aside"' in script
