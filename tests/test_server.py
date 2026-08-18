@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -1316,7 +1317,10 @@ class TestBasics:
 
         assert len(partials) == final_count
         assert all(partial["kind"] == "market_item" for partial in partials)
-        assert all(partial["item"]["nav"] for partial in partials)
+        assert all("nav" not in partial["item"] for partial in partials)
+        assert all("rsi_history" not in partial["item"] for partial in partials)
+        assert all("data_quality" not in partial["item"] for partial in partials)
+        assert len(json.dumps(result, ensure_ascii=False).encode()) <= 120 * 1024
 
     def test_market_overview_includes_tech_focused_major_indexes(self):
         from quantmaster.market import overview as market_overview
@@ -1452,6 +1456,18 @@ class TestBasics:
         assert body["snapshot"]["state"] == "fresh"
         assert response.headers["etag"]
         assert response.headers["content-type"].startswith("application/json")
+        sample_client = TestClient(app)
+        assert sample_client.get(
+            "/api/v1/market/overview",
+            headers={"If-None-Match": response.headers["etag"]},
+        ).status_code == 304
+        samples = []
+        for _ in range(20):
+            started = time.perf_counter()
+            sampled = sample_client.get("/api/v1/market/overview")
+            samples.append(time.perf_counter() - started)
+            assert sampled.status_code == 200
+        assert sorted(samples)[18] <= 0.150
 
     def test_market_overview_reports_structured_cold_snapshot_state(self, monkeypatch, isolated_config):
         from quantmaster.market import overview_snapshot
@@ -1532,8 +1548,7 @@ class TestBasics:
         assert result["groups"]["商品与汇率"][0]["message"] == "Yahoo 正在限流"
         assert result["group_statuses"]["商品与汇率"]["unavailable"] == 1
         assert result["group_statuses"]["商品与汇率"]["issues"][0]["symbol"] == symbol
-        assert result["unavailable_items"][0]["symbol"] == symbol
-        assert result["unavailable_items"][0]["message"] == "Yahoo 正在限流"
+        assert "unavailable_items" not in result
 
     def test_market_fear_greed_refresh_is_explicit_and_forced(self, monkeypatch):
         calls = []

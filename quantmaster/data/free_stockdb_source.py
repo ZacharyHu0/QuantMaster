@@ -747,6 +747,47 @@ class FreeStockDBSource(DataSource):
             n=[parameters.get(name) for name in normalized],
         )
 
+    def native_board_index(
+        self,
+        symbols: list[str],
+        start: str,
+        end: str,
+        *,
+        method: int,
+        base: float = 1000,
+    ) -> list[dict[str, Any]]:
+        """Calculate one daily synthetic board index through StockDB's public API."""
+
+        if method not in {1, 2, 3, 4, 5}:
+            raise ValueError("free-stockdb 板块指数 method 仅支持 1–5")
+        module = self._load_sdk_module()
+        indicator = getattr(module, "zb", None)
+        calculate = getattr(indicator, "get", None)
+        if not callable(calculate):
+            raise RuntimeError("free-stockdb SDK 未暴露公开 zb.get 指标接口")
+        codes = [str(symbol).partition(".")[0].zfill(6) for symbol in symbols]
+        payload = calculate(
+            "zhishu",
+            codes,
+            start=_compact_time(start, intraday=False),
+            end=_compact_time(end, intraday=False),
+            frequency="1d",
+            method=method,
+            base=float(base),
+        )
+        if isinstance(payload, dict):
+            raise FreeStockDBProviderError(
+                f"free-stockdb 板块指数返回错误：{str(payload.get('error') or payload)[:160]}"
+            )
+        try:
+            rows = list(payload)
+        except TypeError as exc:
+            raise FreeStockDBProviderError("free-stockdb 板块指数返回值不是记录数组") from exc
+        required = {"date", "open", "high", "low", "close", "stock_count"}
+        if any(not isinstance(row, dict) or not required.issubset(row) for row in rows):
+            raise FreeStockDBProviderError("free-stockdb 板块指数记录缺少必要字段")
+        return rows
+
     def accelerated_indicators(
         self,
         names: list[str],

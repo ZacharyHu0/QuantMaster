@@ -62,10 +62,6 @@ def _local_projection_end() -> pd.Timestamp:
     return formal_end if formal_end is not None else pd.Timestamp(market_date())
 
 
-def _series_to_points(series: pd.Series) -> list[list]:
-    return [[str(key.date()), round(float(value), 6)] for key, value in series.dropna().items()]
-
-
 def _personal_market_symbols() -> tuple[dict[str, str], dict[str, list[str]]]:
     """Merge favorites, follows and holdings while preserving their memberships."""
     from quantmaster.data.names import read_stock_names
@@ -129,10 +125,8 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         return None
     checked_at = (meta or {}).get("checked_at")
     rsi = None
-    rsi_history: list[list] = []
     try:
         rsi_series = indicator_frame(pd.DataFrame({"close": close}))["rsi_14"].dropna()
-        rsi_history = _series_to_points(rsi_series.tail(180))
         if not rsi_series.empty and pd.notna(rsi_series.iloc[-1]):
             rsi = round(float(rsi_series.iloc[-1]), 2)
     except ValueError:
@@ -163,18 +157,22 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         "name": name,
         "last": round(float(close.iloc[-1]), 3),
         "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2) if len(close) > 1 else 0.0,
-        "nav": _series_to_points(close / close.iloc[0]),
         "as_of": str(close.index[-1].date()),
         "checked_at": (pd.Timestamp.fromtimestamp(float(checked_at)).isoformat() if checked_at else ""),
         "cache_status": str((meta or {}).get("last_status") or "ready"),
         "source": str((meta or {}).get("last_source") or "local-cache"),
         "rsi_14": rsi,
-        "rsi_history": rsi_history,
         "opportunity": classify_opportunity(rsi),
-        "data_quality": quality,
+        "quality_status": str(quality.get("status") or "degraded"),
+        "_quality": quality,
         "freshness": freshness,
         "state": freshness,
     }
+
+
+def _market_item_projection(item: dict) -> dict:
+    """Return the compact public card without internal aggregation evidence."""
+    return {key: value for key, value in item.items() if key != "_quality"}
 
 
 def _market_overview_response(
@@ -224,15 +222,14 @@ def _market_overview_response(
                 **unavailable_item,
                 "last": None,
                 "change_pct": None,
-                "nav": [],
                 "as_of": "",
                 "checked_at": last_success_at,
                 "cache_status": "unavailable",
                 "source": "",
                 "rsi_14": None,
-                "rsi_history": [],
                 "opportunity": {"code": "unavailable", "label": "行情暂缺"},
-                "data_quality": {
+                "quality_status": "unavailable",
+                "_quality": {
                     "status": "unavailable",
                     "sources": [],
                     "issues": [message],
@@ -257,7 +254,7 @@ def _market_overview_response(
             ],
         }
     item_qualities = [
-        item.get("data_quality") or {}
+        item.get("_quality") or {}
         for values in result.values()
         for item in values
     ]
@@ -293,6 +290,9 @@ def _market_overview_response(
         f"{missing_total} 个标的不可用" if missing_total else "",
         f"{stale_total} 个标的使用陈旧缓存" if stale_total else "",
     ))
+    for values in result.values():
+        for item in values:
+            item.pop("_quality", None)
     return {
         "meta": {
             "snapshot_id": snapshot_id,
@@ -318,7 +318,6 @@ def _market_overview_response(
         "groups": result,
         "group_counts": {group: len(symbols) for group, symbols in groups.items()},
         "group_statuses": group_statuses,
-        "unavailable_items": unavailable,
         "data_quality": {
             "status": quality_status,
             "stale": bool(stale_total),
@@ -375,7 +374,12 @@ def build_market_overview_data(
                     2,
                     "读取本地市场缓存",
                     f"{name} · 已显示本地数据",
-                    {"kind": "market_item", "stage": "cache", "group": group, "item": item},
+                    {
+                        "kind": "market_item",
+                        "stage": "cache",
+                        "group": group,
+                        "item": _market_item_projection(item),
+                    },
                 )
 
     if refresh == "local":
@@ -453,7 +457,7 @@ def build_market_overview_data(
                                     "kind": "market_item",
                                     "stage": "updated",
                                     "group": batch_group,
-                                    "item": item,
+                                    "item": _market_item_projection(item),
                                 }
                                 if item
                                 else None,
@@ -469,7 +473,10 @@ def build_market_overview_data(
                 frame = market_result[3]
                 item = _market_item(symbol, name, frame, store.metadata(symbol))
                 if item is not None:
-                    item["data_quality"] = market_result[4]
+                    item["_quality"] = market_result[4]
+                    item["quality_status"] = str(
+                        market_result[4].get("status") or "degraded"
+                    )
             except Exception as exc:
                 logger.debug("市场概览跳过 %s: %s", symbol, exc)
                 item = items.get((group, symbol))
@@ -487,7 +494,12 @@ def build_market_overview_data(
                     3 + round(94 * completed / max(1, total)),
                     "同步市场行情",
                     f"{completed}/{total} · {name} · {'已更新' if item else '已跳过'}",
-                    {"kind": "market_item", "stage": "updated", "group": group, "item": item}
+                    {
+                        "kind": "market_item",
+                        "stage": "updated",
+                        "group": group,
+                        "item": _market_item_projection(item),
+                    }
                     if item is not None
                     else None,
                     "info" if item else "warning",
