@@ -1823,6 +1823,12 @@ class PaperService:
             matrix = matrix.reindex(columns=requested).sort_index()
             panels[field] = matrix
             missing_symbols.update(str(symbol) for symbol in matrix.columns[matrix.isna().all()])
+            if available_end not in matrix.index:
+                missing_symbols.update(requested)
+            else:
+                missing_symbols.update(
+                    str(symbol) for symbol in matrix.columns[matrix.loc[available_end].isna()]
+                )
         latest = panels["close"].index.max() if not panels["close"].empty else None
         if (
             missing_symbols
