@@ -1850,7 +1850,7 @@ def test_market_temporal_status_is_explicit_accessible_and_narrow(live_server):
     diagnostics = {
         "issues": [], "recent_recovered": [],
         "runtime": {"readiness": {}, "web": {}, "supervisor": {}, "storage": {}, "scheduler": {}},
-        "market_sessions": {
+        "components": {"market_sessions": {
             "CN": {
                 "market_timezone": "Asia/Shanghai", "session_date": "2026-08-13",
                 "session_phase": "post_close", "latest_complete_session": "2026-08-12",
@@ -1873,7 +1873,7 @@ def test_market_temporal_status_is_explicit_accessible_and_narrow(live_server):
                 "provider_state": "unavailable", "ingest_state": "unavailable",
                 "diagnostic_codes": ["TIME_UNINTERPRETABLE"],
             },
-        },
+        }},
     }
 
     with playwright_sync.sync_playwright() as manager:

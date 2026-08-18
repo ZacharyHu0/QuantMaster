@@ -1136,7 +1136,7 @@ async function refreshBackendHealth() {
     runtimeInfo.sync('health', Array.isArray(data.issues) ? data.issues : []);
     runtimeInfo.sync('recovered', Array.isArray(data.recent_recovered) ? data.recent_recovered : []);
     runtimeInfo.syncRuntime(data.runtime);
-    renderMarketSessions(data.market_sessions);
+    renderMarketSessions(data.components?.market_sessions);
     renderCacheObservability(data.cache);
   } catch (error) {
     const problem = error?.problem || normalizeProblem(null, {
