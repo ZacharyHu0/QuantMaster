@@ -49,17 +49,19 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     rotation_css = client.get("/static/rotation.css")
     assert rotation_css.headers["cache-control"] == "no-cache, max-age=0, must-revalidate"
     rotation_script = client.get("/static/rotation.js").text
+    market_script = client.get("/static/market-workbench.js").text
     assert "viewRequestController?.abort()" in rotation_script
     assert "api(path, signal ? {signal} : {})" in rotation_script
-    assert 'data-tab="rotation"' in page.text
-    assert 'id="market-temperature-view"' in page.text
-    assert 'id="market-style-view"' in page.text
+    assert 'data-workspace-page="market"' in page.text
+    assert 'id="market-workbench-view"' in page.text
+    assert 'id="market-route-removed"' in page.text
     assert 'id="tab-rotation"' in page.text
-    assert 'data-rotation-page="overview"' in page.text
-    assert 'id="rotation-overview-view"' in page.text
+    assert 'data-rotation-page="overview"' not in page.text
+    assert 'id="rotation-overview-view"' not in page.text
     assert 'data-rotation-page="themes"' in page.text
     assert 'id="rotation-radar-view"' not in page.text
     assert 'src="/static/rotation.js"' not in page.text
+    assert "/api/v1/rotation/board-indexes" in market_script
 
 
 def test_manual_rotation_refresh_does_not_reset_provider_circuit(monkeypatch):

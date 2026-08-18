@@ -7,7 +7,7 @@ const WORKSPACES = {
 
 const PAGES = {
   today: {
-    quotes: 'market', temperature: 'market', style: 'market', rotation: 'rotation',
+    market: 'market', quotes: 'market', temperature: 'market', style: 'market', rotation: 'market',
     industry: 'rotation', themes: 'rotation', etfs: 'rotation', news: 'news',
     'after-close': 'after-close', candidates: 'candidates',
     'stock-analysis': 'stock-analysis', decision: 'decision',
@@ -17,7 +17,7 @@ const PAGES = {
   runtime: {automation: 'automation', operations: 'operations', help: 'help', settings: 'settings'},
 };
 
-const DEFAULT_PAGE = {today: 'quotes', research: 'lab', account: 'paper', runtime: 'automation'};
+const DEFAULT_PAGE = {today: 'market', research: 'lab', account: 'paper', runtime: 'automation'};
 const PAGE_KEY = 'quantmaster.workspacePage.v2';
 const modulePromises = new Map();
 const moduleRetries = new Map();
@@ -99,16 +99,25 @@ function rememberPage(workspace, page) {
 }
 
 function routeFromHash() {
-  const match = location.hash.match(/^#(today|research|account|runtime)\/([a-z-]+)$/);
-  return match && PAGES[match[1]][match[2]] ? {workspace: match[1], page: match[2]} : null;
+  const [path, rawQuery = ''] = location.hash.split('?');
+  const match = path.match(/^#(today|research|account|runtime)\/([a-z-]+)$/);
+  return match && PAGES[match[1]][match[2]]
+    ? {workspace: match[1], page: match[2], query: rawQuery ? `?${rawQuery}` : ''}
+    : null;
 }
 
 /* #30: 从路由参数中提取深链接上下文（板块、快照时间等）。 */
-function routeContext() {
-  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+function routeContext(query = '') {
+  const params = new URLSearchParams(String(query).replace(/^\?/, ''));
   const board = params.get('board') || '';
   const asOf = params.get('as-of') || '';
-  return {board, asOf};
+  return {
+    board, asOf,
+    category: params.get('category') || '',
+    code: params.get('code') || '',
+    method: params.get('method') || '',
+    window: params.get('window') || '',
+  };
 }
 
 function pageControl(workspace, page) {
@@ -154,9 +163,20 @@ function showError(error) {
   output.hidden = false;
 }
 
-async function transitionTo(workspace, page, replace, token) {
+async function transitionTo(workspace, page, query, replace, token) {
   if (token !== activation) return false;
-  const previous = active;
+  let previous = active;
+  const currentRoute = routeFromHash();
+  if (
+    previous && currentRoute?.workspace === previous.workspace
+    && currentRoute.page === previous.page
+  ) {
+    previous = {
+      ...previous,
+      query:currentRoute.query,
+      context:{...previous.context, route:routeContext(currentRoute.query)},
+    };
+  }
   let previousUnmounted = false;
   let adapter = null;
   try {
@@ -167,7 +187,7 @@ async function transitionTo(workspace, page, replace, token) {
       previousUnmounted = true;
     }
     if (token !== activation) return false;
-    const context = {workspace, page, shell};
+    const context = {workspace, page, shell, route: routeContext(query)};
     await adapter.mount(context);
     if (token !== activation) {
       await adapter.unmount();
@@ -176,9 +196,12 @@ async function transitionTo(workspace, page, replace, token) {
     }
     showRoute(workspace, page);
     rememberPage(workspace, page);
-    const target = `#${workspace}/${page}`;
+    const mountedRoute = routeFromHash();
+    const effectiveQuery = mountedRoute?.workspace === workspace && mountedRoute.page === page
+      ? mountedRoute.query : query;
+    const target = `#${workspace}/${page}${effectiveQuery}`;
     if (location.hash !== target) history[replace ? 'replaceState' : 'pushState'](null, '', target);
-    active = {workspace, page, adapter, context};
+    active = {workspace, page, query:effectiveQuery, adapter, context};
     document.dispatchEvent(new CustomEvent('quantmaster:workspace-mounted', {
       detail:{workspace, page},
     }));
@@ -194,7 +217,7 @@ async function transitionTo(workspace, page, replace, token) {
       await previous.adapter.mount(previous.context);
       if (token !== activation) return false;
       showRoute(previous.workspace, previous.page);
-      const target = `#${previous.workspace}/${previous.page}`;
+      const target = `#${previous.workspace}/${previous.page}${previous.query || ''}`;
       if (location.hash !== target) history.replaceState(null, '', target);
       active = previous;
     }
@@ -204,10 +227,10 @@ async function transitionTo(workspace, page, replace, token) {
   }
 }
 
-function activate(workspace, page, {replace = false} = {}) {
+function activate(workspace, page, {replace = false, query = ''} = {}) {
   if (!PAGES[workspace]?.[page]) return Promise.resolve(false);
   const token = ++activation;
-  const pending = transitions.then(() => transitionTo(workspace, page, replace, token));
+  const pending = transitions.then(() => transitionTo(workspace, page, query, replace, token));
   transitions = pending.catch(() => false);
   return pending;
 }
@@ -245,10 +268,13 @@ document.addEventListener('quantmaster:navigate', event => {
 
 window.addEventListener('hashchange', () => {
   const route = routeFromHash();
-  if (route && (route.workspace !== active?.workspace || route.page !== active?.page)) {
-    void activate(route.workspace, route.page, {replace: true});
+  if (route && (
+    route.workspace !== active?.workspace || route.page !== active?.page
+    || route.query !== active?.query
+  )) {
+    void activate(route.workspace, route.page, {replace: true, query: route.query});
   }
 });
 
-const initial = routeFromHash() || {workspace: 'today', page: 'quotes'};
-void activate(initial.workspace, initial.page, {replace: !routeFromHash()});
+const initial = routeFromHash() || {workspace: 'today', page: 'market', query: ''};
+void activate(initial.workspace, initial.page, {replace: !routeFromHash(), query: initial.query});

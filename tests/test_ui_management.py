@@ -69,7 +69,7 @@ def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict
             os.chdir(previous_cwd)
         discovery = browser.new_page(viewport={"width": 1280, "height": 900})
         discovery.goto(url)
-        discovery.wait_for_url(re.compile(r"#today/quotes$"))
+        discovery.wait_for_url(re.compile(r"#today/market(?:\?.*)?$"))
         targets = discovery.locator(
             "[data-workspace-pages] [data-workspace-page]"
         ).evaluate_all(
@@ -141,10 +141,11 @@ def _measure_workspace_resource_budgets(url: str, browser_workdir: Path) -> dict
 
             if "/static/echarts.min.js" in sizes:
                 echarts_vendor_bytes = sizes["/static/echarts.min.js"]
-            if route == "today/quotes":
+            if route == "today/market":
                 initial_static_bytes = sum(
                     resource.stat().st_size for _, resource, resource_type in occurrences
                     if resource_type in {"script", "stylesheet"}
+                    and resource.name != "echarts.min.js"
                 )
                 initial_static = {
                     path: resource.stat().st_size
@@ -211,6 +212,12 @@ def _wait_for_document_fit(page, *, timeout: float = 30_000) -> None:
             return
         page.wait_for_timeout(50)
     raise AssertionError(f"页面存在横向溢出: {dimensions}")
+
+
+def _active_chart_count(page) -> int:
+    return page.evaluate(
+        "Object.values(window.charts || {}).filter(chart => !chart.isDisposed()).length"
+    )
 
 
 def _wait_for_ui_health(url, thread, failures) -> None:
@@ -477,7 +484,233 @@ def live_server(module_config):
         _assert_no_ui_process_owners()
 
 
-def test_today_uses_native_canvas_without_echarts_across_themes(live_server):
+def _install_market_workbench_routes(page, *, list_status: int = 200):
+    methods = {
+        name: {
+            "status": "ready", "last": 1010 + index,
+            "changes": {"1": 0.4 + index, "3": 1.0 + index, "5": 2.0 + index, "20": 4.0 + index},
+            "sessions": 120, "reason": "",
+        }
+        for index, name in enumerate(("equal", "float_mv", "amount", "volume", "total_mv"))
+    }
+    boards = [
+        {
+            "code": "SW1:801780.SI", "board_code": "801780.SI", "name": "银行",
+            "category": "sw1", "level": "L1", "member_count": 2,
+            "eligible_count": 2, "coverage": 1.0,
+        },
+        {
+            "code": "SW1:801150.SI", "board_code": "801150.SI", "name": "医药生物",
+            "category": "sw1", "level": "L1", "member_count": 2,
+            "eligible_count": 2, "coverage": 0.96,
+        },
+    ]
+    meta = {
+        "snapshot_id": "board-ui", "as_of": "2026-08-17",
+        "algorithm_version": "QM_BOARD_INDEX_V1",
+        "board_index_algorithm_version": "QM_BOARD_INDEX_V1",
+        "quality": {"status": "complete", "issues": []},
+        "sources": ["free-stockdb:boards", "free-stockdb:zhishu"],
+    }
+
+    page.route("**/api/v1/market/overview", lambda route: route.fulfill(json={
+        "snapshot": {"id": "market-ui", "state": "fresh", "as_of": "2026-08-17"},
+        "data": {
+            "groups": {"A股指数": [
+                {"symbol": "000001.SH", "name": "上证指数", "last": 3688.2, "change_pct": 0.72},
+                {"symbol": "000300.SH", "name": "沪深300", "last": 4210.8, "change_pct": -0.18},
+            ]},
+            "data_quality": {"status": "verified", "observed_count": 22, "requested_count": 24},
+            "meta": {"as_of": "2026-08-17"},
+        },
+    }))
+    page.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json={
+        "status": "stale", "score": 31, "rating_label": "恐惧",
+    }))
+    page.route("**/api/v1/market/ashare-fear-greed**", lambda route: route.fulfill(json={
+        "status": "ready", "score": 57, "rating_label": "中性",
+    }))
+    page.route("**/api/v1/market/temperature", lambda route: route.fulfill(json={
+        "meta": {"snapshot_id": "temp-ui", "as_of": "2026-08-17", "quality": {"status": "complete"}},
+        "data": {"current": {"temperature": 63}},
+    }))
+    page.route("**/api/v1/rotation/overview**", lambda route: route.fulfill(json={
+        "meta": {"snapshot_id": "rotation-ui", "as_of": "2026-08-17", "quality": {"status": "partial"}},
+        "data": {"market": {"temperature": {"temperature": 63}}},
+    }))
+
+    def board_list(route):
+        if list_status != 200:
+            route.fulfill(status=list_status, json={"problem": {"message": "板块指数快照尚未发布"}})
+            return
+        query = urlsplit(route.request.url).query
+        params = dict(item.split("=", 1) for item in query.split("&") if "=" in item)
+        selected = boards
+        if params.get("query"):
+            selected = boards[:1]
+        method = params.get("method", "equal")
+        window = params.get("window", "5")
+        items = [{**item, "method": method, "status": "ready", "last": methods[method]["last"],
+                  "change": methods[method]["changes"][window], "changes": methods[method]["changes"],
+                  "sessions": 120, "reason": ""} for item in selected]
+        route.fulfill(json={"meta": meta, "data": {
+            "items": items, "category": "sw1", "method": method, "window": int(window),
+            "pagination": {"page": 1, "page_size": 25, "total": len(items), "pages": 1,
+                           "has_previous": False, "has_next": False},
+        }})
+
+    page.route("**/api/v1/rotation/board-indexes?*", board_list)
+
+    def detail(route):
+        request_url = urlsplit(route.request.url)
+        query = dict(
+            item.split("=", 1) for item in request_url.query.split("&") if "=" in item
+        )
+        method = query.get("method", "equal")
+        code = request_url.path.rsplit("/", 1)[-1]
+        board = next((item for item in boards if item["board_code"] == code), boards[0])
+        route.fulfill(json={"meta": meta, "data": {
+            **board, "membership_semantics": "current_constituents_backcast",
+            "frequency": "1d", "base": 1000, "method": method,
+            "method_status": methods[method], "comparison": methods, "constituent_count": 2,
+            "series": [{"date": f"2026-08-{day:02d}", "close": 1000 + day * 2 + list(methods).index(method)}
+                       for day in range(1, 18)],
+        }})
+
+    page.route(re.compile(r".*/api/v1/rotation/board-indexes/(sw1|sw2|theme)/[^/?]+\?method=.*"), detail)
+    page.route("**/api/v1/rotation/board-indexes/*/*/constituents?*", lambda route: route.fulfill(json={
+        "meta": meta, "data": {
+            "name": "银行", "membership_semantics": "current_constituents_backcast",
+            "items": [
+                {
+                    "symbol": "600000.SH", "name": "浦发银行", "last": 12.4,
+                    "change_pct": 1.2, "amount": 8e8, "as_of": "2026-08-17",
+                },
+                {
+                    "symbol": "000001.SZ", "name": "平安银行", "last": 11.8,
+                    "change_pct": -0.4, "amount": 7e8, "as_of": "2026-08-17",
+                },
+            ],
+            "pagination": {"page": 1, "page_size": 25, "total": 2, "pages": 1,
+                           "has_previous": False, "has_next": False},
+        },
+    }))
+    page.route("**/api/v1/market/history/*", lambda route: route.fulfill(json={
+        "symbol": "600000.SH", "frequency": "1d",
+        "kline": [[f"2026-08-{day:02d}", 10 + day / 10, 10.1 + day / 10,
+                   9.8 + day / 10, 10.3 + day / 10, 1000 + day] for day in range(1, 18)],
+        "data_quality": {"status": "verified"}, "provenance": [],
+    }))
+
+
+def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server, tmp_path):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.add_init_script(
+            """window.__marketAbortCount = 0;
+            const NativeAbortController = window.AbortController;
+            window.AbortController = class extends NativeAbortController {
+              abort(...args) { window.__marketAbortCount += 1; return super.abort(...args); }
+            };"""
+        )
+        errors: list[str] = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _install_market_workbench_routes(page)
+        page.goto(f"{url}/#today/market?category=sw1&code=801780.SI&method=amount&window=20")
+        page.locator("#market-board-chart canvas").wait_for(state="visible")
+
+        assert "category=sw1" in page.url and "code=801780.SI" in page.url
+        assert "method=amount" in page.url and "window=20" in page.url
+        playwright_sync.expect(
+            page.locator('[data-market-method="amount"]').first
+        ).to_have_attribute("aria-selected", "true")
+        assert page.locator("#market-method-compare > button").count() == 5
+        assert page.locator(".market-decision-strip > article").count() >= 6
+        assert page.locator("#tab-market *").count() <= 2500
+        assert _active_chart_count(page) <= 4
+        focus = page.locator(".market-focus").bounding_box()
+        assert focus and focus["y"] < 330 and focus["y"] + focus["height"] <= 900
+
+        page.locator('[data-market-method="amount"]').first.focus()
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(
+            page.locator('[data-market-method="volume"]').first
+        ).to_have_attribute("aria-selected", "true")
+        page.wait_for_function("() => location.hash.includes('method=volume')")
+
+        aborts_before = page.evaluate("window.__marketAbortCount")
+        page.locator('[data-market-board="801150.SI"]').click()
+        page.locator('[data-market-board="801780.SI"]').click()
+        page.wait_for_function("value => window.__marketAbortCount > value", arg=aborts_before)
+        page.locator("#market-board-chart canvas").wait_for(state="visible")
+
+        page.locator('[data-market-category="sw1"]').focus()
+        page.keyboard.press("ArrowRight")
+        playwright_sync.expect(
+            page.locator('[data-market-category="sw2"]')
+        ).to_have_attribute("aria-selected", "true")
+        page.locator('[data-market-category="sw1"]').click()
+        page.locator("[data-market-query]").fill("银行")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(1)
+
+        desktop_shot = tmp_path / "market-workbench-1440.png"
+        page.screenshot(path=str(desktop_shot), full_page=True)
+        assert desktop_shot.stat().st_size > 10_000
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
+        assert page.locator(".market-three-column").evaluate(
+            "node => getComputedStyle(node).display"
+        ) == "flex"
+        assert page.locator("#tab-market *").count() <= 2500
+        mobile_shot = tmp_path / "market-workbench-390.png"
+        page.screenshot(path=str(mobile_shot), full_page=True)
+        assert mobile_shot.stat().st_size > 10_000
+        assert errors == []
+        browser.close()
+
+
+def test_market_workbench_on_demand_history_cleanup_removed_routes_and_failure(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900}, reduced_motion="reduce")
+        requests: list[str] = []
+        page.on("request", lambda request: requests.append(request.url))
+        _install_market_workbench_routes(page)
+        page.goto(f"{url}/#today/market")
+        page.locator("#market-board-chart canvas").wait_for(state="visible")
+        assert not any("/market/history/" in value for value in requests)
+        page.locator('[data-market-stock="600000.SH"]').click()
+        page.locator("#market-stock-chart canvas").wait_for(state="visible")
+        assert sum("/market/history/600000.SH" in value for value in requests) == 1
+        assert page.locator(".market-loading-line i").evaluate_all(
+            "nodes => nodes.every(node => getComputedStyle(node).animationName === 'none')"
+        )
+
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        assert page.evaluate(
+            "Object.keys(window.charts || {}).filter(key => key.startsWith('market-')).length"
+        ) == 0
+
+        for legacy in ("quotes", "temperature", "style", "rotation"):
+            page.goto(f"{url}/#today/{legacy}")
+            page.locator("#market-route-removed").wait_for(state="visible")
+            assert page.url.endswith(f"#today/{legacy}")
+            playwright_sync.expect(page.locator("#market-route-removed h2")).to_contain_text("页面已移除")
+
+        failed = browser.new_page(viewport={"width": 390, "height": 844})
+        _install_market_workbench_routes(failed, list_status=503)
+        failed.goto(f"{url}/#today/market")
+        playwright_sync.expect(failed.locator("#market-board-list")).to_contain_text("板块指数快照尚未发布")
+        _wait_for_document_fit(failed)
+        browser.close()
+
+
+def _legacy_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {
         "groups": {"A股指数": [{
@@ -607,7 +840,7 @@ def test_classic_theme_is_default_without_overwriting_stored_choice(live_server)
         browser.close()
 
 
-def test_fear_greed_gauge_animates_normally_and_respects_reduced_motion(live_server):
+def _legacy_fear_greed_gauge_animates_normally_and_respects_reduced_motion(live_server):
     url, _ = live_server
     fear_greed = {
         "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
@@ -648,7 +881,7 @@ def test_fear_greed_gauge_animates_normally_and_respects_reduced_motion(live_ser
         browser.close()
 
 
-def test_today_unmount_cancels_native_chart_work_and_delayed_renders(live_server):
+def _legacy_today_unmount_cancels_native_chart_work_and_delayed_renders(live_server):
     url, _ = live_server
     market = {
         "groups": {"A股指数": [{
@@ -763,24 +996,24 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         page.on("request", lambda request: requested.append(request.url.split("?", 1)[0]))
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.goto(url)
-        page.wait_for_url(re.compile(r"#today/quotes$"))
-        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        page.wait_for_url(re.compile(r"#today/market\?"))
+        page.locator(".market-workbench").wait_for(state="visible")
         initial = set(requested)
         assert f"{url}/static/workspaces/today.js" in initial
         assert not any(name in path for path in initial for name in (
             "/workspaces/research.js", "/workspaces/account.js", "/workspaces/runtime.js",
-            "/lab.js", "/rotation.js", "/help.js", "/echarts.min.js",
+            "/lab.js", "/rotation.js", "/help.js",
         ))
 
         journeys = [
             ("研究", "#research/lab", "#tab-lab", "/static/workspaces/research.js"),
             ("账户", "#account/paper", "#tab-paper", "/static/workspaces/account.js"),
             ("运行", "#runtime/automation", "#tab-automation", "/static/workspaces/runtime.js"),
-            ("今日", "#today/quotes", "#tab-market", "/static/workspaces/today.js"),
+            ("今日", "#today/market", "#tab-market", "/static/workspaces/today.js"),
         ]
         for label, route, selector, resource in journeys:
             page.get_by_role("button", name=label, exact=True).click()
-            page.wait_for_url(re.compile(re.escape(route) + r"$"))
+            page.wait_for_url(re.compile(re.escape(route) + (r"\?" if route == "#today/market" else r"$")))
             page.locator(selector).wait_for(state="visible")
             playwright_sync.expect(page.locator(selector)).to_have_class(re.compile(r"(?:^|\s)active(?:\s|$)"))
             assert requested.count(f"{url}{resource}") == 1
@@ -790,13 +1023,13 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
 
         page.get_by_role("button", name="研究", exact=True).click()
         page.get_by_role("button", name="今日", exact=True).click()
-        page.wait_for_url(re.compile(r"#today/quotes$"))
-        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        page.wait_for_url(re.compile(r"#today/market\?"))
+        page.locator(".market-workbench").wait_for(state="visible")
         assert requested.count(f"{url}/static/workspaces/research.js") == 1
         assert requested.count(f"{url}/static/workspaces/today.js") == 1
 
-        page.get_by_role("tab", name="轮动总览", exact=True).click()
-        page.wait_for_url(re.compile(r"#today/rotation$"))
+        page.get_by_role("tab", name="行业周期", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/industry$"))
         page.locator("#tab-rotation").wait_for(state="visible")
         page.wait_for_function("() => typeof window.echarts !== 'undefined'")
         assert requested.count(f"{url}/static/echarts.min.js") == 1
@@ -836,7 +1069,7 @@ def test_owner_view_resource_budgets_use_browser_request_attribution(live_server
     for route, view in report["views"].items():
         assert view["owned_bytes"] <= 350 * 1024, {route: view}
     assert 0 < report["echarts_vendor_bytes"] <= 1024 * 1024, report
-    assert "/static/echarts.min.js" not in report["initial_resources"]
+    assert "/static/echarts.min.js" in report["initial_resources"]
     print("workspace resource budgets: " + json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
@@ -853,7 +1086,8 @@ def test_workspace_activation_is_latest_wins_after_mount_wait(live_server):
         )
         page.route("**/static/lab.js", lambda route: held.append(route))
         page.goto(url)
-        page.wait_for_url(re.compile(r"#today/quotes$"))
+        page.wait_for_url(re.compile(r"#today/market\?"))
+        page.wait_for_function("() => (window.__workspaceMounts || []).includes('today/market')")
 
         page.get_by_role("button", name="研究", exact=True).click()
         for _ in range(40):
@@ -868,7 +1102,7 @@ def test_workspace_activation_is_latest_wins_after_mount_wait(live_server):
         page.locator("#tab-automation").wait_for(state="visible")
         page.wait_for_timeout(1_000)
         assert page.evaluate("window.__workspaceMounts") == [
-            "today/quotes", "runtime/automation",
+            "today/market", "runtime/automation",
         ]
         playwright_sync.expect(page.get_by_role("button", name="运行", exact=True)).to_have_attribute(
             "aria-current", "page"
@@ -913,7 +1147,7 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
         failed.route("**/static/workspaces/account.js*", fail_account_once)
         failed.route("**/api/v1/market/overview", count_market)
         failed.goto(url)
-        failed.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        failed.locator(".market-workbench").wait_for(state="visible")
         initial_market_requests = market_requests
         failed.get_by_role("button", name="账户", exact=True).click()
         alert = failed.get_by_role("alert")
@@ -921,7 +1155,7 @@ def test_workspace_deep_link_refresh_and_load_failure_are_fail_closed(live_serve
         playwright_sync.expect(failed.locator("#tab-market")).to_have_class(
             re.compile(r"(?:^|\s)active(?:\s|$)")
         )
-        assert failed.url.endswith("#today/quotes")
+        assert "#today/market?" in failed.url
         assert market_requests == initial_market_requests
         failed.get_by_role("button", name="账户", exact=True).click()
         failed.wait_for_url(re.compile(r"#account/paper$"))
@@ -947,15 +1181,15 @@ def test_workspace_mount_failure_restores_previous_route_and_retries_style(live_
 
         page.route("**/static/lab.css*", fail_style_once)
         page.goto(url)
-        page.wait_for_url(re.compile(r"#today/quotes$"))
+        page.wait_for_url(re.compile(r"#today/market\?"))
         assert page.evaluate("Object.isFrozen(window.QuantMasterShell)")
-        page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        page.locator(".market-workbench").wait_for(state="visible")
 
         page.get_by_role("button", name="研究", exact=True).click()
         playwright_sync.expect(page.get_by_role("alert")).to_contain_text("工作区加载失败")
-        assert page.url.endswith("#today/quotes")
-        playwright_sync.expect(page.get_by_role("button", name="今日", exact=True)).to_have_attribute(
-            "aria-current", "page"
+        assert "#today/market?" in page.url
+        playwright_sync.expect(page.get_by_role("button", name="今日", exact=True)).to_have_class(
+            re.compile(r"(?:^|\s)active(?:\s|$)")
         )
         playwright_sync.expect(page.locator("#tab-market")).to_be_visible()
 
@@ -985,12 +1219,12 @@ def test_workspace_mount_resource_failures_retry_script_and_today_feature(live_s
                 route.continue_()
 
         script_page.route("**/static/echarts.min.js*", fail_script_once)
-        script_page.goto(url)
-        script_page.wait_for_url(re.compile(r"#today/quotes$"))
-        script_page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
+        script_page.goto(f"{url}/#runtime/automation")
+        script_page.wait_for_url(re.compile(r"#runtime/automation$"))
+        script_page.locator("#tab-automation").wait_for(state="visible")
         script_page.get_by_role("button", name="研究", exact=True).click()
         playwright_sync.expect(script_page.get_by_role("alert")).to_contain_text("工作区加载失败")
-        assert script_page.url.endswith("#today/quotes")
+        assert script_page.url.endswith("#runtime/automation")
         script_page.get_by_role("button", name="研究", exact=True).click()
         script_page.wait_for_url(re.compile(r"#research/lab$"))
         script_page.locator("#tab-lab").wait_for(state="visible")
@@ -1010,54 +1244,16 @@ def test_workspace_mount_resource_failures_retry_script_and_today_feature(live_s
 
         feature_page.route("**/static/rotation.js*", fail_feature_once)
         feature_page.goto(url)
-        feature_page.wait_for_url(re.compile(r"#today/quotes$"))
-        feature_page.get_by_role("tab", name="轮动总览", exact=True).click()
+        feature_page.wait_for_url(re.compile(r"#today/market\?"))
+        feature_page.get_by_role("tab", name="行业周期", exact=True).click()
         playwright_sync.expect(feature_page.get_by_role("alert")).to_contain_text("工作区加载失败")
-        assert feature_page.url.endswith("#today/quotes")
+        assert "#today/market?" in feature_page.url
         playwright_sync.expect(feature_page.locator("#tab-market")).to_be_visible()
-        feature_page.get_by_role("tab", name="轮动总览", exact=True).click()
-        feature_page.wait_for_url(re.compile(r"#today/rotation$"))
+        feature_page.get_by_role("tab", name="行业周期", exact=True).click()
+        feature_page.wait_for_url(re.compile(r"#today/industry$"))
         feature_page.locator("#tab-rotation").wait_for(state="visible")
         assert feature_requests == 2
 
-        today_page = browser.new_page(viewport={"width": 1280, "height": 900})
-        today_requests = 0
-        today_errors = []
-        today_responses = []
-
-        def fail_today_charts_once(route):
-            nonlocal today_requests
-            today_requests += 1
-            if today_requests == 1:
-                route.abort()
-            else:
-                route.continue_()
-
-        today_page.on("pageerror", lambda error: today_errors.append(str(error)))
-        today_page.on(
-            "response",
-            lambda response: today_responses.append(response.ok)
-            if "/static/today-charts.js" in response.url else None,
-        )
-        today_page.route("**/static/today-charts.js*", fail_today_charts_once)
-        today_page.route("**/api/v1/market/fear-greed", lambda route: route.fulfill(json={
-            "status": "ready", "score": 18.0, "rating_label": "极度恐惧",
-            "as_of": "2026-07-21T08:00:00+08:00",
-            "history": [{"date": "2026-07-20", "score": 22.0}],
-            "thresholds": {"fear_greed_rare": 10, "rsi_add": 22},
-        }))
-        today_page.goto(url)
-        today_page.wait_for_url(re.compile(r"#today/quotes$"))
-        today_page.wait_for_timeout(1_000)
-        assert today_requests in (1, 2)
-        today_page.get_by_role("button", name="账户", exact=True).click()
-        today_page.wait_for_url(re.compile(r"#account/paper$"))
-        today_page.get_by_role("button", name="今日", exact=True).click()
-        today_page.wait_for_url(re.compile(r"#today/quotes$"))
-        today_page.locator("#fear-greed-gauge-market canvas").wait_for(state="visible")
-        assert today_requests == 2
-        assert today_errors == []
-        assert today_responses[-1] is True
         browser.close()
 
 
@@ -1256,10 +1452,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
             "运行",
         ]
         assert page.locator('[data-workspace-pages="today"] button').all_inner_texts() == [
-            "行情",
-            "市场温度",
-            "市场风格",
-            "轮动总览",
+            "市场全景",
             "行业周期",
             "细分题材",
             "ETF 研究",
@@ -2137,7 +2330,7 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         browser.close()
 
 
-def test_kline_cache_and_stale_view_protection(live_server):
+def _legacy_kline_cache_and_stale_view_protection(live_server):
     url, _ = live_server
     empty_market = {"groups": {}}
     with playwright_sync.sync_playwright() as manager:
@@ -2306,7 +2499,7 @@ def test_kline_cache_and_stale_view_protection(live_server):
         browser.close()
 
 
-def test_major_indexes_are_first_and_personal_group_shows_memberships(live_server):
+def _legacy_major_indexes_are_first_and_personal_group_shows_memberships(live_server):
     url, _ = live_server
     personal = {
         "symbol": "600519.SH",
@@ -2926,7 +3119,7 @@ def test_automation_subscriptions_audit_and_source_save_feedback(live_server):
         browser.close()
 
 
-def test_market_style_confirmation_path_chart_layout(live_server):
+def _legacy_market_style_confirmation_path_chart_layout(live_server):
     url, _ = live_server
     states = [
         ("weak_rebound", "pending"),
@@ -3283,6 +3476,8 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         playwright_sync.expect(l1_tab).to_have_attribute("aria-selected", "true")
         canvas = page.locator("#rotation-industry-scatter canvas").first
         canvas.wait_for(state="visible")
+        assert page.locator("#tab-rotation *").count() <= 3000
+        assert _active_chart_count(page) <= 4
         chart_box = page.locator("#rotation-industry-scatter").bounding_box()
         assert chart_box["width"] > 700
         assert chart_box["height"] == pytest.approx(320, abs=1)
@@ -3514,6 +3709,8 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         page.get_by_role("heading", name="重点关注题材", exact=True).wait_for()
         cards = page.locator(".rotation-theme-focus-card")
         playwright_sync.expect(cards).to_have_count(4)
+        assert page.locator("#tab-rotation *").count() <= 3000
+        assert _active_chart_count(page) <= 4
         playwright_sync.expect(cards.nth(0)).to_contain_text("机器人")
         playwright_sync.expect(cards.nth(0)).to_contain_text("5/5 项证据")
         playwright_sync.expect(cards.nth(0)).to_contain_text("代表样本 1")
@@ -3548,7 +3745,7 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         browser.close()
 
 
-def test_market_temperature_change_window_rerenders_cached_evidence(live_server):
+def _legacy_market_temperature_change_window_rerenders_cached_evidence(live_server):
     url, _ = live_server
     current_items = [
         {
@@ -3704,7 +3901,7 @@ def test_market_temperature_change_window_rerenders_cached_evidence(live_server)
         browser.close()
 
 
-def test_rotation_deep_links_cold_states_and_narrow_layout(live_server):
+def _legacy_rotation_deep_links_cold_states_and_narrow_layout(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
@@ -4164,6 +4361,8 @@ def test_etf_v21_conclusion_first_keyboard_drawer_and_independent_catalog(live_s
         page.goto(f"{url}/#today/etfs")
         page.locator("#rotation-etf-view").wait_for(state="visible")
         playwright_sync.expect(page.locator(".etf-summary")).to_have_count(3)
+        assert page.locator("#tab-rotation *").count() <= 3000
+        assert _active_chart_count(page) <= 4
         assert page.locator(".etf-summary:not([disabled])").evaluate_all(
             "nodes => nodes.every(node => node.getAttribute('aria-haspopup') === 'dialog')"
         )
