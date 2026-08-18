@@ -291,7 +291,9 @@ def make_paper_service(tmp_path, name="日频验证", *, rebalance="D"):
     return PaperService(store), account
 
 
-def validated_panel(panel):
+def validated_panel(panel, *, execution_price_type="raw"):
+    if execution_price_type is not None:
+        panel["open"].attrs["execution_price_type"] = execution_price_type
     sessions = sorted({
         pd.Timestamp(value).date()
         for frame in panel.values()
@@ -380,7 +382,25 @@ def test_paper_process_never_uses_adjusted_prices_as_raw_execution(tmp_path):
 
     result = service.process(
         account["id"],
-        **validated_panel(adjusted),
+        **validated_panel(adjusted, execution_price_type=None),
+    )
+
+    assert result["status"] == "waiting_market_data"
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
+def test_paper_process_waits_when_execution_price_semantics_are_undeclared(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+
+    result = service.process(
+        account["id"],
+        **validated_panel(price_panel(dates), execution_price_type=None),
     )
 
     assert result["status"] == "waiting_market_data"

@@ -1830,6 +1830,7 @@ class PaperService:
         """Convert one accepted StockDB frame without changing its price contract."""
 
         requested = tuple(dict.fromkeys(str(symbol).upper() for symbol in symbols))
+        required_end = pd.Timestamp(end).normalize()
         fields = ("open", "high", "low", "close", "volume")
         value = frame.copy()
         value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
@@ -1842,20 +1843,20 @@ class PaperService:
             matrix = matrix.reindex(columns=requested).sort_index()
             panels[field] = matrix
             missing_symbols.update(str(symbol) for symbol in matrix.columns[matrix.isna().all()])
-            if available_end not in matrix.index:
+            if required_end not in matrix.index:
                 missing_symbols.update(requested)
             else:
                 missing_symbols.update(
-                    str(symbol) for symbol in matrix.columns[matrix.loc[available_end].isna()]
+                    str(symbol) for symbol in matrix.columns[matrix.loc[required_end].isna()]
                 )
         latest = panels["close"].index.max() if not panels["close"].empty else None
-        if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < pd.Timestamp(end):
+        if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < required_end:
             issues = []
             if missing_symbols:
                 issues.append("缺少标的：" + "、".join(sorted(missing_symbols)))
             if latest is None:
                 issues.append("没有可用收盘行情")
-            elif pd.Timestamp(latest).normalize() < pd.Timestamp(end):
+            elif pd.Timestamp(latest).normalize() < required_end:
                 issues.append(f"最新行情仅到 {pd.Timestamp(latest).date()}")
             quality = BarDataQuality(
                 "unavailable",
@@ -2248,7 +2249,7 @@ class PaperService:
         declared_price_type = str(
             open_prices.attrs.get("execution_price_type")
             or open_prices.attrs.get("adjustment")
-            or (PriceType.RAW.value if observed_at is not None else "unknown")
+            or "unknown"
         ).lower()
         execution_price_type = {
             "none": PriceType.RAW.value,
