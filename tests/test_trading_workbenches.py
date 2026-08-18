@@ -179,6 +179,11 @@ class _RoutePaperStore:
             raise KeyError("周期不存在")
         return {"id": cycle_id, "status": "confirmed"}
 
+    def recover_unproven_order(self, order_id, **payload):
+        if order_id == "missing":
+            raise KeyError("模拟订单不存在")
+        return {"id": order_id, "status": "filled", **payload}
+
     def cycles(self, account_id, limit=30):
         return [{"account_id": account_id, "limit": limit}]
 
@@ -1232,6 +1237,75 @@ def test_legacy_filled_order_without_fill_evidence_becomes_unproven(tmp_path):
         migrated.transition_order(legacy["id"], "open")
 
 
+def test_unproven_legacy_fill_blocks_report_and_cycle_projection(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(account_spec("历史收益核验"), symbols=["600000.SH"])
+    cycle, _ = store.create_cycle(
+        account, "2024-01-05", {"600000.SH": 1.0}, {"600000.SH": 10.0}, [],
+    )
+    order = cycle["orders"][0]
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_orders SET status='unproven',shares=100,price=10,"
+            "requested_qty=NULL,filled_qty=0,remaining_qty=NULL,"
+            "integrity_code='legacy_fill_unproven' WHERE id=?",
+            (order["id"],),
+        )
+        conn.execute("UPDATE paper_cycles SET status='completed' WHERE id=?", (cycle["id"],))
+    store.ledger(account["id"]).add_trade(
+        TradeRecord("2024-01-08", "600000.SH", "buy", 10, 100),
+        idempotency_key=order["idempotency_key"],
+    )
+
+    payload = PaperService(store).report(account["id"])
+
+    assert payload["report"]["evidence_status"] == "unproven"
+    assert payload["report"]["total_assets"] is None
+    assert payload["report"]["positions"] == []
+    assert payload["dates"] == payload["twr"] == []
+    assert payload["cycles"][0]["status"] == "unproven"
+    assert "停止计算持仓、净值和收益" in payload["warnings"][0]
+
+
+def test_unproven_legacy_fill_requires_matching_manual_recovery_evidence(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(account_spec("历史成交恢复"), symbols=["600000.SH"])
+    cycle, _ = store.create_cycle(
+        account, "2024-01-05", {"600000.SH": 1.0}, {"600000.SH": 10.0}, [],
+    )
+    order = cycle["orders"][0]
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_orders SET status='unproven',shares=100,price=10,"
+            "requested_qty=NULL,filled_qty=0,remaining_qty=NULL,"
+            "integrity_code='legacy_fill_unproven' WHERE id=?",
+            (order["id"],),
+        )
+        conn.execute("UPDATE paper_cycles SET status='completed' WHERE id=?", (cycle["id"],))
+    store.ledger(account["id"]).add_trade(
+        TradeRecord("2024-01-08", "600000.SH", "buy", 10, 100),
+        idempotency_key=order["idempotency_key"],
+    )
+
+    with pytest.raises(ValueError, match="不一致"):
+        store.recover_unproven_order(
+            order["id"], fill_key="manual-fill-1", quantity=100, price=11, fee=0,
+            filled_at="2024-01-08T09:30:00+08:00", market_ref="statement:1",
+            rule_version="manual-v1", side="buy",
+        )
+    recovered = store.recover_unproven_order(
+        order["id"], fill_key="manual-fill-1", quantity=100, price=10, fee=0,
+        filled_at="2024-01-08T09:30:00+08:00", market_ref="statement:1",
+        rule_version="manual-v1", side="buy",
+    )
+
+    assert recovered["status"] == "filled"
+    assert recovered["integrity_code"] == ""
+    assert recovered["side"] == "buy"
+    assert store.cycle(cycle["id"])["status"] == "completed"
+    assert store.order_fills(order["id"])[0]["market_ref"] == "statement:1"
+
+
 def test_paper_auto_run_health_distinguishes_expired_lease_and_reclaim(tmp_path):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     account = store.create_account(
@@ -1818,6 +1892,9 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "核心数量冲突" in trading_script
     assert "unproven: '成交待核验'" in trading_script
     assert "历史订单没有可验证的 fill 明细" in trading_script
+    assert "收益报告待核验" in trading_script
+    assert "data-paper-verify-fill" in trading_script
+    assert "verified-fill" in trading_script
     assert "const PAPER_PROPOSAL_TIMEOUT_MS = 60_000;" in trading_script
     assert "timeoutMs: PAPER_PROPOSAL_TIMEOUT_MS" in trading_script
     assert 'class="trading-history-row" role="row"' in trading_script
@@ -2116,6 +2193,27 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
             trading.PaperAccountUpdate(status="paused"),
             request,
         )
+    recovered = trading.recover_paper_order_fill(
+        "order",
+        trading.PaperVerifiedFill(
+            fill_key="manual-fill-1", quantity=100, price=10, fee=0,
+            filled_at="2024-01-08T09:30:00+08:00", market_ref="statement:1",
+            rule_version="manual-v1", side="buy",
+        ),
+        request,
+    )
+    assert recovered["order"]["status"] == "filled"
+    with pytest.raises(trading.HTTPException) as missing_recovery:
+        trading.recover_paper_order_fill(
+            "missing",
+            trading.PaperVerifiedFill(
+                fill_key="manual-fill-1", quantity=100, price=10, fee=0,
+                filled_at="2024-01-08T09:30:00+08:00", market_ref="statement:1",
+                rule_version="manual-v1", side="buy",
+            ),
+            request,
+        )
+    assert missing_recovery.value.status_code == 404
     deleted = trading.delete_paper_account("account", request)
     assert deleted["deleted"] is True and deleted["recoverable"] is True
     assert deleted["account"]["status"] == "archived"
