@@ -655,6 +655,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
         page.locator("[data-market-query]").fill("银行")
         playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(1)
 
+        page.locator("#runtime-info").evaluate("node => { node.hidden = true; }")
         desktop_shot = tmp_path / "market-workbench-1440.png"
         page.screenshot(path=str(desktop_shot), full_page=True)
         assert desktop_shot.stat().st_size > 10_000

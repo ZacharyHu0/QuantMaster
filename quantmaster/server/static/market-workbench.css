@@ -22,7 +22,7 @@
 .market-head-actions button:disabled,.market-list-pages button:disabled { opacity:.45; cursor:default; }
 
 .market-decision-strip {
-  display:grid; grid-template-columns:repeat(8,minmax(0,1fr)); margin:12px 0;
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); margin:12px 0;
   border:1px solid var(--border); background:var(--border); gap:1px;
 }
 .market-decision-strip > article { position:relative; display:grid; gap:2px; min-width:0; padding:8px 9px; background:var(--page); }
