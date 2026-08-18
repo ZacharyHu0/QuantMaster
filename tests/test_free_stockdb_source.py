@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import date
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -274,6 +277,54 @@ def test_online_fallback_has_an_independent_single_worker_lane(monkeypatch) -> N
 
     assert not result.empty
     assert calls == ["free-stockdb-online"]
+
+
+def test_online_source_reads_official_trade_calendar_from_sdk(monkeypatch) -> None:
+    calls: list[tuple] = []
+    module = SimpleNamespace(
+        set_init=lambda endpoint, **options: calls.append(("init", endpoint, options)),
+        get_trade_days=lambda **options: calls.append(("calendar", options)) or [
+            "2026-08-17", "2026-08-18",
+        ],
+    )
+    monkeypatch.setattr(
+        free_stockdb,
+        "provider_call",
+        lambda lane, _key, function, **_kwargs: calls.append(("lane", lane)) or function(),
+    )
+    source = FreeStockDBOnlineSource()
+    monkeypatch.setattr(source, "_load_sdk_module", lambda: module)
+
+    result = source.official_trade_days(date(2026, 8, 17), date(2026, 8, 18))
+
+    assert result == ["2026-08-17", "2026-08-18"]
+    assert calls == [
+        ("lane", "free-stockdb-online:calendar"),
+        ("init", "8.138.149.215:7899", {"df": False}),
+        ("calendar", {"start_date": "2026-08-17", "end_date": "2026-08-18"}),
+    ]
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": "calendar unavailable"},
+    ["2026-08-18", "2026-08-19"],
+    ["not-a-date"],
+])
+def test_online_trade_calendar_rejects_error_and_out_of_range_payloads(
+    payload, monkeypatch,
+) -> None:
+    module = SimpleNamespace(
+        set_init=lambda *_args, **_kwargs: None,
+        get_trade_days=lambda **_kwargs: payload,
+    )
+    monkeypatch.setattr(
+        free_stockdb, "provider_call", lambda _lane, _key, function, **_kwargs: function(),
+    )
+    source = FreeStockDBOnlineSource()
+    monkeypatch.setattr(source, "_load_sdk_module", lambda: module)
+
+    with pytest.raises(FreeStockDBProviderError):
+        source.official_trade_days(date(2026, 8, 17), date(2026, 8, 18))
 
 
 def test_cn_source_order_appends_enabled_public_http(monkeypatch) -> None:

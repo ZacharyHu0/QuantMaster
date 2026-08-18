@@ -86,6 +86,33 @@ def test_cold_start_without_calendar_returns_actionable_safe_skip():
     assert "Tushare" in result.reason
 
 
+def test_official_stockdb_calendar_supplements_missing_tushare(
+    isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = ""
+    isolated_config.data.free_stockdb_online_enabled = True
+    calls = []
+
+    def calendar(self, start, end):
+        calls.append((self.name, start, end))
+        return ["2026-08-17", "2026-08-18"]
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source.FreeStockDBOnlineSource.official_trade_days",
+        calendar,
+    )
+
+    result = SessionExpectationResolver().resolve(
+        datetime(2026, 8, 18, 16, 19, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result.session == "2026-08-18"
+    assert result.source == "free-stockdb-online:calendar"
+    assert result.ready is False
+    assert result.completion == "current_session_closed_waiting_provider"
+    assert calls and calls[0][0] == "free-stockdb-online"
+
+
 def test_session_helpers_normalize_dates_and_expose_fallback_evidence(isolated_config):
     timezone = ZoneInfo("Asia/Shanghai")
     naive = _normalize_now(datetime(2026, 8, 4, 20))

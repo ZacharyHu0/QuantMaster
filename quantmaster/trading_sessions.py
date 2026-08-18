@@ -16,7 +16,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
-from quantmaster.runtime.trading_session_sources import official_calendar, research_calendar
+from quantmaster.runtime.trading_session_sources import (
+    official_calendar,
+    research_calendar,
+    supplemental_official_calendar,
+)
 from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -117,9 +121,19 @@ class SessionExpectationResolver:
     """Resolve the latest A-share session without equating clock time with data."""
 
     def _official_sessions(self, start: date, end: date) -> list[str]:
-        if not get_config().data.tushare_token:
+        data = get_config().data
+        if data.tushare_token:
+            return official_calendar(start, end)
+        if not data.free_stockdb_online_enabled:
             return []
-        return official_calendar(start, end)
+        return supplemental_official_calendar(start, end)
+
+    @staticmethod
+    def _official_source_name() -> str:
+        data = get_config().data
+        if not data.tushare_token and data.free_stockdb_online_enabled:
+            return "free-stockdb-online:calendar"
+        return "tushare:SSE"
 
     @staticmethod
     def _research_sessions(start: date, end: date) -> list[str]:
@@ -201,6 +215,7 @@ class SessionExpectationResolver:
         cutoff_iso = current.astimezone(UTC).isoformat()
         coverage: dict[str, Any] = {
             "official_dates": official_sessions,
+            "official_source": self._official_source_name(),
             "research_dates": research_sessions,
             "stockdb_session": stockdb_session,
             "stockdb_completion": stockdb_completion,
@@ -230,7 +245,7 @@ class SessionExpectationResolver:
             )
         if expected:
             return SessionExpectation(
-                expected, "tushare:SSE", False,
+                expected, self._official_source_name(), False,
                 "交易时段已结束，等待 provider 发布及本地完整摄取",
                 "current_session_closed_waiting_provider", "Asia/Shanghai", cutoff_iso, coverage,
             )
@@ -239,7 +254,7 @@ class SessionExpectationResolver:
                 local_complete, "research_lake", True, "最近完整本地交易分区",
                 "previous_session_complete", "Asia/Shanghai", cutoff_iso, coverage,
             )
-        action = "请配置 Tushare 交易日历或先完成一次全市场日线同步"
+        action = "请配置 Tushare、启用 free-stockdb-online，或先完成一次全市场日线同步"
         detail = "；".join(failures)
         return SessionExpectation(
             source="unavailable",
@@ -285,7 +300,7 @@ class SessionExpectationResolver:
                 coverage,
             )
         return SessionExpectation(
-            value.isoformat(), "tushare:SSE", False,
+            value.isoformat(), self._official_source_name(), False,
             "交易日已验证，但 cutoff 前缺少完整本地数据证据",
             "current_session_closed_waiting_provider", "Asia/Shanghai",
             current.astimezone(UTC).isoformat(),

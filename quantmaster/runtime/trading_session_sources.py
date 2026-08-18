@@ -13,6 +13,7 @@ from pathlib import Path
 from quantmaster.runtime.sqlite import connect_sqlite
 
 _official_source: Callable[[date, date], list[str]] | None = None
+_supplemental_official_source: Callable[[date, date], list[str]] | None = None
 
 
 def register_official_calendar(source: Callable[[date, date], list[str]]) -> None:
@@ -22,6 +23,19 @@ def register_official_calendar(source: Callable[[date, date], list[str]]) -> Non
 
 def official_calendar(start: date, end: date) -> list[str]:
     return [] if _official_source is None else list(_official_source(start, end))
+
+
+def register_supplemental_official_calendar(
+    source: Callable[[date, date], list[str]],
+) -> None:
+    global _supplemental_official_source
+    _supplemental_official_source = source
+
+
+def supplemental_official_calendar(start: date, end: date) -> list[str]:
+    if _supplemental_official_source is None:
+        return []
+    return list(_supplemental_official_source(start, end))
 
 
 def research_calendar(root: Path, start: date, end: date) -> list[str]:

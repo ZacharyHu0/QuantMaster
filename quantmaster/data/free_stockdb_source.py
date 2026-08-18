@@ -16,7 +16,7 @@ import math
 import sys
 import threading
 import tokenize
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -37,6 +37,7 @@ from quantmaster.data.base import (
 )
 from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
 from quantmaster.data.resilience import provider_call
+from quantmaster.runtime.trading_session_sources import register_supplemental_official_calendar
 from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 _BOARD_CATEGORIES = {
@@ -1223,3 +1224,76 @@ class FreeStockDBOnlineSource(FreeStockDBSource):
             base_url=cfg.free_stockdb_online_url,
             timeout=cfg.free_stockdb_online_timeout,
         )
+
+    def official_trade_days(self, start: date, end: date) -> list[str]:
+        """Read the official online calendar exported by stock_sdk."""
+        parsed = urlparse(self.base_url)
+        if not parsed.hostname:
+            raise FreeStockDBProviderError("free-stockdb-online 地址缺少主机名")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        endpoint = f"{parsed.hostname}:{port}"
+        key = json.dumps({
+            "endpoint": endpoint,
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+        }, sort_keys=True, separators=(",", ":"))
+
+        def fetch():
+            module = self._load_sdk_module()
+            set_init = getattr(module, "set_init", None)
+            get_trade_days = getattr(module, "get_trade_days", None)
+            if not callable(set_init) or not callable(get_trade_days):
+                raise FreeStockDBProviderError(
+                    "当前 stock_sdk 未提供 set_init/get_trade_days，请升级至 v0.3.1 或更高版本"
+                )
+            with _SDK_CACHE_LOCK:
+                set_init(endpoint, df=False)
+                return get_trade_days(
+                    start_date=start.isoformat(), end_date=end.isoformat(),
+                )
+
+        try:
+            payload = provider_call(f"{self.name}:calendar", key, fetch)
+        except FreeStockDBProviderError:
+            raise
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise FreeStockDBProviderError(
+                str(exc).strip() or "free-stockdb 官方交易日历调用失败"
+            ) from exc
+        if isinstance(payload, dict):
+            detail = str(payload.get("error") or "返回对象不是交易日数组")
+            raise FreeStockDBProviderError(f"free-stockdb 官方交易日历错误：{detail}")
+        if isinstance(payload, (str, bytes)) or payload is None:
+            raise FreeStockDBProviderError("free-stockdb 官方交易日历合同错误：预期日期数组")
+        try:
+            values = list(payload)
+        except TypeError as exc:
+            raise FreeStockDBProviderError(
+                "free-stockdb 官方交易日历合同错误：预期日期数组"
+            ) from exc
+        sessions: set[date] = set()
+        for raw in values:
+            try:
+                session = date.fromisoformat(str(raw)[:10])
+            except ValueError as exc:
+                raise FreeStockDBProviderError(
+                    f"free-stockdb 官方交易日历包含无效日期：{str(raw)[:32]}"
+                ) from exc
+            if not start <= session <= end:
+                raise FreeStockDBProviderError(
+                    f"free-stockdb 官方交易日历返回越界日期：{session.isoformat()}"
+                )
+            sessions.add(session)
+        if not sessions:
+            raise FreeStockDBProviderError("free-stockdb 官方交易日历返回空数组")
+        return [item.isoformat() for item in sorted(sessions)]
+
+
+def register_free_stockdb_calendar() -> None:
+    """Register the opt-in online calendar without coupling the resolver to data."""
+    register_supplemental_official_calendar(
+        lambda start, end: FreeStockDBOnlineSource().official_trade_days(start, end),
+    )
+
+
+register_free_stockdb_calendar()
