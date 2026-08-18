@@ -1069,6 +1069,69 @@ class RotationStore:
             return header, [], pagination
         return header, self._decode_snapshot_items(kind, rows), pagination
 
+    def board_index_items_page(
+        self,
+        *,
+        method: str,
+        window: int,
+        query: str = "",
+        category: str = "",
+        sort: str = "change",
+        order: str = "desc",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any]]:
+        """Page board rankings in SQLite without decoding the full directory."""
+
+        if method not in {"equal", "float_mv", "amount", "volume", "total_mv"}:
+            raise ValueError("未知板块指数算法")
+        selected_window = int(window)
+        if selected_window not in _SNAPSHOT_WINDOWS:
+            raise ValueError("轮动观察窗口仅支持 1、3、5、20 日")
+        header = self.snapshot_header("board_indexes")
+        selected_size = max(1, min(100, int(page_size)))
+        if header is None:
+            return None, [], _empty_snapshot_page(selected_size)
+        snapshot_id = str((header.get("meta") or {}).get("snapshot_id") or "")
+        filters = _snapshot_item_filters(
+            "board_indexes",
+            snapshot_id,
+            query=query,
+            level="",
+            allowed_keys=None,
+            include_l1=False,
+            stage="",
+            category=category,
+            grade="",
+            window=selected_window,
+        )
+        if filters is None:
+            return header, [], _empty_snapshot_page(selected_size)
+        where, params = filters
+        method_path = f"$.methods.{method}"
+        columns = {
+            "change": (
+                "CAST(json_extract(payload_json, "
+                f"'{method_path}.changes.\"{selected_window}\"') AS REAL)"
+            ),
+            "name": "name COLLATE NOCASE",
+            "coverage": "coverage",
+            "member_count": "CAST(json_extract(payload_json, '$.member_count') AS INTEGER)",
+        }
+        selected = columns.get(str(sort), columns["change"])
+        direction = "DESC" if str(order).lower() == "desc" else "ASC"
+        order_by = (
+            f"CASE WHEN {selected} IS NULL THEN 1 ELSE 0 END ASC, "
+            f"{selected} {direction}, item_key ASC"
+        )
+        try:
+            rows, pagination = self._read_snapshot_items_page(
+                where, params, order_by, max(1, int(page)), selected_size,
+            )
+        except (FileNotFoundError, sqlite3.OperationalError):
+            return header, [], _empty_snapshot_page(selected_size)
+        return header, self._decode_snapshot_items("board_indexes", rows), pagination
+
     def snapshot_item_categories(self, kind: str) -> list[str]:
         header = self.snapshot_header(kind)
         if header is None:

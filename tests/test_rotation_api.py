@@ -48,6 +48,9 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert "%%QM_ROTATION_CSS_REV%%" not in page.text
     rotation_css = client.get("/static/rotation.css")
     assert rotation_css.headers["cache-control"] == "no-cache, max-age=0, must-revalidate"
+    rotation_script = client.get("/static/rotation.js").text
+    assert "viewRequestController?.abort()" in rotation_script
+    assert "api(path, signal ? {signal} : {})" in rotation_script
     assert 'data-tab="rotation"' in page.text
     assert 'id="market-temperature-view"' in page.text
     assert 'id="market-style-view"' in page.text
@@ -163,6 +166,17 @@ def test_board_index_routes_read_only_the_published_detail_and_page(monkeypatch)
         "category": "sw1", "level": "L1", "member_count": 2,
         "eligible_count": 2, "coverage": 1.0, "methods": methods,
     }
+    extra_items = [
+        {
+            **item,
+            "code": f"THEME:{index:06d}.TI",
+            "board_code": f"{index:06d}.TI",
+            "name": f"题材 {index:06d}",
+            "category": "theme",
+            "level": "CONCEPT",
+        }
+        for index in range(520)
+    ]
     service.store.save_snapshots({
         "board_indexes": {
             "meta": {
@@ -172,7 +186,7 @@ def test_board_index_routes_read_only_the_published_detail_and_page(monkeypatch)
                 "input_fingerprint": "fixture", "quality": {"status": "complete"},
             },
             "data": {
-                "items": [item],
+                "items": [item, *extra_items],
                 "details": {
                     "SW1:801010.SI": {
                         **item,
@@ -225,6 +239,14 @@ def test_board_index_routes_read_only_the_published_detail_and_page(monkeypatch)
     )
     assert changed_query.status_code == 200
     assert changed_query.headers["etag"] != page.headers["etag"]
+    final_page = client.get(
+        "/api/v1/rotation/board-indexes",
+        params={"page": 6, "page_size": 100, "sort": "name", "order": "asc"},
+    )
+    assert final_page.status_code == 200
+    assert final_page.json()["data"]["pagination"]["total"] == 521
+    assert len(final_page.json()["data"]["items"]) == 21
+    assert len(final_page.content) <= 64 * 1024
 
     detail = client.get(
         "/api/v1/rotation/board-indexes/sw1/801010.SI",

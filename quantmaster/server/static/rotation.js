@@ -74,6 +74,7 @@ const rotationFeature = (() => {
   let pendingEtfAssetFocus = '';
   let etfState = '';
   let requestVersion = 0;
+  let viewRequestController = null;
   let searchTimer = 0;
 
   document.addEventListener('pointerdown', event=>{
@@ -350,16 +351,17 @@ const rotationFeature = (() => {
     target?.querySelector('[data-close-etf-panel]')?.focus({preventScroll:true});
   }
 
-  async function fetchView(key, path, force = false) {
-    if (!force && cache.has(key)) return cache.get(key);
-    const task = api(path);
-    cache.set(key, task);
+  async function fetchView(key, path, force = false, signal = null) {
+    const cached = cache.get(key);
+    if (!force && cached && typeof cached?.then !== 'function') return cached;
+    const task = api(path, signal ? {signal} : {});
+    if (!signal) cache.set(key, task);
     try {
       const value = await task;
       cache.set(key, value);
       return value;
     } catch (error) {
-      cache.delete(key);
+      if (cache.get(key) === task) cache.delete(key);
       throw error;
     }
   }
@@ -1310,6 +1312,9 @@ const rotationFeature = (() => {
   }
 
   async function loadCurrent(force = false, hiddenOwner = '') {
+    viewRequestController?.abort();
+    const controller = new AbortController();
+    viewRequestController = controller;
     const thisRequest = ++requestVersion;
     const marketPage = activeMarketPage;
     const rotationPage = activeRotationPage;
@@ -1324,23 +1329,23 @@ const rotationFeature = (() => {
     try {
       let payload;
       if (marketActive && marketPage === 'temperature') {
-        payload = await fetchView('temperature','/api/v1/market/temperature',force);
+        payload = await fetchView('temperature','/api/v1/market/temperature',force,controller.signal);
         if (stillCurrent()) renderTemperature(payload);
       } else if (marketActive && marketPage === 'style') {
-        payload = await fetchView('structure','/api/v1/market/structure',force);
+        payload = await fetchView('structure','/api/v1/market/structure',force,controller.signal);
         if (stillCurrent()) renderStructure(payload);
       } else if (rotationActive && rotationPage === 'overview') {
-        payload = await fetchView(`overview:${activeWindow}`,`/api/v1/rotation/overview?window=${activeWindow}`,force);
+        payload = await fetchView(`overview:${activeWindow}`,`/api/v1/rotation/overview?window=${activeWindow}`,force,controller.signal);
         if (stillCurrent()) renderOverview(payload);
       } else if (rotationActive && rotationPage === 'industry') {
-        payload = await fetchView(`industries:${activeWindow}`,`/api/v1/rotation/industries?window=${activeWindow}`,force);
+        payload = await fetchView(`industries:${activeWindow}`,`/api/v1/rotation/industries?window=${activeWindow}`,force,controller.signal);
         if (stillCurrent()) renderIndustries(payload);
       } else if (rotationActive && rotationPage === 'themes') {
         const params = new URLSearchParams({page:String(themePage),page_size:String(themePageSize),window:String(activeWindow),sort:themeSort,order:themeSort === 'name' ? 'asc' : 'desc'});
         if (themeQuery.trim()) params.set('query',themeQuery.trim());
         if (themeStage) params.set('stage',themeStage);
         if (themeGrade) params.set('grade',themeGrade);
-        payload = await fetchView(`themes:${params.toString()}`,`/api/v1/rotation/themes?${params}`,force);
+        payload = await fetchView(`themes:${params.toString()}`,`/api/v1/rotation/themes?${params}`,force,controller.signal);
         themePage = Number(payload.data?.pagination?.page || themePage);
         if (stillCurrent()) renderThemes(payload);
       } else if (rotationActive && rotationPage === 'etfs') {
@@ -1353,8 +1358,8 @@ const rotationFeature = (() => {
         if (selectedEtfSnapshotId) { overviewParams.set('snapshot_id',selectedEtfSnapshotId); productParams.set('snapshot_id',selectedEtfSnapshotId); }
         if (selectedEtfTier === 'sandbox') { overviewParams.set('tier','sandbox'); productParams.set('tier','sandbox'); }
         const [overview,products] = await Promise.all([
-          fetchView(`etf-overview:${overviewParams}`,`/api/v1/rotation/etfs/overview?${overviewParams}`,force),
-          fetchView(`etf-products:${productParams}`,`/api/v1/rotation/etfs?${productParams}`,force),
+          fetchView(`etf-overview:${overviewParams}`,`/api/v1/rotation/etfs/overview?${overviewParams}`,force,controller.signal),
+          fetchView(`etf-products:${productParams}`,`/api/v1/rotation/etfs?${productParams}`,force,controller.signal),
         ]);
         etfProductPage = Number(products.data?.pagination?.page || etfProductPage);
         payload = {meta:overview.meta,data:{overview:overview.data,products:products.data}};
@@ -1813,6 +1818,9 @@ const rotationFeature = (() => {
   }
 
   function unmount() {
+    requestVersion += 1;
+    viewRequestController?.abort();
+    viewRequestController = null;
     clearTimeout(searchTimer);
     searchTimer = 0;
     activeJob = null;

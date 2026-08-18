@@ -316,30 +316,19 @@ def rotation_board_indexes(
     window = _rotation_window(window)
     selected_size = _page_size(page_size)
     service = get_rotation_service(read_only=True)
-    header, values, _pagination_meta = service.store.snapshot_items_page(
-        "board_indexes",
+    header, values, pagination = service.store.board_index_items_page(
+        method=method,
+        window=window,
         query=query,
         category="" if category == "all" else category,
-        page=1,
-        page_size=500,
+        sort=sort,
+        order=order,
+        page=page,
+        page_size=selected_size,
     )
     if header is None:
         raise HTTPException(503, "板块指数快照尚未发布")
     items = [_board_index_item(item, method, window) for item in values]
-
-    def sort_key(item: dict[str, Any]) -> tuple[Any, str]:
-        value = item.get(sort)
-        if sort == "name":
-            value = str(value or "").casefold()
-        else:
-            value = _number(value)
-        return value, str(item.get("code") or "")
-
-    available = [item for item in items if item.get(sort) is not None]
-    unavailable = [item for item in items if item.get(sort) is None]
-    available.sort(key=sort_key, reverse=order == "desc")
-    items = available + unavailable
-    items, pagination = _pagination(items, page, selected_size)
     data = dict(header.get("data") or {})
     data.update({
         "items": items,
