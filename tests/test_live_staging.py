@@ -60,6 +60,55 @@ def test_release_metadata_rejects_non_string_constants(tmp_path: Path) -> None:
     assert failure.value.reason == "release_metadata_invalid"
 
 
+@pytest.mark.parametrize(
+    ("tagged", "message", "expected"),
+    [
+        (True, "release: publish v1.16.2\n", "v1.16.2"),
+        (
+            False,
+            "fix(update): keep candidate title metadata (#360)\n",
+            "v1.16.2 · fix(update): keep candidate title metadata",
+        ),
+        (
+            False,
+            "Merge pull request #360 from codex/candidate-title-metadata\n\n"
+            "fix(update): keep candidate title metadata\n",
+            "v1.16.2 · fix(update): keep candidate title metadata",
+        ),
+        (False, "chore: direct main change\n", "v1.16.2 · 未发布 main 测试构建"),
+    ],
+)
+def test_candidate_title_uses_exact_release_tag_or_merged_pr_title(
+    monkeypatch, tagged: bool, message: str, expected: str,
+) -> None:
+    sha = "a" * 40
+
+    def git(args, **_kwargs):
+        if args[0] == "rev-parse":
+            assert args == ["rev-parse", "--verify", "--quiet", "v1.16.2^{commit}"]
+            return subprocess.CompletedProcess(args, 0 if tagged else 1, f"{sha}\n" if tagged else "", "")
+        assert args == ["show", "-s", "--format=%B", sha]
+        return subprocess.CompletedProcess(args, 0, message, "")
+
+    monkeypatch.setattr(live.tasks, "git", git)
+
+    assert live._candidate_title(Path("primary"), sha, "1.16.2") == expected
+
+
+def test_slot_metadata_keeps_candidate_title(tmp_path: Path) -> None:
+    sha = "a" * 40
+    live._write_slot_meta(
+        tmp_path, sha, version="1.16.2", release_date="2026-08-16",
+        title="v1.16.2 · fix(update): keep candidate title metadata",
+    )
+
+    assert live._read_slot_meta(tmp_path, sha) == {
+        "version": "1.16.2",
+        "release_date": "2026-08-16",
+        "title": "v1.16.2 · fix(update): keep candidate title metadata",
+    }
+
+
 def _git(cwd: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", "-c", f"safe.directory={cwd.as_posix()}", *args],

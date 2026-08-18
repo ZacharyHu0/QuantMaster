@@ -25,6 +25,8 @@ from scripts.dev import tasks  # noqa: E402
 from scripts.release import check_desktop_artifact, smoke_frozen_runtime  # noqa: E402
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+_SQUASHED_PULL_REQUEST = re.compile(r"^(?P<title>.+?)\s+\(#\d+\)$")
+_MERGE_PULL_REQUEST = re.compile(r"^Merge pull request #\d+ from \S+$")
 STAGE_SCHEMA = 1
 ACTIVE_STATE_SCHEMA = 1
 STAGE_MARKER = ".quantmaster-stage.json"
@@ -97,6 +99,37 @@ def _release_metadata(snapshot: Path) -> tuple[str, str]:
     if not isinstance(date, str) or not date.strip():
         _block("release_metadata_invalid", "快照发布元数据缺少有效 RELEASE_DATE")
     return version.strip(), date.strip()
+
+
+def _merged_pull_request_title(message: str) -> str:
+    """Return a GitHub merge's PR title when the local commit records one."""
+
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if match := _SQUASHED_PULL_REQUEST.fullmatch(lines[0]):
+        return match.group("title").strip()
+    if _MERGE_PULL_REQUEST.fullmatch(lines[0]) and len(lines) > 1:
+        return lines[1]
+    return ""
+
+
+def _published_release(primary: Path, main_sha: str, version: str) -> bool:
+    tag = f"v{version}^{{commit}}"
+    result = tasks.git(["rev-parse", "--verify", "--quiet", tag], cwd=primary, check=False)
+    return result.returncode == 0 and result.stdout.strip() == main_sha
+
+
+def _candidate_title(primary: Path, main_sha: str, version: str) -> str:
+    release_title = f"v{version}"
+    if _published_release(primary, main_sha, version):
+        return release_title
+    message = tasks.git(
+        ["show", "-s", "--format=%B", main_sha], cwd=primary, check=False,
+    ).stdout
+    pull_request_title = _merged_pull_request_title(message)
+    suffix = pull_request_title or "未发布 main 测试构建"
+    return f"{release_title} · {suffix}"
 
 
 def _full_sha(value: object, *, label: str) -> str:
@@ -519,21 +552,23 @@ def _read_slot_meta(slot: Path, main_sha: str) -> dict[str, object] | None:
         return None
     version = str(payload.get("version") or "")
     date = str(payload.get("release_date") or "")
-    if version or date:
-        return {"version": version, "release_date": date}
+    title = str(payload.get("title") or "").strip()
+    if version or date or title:
+        return {"version": version, "release_date": date, "title": title}
     return None
 
 
 def _write_slot_meta(
-    slot: Path, main_sha: str, *, version: str, release_date: str,
+    slot: Path, main_sha: str, *, version: str, release_date: str, title: str,
 ) -> None:
-    """Write immutable version metadata next to the slot marker."""
+    """Write immutable candidate-display metadata next to the slot marker."""
 
     payload = {
         "schema": 1,
         "build_sha": main_sha,
         "version": version,
         "release_date": release_date,
+        "title": title,
     }
     meta_path = slot / SLOT_META_FILE
     temporary = slot / f".{SLOT_META_FILE}.{uuid.uuid4().hex}.tmp"
@@ -605,6 +640,7 @@ def _stage_candidate(
                 build_root = Path(raw_build)
                 snapshot = _snapshot_main(primary, main_sha, build_root)
                 slot_version, slot_date = _release_metadata(snapshot)
+                slot_title = _candidate_title(primary, main_sha, slot_version)
                 archive, size_report = _build_onedir(
                     snapshot,
                     tasks.project_python(primary),
@@ -635,7 +671,9 @@ def _stage_candidate(
                     "staged_at": datetime.now(UTC).isoformat(),
                 }
                 _write_marker(slot, payload)
-                _write_slot_meta(slot, main_sha, version=slot_version, release_date=slot_date)
+                _write_slot_meta(
+                    slot, main_sha, version=slot_version, release_date=slot_date, title=slot_title,
+                )
                 slot_meta = _read_slot_meta(slot, main_sha)
                 owned_slot = False
                 _assert_active_unchanged(active, active_snapshot)

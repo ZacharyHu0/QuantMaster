@@ -495,6 +495,13 @@ class TestBasics:
             json={"build_sha": "0" * 40},
         ).status_code == 409
 
+    def test_operations_candidates_render_display_title_separately_from_sha(self):
+        script = client.get("/static/operations.js").text
+
+        assert "const candidateTitle = text(candidate?.title);" in script
+        assert "version.textContent = candidateTitle ||" in script
+        assert "text(candidate?.build_sha) || '未知版本'" not in script
+
     def test_ashare_fear_greed_route_reads_local_snapshot(self, monkeypatch):
         from quantmaster import market
 
