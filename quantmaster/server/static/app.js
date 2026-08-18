@@ -1554,11 +1554,11 @@ async function streamJson(path, opts, onProgress) {
   }
 
   function renderVendorNotice(notice) {
-    if (!notice || (!notice.data_date && !notice.version)) return;
-    vendorFingerprint = String(notice.fingerprint || `${notice.data_date || ''}|${notice.version || ''}|${notice.announcement || ''}`);
+    if (!notice || (!notice.notice_updated_on && !notice.version)) return;
+    vendorFingerprint = String(notice.fingerprint || `${notice.notice_updated_on || ''}|${notice.version || ''}|${notice.announcement || ''}`);
     const details = [];
     if (notice.announcement) details.push(notice.announcement);
-    if (notice.data_date) details.push(`数据更新至 ${notice.data_date}`);
+    if (notice.notice_updated_on) details.push(`官网动态更新于 ${notice.notice_updated_on}`);
     if (notice.version) details.push(`最新版本 ${notice.version}`);
     vendorSummary.textContent = details.join(' · ');
     vendorState.textContent = notice.status === 'stale' ? '最近一次动态' : '最新动态';

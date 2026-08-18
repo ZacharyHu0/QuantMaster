@@ -279,45 +279,32 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
     assert launches == 2
 
 
-def test_vendor_notice_parser_extracts_data_date_and_version() -> None:
+def test_vendor_notice_parser_extracts_notice_date_and_version() -> None:
     notice = FreeStockDBRuntime._parse_vendor_notice(
-        "<div>数据更新至：2026-08-05</div>"
-        "<span>[08-05] 二次加速修复</span>"
-        "<p>最新版本 v2.3.1（2026-08-05 发布）</p>"
+        '<span class="tag-blue">更新至: 2026-08-17</span>'
+        '<h3 class="card-title">[08-14] 全市场实时 Ticks 行情</h3>'
+        "<p>最新版本 v0.3.1-online-more-power，直接解压覆盖即可。</p>"
     )
 
     assert notice == {
-        "data_date": "2026-08-05",
-        "version": "2.3.1",
-        "announcement": "[08-05] 二次加速修复",
+        "notice_updated_on": "2026-08-17",
+        "version": "0.3.1-online-more-power",
+        "announcement": "[08-14] 全市场实时 Ticks 行情",
     }
 
 
-def test_vendor_date_validation_uses_shanghai_market_date(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.market_date",
-        lambda: pd.Timestamp("2026-08-10").date(),
-    )
-    assert FreeStockDBRuntime._valid_date("2026-08-10") == "2026-08-10"
-    assert FreeStockDBRuntime._valid_date("2026-08-11") == ""
-
-
-def test_newer_vendor_date_nominates_strict_validation_target(monkeypatch) -> None:
+def test_notice_update_date_never_nominates_trading_target(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(
         runtime, "check_vendor_notice",
-        lambda **_kwargs: {"data_date": "2026-08-13"},
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.market_date",
-        lambda: pd.Timestamp("2026-08-13").date(),
+        lambda **_kwargs: {"notice_updated_on": "2026-08-13"},
     )
     monkeypatch.setattr(
         "quantmaster.trading_sessions.resolve_session_target",
-        lambda: SimpleNamespace(ready=True, session="2026-08-12", source="research_lake"),
+        lambda: SimpleNamespace(ready=False, session="", source="unavailable"),
     )
 
-    assert runtime._target_session() == ("2026-08-13", "free-stockdb-vendor")
+    assert runtime._target_session() == ("", "unavailable")
 
 
 def test_vendor_target_does_not_advance_marker_when_validation_fails(
@@ -344,14 +331,11 @@ def test_vendor_target_does_not_advance_marker_when_validation_fails(
     assert runtime._last_update_date() == "2026-08-12"
 
 
-def test_vendor_target_never_moves_newer_resolver_backward(monkeypatch) -> None:
+def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(
-        runtime, "check_vendor_notice", lambda **_kwargs: {"data_date": "2026-08-12"},
-    )
-    monkeypatch.setattr(
-        "quantmaster.data.free_stockdb_runtime.market_date",
-        lambda: pd.Timestamp("2026-08-13").date(),
+        runtime, "check_vendor_notice",
+        lambda **_kwargs: {"notice_updated_on": "2026-08-12"},
     )
     monkeypatch.setattr(
         "quantmaster.trading_sessions.resolve_session_target",
@@ -370,9 +354,9 @@ def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) 
 
     class Response:
         text = (
-            "数据更新至: 2026-08-06"
-            "<span>[08-06] 新增私有存储</span>"
-            "最新版本v3.0.0"
+            "更新至: 2026-08-06"
+            '<h3 class="card-title">[08-06] 新增私有存储</h3>'
+            "最新版本 v3.0.0"
         )
 
         @staticmethod
@@ -401,8 +385,10 @@ def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) 
     second = runtime.check_vendor_notice()
 
     assert first["fingerprint"] == "2026-08-06|3.0.0|[08-06] 新增私有存储"
+    assert first["notice_updated_on"] == "2026-08-06"
     assert second == first
-    assert calls.count("https://a.123128.xyz/") == 1
+    assert first["url"] == "https://a.123128.xyz/"
+    assert calls.count("https://a.123128.xyz/tabs/notice.html") == 1
     assert cache_path.is_file()
 
 

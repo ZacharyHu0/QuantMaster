@@ -627,7 +627,9 @@ def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypa
     monkeypatch.setattr(
         free_stockdb_runtime,
         "cached_vendor_notice",
-        lambda: {"status": "ok", "data_date": "2026-08-06", "version": "3.0.0"},
+        lambda: {
+            "status": "ok", "notice_updated_on": "2026-08-06", "version": "3.0.0",
+        },
     )
     accepted = iter((True, False))
     monkeypatch.setattr(
@@ -637,7 +639,7 @@ def test_free_stockdb_sidecar_api_requires_local_csrf_and_reports_queue(monkeypa
     assert local.get("/api/v1/settings/free-stockdb").status_code == 200
     vendor_notice = local.get("/api/v1/settings/free-stockdb/vendor-notice")
     assert vendor_notice.status_code == 200
-    assert vendor_notice.json()["data_date"] == "2026-08-06"
+    assert vendor_notice.json()["notice_updated_on"] == "2026-08-06"
     assert local.post("/api/v1/settings/free-stockdb/update").status_code == 403
     settings = local.get("/api/v1/settings").json()
     headers = {"X-CSRF-Token": settings["csrf_token"]}
