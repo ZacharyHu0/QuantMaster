@@ -498,10 +498,15 @@ class TestBasics:
 
     def test_operations_candidates_render_display_title_separately_from_sha(self):
         script = client.get("/static/operations.js").text
+        styles = client.get("/static/operations.css").text
 
         assert "const candidateTitle = text(candidate?.title);" in script
         assert "version.textContent = candidateTitle ||" in script
         assert "text(candidate?.build_sha) || '未知版本'" not in script
+        assert "operations-candidate-current" in script
+        assert "operations-candidate-previous" in script
+        assert ".operations-candidate-current { background:color-mix(in oklch,var(--s3)" in styles
+        assert ".operations-candidate-previous { background:color-mix(in oklch,var(--s2)" in styles
 
     def test_ashare_fear_greed_route_reads_local_snapshot(self, monkeypatch):
         from quantmaster import market

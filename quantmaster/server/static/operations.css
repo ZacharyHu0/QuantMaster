@@ -11,8 +11,10 @@
 .operations-section-head { display:flex; align-items:baseline; justify-content:space-between; gap:16px; }
 .operations-section-head h3,.operations-blockers h3,.operations-result h3 { color:var(--ink-2); font-size:14px; font-weight:600; }
 .operations-section-head span { color:var(--muted); font-size:11px; }
-.operations-candidate { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 16px; padding:12px 0; border-top:1px solid var(--grid); }
+.operations-candidate { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px 16px; padding:12px; border-top:1px solid var(--grid); border-radius:8px; }
 .operations-candidate:first-child { border-top:0; }
+.operations-candidate-current { background:color-mix(in oklch,var(--s3) 9%,var(--surface)); box-shadow:inset 3px 0 0 var(--s3); }
+.operations-candidate-previous { background:color-mix(in oklch,var(--s2) 8%,var(--surface)); box-shadow:inset 3px 0 0 var(--s2); }
 .operations-candidate-heading { display:flex; align-items:baseline; gap:9px; min-width:0; }
 .operations-candidate-heading strong { color:var(--ink); font-size:13px; font-weight:600; }
 .operations-candidate-heading span { color:var(--s3); font-size:11px; white-space:nowrap; }

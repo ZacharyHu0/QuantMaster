@@ -94,6 +94,9 @@ function renderCandidates(data) {
   list.replaceChildren(...candidates.map(candidate => {
     const item = document.createElement('article');
     item.className = 'operations-candidate';
+    const current = candidate?.current === true;
+    item.classList.toggle('operations-candidate-current', current);
+    item.classList.toggle('operations-candidate-previous', !current && candidate?.previous === true);
     const heading = document.createElement('div');
     heading.className = 'operations-candidate-heading';
     const version = document.createElement('strong');
