@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
+import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
@@ -36,6 +37,7 @@ from quantmaster.data.base import (
 )
 from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
 from quantmaster.data.resilience import provider_call
+from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 _BOARD_CATEGORIES = {
     0: "概念",
@@ -91,6 +93,33 @@ def _canonical_cn_symbol(value: Any) -> str:
         return ""
     suffix = "BJ" if code.startswith(("4", "8", "920")) else "SH" if code.startswith(("6", "9")) else "SZ"
     return f"{code}.{suffix}"
+
+
+def normalize_stockdb_no_trade_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize StockDB's zero-OHLC no-trade placeholder to a flat close bar."""
+
+    required = {"open", "high", "low", "close", "volume"}
+    if frame is None or frame.empty or not required.issubset(frame.columns):
+        return frame
+    result = frame.copy()
+    numeric = result[["open", "high", "low", "close", "volume"]].apply(
+        pd.to_numeric, errors="coerce",
+    )
+    no_trade = (
+        numeric["volume"].eq(0)
+        & numeric["close"].gt(0)
+        & numeric[["open", "high", "low"]].eq(0).all(axis=1)
+    )
+    if no_trade.any():
+        carried = np.repeat(
+            numeric.loc[no_trade, ["close"]].to_numpy(), 3, axis=1,
+        )
+        result.loc[no_trade, ["open", "high", "low"]] = carried
+    result.attrs["stockdb_no_trade_rows_normalized"] = (
+        int(frame.attrs.get("stockdb_no_trade_rows_normalized") or 0)
+        + int(no_trade.sum())
+    )
+    return result
 
 
 class FreeStockDBSource(DataSource):
@@ -457,6 +486,27 @@ class FreeStockDBSource(DataSource):
         })
         return result
 
+    @staticmethod
+    def _bind_formal_acceptance(frame: pd.DataFrame, end: str) -> pd.DataFrame:
+        """Bind local qfq bytes to the accepted StockDB session that admits them."""
+
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        if acceptance is None or acceptance.session < end:
+            return frame
+        frame = normalize_stockdb_no_trade_bars(frame)
+        frame.attrs.update({
+            "adjustment_status": "stockdb_accepted",
+            "factor_coverage": "complete",
+            "adjustment_provider_definition": "free-stockdb:native-qfq",
+            "adjustment_company_actions": f"stockdb-through:{acceptance.session}",
+            "adjustment_anchor_date": acceptance.session,
+            "coverage_complete": True,
+            "provider_published_at": acceptance.updated_at.isoformat(),
+            "ingested_at": acceptance.updated_at.isoformat(),
+            "formal_evidence": "stockdb_accepted_v2",
+        })
+        return frame
+
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         code = symbol.partition(".")[0].zfill(6)
         begin = _compact_time(start, intraday=False)
@@ -468,7 +518,8 @@ class FreeStockDBSource(DataSource):
             records = self._apply_qfq(records, factors, code)
         else:
             records = self._dictionary_rows(payload, contract="stock_sdk daily")
-        return self._frame(records, intraday=False).loc[start:end]
+        frame = self._frame(records, intraday=False).loc[start:end]
+        return self._bind_formal_acceptance(frame, end)
 
     def daily_many(
         self,
@@ -489,7 +540,8 @@ class FreeStockDBSource(DataSource):
         if not isinstance(payload, dict):
             if len(ordered) == 1:
                 rows = self._dictionary_rows(payload, contract="stock_sdk daily batch")
-                return {ordered[0]: self._frame(rows, intraday=False).loc[start:end]}
+                frame = self._frame(rows, intraday=False).loc[start:end]
+                return {ordered[0]: self._bind_formal_acceptance(frame, end)}
             raise FreeStockDBProviderError(
                 "stock_sdk daily batch 合同错误：多证券请求必须返回 code 到 rows 的对象"
             )
@@ -501,6 +553,7 @@ class FreeStockDBSource(DataSource):
                 payload[code], contract=f"stock_sdk daily batch {code}",
             )
             frame = self._frame(rows, intraday=False).loc[start:end]
+            frame = self._bind_formal_acceptance(frame, end)
             if not frame.empty:
                 result[symbol] = frame
         return result

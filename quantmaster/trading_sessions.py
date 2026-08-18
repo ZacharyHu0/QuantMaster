@@ -7,7 +7,6 @@ validated local market data.  With neither source it returns a safe skip.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from quantmaster.config import get_config
 from quantmaster.runtime.trading_session_sources import official_calendar, research_calendar
+from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 DAILY_SIGNAL_CUTOFF = wall_time(15, 0)
@@ -133,40 +133,20 @@ class SessionExpectationResolver:
         data, so they must never be reinterpreted as session evidence.
         """
 
-        marker_path = get_config().free_stockdb_root / ".quantmaster-update.json"
-        if not marker_path.is_file():
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        if acceptance is None:
             return "", "unavailable"
-        try:
-            marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            validation = marker.get("validation")
-            session = date.fromisoformat(str(marker.get("validated_session") or ""))
-            observed_at = datetime.fromisoformat(
-                str(marker.get("updated_at") or "").replace("Z", "+00:00"),
-            )
-        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-            return "", "unavailable"
+        session = date.fromisoformat(acceptance.session)
         if (
-            marker.get("schema_version") != 2
-            or not isinstance(validation, dict)
-            or validation.get("accepted") is not True
-            or str(marker.get("target_session") or "") != session.isoformat()
-            or str(validation.get("target_session") or "") != session.isoformat()
-            or str(validation.get("actual_session") or "") != session.isoformat()
-            or not start <= session <= end
-            or observed_at.tzinfo is None
-            or observed_at.astimezone(UTC) > cutoff_at.astimezone(UTC)
+            not start <= session <= end
+            or acceptance.updated_at.astimezone(UTC) > cutoff_at.astimezone(UTC)
         ):
             return "", "unavailable"
-        completion = (
-            "current_session_complete"
-            if validation.get("complete") is True
-            else "current_session_provider_published_waiting_ingest"
-        )
-        return session.isoformat(), completion
+        return session.isoformat(), "current_session_complete"
 
     @classmethod
     def _validated_stockdb_sessions(cls, start: date, end: date) -> list[str]:
-        """Compatibility query returning only formally complete StockDB evidence."""
+        """Compatibility query returning formally accepted StockDB evidence."""
         session, completion = cls._stockdb_evidence(
             start, end, datetime.now(SHANGHAI),
         )
@@ -233,14 +213,14 @@ class SessionExpectationResolver:
         ):
             return SessionExpectation(
                 stockdb_session, "stockdb:validated", True,
-                "StockDB 完整验收记录", stockdb_completion,
+                "StockDB 已通过本地验收", stockdb_completion,
                 "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and stockdb_session == expected and stockdb_completion != "unavailable":
             ready = stockdb_completion == "current_session_complete"
             return SessionExpectation(
                 expected, "stockdb:validated", ready,
-                "StockDB 完整验收记录" if ready else "provider 已发布但本地覆盖尚未完整",
+                "StockDB 已通过本地验收" if ready else "provider 已发布但本地覆盖尚未验收",
                 stockdb_completion, "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and local_complete == expected:
@@ -293,7 +273,7 @@ class SessionExpectationResolver:
             raise ValueError("交易日目标不是已验证交易日")
         if stockdb_session == value.isoformat() and stockdb_completion == "current_session_complete":
             return SessionExpectation(
-                value.isoformat(), "stockdb:validated", True, "StockDB 完整验收记录",
+                value.isoformat(), "stockdb:validated", True, "StockDB 已通过本地验收",
                 stockdb_completion, "Asia/Shanghai", current.astimezone(UTC).isoformat(),
                 coverage,
             )

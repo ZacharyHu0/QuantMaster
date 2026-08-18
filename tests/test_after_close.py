@@ -48,6 +48,21 @@ class _Source:
         ].drop_duplicates()
         return value.assign(adj_factor=1.0)
 
+    def daily_many(self, symbols, start, end):
+        dates = pd.to_datetime(self.frame["date"])
+        result = {}
+        for symbol in symbols:
+            value = self.frame.loc[
+                self.frame["symbol"].eq(symbol)
+                & dates.ge(pd.Timestamp(start))
+                & dates.le(pd.Timestamp(end)),
+                ["date", "open", "high", "low", "close", "volume", "amount"],
+            ].copy()
+            if value.empty:
+                continue
+            result[symbol] = value.set_index("date")
+        return result
+
     def board_hierarchy(self):
         symbols = sorted(self.frame["symbol"].unique())
         return [
@@ -178,6 +193,74 @@ def test_after_close_scan_is_immutable_auditable_and_filters_stock_pool(service)
     )
     revised.loc[mask, "close"] *= 1.01
     assert service._frame_hash(revised) != service._frame_hash(service.source.frame)
+
+
+def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
+    service, isolated_config, monkeypatch,
+) -> None:
+    root = isolated_config.data_root / "stockdb-runtime"
+    root.mkdir(parents=True)
+    isolated_config.data.free_stockdb_root = str(root)
+    target = "2026-08-05"
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": target,
+        "target_session": target,
+        "updated_at": "2026-08-05T18:00:00+08:00",
+        "validation": {
+            "accepted": True,
+            "complete": False,
+            "target_session": target,
+            "actual_session": target,
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        service.source,
+        "adjustment_factors",
+        lambda *_args, **_kwargs: pytest.fail("accepted StockDB must not require factors"),
+    )
+    monkeypatch.setattr(
+        service.ingest,
+        "_cross_source_validation",
+        lambda *_args, **_kwargs: pytest.fail("accepted StockDB must not require online audit"),
+    )
+    placeholder_date = sorted(service.source.frame["date"].unique())[-2]
+    placeholder = (
+        service.source.frame["symbol"].eq("600001.SH")
+        & service.source.frame["date"].eq(placeholder_date)
+    )
+    service.source.frame.loc[placeholder, ["open", "high", "low", "volume", "amount"]] = 0
+
+    snapshot = service.scan()
+    ingest = service.ingest.store.get(snapshot.ingest_id)
+
+    assert snapshot.coverage["acceptance"] == {
+        "formal_allowed": True,
+        "preview_allowed": True,
+        "reason": "",
+        "evidence": "stockdb_accepted_v2",
+    }
+    assert snapshot.coverage["cross_source_validation"]["remote_fetches"] == 0
+    assert snapshot.coverage["native_qfq"] == {
+        "source": "free-stockdb:native-qfq",
+        "no_trade_rows_normalized": 1,
+    }
+    assert ingest is not None
+    assert ingest.status == "complete"
+    assert ingest.provenance["research_price_formula"] == (
+        "free-stockdb:native-qfq@accepted-v2"
+    )
+    frozen = service.ingest.store.load_frame(ingest, "stock_research_prices")
+    assert set(frozen["price_adjustment"]) == {
+        "forward_adjusted_from_stockdb_accepted_v2"
+    }
+    normalized = frozen.loc[
+        frozen["symbol"].eq("600001.SH")
+        & frozen["date"].eq(placeholder_date)
+    ].iloc[0]
+    assert normalized[["open", "high", "low"]].tolist() == [
+        normalized["close"], normalized["close"], normalized["close"],
+    ]
 
 
 def test_gate_failure_keeps_previous_snapshot_and_marks_it_stale(service) -> None:

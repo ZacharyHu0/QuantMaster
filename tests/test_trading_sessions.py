@@ -177,7 +177,7 @@ def test_newer_strict_stockdb_marker_advances_stale_research_lake(
         "updated_at": "2026-08-13T18:33:49+08:00",
         "validation": {
             "accepted": True,
-            "complete": True,
+            "complete": False,
             "target_session": "2026-08-13",
             "actual_session": "2026-08-13",
         },
@@ -279,7 +279,7 @@ def test_resolve_reports_coverage_evidence_on_ready_stockdb_session(
         "target_session": "2026-08-13",
         "updated_at": "2026-08-13T18:33:49+08:00",
         "validation": {
-            "accepted": True, "complete": True,
+            "accepted": True, "complete": False,
             "target_session": "2026-08-13", "actual_session": "2026-08-13",
         },
     }), encoding="utf-8")

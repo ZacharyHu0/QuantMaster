@@ -209,6 +209,62 @@ def test_rotation_market_matrices_reads_stockdb_preview_when_lake_is_stale(
     assert names == {symbol: f"名称-{symbol}" for symbol in symbols}
 
 
+def test_rotation_formal_matrices_use_accepted_stockdb_native_qfq(monkeypatch):
+    symbols = [f"{600000 + index:06d}.SH" for index in range(30)]
+    target = "2026-08-17"
+    calls: list[str] = []
+
+    class FakeStockDBService:
+        def __init__(self):
+            self.read_metrics = []
+
+        def read_cross_section_history(self, *_args, **_kwargs):
+            raise AssertionError("formal research must not use raw StockDB bars")
+
+        def read_native_research_history(
+            self, symbols_value, _start, end, *, progress, cancelled,
+        ):
+            calls.append("native-qfq")
+            assert end == target and not cancelled()
+            progress(50, "fixture", "qfq")
+            return pd.DataFrame({
+                "symbol": symbols_value,
+                "date": [pd.Timestamp(target)] * len(symbols_value),
+                "close": np.arange(len(symbols_value), dtype=float) + 10,
+                "amount": np.arange(len(symbols_value), dtype=float) + 1_000,
+            })
+
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_listed_instruments",
+        staticmethod(lambda: (SimpleNamespace(), len(symbols))),
+    )
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_listed_symbols",
+        staticmethod(lambda _instruments: (symbols, {symbol: symbol for symbol in symbols})),
+    )
+    monkeypatch.setattr(
+        RotationDataLoader,
+        "_research_lake_matrices",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.StockDBIngestService",
+        FakeStockDBService,
+    )
+
+    result = RotationDataLoader(RotationStore()).market_matrices(
+        progress=lambda *_args: None,
+        cancelled=lambda: False,
+        target_as_of=target,
+        purpose="formal_research",
+    )
+
+    assert calls == ["native-qfq"]
+    assert result[-1] == ["local:stockdb:qfq-accepted"]
+
+
 def test_rotation_local_input_state_tracks_validated_stockdb_session(
     monkeypatch, isolated_config,
 ):
@@ -270,16 +326,47 @@ def test_rotation_local_input_state_tracks_validated_stockdb_session(
     state = loader.local_input_state()
 
     assert state["as_of"] == "2026-08-17"
-    assert state["source"] == "stockdb_preview"
+    assert state["source"] == "stockdb_formal"
     assert state["available"] is True
     generations = {item.get("source") for item in state["generations"]}
     assert "stockdb.validated_session" in generations
 
-    formal_state = loader.local_input_state(include_stockdb_preview=False)
-    assert formal_state["as_of"] == ""
-    assert formal_state["available"] is False
+    formal_state = loader.local_input_state()
+    assert formal_state["as_of"] == "2026-08-17"
+    assert formal_state["available"] is True
     formal_generations = {item.get("source") for item in formal_state["generations"]}
-    assert "stockdb.validated_session" not in formal_generations
+    assert "stockdb.validated_session" in formal_generations
+
+
+def test_rotation_formal_stockdb_generation_requires_accepted_v2_marker(
+    isolated_config,
+):
+    root = isolated_config.data_root / "stockdb-runtime"
+    root.mkdir(parents=True)
+    isolated_config.data.free_stockdb_root = str(root)
+    marker = root / ".quantmaster-update.json"
+    payload = {
+        "schema_version": 2,
+        "validated_session": "2026-08-17",
+        "target_session": "2026-08-17",
+        "updated_at": "2026-08-17T18:00:00+08:00",
+        "validation": {
+            "accepted": True,
+            "complete": False,
+            "target_session": "2026-08-17",
+            "actual_session": "2026-08-17",
+        },
+    }
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    session, generation = RotationDataLoader._validated_stockdb_session()
+    assert session == "2026-08-17"
+    assert generation is not None and generation["formal_eligible"] is True
+    assert generation["complete"] is False
+
+    payload["validation"]["accepted"] = False
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+    assert RotationDataLoader._validated_stockdb_session() == ("", None)
 
 
 def test_market_etf_evidence_overlays_stockdb_prices_for_unpriced_share_rows(
@@ -1084,8 +1171,9 @@ def test_rotation_service_builds_coherent_views_from_local_matrices(tmp_path, mo
         ),
     )
 
-    def load_values(*, progress, cancelled, target_as_of=""):
+    def load_values(*, progress, cancelled, target_as_of="", purpose="display"):
         assert target_as_of == ""
+        assert purpose == "current_analysis"
         assert not cancelled()
         progress(20, "测试行情", "已准备")
         return close, amount, names, len(close.columns), ["test:local"]
