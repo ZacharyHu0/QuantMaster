@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.17.1"
+VERSION = "1.18.0"
 RELEASE_DATE = "2026-08-18"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,50 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "市场全景与交互",
+                "items": (
+                    (
+                        "今天工作区将行情、市场温度、市场风格和轮动总览收拢为单一市场全景；"
+                        "决策条集中展示主要指数、A 股与海外恐贪、市场温度、数据日期、覆盖率和刷新进度。"
+                    ),
+                    (
+                        "板块目录、五算法主图、阶段收益比较、当前成分与质量来源组成三栏主从工作台；"
+                        "个股历史按需加载，category、code、method 和 window 可通过 URL 深链恢复。"
+                    ),
+                    (
+                        "行业周期、细分题材和 ETF 研究统一为目录、主图与详情模式；旧市场 hash "
+                        "明确显示已移除状态，窄屏顺序折叠并支持 reduced-motion。"
+                    ),
+                ),
+            },
+            {
+                "title": "板块指数与性能",
+                "items": (
+                    (
+                        "市场与轮动总览改用紧凑响应，轮动只传所选周期，行业和成分目录分页；"
+                        "快照继续支持 ETag，页面切换和连续选择会取消过期请求并销毁图表。"
+                    ),
+                    (
+                        "新增本地数据优先的 board_indexes 原子快照，后台预计算等权、流通市值、"
+                        "成交额、成交量和总市值五类日线指数；GET 请求不再现场执行指数计算。"
+                    ),
+                    (
+                        "指数详情明确采用当前成分股回溯语义，并携带基准、算法版本、覆盖率和"
+                        "不可用原因；冷启动优先批次可标记 partial，完整批次原子替换。"
+                    ),
+                    (
+                        "新增板块指数排名、详情和分页成分接口，以及 indexes 异步刷新 scope；"
+                        "总览与详情分离存储，避免读取目录时反序列化全部历史序列。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.17.1",
+        "date": "2026-08-18",
         "sections": (
             {
                 "title": "本地更新与激活",
