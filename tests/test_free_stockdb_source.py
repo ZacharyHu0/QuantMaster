@@ -12,6 +12,7 @@ from quantmaster.data.free_stockdb_source import (
     FreeStockDBProviderError,
     FreeStockDBSource,
 )
+from quantmaster.data.resilience import local_only_data_access
 
 
 class _FakeReader:
@@ -463,6 +464,19 @@ def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None
 
     assert list(result) == ["600519.SH"]
     assert client.calls[0]["code"] == ["600519", "000858"]
+
+
+def test_local_page_read_allows_native_loopback_stockdb_snapshot() -> None:
+    source = FreeStockDBSource()
+    client = _FakeClient()
+    source._sdk_checked = True
+    source._client = client
+
+    with local_only_data_access():
+        result = source.daily_many(["600519.SH"], "2026-08-05", "2026-08-05")
+
+    assert list(result) == ["600519.SH"]
+    assert client.calls[0]["code"] == ["600519"]
 
 
 def test_online_source_is_only_in_interactive_request_factories(monkeypatch) -> None:

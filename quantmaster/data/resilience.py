@@ -945,12 +945,19 @@ def provider_call[T](
     func: Callable[[], T],
     *,
     probe: bool = False,
+    local_snapshot: bool = False,
     empty_opens: bool = False,
     retry_attempts: int | None = None,
     retry_backoff: float | None = None,
 ) -> T:
-    """经过优先级队列、请求合并和持久化熔断执行一次上游调用。"""
-    _require_remote_io(lane)
+    """Run one provider call with scheduling, coalescing, and circuit state.
+
+    ``local_snapshot`` is reserved for adapters that have already proven the
+    operation targets a local snapshot.  It keeps page reads from treating a
+    loopback SDK call as an upstream request.
+    """
+    if not local_snapshot:
+        _require_remote_io(lane)
     _require_provider_enabled(lane, probe=probe)
     PROVIDER_HEALTH.check_available(lane, probe=probe)
     # The scheduler owns daemon workers shared by the process.  Capture the

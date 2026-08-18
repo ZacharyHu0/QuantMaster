@@ -326,6 +326,7 @@ class FreeStockDBSource(DataSource):
                 key,
                 lambda: client.get_data(**arguments),
                 probe=probe,
+                local_snapshot=self.name == "free-stockdb" and not self._trust_env,
             )
         except self._sdk_provider_errors(client) as exc:
             raise FreeStockDBProviderError(
