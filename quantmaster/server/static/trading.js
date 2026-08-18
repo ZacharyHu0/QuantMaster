@@ -18,6 +18,7 @@ const tradingFeature = (() => {
     queued: '排队中', running: '运行中', interrupted: '恢复中', completed: '已完成',
     failed: '失败', cancelled: '已取消', proposed: '待确认', confirmed: '待开盘',
     blocked: '部分受阻', superseded: '已替代', filled: '已成交', skipped: '无需调整',
+    unproven: '成交待核验',
     created: '已创建', accepted: '已接受', open: '可撮合', partially_filled: '部分成交',
     waiting_market_open: '等待开市', waiting_price: '等待价格', waiting_market_data: '等待行情',
     expired: '已过期', rejected: '已拒绝', retry_wait: '等待重试', idle: '空闲',
@@ -871,12 +872,19 @@ const tradingFeature = (() => {
     const filled = order.filled_qty ?? (order.status === 'filled' ? order.shares : 0);
     const remaining = order.remaining_qty ?? Math.max(0, Number(requested || 0) - Number(filled || 0));
     const integrity = order.integrity_code || order.diagnostic_code || '';
+    const legacyFillUnproven = integrity === 'legacy_fill_unproven';
     const progress = order.market_data_progress || order.last_progress || '';
     return `<article class="paper-order" data-status="${escapeHtml(order.status)}" data-integrity="${integrity ? 'conflict' : 'ok'}">
       <div class="paper-order-main"><div><strong>${escapeHtml(order.symbol || '未知标的')}</strong><span>${percent(order.target_weight)} · ${order.side === 'buy' ? '买入' : order.side === 'sell' ? '卖出' : '调仓'}</span></div><span class="trading-status ${escapeHtml(order.status)}">${escapeHtml(orderStatus(order))}</span></div>
-      <dl class="paper-order-facts"><div><dt>申报 / 已成交 / 剩余</dt><dd>${number(requested)} / ${number(filled)} / ${number(remaining)}</dd></div><div><dt>均价 / 费用</dt><dd>${number(order.avg_fill_price ?? order.price)} / ${number(order.fee)}</dd></div><div><dt>下次检查</dt><dd>${escapeHtml(timeValue(order.next_check_at || order.next_attempt_at))}</dd></div><div><dt>最近进展</dt><dd>${escapeHtml(timeValue(order.last_progress_at || order.updated_at))}</dd></div></dl>
+      <dl class="paper-order-facts">${legacyFillUnproven
+        ? '<div><dt>成交证据</dt><dd>历史记录未能核验</dd></div>'
+        : `<div><dt>申报 / 已成交 / 剩余</dt><dd>${number(requested)} / ${number(filled)} / ${number(remaining)}</dd></div><div><dt>均价 / 费用</dt><dd>${number(order.avg_fill_price ?? order.price)} / ${number(order.fee)}</dd></div>`
+      }<div><dt>下次检查</dt><dd>${escapeHtml(timeValue(order.next_check_at || order.next_attempt_at))}</dd></div><div><dt>最近进展</dt><dd>${escapeHtml(timeValue(order.last_progress_at || order.updated_at))}</dd></div></dl>
       ${(progress || order.required_market_range || order.latest_market_data_at) ? `<p class="paper-order-progress">${escapeHtml(progress || '行情等待中')}${order.required_market_range ? ` · 需要 ${escapeHtml(order.required_market_range)}` : ''}${order.latest_market_data_at ? ` · 最近可用 ${escapeHtml(order.latest_market_data_at)}` : ''}</p>` : ''}
-      ${integrity ? `<p class="paper-order-conflict" role="alert">核心数量冲突：<code>${escapeHtml(integrity)}</code>。未补造成交，需要人工核对。</p>` : ''}
+      ${integrity ? `<p class="paper-order-conflict" role="alert">${legacyFillUnproven
+        ? '历史订单没有可验证的 fill 明细，已停止将其呈现为成交；需要人工核对。'
+        : `核心数量冲突：<code>${escapeHtml(integrity)}</code>。未补造成交，需要人工核对。`
+      }</p>` : ''}
       ${fills.length ? `<details class="paper-fills"><summary>${fills.length} 笔 fill 明细</summary><ol>${fills.map(renderFill).join('')}</ol></details>` : ''}
     </article>`;
   }

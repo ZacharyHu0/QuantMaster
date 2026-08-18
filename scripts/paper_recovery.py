@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from quantmaster.backtest.paper_accounts import PaperStore
+from quantmaster.backtest.paper_accounts import PAPER_SCHEMA_VERSION, PaperStore
 from quantmaster.config import get_config
 from quantmaster.runtime.sqlite import connect_sqlite, reset_sqlite_runtime_for_tests
 from quantmaster.runtime.worker_ipc import call_worker_command
@@ -83,7 +83,7 @@ def recovery_plan(path: Path, *, now: float | None = None) -> dict[str, Any]:
             account = accounts.get(str(raw["account_id"]), {})
             cycle = cycles.get(str(raw["cycle_id"]), {})
             reason = "preserve"
-            if target in {"skipped", "superseded", "filled", "cancelled", "expired", "rejected"}:
+            if target in {"skipped", "superseded", "filled", "cancelled", "expired", "rejected", "unproven"}:
                 reason = "terminal_preserved_no_fill_invented"
             elif target in {"queued", "blocked", "proposed"}:
                 target, reason = "waiting_market_data", "market_data_gap"
@@ -306,7 +306,7 @@ def _actual_plan_rows(conn: sqlite3.Connection, plan: dict[str, Any]) -> list[di
 
 
 def _needs_apply(plan: dict[str, Any]) -> bool:
-    if plan["user_version"] == 4:
+    if plan["user_version"] < PAPER_SCHEMA_VERSION:
         return True
     return any(
         row["from"] != row["to"]
@@ -375,8 +375,8 @@ def apply_recovery(
     path = path.resolve()
     _validate_apply_target(path, confirmed_path, test_db=test_db)
     before = recovery_plan(path)
-    if before["user_version"] not in {4, 5}:
-        raise ValueError("恢复仅接受 user_version=4/5")
+    if before["user_version"] not in range(4, PAPER_SCHEMA_VERSION + 1):
+        raise ValueError(f"恢复仅接受 user_version=4..{PAPER_SCHEMA_VERSION}")
     if not _needs_apply(before):
         return {"noop": True, "affected_rows": 0, "before": before, "after": inspect_database(path)}
     operation = backup_root.resolve() / f"paper-recovery-{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex}"
@@ -385,7 +385,7 @@ def apply_recovery(
         manifest = _backup_set(path, operation)
         try:
             _verify_lease(path, lease, test_db=test_db)
-            if before["user_version"] == 4:
+            if before["user_version"] < PAPER_SCHEMA_VERSION:
                 PaperStore.migrate_legacy_database(
                     path, path.parent / "paper_accounts",
                 )

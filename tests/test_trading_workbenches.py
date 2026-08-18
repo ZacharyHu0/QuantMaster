@@ -1200,6 +1200,38 @@ def test_paper_order_partial_fills_are_idempotent_and_arithmetically_consistent(
         )
 
 
+def test_legacy_filled_order_without_fill_evidence_becomes_unproven(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(account_spec("历史成交核验"), symbols=["600000.SH"])
+    cycle, created = store.create_cycle(
+        account,
+        "2024-01-05",
+        {"600000.SH": 1.0},
+        {"600000.SH": 10.0},
+        [],
+    )
+    assert created is True
+    order = cycle["orders"][0]
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_orders SET status='filled',shares=100,price=10,"
+            "requested_qty=NULL,filled_qty=0,remaining_qty=NULL,integrity_code='' "
+            "WHERE id=?",
+            (order["id"],),
+        )
+        conn.execute("PRAGMA user_version=4")
+
+    PaperStore.migrate_legacy_database(store.path, store.account_root)
+    migrated = PaperStore(store.path, store.account_root)
+    legacy = migrated.cycle(cycle["id"])["orders"][0]
+
+    assert legacy["status"] == "unproven"
+    assert legacy["integrity_code"] == "legacy_fill_unproven"
+    assert legacy["fills"] == []
+    with pytest.raises(ValueError, match="不能从"):
+        migrated.transition_order(legacy["id"], "open")
+
+
 def test_paper_auto_run_health_distinguishes_expired_lease_and_reclaim(tmp_path):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     account = store.create_account(
@@ -1784,6 +1816,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "后台撮合任务" in trading_script
     assert "订单业务状态" in trading_script
     assert "核心数量冲突" in trading_script
+    assert "unproven: '成交待核验'" in trading_script
+    assert "历史订单没有可验证的 fill 明细" in trading_script
     assert "const PAPER_PROPOSAL_TIMEOUT_MS = 60_000;" in trading_script
     assert "timeoutMs: PAPER_PROPOSAL_TIMEOUT_MS" in trading_script
     assert 'class="trading-history-row" role="row"' in trading_script
@@ -1793,6 +1827,7 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "stalled: '已卡死'" in trading_script
     assert '.paper-task-panel[data-health="problem"]' in css
     assert ".trading-status.waiting_market_open" in css
+    assert ".trading-status.unproven" in css
     blocked_rule = css.split(".trading-status.blocked", 1)[1].split("}", 1)[0]
     assert "var(--bad)" not in blocked_rule
 
