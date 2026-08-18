@@ -21,10 +21,12 @@ from quantmaster.backtest.paper_accounts import get_paper_service
 from quantmaster.backtest.paper_automation import get_paper_automation_worker
 from quantmaster.backtest.spec import BacktestSpec, PaperAccountSpec, StrategySpec
 from quantmaster.config import get_config
+from quantmaster.data.base import MarketDataUnavailable
 from quantmaster.runtime.contracts import ContractModel
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.problems import OperationProblem, make_problem
 from quantmaster.server.management import _require_csrf
+from quantmaster.trading_sessions import SessionTargetUnavailable
 
 router = APIRouter(prefix="/api/v1")
 logger = logging.getLogger(__name__)
@@ -302,6 +304,8 @@ def propose_paper_cycle(account_id: str, request: Request) -> dict:
     _require_csrf(request)
     try:
         return get_paper_service().propose(account_id)
+    except (MarketDataUnavailable, SessionTargetUnavailable):
+        raise
     except Exception as exc:
         raise _error(exc) from None
 
