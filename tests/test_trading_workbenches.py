@@ -468,6 +468,35 @@ def test_paper_process_uses_raw_accepted_stockdb_open(tmp_path, monkeypatch):
     )
 
 
+def test_paper_process_clears_resolved_execution_gate_warning(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    service.store.set_runtime_warning(
+        account["id"], "待撮合行情证据未通过成交门禁：本地快照不完整",
+    )
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+
+    result = service.process(account["id"], **validated_panel(price_panel(dates)))
+
+    assert result["status"] == "completed"
+    assert service.store.account(account["id"])["runtime_warning"] == ""
+
+
+def test_paper_process_keeps_execution_gate_warning_while_still_waiting(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    warning = "待撮合行情证据未通过成交门禁：本地快照不完整"
+    service.store.set_runtime_warning(account["id"], warning)
+    signal_panel = price_panel(pd.bdate_range("2024-01-01", periods=5))
+    proposal = service.propose(account["id"], panel=signal_panel)
+    service.store.confirm(proposal["id"])
+
+    result = service.process(account["id"], **validated_panel(signal_panel))
+
+    assert result["status"] == "waiting_market_data"
+    assert service.store.account(account["id"])["runtime_warning"] == warning
+
+
 def test_paper_proposal_bootstraps_from_accepted_local_stockdb(tmp_path, monkeypatch):
     service, account = make_paper_service(tmp_path)
     panel = price_panel(pd.bdate_range("2024-01-01", periods=5))

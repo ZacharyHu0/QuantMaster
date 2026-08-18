@@ -2317,6 +2317,14 @@ class PaperService:
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
+
+        def clear_resolved_execution_warning() -> None:
+            if str(account.get("runtime_warning") or "").startswith((
+                "待撮合行情证据未通过成交门禁：",
+                "待撮合行情不是已验证 raw 开盘价，",
+            )):
+                self.store.clear_runtime_warning(account_id)
+
         if account["status"] != "active":
             return {
                 "status": "paused",
@@ -2709,6 +2717,8 @@ class PaperService:
         self.store.mark_orders_processed([str(order["id"]) for order in orders], execution_date)
         status = "blocked" if blocked else "completed"
         cycle = self.store.update_cycle_status(cycle["id"], status, execution_date)
+        if status == "completed":
+            clear_resolved_execution_warning()
         final_report = ledger_report(ledger, prices=valuation, as_of=execution_date)
         if float(final_report["cash"]) < -1e-6:
             message = "撮合后现金为负，账户已暂停；请检查账本完整性。"
