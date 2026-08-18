@@ -42,6 +42,7 @@ def _monotonic() -> float:
     return time.monotonic()
 
 _VENDOR_HOME = "https://a.123128.xyz/"
+_VENDOR_NOTICE_URL = f"{_VENDOR_HOME}tabs/notice.html"
 _VENDOR_NOTICE_TTL = 6 * 60 * 60
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
 _AUTO_MAX_ATTEMPTS = 3
@@ -796,12 +797,13 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _parse_vendor_notice(document: str) -> dict[str, str]:
-        data_match = re.search(r"数据更新至\s*[:：]\s*(\d{4}-\d{2}-\d{2})", document)
+        data_match = re.search(r"更新至\s*[:：]\s*(\d{4}-\d{2}-\d{2})", document)
         version_match = re.search(
-            r"最新版本\s*v?([^<（(,，]+)", document, flags=re.IGNORECASE,
+            r"最新版本\s*v?([^\s<,，。；;]+)", document, flags=re.IGNORECASE,
         )
         announcement_match = re.search(
-            r"<span\b[^>]*>(.*?)</span>", document,
+            r"<h3\b[^>]*class=[\"'][^\"']*\bcard-title\b[^\"']*[\"'][^>]*>"
+            r"(.*?)</h3>", document,
             flags=re.IGNORECASE | re.DOTALL,
         )
         version = html.unescape(version_match.group(1)).strip() if version_match else ""
@@ -852,7 +854,7 @@ class FreeStockDBRuntime:
             return cached or {"status": "checking", "url": _VENDOR_HOME}
         try:
             with httpx.Client(timeout=4.0, follow_redirects=True) as client:
-                response = client.get(_VENDOR_HOME)
+                response = client.get(_VENDOR_NOTICE_URL)
                 response.raise_for_status()
             details = self._parse_vendor_notice(response.text)
             now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
