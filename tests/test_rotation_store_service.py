@@ -209,7 +209,7 @@ def test_rotation_market_matrices_reads_stockdb_preview_when_lake_is_stale(
     assert names == {symbol: f"名称-{symbol}" for symbol in symbols}
 
 
-def test_rotation_formal_matrices_use_complete_stockdb_native_qfq(monkeypatch):
+def test_rotation_formal_matrices_use_accepted_stockdb_native_qfq(monkeypatch):
     symbols = [f"{600000 + index:06d}.SH" for index in range(30)]
     target = "2026-08-17"
     calls: list[str] = []
@@ -262,7 +262,7 @@ def test_rotation_formal_matrices_use_complete_stockdb_native_qfq(monkeypatch):
     )
 
     assert calls == ["native-qfq"]
-    assert result[-1] == ["local:stockdb:qfq-complete"]
+    assert result[-1] == ["local:stockdb:qfq-accepted"]
 
 
 def test_rotation_local_input_state_tracks_validated_stockdb_session(
@@ -318,9 +318,7 @@ def test_rotation_local_input_state_tracks_validated_stockdb_session(
     monkeypatch.setattr(
         RotationDataLoader,
         "_validated_stockdb_session",
-        staticmethod(lambda *, require_complete=False: (
-            ("", None) if require_complete else ("2026-08-17", entry)
-        )),
+        staticmethod(lambda: ("2026-08-17", entry)),
     )
     monkeypatch.setattr("quantmaster.rotation.service.BarStore", FakeBars)
 
@@ -328,30 +326,19 @@ def test_rotation_local_input_state_tracks_validated_stockdb_session(
     state = loader.local_input_state()
 
     assert state["as_of"] == "2026-08-17"
-    assert state["source"] == "stockdb_preview"
+    assert state["source"] == "stockdb_formal"
     assert state["available"] is True
     generations = {item.get("source") for item in state["generations"]}
     assert "stockdb.validated_session" in generations
 
-    formal_state = loader.local_input_state(include_stockdb_preview=False)
-    assert formal_state["as_of"] == ""
-    assert formal_state["available"] is False
+    formal_state = loader.local_input_state()
+    assert formal_state["as_of"] == "2026-08-17"
+    assert formal_state["available"] is True
     formal_generations = {item.get("source") for item in formal_state["generations"]}
-    assert "stockdb.validated_session" not in formal_generations
-
-    complete_entry = {**entry, "content_id": "complete-session", "formal_eligible": True}
-    monkeypatch.setattr(
-        RotationDataLoader,
-        "_validated_stockdb_session",
-        staticmethod(lambda *, require_complete=False: ("2026-08-17", complete_entry)),
-    )
-    complete_state = loader.local_input_state(include_stockdb_preview=False)
-    assert complete_state["as_of"] == "2026-08-17"
-    assert complete_state["source"] == "stockdb_complete"
-    assert complete_state["available"] is True
+    assert "stockdb.validated_session" in formal_generations
 
 
-def test_rotation_formal_stockdb_generation_requires_complete_v2_marker(
+def test_rotation_formal_stockdb_generation_requires_accepted_v2_marker(
     isolated_config,
 ):
     root = isolated_config.data_root / "stockdb-runtime"
@@ -372,18 +359,12 @@ def test_rotation_formal_stockdb_generation_requires_complete_v2_marker(
     }
     marker.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert RotationDataLoader._validated_stockdb_session()[0] == "2026-08-17"
-    assert RotationDataLoader._validated_stockdb_session(require_complete=True) == ("", None)
-
-    payload["validation"]["complete"] = True
-    marker.write_text(json.dumps(payload), encoding="utf-8")
-    session, generation = RotationDataLoader._validated_stockdb_session(
-        require_complete=True,
-    )
+    session, generation = RotationDataLoader._validated_stockdb_session()
     assert session == "2026-08-17"
     assert generation is not None and generation["formal_eligible"] is True
+    assert generation["complete"] is False
 
-    payload["validation"]["actual_session"] = "2026-08-14"
+    payload["validation"]["accepted"] = False
     marker.write_text(json.dumps(payload), encoding="utf-8")
     assert RotationDataLoader._validated_stockdb_session() == ("", None)
 

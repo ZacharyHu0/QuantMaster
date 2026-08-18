@@ -130,7 +130,7 @@ def test_stockdb_frame_assessment_never_calls_tushare(monkeypatch):
     assert any("复权" in issue for issue in quality.issues)
 
 
-def test_complete_stockdb_native_qfq_is_formal_without_online_evidence(
+def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
     isolated_config, monkeypatch,
 ):
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
@@ -162,14 +162,14 @@ def test_complete_stockdb_native_qfq_is_formal_without_online_evidence(
         "updated_at": "2026-08-07T18:00:00+08:00",
         "validation": {
             "accepted": True,
-            "complete": True,
+            "complete": False,
             "target_session": "2026-08-07",
             "actual_session": "2026-08-07",
         },
     }), encoding="utf-8")
     monkeypatch.setattr(
         "quantmaster.data.tushare_source.TushareSource.daily",
-        lambda *_args, **_kwargs: pytest.fail("complete StockDB must remain offline"),
+        lambda *_args, **_kwargs: pytest.fail("accepted StockDB must remain offline"),
     )
     monkeypatch.setattr(
         registry,
@@ -177,7 +177,7 @@ def test_complete_stockdb_native_qfq_is_formal_without_online_evidence(
         lambda _start, _end: (dates, "stockdb-ingest:complete"),
     )
 
-    bound = FreeStockDBSource._bind_complete_acceptance(local, "2026-08-07")
+    bound = FreeStockDBSource._bind_formal_acceptance(local, "2026-08-07")
     quality = registry._assess_daily_frame(
         bound,
         "2026-07-01",

@@ -459,14 +459,14 @@ class FreeStockDBSource(DataSource):
         return result
 
     @staticmethod
-    def _bind_complete_acceptance(frame: pd.DataFrame, end: str) -> pd.DataFrame:
-        """Bind local qfq bytes to the complete StockDB session that admits them."""
+    def _bind_formal_acceptance(frame: pd.DataFrame, end: str) -> pd.DataFrame:
+        """Bind local qfq bytes to the accepted StockDB session that admits them."""
 
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
-        if acceptance is None or not acceptance.complete or acceptance.session < end:
+        if acceptance is None or acceptance.session < end:
             return frame
         frame.attrs.update({
-            "adjustment_status": "stockdb_complete",
+            "adjustment_status": "stockdb_accepted",
             "factor_coverage": "complete",
             "adjustment_provider_definition": "free-stockdb:native-qfq",
             "adjustment_company_actions": f"stockdb-through:{acceptance.session}",
@@ -474,7 +474,7 @@ class FreeStockDBSource(DataSource):
             "coverage_complete": True,
             "provider_published_at": acceptance.updated_at.isoformat(),
             "ingested_at": acceptance.updated_at.isoformat(),
-            "formal_evidence": "stockdb_complete_v2",
+            "formal_evidence": "stockdb_accepted_v2",
         })
         return frame
 
@@ -490,7 +490,7 @@ class FreeStockDBSource(DataSource):
         else:
             records = self._dictionary_rows(payload, contract="stock_sdk daily")
         frame = self._frame(records, intraday=False).loc[start:end]
-        return self._bind_complete_acceptance(frame, end)
+        return self._bind_formal_acceptance(frame, end)
 
     def daily_many(
         self,
@@ -512,7 +512,7 @@ class FreeStockDBSource(DataSource):
             if len(ordered) == 1:
                 rows = self._dictionary_rows(payload, contract="stock_sdk daily batch")
                 frame = self._frame(rows, intraday=False).loc[start:end]
-                return {ordered[0]: self._bind_complete_acceptance(frame, end)}
+                return {ordered[0]: self._bind_formal_acceptance(frame, end)}
             raise FreeStockDBProviderError(
                 "stock_sdk daily batch 合同错误：多证券请求必须返回 code 到 rows 的对象"
             )
@@ -524,7 +524,7 @@ class FreeStockDBSource(DataSource):
                 payload[code], contract=f"stock_sdk daily batch {code}",
             )
             frame = self._frame(rows, intraday=False).loc[start:end]
-            frame = self._bind_complete_acceptance(frame, end)
+            frame = self._bind_formal_acceptance(frame, end)
             if not frame.empty:
                 result[symbol] = frame
         return result

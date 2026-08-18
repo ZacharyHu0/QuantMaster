@@ -507,7 +507,7 @@ def _assess_daily_frame(
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") not in {
-        "verified", "stockdb_complete",
+        "verified", "stockdb_accepted",
     }:
         adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")

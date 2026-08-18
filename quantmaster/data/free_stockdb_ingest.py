@@ -953,11 +953,11 @@ class StockDBIngestService:
         progress: Progress,
         cancelled: Cancelled,
     ) -> pd.DataFrame:
-        """Read StockDB-native qfq bars only behind a complete v2 marker."""
+        """Read StockDB-native qfq bars only behind an accepted v2 marker."""
 
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
-        if acceptance is None or not acceptance.complete or acceptance.session < end:
-            raise ValueError("正式研究需要覆盖目标日的完整 StockDB v2 验收记录")
+        if acceptance is None or acceptance.session < end:
+            raise ValueError("正式研究需要覆盖目标日的 accepted StockDB v2 验收记录")
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
         if cancelled():
             raise InterruptedError("free-stockdb 正式研究读取已取消")
@@ -975,18 +975,12 @@ class StockDBIngestService:
         result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         required = {"symbol", "date", "open", "high", "low", "close", "volume"}
         if result.empty or not required.issubset(result):
-            raise ValueError("完整 StockDB 没有返回可用的原生 qfq 日线")
+            raise ValueError("已验收 StockDB 没有返回可用的原生 qfq 日线")
         result["date"] = pd.to_datetime(result["date"], errors="coerce").dt.normalize()
         result = result.dropna(subset=["date", "symbol"])
         duplicates = result.duplicated(["symbol", "date"], keep=False)
         if duplicates.any():
-            raise ValueError("完整 StockDB 原生 qfq 存在重复 (symbol,date)")
-        missing = sorted(set(ordered) - set(result["symbol"].astype(str)))
-        if missing:
-            raise ValueError(
-                f"完整 StockDB 原生 qfq 缺少 {len(missing)} 只证券："
-                + "、".join(missing[:10])
-            )
+            raise ValueError("已验收 StockDB 原生 qfq 存在重复 (symbol,date)")
         numeric = result[["open", "high", "low", "close", "volume"]].apply(
             pd.to_numeric, errors="coerce",
         )
@@ -999,10 +993,14 @@ class StockDBIngestService:
             & numeric["low"].le(prices[["open", "close"]].min(axis=1))
         )
         if not bool(valid.all()):
-            raise ValueError("完整 StockDB 原生 qfq 存在无效 OHLCV")
-        result["price_adjustment"] = "forward_adjusted_from_stockdb_complete_v2"
-        result["adjustment_status"] = "stockdb_complete"
-        progress(53, "读取完整 StockDB qfq", f"已读取 {len(ordered)} 只股票")
+            raise ValueError("已验收 StockDB 原生 qfq 存在无效 OHLCV")
+        result["price_adjustment"] = "forward_adjusted_from_stockdb_accepted_v2"
+        result["adjustment_status"] = "stockdb_accepted"
+        progress(
+            53,
+            "读取已验收 StockDB qfq",
+            f"已读取 {result['symbol'].nunique()}/{len(ordered)} 只股票",
+        )
         return result.sort_values(["symbol", "date"]).reset_index(drop=True)
 
     @staticmethod
@@ -1376,8 +1374,8 @@ class StockDBIngestService:
         self.read_metrics = []
         symbols = [str(item.symbol).upper() for item in instruments]
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
-        stockdb_complete = bool(
-            acceptance is not None and acceptance.complete and acceptance.session >= end
+        stockdb_formal = bool(
+            acceptance is not None and acceptance.session >= end
         )
         master_id = self.master_snapshot_id(instruments)
         data_session = self._data_session(end)
@@ -1444,14 +1442,14 @@ class StockDBIngestService:
                 and len(reusable.session_dates) >= history_sessions
                 and isinstance(evidence, dict)
                 and evidence.get("status") in {
-                    "verified", "locally_validated", "stockdb_complete",
+                    "verified", "locally_validated", "stockdb_accepted",
                 }
-                and (not stockdb_complete or not research_frame.empty)
+                and (not stockdb_formal or not research_frame.empty)
             ):
                 progress(55, "复用本地摄取", reusable.ingest_id)
                 research = (
                     research_frame
-                    if stockdb_complete else self._research_prices(frame, adjustment)
+                    if stockdb_formal else self._research_prices(frame, adjustment)
                 )
                 return reusable, research, boards, True
 
@@ -1563,7 +1561,7 @@ class StockDBIngestService:
             validation=coverage.get("consistency") or {},
         )
         research_frame: pd.DataFrame | None = None
-        if stockdb_complete:
+        if stockdb_formal:
             native = self.read_native_research_history(
                 symbols,
                 session_dates[0],
@@ -1574,7 +1572,7 @@ class StockDBIngestService:
             research_frame = self._native_research_prices(frame, native)
             cross_validation = {
                 "schema_version": STOCKDB_CROSS_VALIDATION_SCHEMA_VERSION,
-                "status": "stockdb_complete",
+                "status": "stockdb_accepted",
                 "remote_fetches": 0,
                 "remote_requests_avoided": len(symbols),
                 "session": acceptance.session if acceptance is not None else end,
@@ -1583,20 +1581,20 @@ class StockDBIngestService:
             cross_validation = self._cross_source_validation(frame)
         coverage["cross_source_validation"] = cross_validation
         coverage["acceptance"] = {
-            "formal_allowed": stockdb_complete,
+            "formal_allowed": stockdb_formal,
             "preview_allowed": True,
             "reason": (
-                "" if stockdb_complete
+                "" if stockdb_formal
                 else "复权因子完整性尚未逐标的确认，结果仅可预览"
             ),
-            "evidence": "stockdb_complete_v2" if stockdb_complete else "",
+            "evidence": "stockdb_accepted_v2" if stockdb_formal else "",
         }
         if catalog_issue:
             coverage.setdefault("issues_non_blocking", []).append(catalog_issue)
         adjustment = pd.DataFrame(columns=["symbol", "date", "adj_factor"])
         factor_reader = getattr(self.source, "adjustment_factors", None)
-        if stockdb_complete:
-            coverage["price_adjustment_status"] = "stockdb_complete"
+        if stockdb_formal:
+            coverage["price_adjustment_status"] = "stockdb_accepted"
             coverage["adjustment_factor_missing_symbols"] = []
             if calendar_issues:
                 coverage.setdefault("issues_non_blocking", []).extend(calendar_issues)
@@ -1639,8 +1637,8 @@ class StockDBIngestService:
         )
         coverage["catalog"] = catalog_snapshot.coverage
         cross_status = str(cross_validation.get("status") or "locally_validated")
-        acceptance_issues = [] if stockdb_complete else [*calendar_issues]
-        if not stockdb_complete and cross_status != "verified":
+        acceptance_issues = [] if stockdb_formal else [*calendar_issues]
+        if not stockdb_formal and cross_status != "verified":
             acceptance_issues.append(
                 "StockDB 整批独立抽检未通过正式资格：" + cross_status
             )
@@ -1671,11 +1669,11 @@ class StockDBIngestService:
                 "field_sources": {column: self.source.name for column in frame.columns},
                 "price_storage": "raw",
                 "research_price_formula": (
-                    "free-stockdb:native-qfq@complete-v2"
-                    if stockdb_complete
+                    "free-stockdb:native-qfq@accepted-v2"
+                    if stockdb_formal
                     else "raw_price*adj_factor/latest_factor@as_of:v1"
                 ),
-                "formal_evidence": "stockdb_complete_v2" if stockdb_complete else "",
+                "formal_evidence": "stockdb_accepted_v2" if stockdb_formal else "",
             },
             catalog_snapshot=catalog_snapshot,
             session_dates=session_dates,
@@ -1717,7 +1715,7 @@ class StockDBIngestService:
         if len(missing):
             symbols = sorted({str(symbol) for symbol, _date in missing})
             raise ValueError(
-                f"完整 StockDB 原生 qfq 缺少 {len(missing)} 个证券交易日；"
+                f"已验收 StockDB 原生 qfq 缺少 {len(missing)} 个证券交易日；"
                 + "、".join(symbols[:10])
             )
         overlay = qfq[keys + price_columns].rename(
@@ -1727,10 +1725,10 @@ class StockDBIngestService:
         for column in price_columns:
             adjusted = pd.to_numeric(value.pop(f"{column}_qfq"), errors="coerce")
             if adjusted.isna().any():
-                raise ValueError(f"完整 StockDB 原生 qfq 的 {column} 存在空值")
+                raise ValueError(f"已验收 StockDB 原生 qfq 的 {column} 存在空值")
             value[column] = adjusted
-        value["price_adjustment"] = "forward_adjusted_from_stockdb_complete_v2"
-        value["adjustment_status"] = "stockdb_complete"
+        value["price_adjustment"] = "forward_adjusted_from_stockdb_accepted_v2"
+        value["adjustment_status"] = "stockdb_accepted"
         return value.sort_values(keys).reset_index(drop=True)
 
     @staticmethod

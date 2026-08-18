@@ -195,7 +195,7 @@ def test_after_close_scan_is_immutable_auditable_and_filters_stock_pool(service)
     assert service._frame_hash(revised) != service._frame_hash(service.source.frame)
 
 
-def test_complete_stockdb_marker_admits_native_qfq_without_online_evidence(
+def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
     service, isolated_config, monkeypatch,
 ) -> None:
     root = isolated_config.data_root / "stockdb-runtime"
@@ -209,7 +209,7 @@ def test_complete_stockdb_marker_admits_native_qfq_without_online_evidence(
         "updated_at": "2026-08-05T18:00:00+08:00",
         "validation": {
             "accepted": True,
-            "complete": True,
+            "complete": False,
             "target_session": target,
             "actual_session": target,
         },
@@ -217,12 +217,12 @@ def test_complete_stockdb_marker_admits_native_qfq_without_online_evidence(
     monkeypatch.setattr(
         service.source,
         "adjustment_factors",
-        lambda *_args, **_kwargs: pytest.fail("complete StockDB must not require factors"),
+        lambda *_args, **_kwargs: pytest.fail("accepted StockDB must not require factors"),
     )
     monkeypatch.setattr(
         service.ingest,
         "_cross_source_validation",
-        lambda *_args, **_kwargs: pytest.fail("complete StockDB must not require online audit"),
+        lambda *_args, **_kwargs: pytest.fail("accepted StockDB must not require online audit"),
     )
 
     snapshot = service.scan()
@@ -232,17 +232,17 @@ def test_complete_stockdb_marker_admits_native_qfq_without_online_evidence(
         "formal_allowed": True,
         "preview_allowed": True,
         "reason": "",
-        "evidence": "stockdb_complete_v2",
+        "evidence": "stockdb_accepted_v2",
     }
     assert snapshot.coverage["cross_source_validation"]["remote_fetches"] == 0
     assert ingest is not None
     assert ingest.status == "complete"
     assert ingest.provenance["research_price_formula"] == (
-        "free-stockdb:native-qfq@complete-v2"
+        "free-stockdb:native-qfq@accepted-v2"
     )
     frozen = service.ingest.store.load_frame(ingest, "stock_research_prices")
     assert set(frozen["price_adjustment"]) == {
-        "forward_adjusted_from_stockdb_complete_v2"
+        "forward_adjusted_from_stockdb_accepted_v2"
     }
 
 

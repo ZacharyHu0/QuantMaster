@@ -412,17 +412,15 @@ class RotationDataLoader:
         return symbols, names
 
     @staticmethod
-    def _validated_stockdb_session(
-        *, require_complete: bool = False,
-    ) -> tuple[str, dict[str, Any] | None]:
+    def _validated_stockdb_session() -> tuple[str, dict[str, Any] | None]:
         """Describe the latest accepted local StockDB session as a generation.
 
-        An accepted-but-partial session is valid local evidence for a current
-        display snapshot.  Formal callers receive only complete v2 evidence.
+        An accepted v2 session is formal local evidence; ``complete`` remains
+        coverage telemetry and is not a second admission gate.
         """
 
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
-        if acceptance is None or (require_complete and not acceptance.complete):
+        if acceptance is None:
             return "", None
         validation = acceptance.validation
         session = acceptance.session
@@ -449,7 +447,8 @@ class RotationDataLoader:
             "content_id": content_id,
             "coverage_start": session,
             "coverage_end": session,
-            "formal_eligible": acceptance.complete,
+            "formal_eligible": True,
+            "complete": acceptance.complete,
             "observed_at": acceptance.updated_at.isoformat(),
         }
 
@@ -493,15 +492,14 @@ class RotationDataLoader:
             logger.debug("研究湖全市场日线暂不可用", exc_info=True)
             return None
 
-    def local_input_state(self, *, include_stockdb_preview: bool = True) -> dict[str, Any]:
+    def local_input_state(self) -> dict[str, Any]:
         """Read only local catalogs to describe the currently usable panel.
 
         This method is deliberately forbidden from opening Parquet bars.  It is
         used before submitting a refresh to decide whether a published snapshot
         is already valid and whether an ``auto`` request actually needs a
-        remote supplement.  Accepted-but-partial StockDB sessions count as
-        local display evidence only when ``include_stockdb_preview`` is true.
-        Complete sessions remain visible to formal callers.
+        remote supplement.  Accepted v2 StockDB sessions are formal local
+        generations even when absolute catalog coverage is below 100%.
         """
 
         instruments, expected_count = self._listed_instruments()
@@ -593,9 +591,7 @@ class RotationDataLoader:
         )
         selected_entries = lake_entries if use_lake else bar_entries
         panel_as_of = lake_as_of if use_lake else bar_as_of
-        stockdb_session, stockdb_entry = self._validated_stockdb_session(
-            require_complete=not include_stockdb_preview,
-        )
+        stockdb_session, stockdb_entry = self._validated_stockdb_session()
         if stockdb_entry is not None:
             selected_entries = [stockdb_entry, *selected_entries]
         generations = self.store.derived.advance_source_generations([
@@ -610,11 +606,7 @@ class RotationDataLoader:
         return {
             "generations": generations,
             "as_of": stockdb_session if use_stockdb else panel_as_of,
-            "source": (
-                "stockdb_complete"
-                if use_stockdb and bool((stockdb_entry or {}).get("formal_eligible"))
-                else "stockdb_preview"
-            ) if use_stockdb else (
+            "source": "stockdb_formal" if use_stockdb else (
                 "research_lake" if use_lake else "bar_store"
             ),
             "expected_count": expected_count,
@@ -792,9 +784,9 @@ class RotationDataLoader:
             30,
             "读取本地 StockDB 截面",
             f"{len(close.columns)} 只 · 截至 {close.index.max().date()} · "
-            f"{'完整验收 qfq' if formal else '原始价格预览'}",
+            f"{'已验收 qfq' if formal else '原始价格预览'}",
         )
-        source = "local:stockdb:qfq-complete" if formal else "local:stockdb:raw"
+        source = "local:stockdb:qfq-accepted" if formal else "local:stockdb:raw"
         return close, amount, names, expected_count, [source]
 
     def market_matrices(
@@ -1128,11 +1120,9 @@ class RotationService:
             if spec.as_of else _expected_market_session()
         )
 
-    def _local_input_state(self, *, include_stockdb_preview: bool = True) -> dict[str, Any]:
+    def _local_input_state(self) -> dict[str, Any]:
         try:
-            return self.loader.local_input_state(
-                include_stockdb_preview=include_stockdb_preview,
-            )
+            return self.loader.local_input_state()
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
             logger.warning("读取本地 generation 失败；本次不会将旧快照误判为命中", exc_info=True)
             return {
@@ -1172,10 +1162,7 @@ class RotationService:
     ) -> tuple[str, dict[str, Any]]:
         """Fingerprint only catalog rows, never the full market matrix."""
 
-        preview_allowed = spec.purpose in {"display", "current_analysis"}
-        state = local_state or self._local_input_state(
-            include_stockdb_preview=preview_allowed,
-        )
+        state = local_state or self._local_input_state()
         node_fingerprints = self.snapshot_input_fingerprints(spec, local_state=state)
         fingerprint = self.store.derived.input_fingerprint(
             schema_version=2,
@@ -1209,10 +1196,7 @@ class RotationService:
         its own dependency cut.
         """
 
-        preview_allowed = spec.purpose in {"display", "current_analysis"}
-        state = local_state or self._local_input_state(
-            include_stockdb_preview=preview_allowed,
-        )
+        state = local_state or self._local_input_state()
         local_generations = list(state.get("generations") or [])
         catalog_generations = self.store.source_generations()
 
@@ -1775,9 +1759,8 @@ class _RotationBuildRun:
         checkpoint: Callable[[str, dict[str, Any]], None] | None,
     ) -> None:
         need_market = spec.scope in {"all", "close", "market", "industries", "themes"}
-        preview_allowed = spec.purpose in {"display", "current_analysis"}
         local_state = (
-            service._local_input_state(include_stockdb_preview=preview_allowed)
+            service._local_input_state()
             if need_market else {
                 "generations": [], "as_of": "", "source": "not_required",
                 "expected_count": 0, "available": True,
@@ -1977,10 +1960,7 @@ class _RotationBuildRun:
         if not operations:
             return
         if state.need_market:
-            preview_allowed = state.spec.purpose in {"display", "current_analysis"}
-            state.local_state = self.service._local_input_state(
-                include_stockdb_preview=preview_allowed,
-            )
+            state.local_state = self.service._local_input_state()
         state.input_fingerprint, state.local_state = self.service.input_fingerprint(
             state.spec, local_state=state.local_state,
         )
@@ -2027,18 +2007,12 @@ class _RotationBuildRun:
     def _load_market_matrices(self) -> None:
         state = self.state
         allow_stockdb_preview = state.spec.purpose in {"display", "current_analysis"}
-        stockdb_session, stockdb_entry = self.service.loader._validated_stockdb_session(
-            require_complete=not allow_stockdb_preview,
-        )
+        stockdb_session, stockdb_entry = self.service.loader._validated_stockdb_session()
         if stockdb_entry is not None and not allow_stockdb_preview:
             observed_at = datetime.fromisoformat(str(stockdb_entry["observed_at"]))
             if observed_at.timestamp() > _knowledge_cutoff_epoch(state.spec.knowledge_cutoff):
-                raise ValueError("StockDB 完整验收记录晚于 knowledge_cutoff")
-        target_as_of = (
-            state.spec.as_of or stockdb_session
-            if allow_stockdb_preview or stockdb_entry is not None
-            else ""
-        )
+                raise ValueError("StockDB 验收记录晚于 knowledge_cutoff")
+        target_as_of = state.spec.as_of or stockdb_session
         with self.metrics.node_timer(
             "rotation.market_matrix", job_id=state.job_id,
             input_fingerprint=state.input_fingerprint,

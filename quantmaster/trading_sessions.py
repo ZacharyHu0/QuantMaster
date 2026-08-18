@@ -142,16 +142,11 @@ class SessionExpectationResolver:
             or acceptance.updated_at.astimezone(UTC) > cutoff_at.astimezone(UTC)
         ):
             return "", "unavailable"
-        completion = (
-            "current_session_complete"
-            if acceptance.complete
-            else "current_session_provider_published_waiting_ingest"
-        )
-        return session.isoformat(), completion
+        return session.isoformat(), "current_session_complete"
 
     @classmethod
     def _validated_stockdb_sessions(cls, start: date, end: date) -> list[str]:
-        """Compatibility query returning only formally complete StockDB evidence."""
+        """Compatibility query returning formally accepted StockDB evidence."""
         session, completion = cls._stockdb_evidence(
             start, end, datetime.now(SHANGHAI),
         )
@@ -218,14 +213,14 @@ class SessionExpectationResolver:
         ):
             return SessionExpectation(
                 stockdb_session, "stockdb:validated", True,
-                "StockDB 完整验收记录", stockdb_completion,
+                "StockDB 已通过本地验收", stockdb_completion,
                 "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and stockdb_session == expected and stockdb_completion != "unavailable":
             ready = stockdb_completion == "current_session_complete"
             return SessionExpectation(
                 expected, "stockdb:validated", ready,
-                "StockDB 完整验收记录" if ready else "provider 已发布但本地覆盖尚未完整",
+                "StockDB 已通过本地验收" if ready else "provider 已发布但本地覆盖尚未验收",
                 stockdb_completion, "Asia/Shanghai", cutoff_iso, coverage,
             )
         if expected and local_complete == expected:
@@ -278,7 +273,7 @@ class SessionExpectationResolver:
             raise ValueError("交易日目标不是已验证交易日")
         if stockdb_session == value.isoformat() and stockdb_completion == "current_session_complete":
             return SessionExpectation(
-                value.isoformat(), "stockdb:validated", True, "StockDB 完整验收记录",
+                value.isoformat(), "stockdb:validated", True, "StockDB 已通过本地验收",
                 stockdb_completion, "Asia/Shanghai", current.astimezone(UTC).isoformat(),
                 coverage,
             )
