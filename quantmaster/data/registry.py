@@ -356,7 +356,11 @@ def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.Datetime
         from quantmaster.data.free_stockdb_ingest import StockDBIngestStore
 
         for snapshot in StockDBIngestStore().history(limit=20):
-            if not str(snapshot.session_source).startswith("tushare:"):
+            formal_local = bool(
+                snapshot.status == "complete"
+                and (snapshot.coverage.get("acceptance") or {}).get("formal_allowed") is True
+            )
+            if not str(snapshot.session_source).startswith("tushare:") and not formal_local:
                 continue
             values = pd.DatetimeIndex(
                 pd.to_datetime(snapshot.session_dates, errors="coerce")
@@ -419,6 +423,18 @@ def _assess_daily_frame(
     )
     issues = list(extra_issues)
     units, unit_issue = _unit_contract(symbol)
+    stockdb_units = df.attrs.get("units") if df is not None else None
+    if (
+        source.startswith("free-stockdb")
+        and isinstance(stockdb_units, dict)
+        and df.attrs.get("unit_status") in {"verified", "verified_local_stockdb_schema_v1"}
+    ):
+        resolved = tuple(
+            (field, str(stockdb_units.get(field) or "unknown"))
+            for field in (*OHLCV_COLUMNS, "amount")
+        )
+        if all(unit != "unknown" for _field, unit in resolved):
+            units, unit_issue = resolved, ""
     if unit_issue:
         issues.append(unit_issue)
     if df is None or df.empty:
@@ -490,7 +506,9 @@ def _assess_daily_frame(
     semantics, semantic_issues = _numeric_semantics(symbol, source, df, units)
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
-    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
+    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") not in {
+        "verified", "stockdb_complete",
+    }:
         adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
     boundary_tolerance = pd.Timedelta(days=14)

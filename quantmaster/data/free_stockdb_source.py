@@ -36,6 +36,7 @@ from quantmaster.data.base import (
 )
 from quantmaster.data.free_stockdb_contracts import StockDBArtifactIdentity
 from quantmaster.data.resilience import provider_call
+from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 _BOARD_CATEGORIES = {
     0: "概念",
@@ -457,6 +458,26 @@ class FreeStockDBSource(DataSource):
         })
         return result
 
+    @staticmethod
+    def _bind_complete_acceptance(frame: pd.DataFrame, end: str) -> pd.DataFrame:
+        """Bind local qfq bytes to the complete StockDB session that admits them."""
+
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        if acceptance is None or not acceptance.complete or acceptance.session < end:
+            return frame
+        frame.attrs.update({
+            "adjustment_status": "stockdb_complete",
+            "factor_coverage": "complete",
+            "adjustment_provider_definition": "free-stockdb:native-qfq",
+            "adjustment_company_actions": f"stockdb-through:{acceptance.session}",
+            "adjustment_anchor_date": acceptance.session,
+            "coverage_complete": True,
+            "provider_published_at": acceptance.updated_at.isoformat(),
+            "ingested_at": acceptance.updated_at.isoformat(),
+            "formal_evidence": "stockdb_complete_v2",
+        })
+        return frame
+
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         code = symbol.partition(".")[0].zfill(6)
         begin = _compact_time(start, intraday=False)
@@ -468,7 +489,8 @@ class FreeStockDBSource(DataSource):
             records = self._apply_qfq(records, factors, code)
         else:
             records = self._dictionary_rows(payload, contract="stock_sdk daily")
-        return self._frame(records, intraday=False).loc[start:end]
+        frame = self._frame(records, intraday=False).loc[start:end]
+        return self._bind_complete_acceptance(frame, end)
 
     def daily_many(
         self,
@@ -489,7 +511,8 @@ class FreeStockDBSource(DataSource):
         if not isinstance(payload, dict):
             if len(ordered) == 1:
                 rows = self._dictionary_rows(payload, contract="stock_sdk daily batch")
-                return {ordered[0]: self._frame(rows, intraday=False).loc[start:end]}
+                frame = self._frame(rows, intraday=False).loc[start:end]
+                return {ordered[0]: self._bind_complete_acceptance(frame, end)}
             raise FreeStockDBProviderError(
                 "stock_sdk daily batch 合同错误：多证券请求必须返回 code 到 rows 的对象"
             )
@@ -501,6 +524,7 @@ class FreeStockDBSource(DataSource):
                 payload[code], contract=f"stock_sdk daily batch {code}",
             )
             frame = self._frame(rows, intraday=False).loc[start:end]
+            frame = self._bind_complete_acceptance(frame, end)
             if not frame.empty:
                 result[symbol] = frame
         return result

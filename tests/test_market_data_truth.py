@@ -130,6 +130,69 @@ def test_stockdb_frame_assessment_never_calls_tushare(monkeypatch):
     assert any("复权" in issue for issue in quality.issues)
 
 
+def test_complete_stockdb_native_qfq_is_formal_without_online_evidence(
+    isolated_config, monkeypatch,
+):
+    dates = pd.bdate_range("2026-07-01", "2026-08-07")
+    local = _bars(dates)
+    local.index.name = "date"
+    local["amount"] = 10_000_000.0
+    local.attrs.update(
+        unit_status="verified_local_stockdb_schema_v1",
+        adjustment="qfq",
+        adjustment_status="requested_unverified",
+        factor_coverage="unconfirmed",
+        provider_interface="stock_sdk:daily",
+        units={
+            "open": "CNY/share",
+            "high": "CNY/share",
+            "low": "CNY/share",
+            "close": "CNY/share",
+            "volume": "share",
+            "amount": "CNY",
+        },
+    )
+    root = isolated_config.data_root / "stockdb-runtime"
+    root.mkdir(parents=True)
+    isolated_config.data.free_stockdb_root = str(root)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": "2026-08-07",
+        "target_session": "2026-08-07",
+        "updated_at": "2026-08-07T18:00:00+08:00",
+        "validation": {
+            "accepted": True,
+            "complete": True,
+            "target_session": "2026-08-07",
+            "actual_session": "2026-08-07",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.TushareSource.daily",
+        lambda *_args, **_kwargs: pytest.fail("complete StockDB must remain offline"),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda _start, _end: (dates, "stockdb-ingest:complete"),
+    )
+
+    bound = FreeStockDBSource._bind_complete_acceptance(local, "2026-08-07")
+    quality = registry._assess_daily_frame(
+        bound,
+        "2026-07-01",
+        "2026-08-07",
+        symbol="600000.SH",
+        source="free-stockdb",
+    )
+
+    assert quality.status == "verified", quality.issues
+    assert quality.adjustment == "forward_adjusted"
+    assert quality.formal_eligible is True
+    assert quality.semantics is not None
+    assert quality.semantics.factor_coverage == "complete"
+
+
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
     dates = pd.bdate_range("2026-03-23", periods=100)
     local = _bars(dates)

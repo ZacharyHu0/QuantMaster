@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import logging
 import sqlite3
 import threading
@@ -61,6 +60,7 @@ from quantmaster.runtime.jobs import (
 )
 from quantmaster.runtime.json import strict_json_dumps
 from quantmaster.runtime.metrics import get_runtime_metrics
+from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 
 logger = logging.getLogger(__name__)
 Progress = Callable[[int, str, str], None]
@@ -412,47 +412,20 @@ class RotationDataLoader:
         return symbols, names
 
     @staticmethod
-    def _validated_stockdb_session() -> tuple[str, dict[str, Any] | None]:
+    def _validated_stockdb_session(
+        *, require_complete: bool = False,
+    ) -> tuple[str, dict[str, Any] | None]:
         """Describe the latest accepted local StockDB session as a generation.
 
         An accepted-but-partial session is valid local evidence for a current
-        display snapshot, even though it never satisfies the formal
-        completed-session resolver.
+        display snapshot.  Formal callers receive only complete v2 evidence.
         """
 
-        try:
-            from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
-
-            status = free_stockdb_runtime.status()
-        except (ImportError, OSError, RuntimeError, ValueError, sqlite3.Error):
-            status = {}
-        validation = status.get("validation") if isinstance(status, dict) else {}
-        session = str(status.get("validated_session") or "").strip() if isinstance(status, dict) else ""
-        if (
-            not isinstance(validation, dict)
-            or validation.get("accepted") is not True
-            or not session
-            or str(validation.get("target_session") or "").strip() != session
-            or str(validation.get("actual_session") or "").strip() != session
-        ):
-            try:
-                marker = get_config().free_stockdb_root / ".quantmaster-update.json"
-                payload = json.loads(marker.read_text(encoding="utf-8"))
-                validation = payload.get("validation") if isinstance(payload, dict) else {}
-                session = str(payload.get("validated_session") or "").strip()
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                return "", None
-        if not isinstance(validation, dict):
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        if acceptance is None or (require_complete and not acceptance.complete):
             return "", None
-        target = str(validation.get("target_session") or "").strip()
-        actual = str(validation.get("actual_session") or "").strip()
-        if (
-            not session
-            or validation.get("accepted") is not True
-            or target != session
-            or actual != session
-        ):
-            return "", None
+        validation = acceptance.validation
+        session = acceptance.session
         stable = {
             key: validation.get(key)
             for key in (
@@ -466,6 +439,7 @@ class RotationDataLoader:
                 "required_ohlcv_ratio",
             )
         }
+        stable["updated_at"] = acceptance.updated_at.isoformat()
         content_id = hashlib.sha256(
             strict_json_dumps(stable, sort_keys=True).encode("utf-8")
         ).hexdigest()
@@ -475,6 +449,8 @@ class RotationDataLoader:
             "content_id": content_id,
             "coverage_start": session,
             "coverage_end": session,
+            "formal_eligible": acceptance.complete,
+            "observed_at": acceptance.updated_at.isoformat(),
         }
 
     def _research_lake(self) -> tuple[pd.DataFrame, pd.DataFrame] | None:
@@ -524,8 +500,8 @@ class RotationDataLoader:
         used before submitting a refresh to decide whether a published snapshot
         is already valid and whether an ``auto`` request actually needs a
         remote supplement.  Accepted-but-partial StockDB sessions count as
-        local display evidence only when ``include_stockdb_preview`` is true;
-        formal and historical callers keep the completed-session boundary.
+        local display evidence only when ``include_stockdb_preview`` is true.
+        Complete sessions remain visible to formal callers.
         """
 
         instruments, expected_count = self._listed_instruments()
@@ -617,8 +593,8 @@ class RotationDataLoader:
         )
         selected_entries = lake_entries if use_lake else bar_entries
         panel_as_of = lake_as_of if use_lake else bar_as_of
-        stockdb_session, stockdb_entry = (
-            self._validated_stockdb_session() if include_stockdb_preview else ("", None)
+        stockdb_session, stockdb_entry = self._validated_stockdb_session(
+            require_complete=not include_stockdb_preview,
         )
         if stockdb_entry is not None:
             selected_entries = [stockdb_entry, *selected_entries]
@@ -634,7 +610,11 @@ class RotationDataLoader:
         return {
             "generations": generations,
             "as_of": stockdb_session if use_stockdb else panel_as_of,
-            "source": "stockdb_preview" if use_stockdb else (
+            "source": (
+                "stockdb_complete"
+                if use_stockdb and bool((stockdb_entry or {}).get("formal_eligible"))
+                else "stockdb_preview"
+            ) if use_stockdb else (
                 "research_lake" if use_lake else "bar_store"
             ),
             "expected_count": expected_count,
@@ -751,14 +731,9 @@ class RotationDataLoader:
         target_as_of: str,
         progress: Progress,
         cancelled: Cancelled,
+        purpose: str,
     ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
-        """Build a raw local-StockDB panel for current-analysis snapshots.
-
-        Formal research prices require a complete adjustment-factor chain.
-        Current display/current-analysis snapshots may instead use the accepted
-        local StockDB session directly; the source marker keeps that
-        distinction visible in the published provenance.
-        """
+        """Build a purpose-qualified local StockDB panel."""
 
         symbols, names = self._listed_symbols(instruments)
         if len(symbols) < 30:
@@ -776,12 +751,13 @@ class RotationDataLoader:
         def mapped_progress(value: int, phase: str, detail: str) -> None:
             progress(4 + min(26, round(26 * max(0, min(100, value)) / 100)), phase, detail)
 
-        frame = service.read_cross_section_history(
-            symbols,
-            start,
-            end,
-            progress=mapped_progress,
-            cancelled=cancelled,
+        formal = purpose in {"formal_research", "historical_replay"}
+        reader = (
+            service.read_native_research_history
+            if formal else service.read_cross_section_history
+        )
+        frame = reader(
+            symbols, start, end, progress=mapped_progress, cancelled=cancelled,
         )
         if frame.empty or not {"date", "symbol", "close"}.issubset(frame.columns):
             raise ValueError("本地 StockDB 没有可用于市场温度预览的日频截面")
@@ -815,9 +791,11 @@ class RotationDataLoader:
         progress(
             30,
             "读取本地 StockDB 截面",
-            f"{len(close.columns)} 只 · 截至 {close.index.max().date()} · 原始价格预览",
+            f"{len(close.columns)} 只 · 截至 {close.index.max().date()} · "
+            f"{'完整验收 qfq' if formal else '原始价格预览'}",
         )
-        return close, amount, names, expected_count, ["local:stockdb:raw"]
+        source = "local:stockdb:qfq-complete" if formal else "local:stockdb:raw"
+        return close, amount, names, expected_count, [source]
 
     def market_matrices(
         self,
@@ -825,6 +803,7 @@ class RotationDataLoader:
         progress: Progress,
         cancelled: Cancelled,
         target_as_of: str = "",
+        purpose: str = "display",
     ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str], int, list[str]]:
         instruments, expected_count = self._listed_instruments()
         lake_result = self._research_lake_matrices(
@@ -841,6 +820,7 @@ class RotationDataLoader:
                 target_as_of,
                 progress,
                 cancelled,
+                purpose,
             )
         return self._bar_store_matrices(
             instruments, expected_count, progress, cancelled,
@@ -2047,12 +2027,17 @@ class _RotationBuildRun:
     def _load_market_matrices(self) -> None:
         state = self.state
         allow_stockdb_preview = state.spec.purpose in {"display", "current_analysis"}
+        stockdb_session, stockdb_entry = self.service.loader._validated_stockdb_session(
+            require_complete=not allow_stockdb_preview,
+        )
+        if stockdb_entry is not None and not allow_stockdb_preview:
+            observed_at = datetime.fromisoformat(str(stockdb_entry["observed_at"]))
+            if observed_at.timestamp() > _knowledge_cutoff_epoch(state.spec.knowledge_cutoff):
+                raise ValueError("StockDB 完整验收记录晚于 knowledge_cutoff")
         target_as_of = (
-            (
-                state.spec.as_of
-                or self.service.loader._validated_stockdb_session()[0]
-            )
-            if allow_stockdb_preview else ""
+            state.spec.as_of or stockdb_session
+            if allow_stockdb_preview or stockdb_entry is not None
+            else ""
         )
         with self.metrics.node_timer(
             "rotation.market_matrix", job_id=state.job_id,
@@ -2065,6 +2050,7 @@ class _RotationBuildRun:
                 progress=self._market_loader_progress(),
                 cancelled=state.cancelled,
                 target_as_of=target_as_of,
+                purpose=state.spec.purpose,
             )
             dimensions.update(
                 input_rows=len(state.close),
