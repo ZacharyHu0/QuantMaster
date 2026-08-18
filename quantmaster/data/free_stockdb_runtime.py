@@ -797,7 +797,7 @@ class FreeStockDBRuntime:
 
     @staticmethod
     def _parse_vendor_notice(document: str) -> dict[str, str]:
-        data_match = re.search(r"更新至\s*[:：]\s*(\d{4}-\d{2}-\d{2})", document)
+        updated_match = re.search(r"更新至\s*[:：]\s*(\d{4}-\d{2}-\d{2})", document)
         version_match = re.search(
             r"最新版本\s*v?([^\s<,，。；;]+)", document, flags=re.IGNORECASE,
         )
@@ -812,7 +812,7 @@ class FreeStockDBRuntime:
         announcement = re.sub(r"<[^>]+>", " ", announcement)
         announcement = re.sub(r"\s+", " ", html.unescape(announcement)).strip()
         return {
-            "data_date": data_match.group(1) if data_match else "",
+            "notice_updated_on": updated_match.group(1) if updated_match else "",
             "version": version,
             "announcement": announcement,
         }
@@ -859,11 +859,13 @@ class FreeStockDBRuntime:
             details = self._parse_vendor_notice(response.text)
             now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
             fingerprint = (
-                f"{details['data_date']}|{details['version']}|{details['announcement']}"
+                f"{details['notice_updated_on']}|{details['version']}|"
+                f"{details['announcement']}"
             )
             notice: dict[str, Any] = {
                 "status": "ok", "checked_at": now, "url": _VENDOR_HOME,
-                "data_date": details["data_date"], "version": details["version"],
+                "notice_updated_on": details["notice_updated_on"],
+                "version": details["version"],
                 "announcement": details["announcement"],
                 "fingerprint": fingerprint,
             }
@@ -914,31 +916,16 @@ class FreeStockDBRuntime:
         temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         temp.replace(path)
 
-    @staticmethod
-    def _valid_date(value: object) -> str:
-        try:
-            parsed = date.fromisoformat(str(value or "")[:10])
-        except ValueError:
-            return ""
-        return parsed.isoformat() if parsed <= market_date() else ""
-
     def _target_session(self, *, force_notice: bool = False) -> tuple[str, str]:
-        notice = self.check_vendor_notice(force=force_notice)
-        vendor_date = self._valid_date(notice.get("data_date"))
+        self.check_vendor_notice(force=force_notice)
         try:
             from quantmaster.trading_sessions import resolve_session_target
 
             expectation = resolve_session_target()
             if expectation.ready and expectation.session:
-                if vendor_date and vendor_date >= expectation.session:
-                    return vendor_date, "free-stockdb-vendor"
                 return expectation.session, expectation.source
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
-        if vendor_date:
-            # The announcement nominates a validation target only.  Promotion
-            # still requires _validate_data to accept the real local slice.
-            return vendor_date, "free-stockdb-vendor"
         return "", "unavailable"
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:
