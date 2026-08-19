@@ -54,10 +54,13 @@ def test_rotation_cold_state_and_static_taxonomy_are_explicit():
     assert "api(path, signal ? {signal} : {})" in rotation_script
     assert 'data-workspace-page="market"' in page.text
     assert 'id="market-workbench-view"' in page.text
-    assert 'id="market-route-removed"' in page.text
+    assert 'data-workspace-page="quotes"' in page.text
+    assert 'id="market-quotes-view"' in page.text
+    assert 'id="market-temperature-view"' in page.text
+    assert 'id="market-style-view"' in page.text
     assert 'id="tab-rotation"' in page.text
-    assert 'data-rotation-page="overview"' not in page.text
-    assert 'id="rotation-overview-view"' not in page.text
+    assert 'data-rotation-page="overview"' in page.text
+    assert 'id="rotation-overview-view"' in page.text
     assert 'data-rotation-page="themes"' in page.text
     assert 'id="rotation-radar-view"' not in page.text
     assert 'src="/static/rotation.js"' not in page.text

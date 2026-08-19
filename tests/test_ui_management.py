@@ -627,7 +627,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
             page.locator('[data-market-method="amount"]').first
         ).to_have_attribute("aria-selected", "true")
         assert page.locator("#market-method-compare > button").count() == 5
-        assert page.locator(".market-decision-strip > article").count() >= 6
+        assert page.locator(".market-decision-strip > :is(article,.market-decision-metric)").count() >= 6
         assert page.locator("#tab-market *").count() <= 2500
         assert _active_chart_count(page) <= 4
         focus = page.locator(".market-focus").bounding_box()
@@ -1468,6 +1468,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         ]
         assert page.locator('[data-workspace-pages="today"] button').all_inner_texts() == [
             "市场全景",
+            "行情",
+            "市场温度",
+            "市场风格",
+            "轮动总览",
             "行业周期",
             "细分题材",
             "ETF 研究",
