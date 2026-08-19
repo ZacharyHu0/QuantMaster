@@ -157,13 +157,6 @@
 .market-loading-line i { width:7px; height:7px; border:1px solid var(--axis); border-top-color:var(--s1); border-radius:50%; animation:market-spin 700ms linear infinite; }
 @keyframes market-spin { to { transform:rotate(360deg); } }
 
-.market-route-removed { display:grid; justify-items:start; gap:10px; max-width:620px; margin:54px auto; padding:32px; border:1px solid var(--border); background:var(--page); }
-.market-route-removed[hidden] { display:none; }
-.market-route-removed > span { color:var(--s4); font-size:9px; font-weight:700; letter-spacing:.14em; }
-.market-route-removed h2 { font-size:22px; }
-.market-route-removed p { color:var(--muted); font-size:12px; line-height:1.65; }
-.market-route-removed a { min-height:40px; padding:9px 13px; border-radius:6px; text-decoration:none; }
-
 .market-workbench :is(button,input,summary,a):focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
 
 @media (min-width:1600px) {
