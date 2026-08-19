@@ -12,3 +12,13 @@ def test_news_ui_labels_event_and_observation_times_separately() -> None:
     assert "内容版本进入系统 · Asia/Shanghai" in script
     assert "TIME_UNINTERPRETABLE" in script
     assert "localDate(item.first_seen_at || item.published_at)" not in script
+
+
+def test_news_ui_distinguishes_queue_status_from_symbol_association() -> None:
+    script = (
+        Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "news.js"
+    ).read_text(encoding="utf-8")
+    assert "|| status || '待标注'" not in script
+    assert "}[value] || '状态未知';" in script
+    assert "status === 'complete' && symbols.length === 0" in script
+    assert "未关联直接标的" in script

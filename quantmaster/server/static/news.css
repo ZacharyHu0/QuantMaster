@@ -337,9 +337,11 @@
 
 .news-tag.official { color: var(--s4); }
 .news-tag.pending { color: var(--s4); border-style: dashed; }
+.news-tag.unknown { color: var(--bad); border-style: dashed; }
 .news-tag.failed { color: var(--bad); border-color: color-mix(in oklch, var(--bad) 46%, transparent); }
 .news-tag.dead_letter { color: var(--s4); border-color: color-mix(in oklch, var(--s4) 55%, transparent); }
 .news-tag.recovery { color: var(--s1); border-color: color-mix(in oklch, var(--s1) 50%, transparent); }
+.news-tag.unlinked { color: var(--ink-2); border-style: dashed; }
 .news-tag.sector { color: var(--s7); border-color: color-mix(in oklch, var(--s7) 42%, var(--axis)); }
 .news-tag.symbol { color: var(--s1); }
 

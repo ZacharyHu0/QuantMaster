@@ -239,10 +239,11 @@ const newsFeature = (() => {
   }
 
   function statusLabel(status) {
+    const value = String(status || '').trim();
     return {
       complete: '已标注', pending: '待标注', failed: '退避重试',
       recovery: '恢复中', dead_letter: '已暂停',
-    }[status] || status || '待标注';
+    }[value] || '状态未知';
   }
 
   function failureTemplate(item) {
@@ -281,13 +282,19 @@ const newsFeature = (() => {
     const sentimentClass = sentiment == null ? 'missing' : sentiment > .15 ? 'positive' : sentiment < -.15 ? 'negative' : 'neutral';
     const score = item.alert_importance_score == null ? null : Math.round(Number(item.alert_importance_score));
     const sectors = Array.isArray(item.sectors) ? item.sectors : [];
+    const symbols = Array.isArray(item.symbols) ? item.symbols : [];
+    const status = String(item.analysis_status || '').trim();
+    const statusClass = ['complete', 'pending', 'failed', 'recovery', 'dead_letter'].includes(status)
+      ? status : 'unknown';
     const tags = [
       item.is_official ? '<span class="news-tag official">官方</span>' : '',
       item.event_type ? `<span class="news-tag">${html(item.event_type)}</span>` : '',
-      `<span class="news-tag ${html(item.analysis_status)}">${html(statusLabel(item.analysis_status))}</span>`,
+      `<span class="news-tag ${statusClass}">${html(statusLabel(status))}</span>`,
+      status === 'complete' && symbols.length === 0
+        ? '<span class="news-tag unlinked" title="已完成分析，但未关联直接个股">未关联直接标的</span>' : '',
       ...sectors.slice(0, 3).map(sector => `<span class="news-tag sector">${html(sector)}</span>`),
       sectors.length > 3 ? `<span class="news-tag sector">+${sectors.length - 3}</span>` : '',
-      ...(item.symbols || []).slice(0, 4).map(symbol => `<span class="news-tag symbol">${html(symbol)}</span>`),
+      ...symbols.slice(0, 4).map(symbol => `<span class="news-tag symbol">${html(symbol)}</span>`),
     ].join('');
     const link = safeUrl(item.url);
     const updated = state.updatedIds.has(Number(item.id)) ? ' stream-updated' : '';
