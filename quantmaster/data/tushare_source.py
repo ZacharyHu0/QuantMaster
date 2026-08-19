@@ -831,7 +831,12 @@ def _official_calendar(start, end) -> list[str]:
     return [str(value.date()) for value in calendar]
 
 
-register_official_calendar(_official_calendar)
+def register_tushare_calendar() -> None:
+    """Attach Tushare's official session calendar to the shared callback seam."""
+    register_official_calendar(_official_calendar)
+
+
+register_tushare_calendar()
 register_index_source(TushareSource)
 
 

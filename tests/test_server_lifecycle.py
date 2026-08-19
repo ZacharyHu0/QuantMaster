@@ -4,11 +4,38 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from datetime import datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from quantmaster.server import lifecycle
+
+
+def test_server_bootstrap_registers_tushare_official_calendar(isolated_config, monkeypatch):
+    from quantmaster.data import tushare_source
+    from quantmaster.runtime import trading_session_sources
+    from quantmaster.server import app as server_app
+    from quantmaster.trading_sessions import SessionExpectationResolver
+
+    isolated_config.data.tushare_token = "fixture-token"
+    monkeypatch.setattr(trading_session_sources, "_official_source", None)
+    monkeypatch.setattr(
+        tushare_source.TushareSource,
+        "trade_calendar",
+        lambda _self, _start, _end: pd.DatetimeIndex(["2026-08-17", "2026-08-18"]),
+    )
+
+    server_app._register_trading_calendar_sources()
+
+    assert trading_session_sources._official_source is tushare_source._official_calendar
+    result = SessionExpectationResolver().resolve(
+        datetime(2026, 8, 18, 16, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    assert result.session == "2026-08-18"
+    assert result.coverage["official_dates"] == ["2026-08-17", "2026-08-18"]
 
 
 def test_app_lifespan_forwards_rotation_bootstrap_to_supervisor(monkeypatch):

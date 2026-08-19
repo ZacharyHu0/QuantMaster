@@ -36,6 +36,13 @@ logger = logging.getLogger(__name__)
 _web_stream_runtime = None
 
 
+def _register_trading_calendar_sources() -> None:
+    """Install configured calendar providers before startup services resolve sessions."""
+    from quantmaster.data.tushare_source import register_tushare_calendar
+
+    register_tushare_calendar()
+
+
 def _configure_reload_worker_logging() -> bool:
     """Restore CLI logging in workers spawned directly by Uvicorn's reloader."""
     if os.environ.get("QM_SERVER_RELOAD_WORKER") != "1":
@@ -51,6 +58,7 @@ def create_lifespan(*, bootstrap_rotation: bool):
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        _register_trading_calendar_sources()
         _stream_runtime()
         from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.logging_config import current_log_path
