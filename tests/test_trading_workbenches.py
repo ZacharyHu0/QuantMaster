@@ -228,6 +228,13 @@ class _RoutePaperService:
             raise KeyError("模拟账户不存在")
         return {"id": account_id, "status": "archived"}
 
+    def permanently_delete_account(self, account_id, *, confirm_name):
+        if account_id == "missing":
+            raise KeyError("模拟账户不存在")
+        if confirm_name != "route account":
+            raise ValueError("确认名称不匹配，已取消永久删除")
+        return {"id": account_id, "deleted": True, "recoverable": False}
+
     def clone_account(self, account_id, name, mode):
         if account_id == "missing":
             raise KeyError("模拟账户不存在")
@@ -943,9 +950,10 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
         "strategy_editable": True,
         "pending_strategy_change": False,
         "strategy_effective_after": "",
-        "can_archive": True,
+        "can_hide": True,
         "can_restore": False,
-        "delete_mode": "archive",
+        "can_permanently_delete": False,
+        "delete_mode": "hide",
     }
 
     prior_cycles = service.store.cycles(account["id"])
@@ -989,7 +997,7 @@ def test_paper_strategy_transition_error_is_redacted(tmp_path, monkeypatch):
     assert "secret-value" not in message
 
 
-def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
+def test_paper_hide_is_recoverable_and_preserves_history(tmp_path):
     service, account = make_paper_service(tmp_path, "可恢复账户")
     cycle, _created = service.store.create_cycle(
         account,
@@ -1011,14 +1019,64 @@ def test_paper_delete_is_recoverable_and_preserves_history(tmp_path):
         "strategy_editable": False,
         "pending_strategy_change": False,
         "strategy_effective_after": "",
-        "can_archive": False,
+        "can_hide": False,
         "can_restore": True,
-        "delete_mode": "archive",
+        "can_permanently_delete": True,
+        "delete_mode": "hide",
     }
 
     restored = service.update_account(account["id"], status="paused")
     assert restored["status"] == "paused"
     assert service.store.accounts()[0]["id"] == account["id"]
+
+
+def test_hidden_paper_account_can_be_permanently_deleted_with_name_confirmation(tmp_path):
+    service, account = make_paper_service(tmp_path, "待永久删除账户")
+    ledger_directory = service.store.ledger_path(account["id"]).parent
+    cycle, _created = service.store.create_cycle(
+        account,
+        "2026-08-05",
+        {"600000.SH": 0.35},
+        {"600000.SH": 10.0},
+        [],
+    )
+    order = service.store.orders(cycle_id=cycle["id"])[0]
+    with service.store._conn() as conn:
+        conn.execute(
+            "INSERT INTO paper_order_fills(id,order_id,fill_key,filled_at,quantity,price,fee,"
+            "market_ref,rule_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("fill", order["id"], "fill-key", "2026-08-06T09:30:00+08:00", 100, 10, 0,
+             "fixture", "test", "2026-08-06T09:30:00+08:00"),
+        )
+        conn.execute(
+            "INSERT INTO paper_order_events(order_id,from_status,to_status,event_code,"
+            "details_json,created_at) VALUES (?,?,?,?,?,?)",
+            (order["id"], "proposed", "queued", "test", "{}", "2026-08-06T09:30:00+08:00"),
+        )
+
+    with pytest.raises(ValueError, match="已隐藏"):
+        service.permanently_delete_account(account["id"], confirm_name=account["name"])
+
+    service.archive_account(account["id"])
+    with pytest.raises(ValueError, match="确认名称"):
+        service.permanently_delete_account(account["id"], confirm_name="不匹配")
+
+    deleted = service.permanently_delete_account(account["id"], confirm_name=account["name"])
+
+    assert deleted == {"id": account["id"], "deleted": True, "recoverable": False}
+    assert service.store.account(account["id"]) is None
+    assert service.store.accounts(include_archived=True) == []
+    assert not ledger_directory.exists()
+    with service.store._conn() as conn:
+        assert all(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+            for table in (
+                "paper_accounts", "paper_cycles", "paper_orders", "paper_order_fills",
+                "paper_order_events", "paper_auto_runs", "paper_legacy_imports",
+            )
+        )
+    with pytest.raises(KeyError, match="模拟账户不存在"):
+        service.store.ledger(account["id"])
 
 
 def test_removed_holding_is_quoted_but_not_ranked_for_new_target(tmp_path):
@@ -2022,6 +2080,15 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "生成调仓提案" in page
     assert "确认并等待开盘" not in page  # 仅在真实提案渲染后出现
     assert "每日自动交易" in page
+    paper_header = page.split('class="paper-list-title-row"', 1)[1].split(
+        'id="paper-new-toggle"', 1,
+    )[0]
+    assert 'id="paper-show-archived"' in paper_header
+    assert 'type="button"' in paper_header
+    assert 'aria-pressed="false"' in paper_header
+    assert 'type="checkbox"' not in paper_header
+    assert 'id="paper-hide"' in page
+    assert 'id="paper-permanent-delete"' in page
     assert "进入页面只读取历史快照，不会自动计算" in page
     backtest_layout = page.split('<div class="trading-layout">', 1)[1].split(
         "</section>\n\n<!-- ================= 挖掘", 1,
@@ -2041,6 +2108,7 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "document.getElementById('decision-form').requestSubmit()" not in app_script
 
     css = client.get("/static/trading.css").text
+    assert ".paper-visibility-toggle[aria-pressed=\"true\"]" in css
     checkbox_rule = css.split(
         '.trading-history-row input[type="checkbox"]',
         1,
@@ -2052,6 +2120,8 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     assert "position: fixed" in css.split(".factor-completion-menu", 1)[1].split("}", 1)[0]
 
     trading_script = client.get("/static/trading.js").text
+    assert "/permanent" in trading_script
+    assert "确认名称" in trading_script
     assert "artifact.manifest?.formal_eligible === true" in trading_script
     assert "缺少正式资格证据" in trading_script
     assert "正式结果 · 可晋升" in trading_script
@@ -2384,12 +2454,25 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
             request,
         )
     assert missing_recovery.value.status_code == 404
-    deleted = trading.delete_paper_account("account", request)
-    assert deleted["deleted"] is True and deleted["recoverable"] is True
-    assert deleted["account"]["status"] == "archived"
+    hidden = trading.delete_paper_account("account", request)
+    assert hidden["hidden"] is True and hidden["recoverable"] is True
+    assert hidden["account"]["status"] == "archived"
     with pytest.raises(trading.HTTPException) as missing_delete:
         trading.delete_paper_account("missing", request)
     assert missing_delete.value.status_code == 404
+    deleted = trading.permanently_delete_paper_account(
+        "account",
+        trading.PaperAccountPermanentDelete(confirm_name="route account"),
+        request,
+    )
+    assert deleted == {"id": "account", "deleted": True, "recoverable": False}
+    with pytest.raises(trading.HTTPException) as wrong_confirmation:
+        trading.permanently_delete_paper_account(
+            "account",
+            trading.PaperAccountPermanentDelete(confirm_name="wrong"),
+            request,
+        )
+    assert wrong_confirmation.value.status_code == 400
     assert (
         trading.clone_paper_account(
             "account",

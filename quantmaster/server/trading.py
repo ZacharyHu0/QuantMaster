@@ -262,6 +262,11 @@ class PaperVerifiedFill(ContractModel):
     side: Literal["buy", "sell"]
 
 
+class PaperAccountPermanentDelete(ContractModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_name: str = Field(..., min_length=1, max_length=40)
+
+
 @router.patch("/paper/accounts/{account_id}")
 def update_paper_account(account_id: str, payload: PaperAccountUpdate, request: Request) -> dict:
     _require_csrf(request)
@@ -310,11 +315,27 @@ def recover_paper_order_fill(
 
 @router.delete("/paper/accounts/{account_id}")
 def delete_paper_account(account_id: str, request: Request) -> dict:
-    """Archive an account without deleting its ledger or historical cycles."""
+    """Hide an account without deleting its ledger or historical cycles."""
     _require_csrf(request)
     try:
         account = get_paper_service().archive_account(account_id)
-        return {"deleted": True, "recoverable": True, "account": account}
+        return {"hidden": True, "recoverable": True, "account": account}
+    except (KeyError, ValueError) as exc:
+        raise _error(exc) from None
+
+
+@router.delete("/paper/accounts/{account_id}/permanent")
+def permanently_delete_paper_account(
+    account_id: str,
+    payload: PaperAccountPermanentDelete,
+    request: Request,
+) -> dict:
+    _require_csrf(request)
+    try:
+        return get_paper_service().permanently_delete_account(
+            account_id,
+            confirm_name=payload.confirm_name,
+        )
     except (KeyError, ValueError) as exc:
         raise _error(exc) from None
 
