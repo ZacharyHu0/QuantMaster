@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -287,12 +288,22 @@ def account_spec(name="日频验证", *, rebalance="D"):
     )
 
 
-def make_paper_service(tmp_path, name="日频验证", *, rebalance="D"):
+def make_paper_service(
+    tmp_path,
+    name="日频验证",
+    *,
+    rebalance="D",
+    initial_funding_date="2024-01-01",
+):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
-    account = store.create_account(
-        account_spec(name, rebalance=rebalance),
-        symbols=["600000.SH", "000001.SZ"],
-    )
+    with patch(
+        "quantmaster.backtest.paper_accounts.market_date",
+        return_value=date.fromisoformat(initial_funding_date),
+    ):
+        account = store.create_account(
+            account_spec(name, rebalance=rebalance),
+            symbols=["600000.SH", "000001.SZ"],
+        )
     return PaperService(store), account
 
 
@@ -468,6 +479,38 @@ def test_paper_process_uses_raw_accepted_stockdb_open(tmp_path, monkeypatch):
     )
     assert result["report"]["data_quality"]["status"] == "verified"
     assert result["report"]["market_provenance"]["000001.SZ"][0]["source"] == "free-stockdb"
+
+
+def test_paper_process_waits_until_after_initial_funding_date(tmp_path):
+    service, account = make_paper_service(tmp_path, initial_funding_date="2024-01-09")
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:-1]))
+    service.store.confirm(proposal["id"])
+
+    result = service.process(account["id"], **validated_panel(price_panel(dates)))
+
+    assert result["status"] == "waiting_market_data"
+    assert service.store.ledger(account["id"]).trades().empty
+    assert {order["status"] for order in service.store.cycle(proposal["id"])["orders"]} == {
+        "waiting_market_data"
+    }
+
+
+def test_paper_process_fills_on_first_session_after_initial_funding_date(tmp_path):
+    service, account = make_paper_service(tmp_path, initial_funding_date="2024-01-09")
+    dates = pd.bdate_range("2024-01-01", periods=8)
+    proposal = service.propose(account["id"], panel=price_panel(dates[:5]))
+    service.store.confirm(proposal["id"])
+
+    result = service.process(account["id"], **validated_panel(price_panel(dates)))
+    ledger = service.store.ledger(account["id"])
+    trades = ledger.trades()
+
+    assert result["status"] == "completed"
+    assert set(trades["date"]) == {"2024-01-10"}
+    assert set(ledger.cashflows()["date"]) == {"2024-01-09"}
+    assert not any("现金余额" in warning for warning in result["report"]["warnings"])
+    assert not any("累计净入金" in warning for warning in result["report"]["warnings"])
 
 
 def test_paper_process_clears_resolved_execution_gate_warning(tmp_path):
