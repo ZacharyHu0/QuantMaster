@@ -2525,6 +2525,20 @@ class PaperService:
         sells = float(eligible.loc[eligible["side"] == "sell", "shares"].sum())
         return max(0.0, buys - sells)
 
+    @staticmethod
+    def _initial_funding_floor(ledger: Ledger, account_id: str) -> str:
+        cashflows = ledger.cashflows()
+        initial = cashflows.loc[
+            cashflows["idempotency_key"] == f"account:{account_id}:initial"
+        ]
+        if (
+            len(initial) != 1
+            or str(initial.iloc[0]["kind"]) != "deposit"
+            or float(initial.iloc[0]["amount"]) <= 0
+        ):
+            raise ValueError("初始入金凭证无效，不能撮合模拟订单")
+        return str(initial.iloc[0]["date"])
+
     def process(  # noqa: C901, RUF100 -- ordered matching stages share one lease fence
         self,
         account_id: str,
@@ -2573,6 +2587,7 @@ class PaperService:
             return {"status": "idle", "account_id": account_id, "message": "没有待撮合订单。"}
         cycle = cycles[-1]
         ledger = self.store.ledger(account_id)
+        initial_funding_floor = self._initial_funding_floor(ledger, account_id)
         held = [position.symbol for position in ledger.positions() if position.shares > 0]
         symbols = sorted(set(cycle["target_weights"]) | set(held))
         markets = {market_for_symbol(symbol) for symbol in symbols}
@@ -2661,6 +2676,7 @@ class PaperService:
             cursor = str(
                 order.get("last_processed_at") or cycle["execution_date"] or cycle["signal_date"]
             )
+            cursor = max(cursor, initial_funding_floor)
             # Injected panels are fixtures with one explicitly supplied observation
             # instant.  Production cache frames must carry per-row first-observed
             # evidence; assigning decision_at here would make late backfills appear
