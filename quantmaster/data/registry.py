@@ -697,6 +697,11 @@ def _shanghai_wall_time(value: object) -> pd.Timestamp:
     return stamp
 
 
+def _intraday_wall_time(value: object, symbol: str) -> pd.Timestamp:
+    """Normalize an intraday request to the symbol's exchange wall clock."""
+    return _market_wall_time(value, _market_timezone(symbol) or ZoneInfo("UTC"))
+
+
 def _intraday_index_assessment(
     frame: pd.DataFrame,
     zone: ZoneInfo | None,
@@ -1426,6 +1431,28 @@ def _bar_envelope(
     purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
 ) -> BarDataEnvelope[pd.DataFrame]:
     metadata = metadata if metadata is not None else store.metadata(symbol) or {}
+    if frequency != "1d" and frame is not None and not frame.empty:
+        # Parquet normally preserves attrs, but older caches and some parquet
+        # engines do not. Rehydrate only a previously persisted IANA zone;
+        # never infer one from the market or from a naive timestamp.
+        try:
+            persisted = json.loads(str(metadata.get("quality_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            persisted = {}
+        persisted_zone = str(persisted.get("timezone") or "").strip()
+        persisted_status = str(persisted.get("status") or "")
+        persisted_issues = {str(value) for value in persisted.get("issues") or ()}
+        try:
+            ZoneInfo(persisted_zone)
+        except (TypeError, ValueError, ZoneInfoNotFoundError):
+            persisted_zone = ""
+        if (
+            persisted_zone
+            and persisted_status in _QUALITY_RANK
+            and not any(value.startswith("TIME_UNZONED:") for value in persisted_issues)
+            and not frame.attrs.get("timezone")
+        ):
+            frame.attrs["timezone"] = persisted_zone
     source = str(metadata.get("last_source") or "")
     stale = str(metadata.get("last_status") or "") in {"stale", "refresh_failed"}
     quality = _assess_bar_quality(
@@ -2483,7 +2510,8 @@ def _load_intraday_frame(
 
     start_is_date = len(str(start).strip()) <= 10
     end_is_date = len(str(end).strip()) <= 10
-    start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+    start_ts = _intraday_wall_time(start, symbol)
+    end_ts = _intraday_wall_time(end, symbol)
     requested_end_date = end_ts.normalize()
     if end_is_date:
         end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)

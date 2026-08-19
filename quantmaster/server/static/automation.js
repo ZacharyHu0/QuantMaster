@@ -69,6 +69,10 @@ const automationFeature = (() => {
 
   function dateText(value) {
     if (!value) return '—';
+    if (typeof value === 'string' && /\dT\d{2}:\d{2}/.test(value)
+      && !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
+      return '不可用 · TIME_UNZONED';
+    }
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? esc(value) : date.toLocaleString('zh-CN', {hour12:false});
   }
