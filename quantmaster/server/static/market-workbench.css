@@ -166,6 +166,19 @@
 
 .market-workbench :is(button,input,summary,a):focus-visible { outline:2px solid var(--s1); outline-offset:2px; }
 
+@media (min-width:1600px) {
+  main:has(> #tab-market.active) {
+    max-width:none;
+    padding-inline:clamp(32px,2vw,72px);
+  }
+  .market-three-column {
+    grid-template-columns:minmax(280px,360px) minmax(640px,1fr) minmax(340px,480px);
+    min-height:clamp(580px,calc(100vh - 250px),820px);
+  }
+  .market-focus { grid-template-rows:auto auto minmax(420px,1fr) auto; }
+  .market-chart-wrap,.market-board-chart { min-height:clamp(420px,28vw,680px); }
+}
+
 @media (max-width:1180px) {
   .market-decision-strip { grid-template-columns:repeat(4,minmax(0,1fr)); }
   .market-three-column { grid-template-columns:minmax(220px,.75fr) minmax(440px,1.5fr); }
