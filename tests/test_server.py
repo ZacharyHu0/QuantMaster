@@ -551,11 +551,14 @@ class TestBasics:
         assert 'data-tab="decision"' in resp.text
         assert 'data-workspace-page="market"' in resp.text
         assert 'id="market-workbench-root"' in resp.text
-        assert 'id="market-route-removed"' in resp.text
-        assert 'data-workspace-page="quotes"' not in resp.text
-        assert 'data-workspace-page="temperature"' not in resp.text
-        assert 'data-workspace-page="style"' not in resp.text
-        assert 'data-workspace-page="rotation"' not in resp.text
+        assert 'id="market-quotes-view"' in resp.text
+        assert 'id="market-temperature-view"' in resp.text
+        assert 'id="market-style-view"' in resp.text
+        assert 'id="rotation-overview-view"' in resp.text
+        assert 'data-workspace-page="quotes"' in resp.text
+        assert 'data-workspace-page="temperature"' in resp.text
+        assert 'data-workspace-page="style"' in resp.text
+        assert 'data-workspace-page="rotation"' in resp.text
         assert "/api/v1/rotation/board-indexes" in market_script
         assert "current_constituents_backcast" in market_script
         assert "data-market-method" in market_script
@@ -638,7 +641,9 @@ class TestBasics:
         assert '.snapshot-validation[data-status="completed"]' in app_styles
         assert "event.partial" in app_script
         assert "/api/v1/research/decision/dashboard/stream" in app_script
-        assert 'id="asset-workbench"' not in resp.text
+        assert 'id="asset-workbench"' in resp.text
+        assert "US FEAR &amp; GREED" in resp.text
+        assert "美股风险背景" in resp.text
         assert 'id="tab-candidates"' in resp.text
         assert 'id="candidate-workspace"' in resp.text
         assert 'href="/static/candidates.css"' not in resp.text

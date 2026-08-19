@@ -673,7 +673,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
         browser.close()
 
 
-def test_market_workbench_on_demand_history_cleanup_removed_routes_and_failure(live_server):
+def test_market_workbench_on_demand_history_restored_detail_routes_and_failure(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
@@ -697,11 +697,25 @@ def test_market_workbench_on_demand_history_cleanup_removed_routes_and_failure(l
             "Object.keys(window.charts || {}).filter(key => key.startsWith('market-')).length"
         ) == 0
 
-        for legacy in ("quotes", "temperature", "style", "rotation"):
-            page.goto(f"{url}/#today/{legacy}")
-            page.locator("#market-route-removed").wait_for(state="visible")
-            assert page.url.endswith(f"#today/{legacy}")
-            playwright_sync.expect(page.locator("#market-route-removed h2")).to_contain_text("页面已移除")
+        for detail, selector in (
+            ("quotes", "#market-quotes-view"),
+            ("temperature", "#market-temperature-view"),
+            ("style", "#market-style-view"),
+            ("rotation", "#rotation-overview-view"),
+        ):
+            page.goto(f"{url}/#today/{detail}")
+            page.locator(selector).wait_for(state="visible")
+            assert page.url.endswith(f"#today/{detail}")
+            assert page.locator("#market-workbench-view").is_hidden()
+
+        page.goto(f"{url}/#today/market")
+        page.locator('a[href="#today/quotes?focus=ashare-fear-greed"]').click()
+        page.locator("#market-ashare-fear-greed").wait_for(state="visible")
+        assert "focus=ashare-fear-greed" in page.url
+        page.goto(f"{url}/#today/market")
+        page.locator('a[href="#today/quotes?focus=fear-greed"]').click()
+        page.locator("#market-fear-greed").wait_for(state="visible")
+        assert "focus=fear-greed" in page.url
 
         failed = browser.new_page(viewport={"width": 390, "height": 844})
         _install_market_workbench_routes(failed, list_status=503)

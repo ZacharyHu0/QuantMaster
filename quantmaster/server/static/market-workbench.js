@@ -1,7 +1,6 @@
 const marketWorkbench = (() => {
   'use strict';
 
-  const LEGACY_PAGES = new Set(['quotes', 'temperature', 'style', 'rotation']);
   const METHODS = {
     equal:'等权', float_mv:'流通市值', amount:'成交额', volume:'成交量', total_mv:'总市值',
   };
@@ -125,8 +124,9 @@ const marketWorkbench = (() => {
     return `<div class="market-state" data-state="error"><strong>数据未能读取</strong><p>${esc(message || '请稍后重试')}</p>${retry ? `<button type="button" ${retry}>重试</button>` : ''}</div>`;
   }
 
-  function metricMarkup(label, value, note = '', valueTone = '') {
-    return `<article><span>${esc(label)}</span><strong class="${valueTone}">${esc(String(value ?? '—'))}</strong><small>${esc(note)}</small></article>`;
+  function metricMarkup(label, value, note = '', valueTone = '', href = '') {
+    const content = `<span>${esc(label)}</span><strong class="${valueTone}">${esc(String(value ?? '—'))}</strong><small>${esc(note)}</small>`;
+    return href ? `<a class="market-decision-metric" href="${href}">${content}</a>` : `<article>${content}</article>`;
   }
 
   function renderDecisionStrip(results) {
@@ -149,9 +149,9 @@ const marketWorkbench = (() => {
     target.dataset.state = snapshot.state || quality.status || 'ready';
     target.innerHTML = [
       ...indexes.map(item => metricMarkup(item.name || item.symbol, number(item.last,2), percent(item.change_pct), tone(item.change_pct))),
-      metricMarkup('A股恐贪', number(ashareFear.score,0), ashareFear.rating_label || statusLabel(ashareFear.status)),
-      metricMarkup('海外恐贪', number(globalFear.score,0), globalFear.rating_label || statusLabel(globalFear.status)),
-      metricMarkup('市场温度', number(temperature,0), temperature == null ? '等待快照' : '0–100'),
+      metricMarkup('A股恐贪', number(ashareFear.score,0), ashareFear.rating_label || statusLabel(ashareFear.status), '', '#today/quotes?focus=ashare-fear-greed'),
+      metricMarkup('美股恐贪', number(globalFear.score,0), globalFear.rating_label || statusLabel(globalFear.status), '', '#today/quotes?focus=fear-greed'),
+      metricMarkup('市场温度', number(temperature,0), temperature == null ? '等待快照' : '0–100', '', '#today/temperature'),
       metricMarkup('数据覆盖', coverage, `${date} · ${statusLabel(quality.status || snapshot.state)}`),
     ].join('');
   }
@@ -487,15 +487,8 @@ const marketWorkbench = (() => {
     context = nextContext;
     const root = document.getElementById('market-workbench-root');
     const workbench = document.getElementById('market-workbench-view');
-    const removed = document.getElementById('market-route-removed');
-    if (LEGACY_PAGES.has(page)) {
-      mounted = false;
-      workbench.hidden = true; removed.hidden = false;
-      removed.querySelector('h2').textContent = `“${({quotes:'行情',temperature:'市场温度',style:'市场风格',rotation:'轮动总览'})[page]}”页面已移除`;
-      return;
-    }
     mounted = true; generation += 1;
-    workbench.hidden = false; removed.hidden = true;
+    workbench.hidden = false;
     restoreRoute(nextContext.route || {});
     root.innerHTML = shellMarkup();
     bindEvents(root);
@@ -513,6 +506,7 @@ const marketWorkbench = (() => {
     window.QuantCharts?.dispose('market-stock-chart');
     const root = document.getElementById('market-workbench-root');
     if (root) { root.onclick = null; root.oninput = null; root.onkeydown = null; }
+    document.getElementById('market-workbench-view')?.setAttribute('hidden','');
   }
 
   return {mount,unmount,refresh:() => Promise.all([loadDecisionStrip(generation),loadBoardList()])};
