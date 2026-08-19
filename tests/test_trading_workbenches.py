@@ -466,6 +466,8 @@ def test_paper_process_uses_raw_accepted_stockdb_open(tmp_path, monkeypatch):
         )
         for row in trades.itertuples()
     )
+    assert result["report"]["data_quality"]["status"] == "verified"
+    assert result["report"]["market_provenance"]["000001.SZ"][0]["source"] == "free-stockdb"
 
 
 def test_paper_process_clears_resolved_execution_gate_warning(tmp_path):
@@ -1311,6 +1313,83 @@ def test_unproven_legacy_fill_blocks_report_and_cycle_projection(tmp_path):
     assert payload["dates"] == payload["twr"] == []
     assert payload["cycles"][0]["status"] == "unproven"
     assert "停止计算持仓、净值和收益" in payload["warnings"][0]
+
+
+def test_paper_report_uses_accepted_native_prices_after_a_fill(tmp_path, monkeypatch):
+    service, account = make_paper_service(tmp_path, "报告本地估值")
+    service.store.ledger(account["id"]).add_trade(
+        TradeRecord("2024-01-08", "600000.SH", "buy", 10, 100),
+        idempotency_key="report-fill",
+    )
+    calls = []
+
+    def accepted_evidence(symbols, start, end):
+        calls.append((symbols, start, end))
+        return (
+            price_panel(["2024-01-08"], first=(12.0, 11.0)),
+            CalendarEvidence.build(
+                PaperMarket.CN,
+                ["2024-01-08"],
+                source="free-stockdb:accepted-v2",
+            ),
+            datetime(2024, 1, 8, 18, tzinfo=ZoneInfo("Asia/Shanghai")),
+        )
+
+    class StaleBarStore:
+        def __init__(self, *_args, **_kwargs):
+            pytest.fail("报告不得回退到旧 BarStore 行情")
+
+    monkeypatch.setattr(
+        PaperService,
+        "_accepted_stockdb_execution_evidence",
+        staticmethod(accepted_evidence),
+    )
+    monkeypatch.setattr("quantmaster.data.storage.BarStore", StaleBarStore)
+
+    payload = service.report(account["id"])
+
+    assert calls and calls[0][0] == ["600000.SH"]
+    assert calls[0][1] == "2024-01-08"
+    assert payload["report"]["as_of"] == "2024-01-08"
+    assert payload["report"]["total_assets"] == pytest.approx(100_200)
+    assert payload["report"]["data_quality"]["status"] == "verified"
+    assert payload["report"]["positions"][0]["price_as_of"] == "2024-01-08"
+    assert payload["report"]["market_provenance"]["600000.SH"][0]["source"] == "free-stockdb"
+    assert payload["data_freshness"] == [
+        {"symbol": "600000.SH", "status": "ready", "as_of": "2024-01-08"},
+    ]
+
+
+def test_paper_report_never_falls_back_to_old_cache_when_native_evidence_is_missing(
+    tmp_path, monkeypatch,
+):
+    service, account = make_paper_service(tmp_path, "报告证据门禁")
+    service.store.ledger(account["id"]).add_trade(
+        TradeRecord("2024-01-08", "600000.SH", "buy", 10, 100),
+        idempotency_key="report-evidence-gap",
+    )
+    unavailable = BarDataQuality(
+        "unavailable", "2024-01-08", "2024-01-08",
+        issues=("accepted StockDB 尚未覆盖成交日",), partial=True,
+    )
+
+    class StaleBarStore:
+        def __init__(self, *_args, **_kwargs):
+            pytest.fail("报告不得以旧 BarStore 行情替代缺失的成交后证据")
+
+    monkeypatch.setattr(
+        PaperService,
+        "_accepted_stockdb_execution_evidence",
+        staticmethod(lambda *_args: (_ for _ in ()).throw(DataEvidenceNotReady(unavailable))),
+    )
+    monkeypatch.setattr("quantmaster.data.storage.BarStore", StaleBarStore)
+
+    payload = service.report(account["id"])
+
+    assert payload["report"]["evidence_status"] == "unavailable"
+    assert payload["report"]["data_quality"]["status"] == "unavailable"
+    assert "报告行情证据未通过门禁" in payload["warnings"][0]
+    assert payload["data_freshness"][0]["status"] == "unavailable"
 
 
 def test_unproven_legacy_fill_requires_matching_manual_recovery_evidence(tmp_path):
