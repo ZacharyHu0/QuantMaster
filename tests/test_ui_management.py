@@ -663,7 +663,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
         page.set_viewport_size({"width": 3840, "height": 2160})
         page.locator("#market-board-chart canvas").wait_for(state="visible")
         workbench_box = page.locator(".market-workbench").bounding_box()
-        focus_box = page.locator(".market-focus").bounding_box()
+        focus_box = page.locator(".market-three-column > .market-focus").bounding_box()
         chart_box = page.locator("#market-board-chart").bounding_box()
         assert workbench_box and workbench_box["width"] >= 3600
         assert focus_box and focus_box["width"] >= 2400
