@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sqlite3
 import threading
 import time
@@ -390,14 +391,17 @@ class PaperStore:
         value["warnings"] = json.loads(value.pop("warning_json") or "[]")
         return value
 
-    def ledger_path(self, account_id: str) -> Path:
+    def _account_directory(self, account_id: str) -> Path:
         try:
             safe_id = os.path.basename(uuid.UUID(account_id).hex)
         except (AttributeError, TypeError, ValueError):
             raise ValueError("模拟账户 ID 非法") from None
         if safe_id != account_id:
             raise ValueError("模拟账户 ID 非法")
-        directory = self.account_root / safe_id
+        return self.account_root / safe_id
+
+    def ledger_path(self, account_id: str) -> Path:
+        directory = self._account_directory(account_id)
         if not self.read_only:
             directory.mkdir(parents=True, exist_ok=True)
         return directory / "ledger.sqlite"
@@ -625,7 +629,7 @@ class PaperStore:
             )
 
     def archive_account(self, account_id: str) -> dict:
-        """Soft-delete an account and fence every unfinished automation path."""
+        """Hide an account and fence every unfinished automation path."""
         now = utc_now()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -656,6 +660,40 @@ class PaperStore:
                 (now, account_id),
             )
         return self.account(account_id) or {}
+
+    def permanently_delete_account(self, account_id: str, *, confirm_name: str) -> dict:
+        """Delete a hidden account and every account-scoped record and ledger file."""
+        directory = self._account_directory(account_id)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT name,status FROM paper_accounts WHERE id=?",
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟账户不存在")
+            if row["status"] != "archived":
+                raise ValueError("只有已隐藏的模拟账户可以永久删除")
+            if confirm_name != row["name"]:
+                raise ValueError("确认名称不匹配，已取消永久删除")
+            conn.execute(
+                "DELETE FROM paper_order_fills WHERE order_id IN "
+                "(SELECT id FROM paper_orders WHERE account_id=?)",
+                (account_id,),
+            )
+            conn.execute(
+                "DELETE FROM paper_order_events WHERE order_id IN "
+                "(SELECT id FROM paper_orders WHERE account_id=?)",
+                (account_id,),
+            )
+            conn.execute("DELETE FROM paper_orders WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_cycles WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_auto_runs WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_legacy_imports WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_accounts WHERE id=?", (account_id,))
+        if directory.exists():
+            shutil.rmtree(directory)
+        return {"id": account_id, "deleted": True, "recoverable": False}
 
     def set_warning(self, account_id: str, warning: str, *, pause: bool = False) -> None:
         """Compatibility wrapper: operational failures are runtime warnings."""
@@ -1719,9 +1757,10 @@ class PaperService:
             "strategy_editable": not archived and bool(account.get("strategy")),
             "pending_strategy_change": bool(account.get("strategy_effective_after")),
             "strategy_effective_after": account.get("strategy_effective_after", ""),
-            "can_archive": not archived,
+            "can_hide": not archived,
             "can_restore": archived,
-            "delete_mode": "archive",
+            "can_permanently_delete": archived,
+            "delete_mode": "hide",
         }
         return account
 
@@ -1813,6 +1852,9 @@ class PaperService:
 
     def archive_account(self, account_id: str) -> dict:
         return self.store.archive_account(account_id)
+
+    def permanently_delete_account(self, account_id: str, *, confirm_name: str) -> dict:
+        return self.store.permanently_delete_account(account_id, confirm_name=confirm_name)
 
     @staticmethod
     def _strategy_warning(spec: PaperAccountSpec) -> str:
