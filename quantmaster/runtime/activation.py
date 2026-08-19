@@ -741,6 +741,7 @@ class ActivationCoordinator:
         )
         self.allow_unrecoverable_current = bool(allow_unrecoverable_current)
         self._schema_handoff = False
+        self._generation_identity: ApplicationIdentity | None = None
 
     def _failure(self, exc: BaseException) -> str:
         if isinstance(exc, ActivationBlocked):
@@ -881,7 +882,6 @@ class ActivationCoordinator:
         self.registry.begin(candidate.build_sha)
         current_stopped = False
         generation: object | None = None
-        self._generation_identity: ApplicationIdentity | None = None
         try:
             current_stopped = self._stop_previous(previous)
             generation, health = self._start_and_wait(candidate.build_sha, self.ready_timeout)
