@@ -506,7 +506,6 @@ const marketWorkbench = (() => {
     window.QuantCharts?.dispose('market-stock-chart');
     const root = document.getElementById('market-workbench-root');
     if (root) { root.onclick = null; root.oninput = null; root.onkeydown = null; }
-    document.getElementById('market-workbench-view')?.setAttribute('hidden','');
   }
 
   return {mount,unmount,refresh:() => Promise.all([loadDecisionStrip(generation),loadBoardList()])};

@@ -42,6 +42,7 @@ async function loadPage(page) {
       view.hidden = view.dataset.marketView !== page;
     });
     await Promise.all([context.shell.loadAssetLists(false), context.shell.loadMarket()]);
+    document.getElementById('market-workbench-view')?.setAttribute('hidden', '');
     const focus = context.route?.focus;
     if (focus) requestAnimationFrame(() => document.getElementById(`market-${focus}`)?.scrollIntoView({block:'start'}));
     return;
@@ -50,6 +51,9 @@ async function loadPage(page) {
     const {loadAdvancedCharts} = await import('../advanced-charts.js');
     const [, module] = await Promise.all([loadAdvancedCharts(), feature(page)]);
     await module?.mount?.(page, context);
+    if (['temperature', 'style'].includes(page)) {
+      document.getElementById('market-workbench-view')?.setAttribute('hidden', '');
+    }
     mountedFeature = module;
     return;
   }
