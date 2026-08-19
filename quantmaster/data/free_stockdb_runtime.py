@@ -1054,6 +1054,17 @@ class FreeStockDBRuntime:
 
             register_free_stockdb_calendar()
             expectation = resolve_session_target()
+            coverage = getattr(expectation, "coverage", {}) or {}
+            official_sessions: list[str] = []
+            for value in coverage.get("official_dates", ()):  # update targets only
+                try:
+                    official_sessions.append(date.fromisoformat(str(value)[:10]).isoformat())
+                except ValueError:
+                    continue
+            if official_sessions:
+                return max(official_sessions), str(
+                    coverage.get("official_source") or expectation.source
+                )
             calendar_target = (
                 getattr(expectation, "completion", "")
                 == "current_session_closed_waiting_provider"

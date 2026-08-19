@@ -347,6 +347,28 @@ def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> N
     assert runtime._target_session() == ("2026-08-13", "stockdb:validated")
 
 
+def test_update_target_uses_latest_closed_official_session_over_reader_fallback(
+    monkeypatch,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(runtime, "check_vendor_notice", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        "quantmaster.trading_sessions.resolve_session_target",
+        lambda: SimpleNamespace(
+            ready=True,
+            session="2026-08-17",
+            source="stockdb:validated",
+            completion="previous_session_complete",
+            coverage={
+                "official_dates": ["2026-08-17", "2026-08-18"],
+                "official_source": "tushare:SSE",
+            },
+        ),
+    )
+
+    assert runtime._target_session() == ("2026-08-18", "tushare:SSE")
+
+
 def test_closed_official_calendar_session_nominates_update_target(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(runtime, "check_vendor_notice", lambda **_kwargs: {})
