@@ -1,5 +1,6 @@
 """分钟线标准化、按频率持久化与缓存复用。"""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
@@ -118,9 +119,9 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "_factories", lambda: {Market.CN: [FakeSource]})
     store = IntradayBarStore("5m", root=tmp_path / "intraday")
     first = registry.refresh_intraday(
-        "600000.SH", "2024-01-02 09:30", "2024-01-02 09:45", "5m", store=store)
+        "600000.SH", "2024-01-02T09:30:00+08:00", "2024-01-02T09:45:00+08:00", "5m", store=store)
     second = registry.refresh_intraday(
-        "600000.SH", "2024-01-02 09:30", "2024-01-02 09:45", "5m", store=store)
+        "600000.SH", "2024-01-02T09:30:00+08:00", "2024-01-02T09:45:00+08:00", "5m", store=store)
     whole_day = registry.refresh_intraday(
         "600000.SH", "2024-01-02", "2024-01-02", "5m", store=store)
     assert len(first.data) == len(second.data) == 4
@@ -133,6 +134,33 @@ def test_intraday_cache_is_reused_and_frequency_isolated(tmp_path, monkeypatch):
     assert IntradayBarStore("15m", root=tmp_path / "intraday").root != store.root
     with pytest.raises(ValueError, match="非法字符"):
         store.path_for_repair("../escape")
+
+
+def test_intraday_quality_rehydrates_versioned_timezone_from_cache_metadata(tmp_path):
+    index = pd.date_range("2024-01-02 09:30", periods=4, freq="5min")
+    frame = pd.DataFrame({
+        "open": [10.0] * 4, "high": [10.2] * 4, "low": [9.9] * 4,
+        "close": [10.1] * 4, "volume": [1000.0] * 4,
+    }, index=index)
+    frame.attrs["timezone"] = "Asia/Shanghai"
+    quality = registry._assess_intraday_frame(
+        frame, "2024-01-02 09:30", "2024-01-02 09:45",
+        symbol="600000.SH", frequency="5m", source="fixture",
+    )
+    frame.attrs.clear()
+    store = IntradayBarStore("5m", root=tmp_path / "intraday")
+    envelope = registry._bar_envelope(
+        frame, symbol="600000.SH", start="2024-01-02T09:30:00+08:00",
+        end="2024-01-02T09:45:00+08:00", store=store, frequency="5m",
+        metadata={
+            "last_source": "fixture", "last_status": "ready",
+            "quality_json": json.dumps(quality.to_dict()),
+            "source_chain_json": "[]",
+        },
+    )
+
+    assert envelope.quality.status != "unavailable"
+    assert envelope.quality.timezone == "Asia/Shanghai"
 
 
 def test_multisymbol_intraday_panel(monkeypatch):

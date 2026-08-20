@@ -702,9 +702,9 @@ class AutomationService:
         if target is None:
             raise ValueError("推送目标不存在")
         event = AlertEvent(
-            kind="task_report", score=0, severity="info", data_as_of=datetime.now().isoformat(),
+            kind="task_report", score=0, severity="info", data_as_of=datetime.now(UTC).isoformat(),
             evidence=["如果你收到这条消息，说明 QuantMaster 与当前 Bot 会话的直连链路正常"],
-            dedupe_key=stable_hash({"test": target_id, "at": datetime.now().isoformat()}),
+            dedupe_key=stable_hash({"test": target_id, "at": datetime.now(UTC).isoformat()}),
             payload={"title": f"{target['label']} 测试推送"},
         )
         result = self.process_event(event, {target_id}, force_delivery=True)
@@ -1199,7 +1199,7 @@ class AutomationService:
             return
         report = AlertEvent(
             kind="task_report", score=0, severity="info",
-            data_as_of=datetime.now().isoformat(),
+            data_as_of=datetime.now(UTC).isoformat(),
             evidence=[f"任务 {name} 已完成", f"运行编号 {run_id[:10]}"],
             dedupe_key=stable_hash({"task": name, "run": run_id}),
             payload={"title": f"任务完成：{name}", "result": result},
@@ -1214,11 +1214,11 @@ class AutomationService:
         )
         event = AlertEvent(
             kind="task_failure", score=100, severity="critical",
-            data_as_of=datetime.now().isoformat(),
+            data_as_of=datetime.now(UTC).isoformat(),
             evidence=[_safe_notification_error(exc, 500), f"运行编号 {run_id[:10]}"],
             dedupe_key=stable_hash({
                 "task_failure": name,
-                "hour": datetime.now().strftime("%Y%m%d%H"),
+                "hour": datetime.now(UTC).strftime("%Y%m%d%H"),
             }),
             payload={
                 "title": title, "task": name,
@@ -1233,7 +1233,8 @@ class AutomationService:
         from quantmaster import data as data_api
         from quantmaster.data.universe import load_universe_analysis
 
-        now = pd.Timestamp.now(tz=get_config().automation.timezone).tz_localize(None)
+        zone = ZoneInfo(get_config().automation.timezone)
+        now = pd.Timestamp.now(tz=zone)
         cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
         start = cutoff - pd.Timedelta(days=35)
         bar_envelopes = {
@@ -1244,7 +1245,11 @@ class AutomationService:
             symbol: envelope.require_data()
             for symbol, envelope in bar_envelopes.items()
         }
-        latest = [pd.Timestamp(frame.index[-1]) for frame in bars.values() if not frame.empty]
+        def in_zone(value: object) -> pd.Timestamp:
+            stamp = pd.Timestamp(value)
+            return stamp.tz_localize(zone) if stamp.tzinfo is None else stamp.tz_convert(zone)
+
+        latest = [in_zone(frame.index[-1]) for frame in bars.values() if not frame.empty]
         if not latest or cutoff - min(latest) > pd.Timedelta(minutes=10):
             return {"status": "skipped", "reason": "分钟行情超过 10 分钟未更新"}
         symbols = load_universe_analysis(get_config().automation.primary_universe)
@@ -1291,9 +1296,14 @@ class AutomationService:
         breadth_rows = self.store.breadth()
         breadth = pd.Series(
             [row["advance_ratio"] for row in breadth_rows],
-            index=pd.to_datetime([row["observed_at"] for row in breadth_rows]),
+            index=[in_zone(row["observed_at"]) for row in breadth_rows],
         )
-        event = self.detector.evaluate(bars, breadth, cutoff=cutoff)
+        detector_bars = {}
+        for symbol, frame in bars.items():
+            normalized = frame.copy()
+            normalized.index = pd.DatetimeIndex([in_zone(value) for value in frame.index])
+            detector_bars[symbol] = normalized
+        event = self.detector.evaluate(detector_bars, breadth, cutoff=cutoff)
         quality_degraded = any(
             envelope.quality.status == "degraded" for envelope in bar_envelopes.values()
         )
@@ -1530,13 +1540,13 @@ class AutomationService:
             kind="important_news", score=float(strongest.get("score") or 0),
             severity=str(strongest.get("severity") or "info"), direction=digest_direction,
             relevance=str(strongest.get("relevance") or "market"),
-            data_as_of=datetime.now().isoformat(),
+            data_as_of=datetime.now(UTC).isoformat(),
             evidence=[
                 f"本期汇总 {len(items)} 条重要资讯",
                 (f"利好 {direction_counts['up']} · 利空 {direction_counts['down']} · "
                  f"中性 {direction_counts['neutral']}"),
             ],
-            dedupe_key=stable_hash({"digest": datetime.now().strftime("%Y%m%d%H")}),
+            dedupe_key=stable_hash({"digest": datetime.now(UTC).strftime("%Y%m%d%H")}),
             payload={
                 "title": "重要资讯摘要",
                 "summary": f"本期共 {len(items)} 条重要资讯",

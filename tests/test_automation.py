@@ -1596,7 +1596,7 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
     store = AutomationStore(tmp_path / "automation.sqlite")
     service = AutomationService(store, OutboxDispatcher(store, RecordingGateway()))
     symbols = ["000300.SH", "000905.SH", "000852.SH", "399006.SZ"]
-    now = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None)
+    now = pd.Timestamp.now(tz="Asia/Shanghai")
     cutoff = now.floor("5min") - pd.Timedelta(minutes=5)
     index = pd.date_range(cutoff - pd.Timedelta(minutes=20), cutoff, freq="5min")
     frame = pd.DataFrame({"close": [100.0] * len(index)}, index=index)
@@ -1639,6 +1639,7 @@ def test_intraday_monitor_uses_fresh_breadth_cache_instead_of_fake_neutral(
     assert result["status"] == "degraded"
     assert result["breadth_source"] == "cache"
     assert result["breadth"] == pytest.approx(0.63)
+    assert store.latest_breadth()["observed_at"].endswith("+08:00")
     service.jobs.stop()
     service.executor.shutdown(wait=False, cancel_futures=True)
 
