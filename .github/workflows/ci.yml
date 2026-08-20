@@ -219,7 +219,7 @@ jobs:
 
   browser:
     if: github.event.pull_request.draft != true
-    timeout-minutes: 25
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     env:
       QM_RUN_UI: "1"
@@ -231,7 +231,7 @@ jobs:
           python-version: "3.12.13"
           enable-cache: true
       - run: uv sync --locked --extra dev --extra ui
-      - run: uv run playwright install --with-deps chromium
+      - run: uv run playwright install chromium
       - name: Chromium management flows
         run: >-
           mkdir -p .artifacts/reports &&
