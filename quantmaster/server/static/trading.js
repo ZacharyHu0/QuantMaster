@@ -23,7 +23,7 @@ const tradingFeature = (() => {
     waiting_market_open: '等待开市', waiting_price: '等待价格', waiting_market_data: '等待行情',
     expired: '已过期', rejected: '已拒绝', retry_wait: '等待重试', idle: '空闲',
     leased: '已领取', stalled: '已卡死', orphaned: '无主任务', manual_recovery: '待人工处理',
-    active: '运行中', paused: '已暂停', archived: '已删除', auto: '自动', manual: '手动',
+    active: '运行中', paused: '已暂停', archived: '已隐藏', auto: '自动', manual: '手动',
   };
   const orderReason = {
     missing_open: '缺少开盘价', limit_up: '涨停无法买入', limit_down: '跌停无法卖出',
@@ -759,7 +759,7 @@ const tradingFeature = (() => {
   function renderAccountList() {
     if (!paperState.accounts.length) {
       paperList.innerHTML = paperState.includeArchived
-        ? '<div class="trading-empty"><strong>没有已删除账户</strong><span>删除采用可恢复归档，不会清除历史账本。</span></div>'
+        ? '<div class="trading-empty"><strong>没有隐藏账户</strong><span>隐藏不会删除账本；永久删除后无法恢复。</span></div>'
         : '<div class="trading-empty"><strong>还没有模拟账户</strong><span>新建账户，或从已完成回测创建。</span></div>';
       return;
     }
@@ -767,6 +767,14 @@ const tradingFeature = (() => {
       <strong>${escapeHtml(account.name)}</strong><span>${escapeHtml(account.universe || '候选未知')} · ${strategyLabel(account.strategy)} · ${statusLabel[account.mode]}</span>
       <i class="trading-status ${account.status}">${statusLabel[account.status] || account.status}</i>
     </button>`).join('');
+  }
+
+  function setPaperArchivedVisibility(includeArchived) {
+    paperState.includeArchived = includeArchived;
+    const toggle = document.getElementById('paper-show-archived');
+    if (!toggle) return;
+    toggle.setAttribute('aria-pressed', String(includeArchived));
+    toggle.textContent = includeArchived ? '显示隐藏 · 开' : '显示隐藏';
   }
 
   function strategyFacts(account) {
@@ -802,7 +810,7 @@ const tradingFeature = (() => {
     const managementState = !account.strategy
       ? ['历史事实可查看', '策略等元数据无可靠证据；账户已暂停，账本成交与现金流仍可查看。', 'paused']
       : account.status === 'archived'
-      ? ['只读归档', '策略和历史账本仍可查看；恢复账户或复制策略后继续。', 'archived']
+      ? ['只读隐藏', '策略和历史账本仍可查看；可恢复账户、复制策略，或永久删除。', 'archived']
       : management.pending_strategy_change
       ? ['切换待执行', `新策略将在 ${management.strategy_effective_after || '后续交易日'} 信号日之后执行。`, 'pending']
       : ['可直接编辑', '修改会建立新策略分段，旧周期和成交历史保持原样。', 'editable'];
@@ -971,8 +979,9 @@ const tradingFeature = (() => {
     pause.textContent = account.status === 'paused' ? '恢复' : '暂停';
     pause.disabled = account.status === 'archived';
     pause.hidden = account.status === 'archived';
-    document.getElementById('paper-delete').hidden = account.status === 'archived';
+    document.getElementById('paper-hide').hidden = account.status === 'archived';
     document.getElementById('paper-restore').hidden = account.status !== 'archived';
+    document.getElementById('paper-permanent-delete').hidden = account.status !== 'archived';
     const edit = document.getElementById('paper-edit');
     edit.disabled = account.status === 'archived';
     paperOut.innerHTML = '<div class="trading-skeleton"></div>';
@@ -1178,24 +1187,50 @@ const tradingFeature = (() => {
     document.getElementById('paper-copy').setAttribute('aria-expanded', 'false');
   });
 
-  document.getElementById('paper-show-archived')?.addEventListener('change', async event => {
-    paperState.includeArchived = event.currentTarget.checked;
+  document.getElementById('paper-show-archived')?.addEventListener('click', async () => {
+    setPaperArchivedVisibility(!paperState.includeArchived);
     await loadPaperAccounts(true);
   });
 
-  document.getElementById('paper-delete')?.addEventListener('click', async event => {
+  document.getElementById('paper-hide')?.addEventListener('click', async event => {
     const account = paperState.activeReport?.account ||
       paperState.accounts.find(item => item.id === paperState.activeId);
-    if (!account || !window.confirm(`删除模拟账户“${account.name}”？\n\n账户会停止自动运行并从默认列表移除，历史账本仍可恢复。`)) return;
+    if (!account || !window.confirm(`隐藏模拟账户“${account.name}”？\n\n账户会停止自动运行并从默认列表移除，历史账本仍可恢复。`)) return;
     const button = event.currentTarget;
-    setButtonBusy(button, true, '正在删除…');
+    setButtonBusy(button, true, '正在隐藏…');
     try {
       await mutate(`/api/v1/paper/accounts/${account.id}`, 'DELETE');
       paperState.activeId = '';
       paperState.activeReport = null;
       await loadPaperAccounts(true);
-      paperStatus.innerHTML = '<div class="trading-success">账户已删除；勾选“已删除”可以查看或恢复。</div>';
-    } catch (error) { renderError(paperStatus, error, '账户删除失败'); }
+      paperStatus.innerHTML = '<div class="trading-success">账户已隐藏；点击“显示隐藏”可以查看或恢复。</div>';
+    } catch (error) { renderError(paperStatus, error, '账户隐藏失败'); }
+    finally { setButtonBusy(button, false); }
+  });
+
+  document.getElementById('paper-permanent-delete')?.addEventListener('click', async event => {
+    const account = paperState.activeReport?.account ||
+      paperState.accounts.find(item => item.id === paperState.activeId);
+    if (!account) return;
+    const confirmedName = window.prompt(
+      `永久删除“${account.name}”会清除订单、成交和账本，且无法恢复。\n\n请输入账户名称确认：`,
+    );
+    if (confirmedName === null) return;
+    if (confirmedName !== account.name) {
+      paperStatus.innerHTML = '<div class="trading-warning">确认名称不匹配，未执行永久删除。</div>';
+      return;
+    }
+    const button = event.currentTarget;
+    setButtonBusy(button, true, '正在永久删除…');
+    try {
+      await mutate(`/api/v1/paper/accounts/${account.id}/permanent`, 'DELETE', {
+        confirm_name: confirmedName,
+      });
+      paperState.activeId = '';
+      paperState.activeReport = null;
+      await loadPaperAccounts(true);
+      paperStatus.innerHTML = '<div class="trading-success">账户及其账本已永久删除，无法恢复。</div>';
+    } catch (error) { renderError(paperStatus, error, '账户永久删除失败'); }
     finally { setButtonBusy(button, false); }
   });
 

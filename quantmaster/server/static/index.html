@@ -806,7 +806,7 @@
   <div class="paper-layout">
     <aside class="paper-accounts" aria-labelledby="paper-accounts-title">
       <div class="trading-block-head paper-list-head">
-        <div class="paper-list-title-row"><h3 id="paper-accounts-title">模拟账户</h3><label><input id="paper-show-archived" type="checkbox">显示已删除</label></div>
+        <div class="paper-list-title-row"><h3 id="paper-accounts-title">模拟账户</h3><button id="paper-show-archived" class="paper-visibility-toggle" type="button" aria-pressed="false">显示隐藏</button></div>
         <button id="paper-new-toggle" class="trading-secondary" type="button" aria-expanded="false">新建账户</button>
       </div>
       <form id="paper-form" class="paper-create-form" hidden>
@@ -827,7 +827,7 @@
     <div class="paper-workspace">
       <div class="trading-toolbar">
         <div><h3 id="paper-account-title">选择一个账户</h3><span id="paper-account-meta">策略快照和订单互相隔离</span></div>
-        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-edit" class="trading-secondary" type="button" aria-expanded="false">编辑账户与策略</button><button id="paper-copy" class="trading-secondary" type="button" aria-expanded="false">复制策略</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button><button id="paper-delete" class="trading-secondary danger" type="button" title="可恢复删除，不会清除历史账本">删除</button><button id="paper-restore" class="trading-secondary" type="button" hidden>恢复</button></div>
+        <div id="paper-account-actions" hidden><button id="paper-propose" class="trading-primary" type="button">生成调仓提案</button><button id="paper-process" class="trading-secondary" type="button">处理待开盘订单</button><button id="paper-edit" class="trading-secondary" type="button" aria-expanded="false">编辑账户与策略</button><button id="paper-copy" class="trading-secondary" type="button" aria-expanded="false">复制策略</button><button id="paper-pause" class="trading-secondary" type="button">暂停</button><button id="paper-hide" class="trading-secondary" type="button" title="隐藏后可恢复，历史账本会保留">隐藏</button><button id="paper-restore" class="trading-secondary" type="button" hidden>恢复</button><button id="paper-permanent-delete" class="trading-secondary danger" type="button" title="永久删除所有账户记录和账本，无法恢复" hidden>永久删除</button></div>
       </div>
       <form id="paper-edit-form" class="paper-create-form paper-edit-form" hidden>
         <input name="action" type="hidden" value="edit">
