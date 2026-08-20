@@ -6,11 +6,13 @@ import json
 import logging
 import math
 import os
+import shutil
 import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -99,6 +101,17 @@ class PaperSchemaMigrationRequired(RuntimeError):
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+@dataclass(frozen=True)
+class _ReportValuation:
+    price_series: dict[str, pd.Series]
+    price_map: dict[str, float]
+    price_contracts: dict[str, dict]
+    freshness: list[dict]
+    holding_symbols: list[str]
+    latest_trade_date: str
+    evidence_warning: str = ""
 
 
 class PaperStore:
@@ -378,14 +391,17 @@ class PaperStore:
         value["warnings"] = json.loads(value.pop("warning_json") or "[]")
         return value
 
-    def ledger_path(self, account_id: str) -> Path:
+    def _account_directory(self, account_id: str) -> Path:
         try:
             safe_id = os.path.basename(uuid.UUID(account_id).hex)
         except (AttributeError, TypeError, ValueError):
             raise ValueError("模拟账户 ID 非法") from None
         if safe_id != account_id:
             raise ValueError("模拟账户 ID 非法")
-        directory = self.account_root / safe_id
+        return self.account_root / safe_id
+
+    def ledger_path(self, account_id: str) -> Path:
+        directory = self._account_directory(account_id)
         if not self.read_only:
             directory.mkdir(parents=True, exist_ok=True)
         return directory / "ledger.sqlite"
@@ -613,7 +629,7 @@ class PaperStore:
             )
 
     def archive_account(self, account_id: str) -> dict:
-        """Soft-delete an account and fence every unfinished automation path."""
+        """Hide an account and fence every unfinished automation path."""
         now = utc_now()
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -644,6 +660,40 @@ class PaperStore:
                 (now, account_id),
             )
         return self.account(account_id) or {}
+
+    def permanently_delete_account(self, account_id: str, *, confirm_name: str) -> dict:
+        """Delete a hidden account and every account-scoped record and ledger file."""
+        directory = self._account_directory(account_id)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT name,status FROM paper_accounts WHERE id=?",
+                (account_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("模拟账户不存在")
+            if row["status"] != "archived":
+                raise ValueError("只有已隐藏的模拟账户可以永久删除")
+            if confirm_name != row["name"]:
+                raise ValueError("确认名称不匹配，已取消永久删除")
+            conn.execute(
+                "DELETE FROM paper_order_fills WHERE order_id IN "
+                "(SELECT id FROM paper_orders WHERE account_id=?)",
+                (account_id,),
+            )
+            conn.execute(
+                "DELETE FROM paper_order_events WHERE order_id IN "
+                "(SELECT id FROM paper_orders WHERE account_id=?)",
+                (account_id,),
+            )
+            conn.execute("DELETE FROM paper_orders WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_cycles WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_auto_runs WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_legacy_imports WHERE account_id=?", (account_id,))
+            conn.execute("DELETE FROM paper_accounts WHERE id=?", (account_id,))
+        if directory.exists():
+            shutil.rmtree(directory)
+        return {"id": account_id, "deleted": True, "recoverable": False}
 
     def set_warning(self, account_id: str, warning: str, *, pause: bool = False) -> None:
         """Compatibility wrapper: operational failures are runtime warnings."""
@@ -1707,9 +1757,10 @@ class PaperService:
             "strategy_editable": not archived and bool(account.get("strategy")),
             "pending_strategy_change": bool(account.get("strategy_effective_after")),
             "strategy_effective_after": account.get("strategy_effective_after", ""),
-            "can_archive": not archived,
+            "can_hide": not archived,
             "can_restore": archived,
-            "delete_mode": "archive",
+            "can_permanently_delete": archived,
+            "delete_mode": "hide",
         }
         return account
 
@@ -1801,6 +1852,9 @@ class PaperService:
 
     def archive_account(self, account_id: str) -> dict:
         return self.store.archive_account(account_id)
+
+    def permanently_delete_account(self, account_id: str, *, confirm_name: str) -> dict:
+        return self.store.permanently_delete_account(account_id, confirm_name=confirm_name)
 
     @staticmethod
     def _strategy_warning(spec: PaperAccountSpec) -> str:
@@ -2095,6 +2149,218 @@ class PaperService:
         )
         return panel, calendar, acceptance.updated_at.astimezone(UTC)
 
+    @staticmethod
+    def _accepted_stockdb_report_evidence(
+        symbols: list[str],
+        history_start: str,
+        execution_floor: str,
+    ) -> tuple[dict[str, pd.DataFrame], CalendarEvidence, datetime]:
+        """Read report history only after proving the accepted frontier is post-fill.
+
+        A report may span the whole position history, but it cannot use that
+        broader range to hide an accepted snapshot that predates the newest
+        fill.  Prove the narrow execution boundary first, then read the
+        history ending at that same accepted session.
+        """
+
+        requested_end = market_date().isoformat()
+        if pd.Timestamp(history_start).normalize() == pd.Timestamp(execution_floor).normalize():
+            return PaperService._accepted_stockdb_execution_evidence(
+                symbols, execution_floor, requested_end,
+            )
+        frontier, _calendar, _observed_at = PaperService._accepted_stockdb_execution_evidence(
+            symbols, execution_floor, requested_end,
+        )
+        close = frontier["close"]
+        accepted_end = pd.Timestamp(close.index.max()).strftime("%Y-%m-%d")
+        return PaperService._accepted_stockdb_execution_evidence(
+            symbols, history_start, accepted_end,
+        )
+
+    @staticmethod
+    def _accepted_stockdb_report_prices(
+        panel: dict[str, pd.DataFrame],
+        symbols: list[str],
+        calendar: CalendarEvidence,
+        observed_at: datetime,
+    ) -> tuple[dict[str, pd.Series], dict[str, float], dict[str, dict], list[dict]]:
+        """Turn accepted raw closes into one explicit report valuation contract."""
+
+        close = panel["close"]
+        price_series: dict[str, pd.Series] = {}
+        price_map: dict[str, float] = {}
+        price_contracts: dict[str, dict] = {}
+        freshness: list[dict] = []
+        for symbol in symbols:
+            if symbol not in close.columns:
+                freshness.append({"symbol": str(symbol), "status": "missing"})
+                continue
+            series = close[symbol].dropna()
+            if series.empty:
+                freshness.append({"symbol": str(symbol), "status": "missing"})
+                continue
+            as_of = pd.Timestamp(series.index[-1]).strftime("%Y-%m-%d")
+            source = "free-stockdb"
+            price_series[str(symbol)] = series
+            price_map[str(symbol)] = float(series.iloc[-1])
+            price_contracts[str(symbol)] = {
+                "quality": {
+                    "status": "verified",
+                    "issues": [],
+                    "stale": False,
+                    "partial": False,
+                    "coverage_ratio": 1.0,
+                    "observed_start": pd.Timestamp(series.index[0]).strftime("%Y-%m-%d"),
+                    "observed_end": as_of,
+                    "calendar_source": calendar.source,
+                    "sources": [source],
+                    "adjustment": PriceType.RAW.value,
+                    "timezone": "Asia/Shanghai",
+                    "expected_session": as_of,
+                    "freshness_state": "fresh",
+                },
+                "provenance": [{
+                    "source": source,
+                    "evidence": "accepted-v2-raw-valuation",
+                    "price_type": PriceType.RAW.value,
+                    "calendar_source": calendar.source,
+                    "observed_at": observed_at.astimezone(UTC).isoformat(),
+                }],
+                "price_as_of": as_of,
+            }
+            freshness.append({"symbol": str(symbol), "status": "ready", "as_of": as_of})
+        return price_series, price_map, price_contracts, freshness
+
+    @staticmethod
+    def _execution_price_contracts(
+        prices: dict[str, float],
+        execution_date: str,
+        calendar: CalendarEvidence,
+        observed_at: datetime,
+        source: str,
+        provider: str,
+        provider_interface: str,
+    ) -> dict[str, dict]:
+        """Describe an intraday raw valuation without claiming unverified fixtures."""
+
+        accepted = source == "free-stockdb:accepted-v2-raw"
+        quality = {
+            "status": "verified" if accepted else "degraded",
+            "issues": [] if accepted else ["撮合价未附已验收 StockDB 原始行情来源"],
+            "stale": False,
+            "partial": False,
+            "coverage_ratio": 1.0,
+            "observed_start": execution_date,
+            "observed_end": execution_date,
+            "calendar_source": calendar.source,
+            "sources": ["free-stockdb"] if accepted else [source],
+            "adjustment": PriceType.RAW.value,
+            "timezone": "Asia/Shanghai",
+            "expected_session": execution_date,
+            "freshness_state": "fresh" if accepted else "unknown",
+        }
+        return {
+            symbol: {
+                "quality": quality.copy(),
+                "provenance": [{
+                    "source": "free-stockdb" if accepted else source,
+                    "evidence": (
+                        "accepted-v2-raw-execution"
+                        if accepted else "injected-raw-execution"
+                    ),
+                    "price_type": PriceType.RAW.value,
+                    "calendar_source": calendar.source,
+                    "observed_at": observed_at.astimezone(UTC).isoformat(),
+                    "provider": provider,
+                    "provider_interface": provider_interface,
+                }],
+                "price_as_of": execution_date,
+            }
+            for symbol in prices
+        }
+
+    def _report_valuation(self, ledger: Ledger, trades: pd.DataFrame) -> _ReportValuation:
+        """Load one fail-closed valuation basis for the account report."""
+
+        holding_symbols = sorted(
+            position.symbol for position in ledger.positions() if position.shares > 1e-9
+        )
+        latest_trade_date = ""
+        history_start = ""
+        if not trades.empty:
+            trade_dates = pd.to_datetime(trades["date"], errors="coerce").dropna()
+            if not trade_dates.empty:
+                history_start = trade_dates.min().strftime("%Y-%m-%d")
+                latest_trade_date = trade_dates.max().strftime("%Y-%m-%d")
+        result = _ReportValuation(
+            price_series={},
+            price_map={},
+            price_contracts={},
+            freshness=[],
+            holding_symbols=holding_symbols,
+            latest_trade_date=latest_trade_date,
+        )
+        if not holding_symbols:
+            return result
+        try:
+            panel, calendar, observed_at = self._accepted_stockdb_report_evidence(
+                holding_symbols,
+                history_start or latest_trade_date,
+                latest_trade_date,
+            )
+            price_series, price_map, price_contracts, freshness = (
+                self._accepted_stockdb_report_prices(
+                    panel, holding_symbols, calendar, observed_at,
+                )
+            )
+            return _ReportValuation(
+                price_series=price_series,
+                price_map=price_map,
+                price_contracts=price_contracts,
+                freshness=freshness,
+                holding_symbols=holding_symbols,
+                latest_trade_date=latest_trade_date,
+            )
+        except DataEvidenceNotReady as exc:
+            return _ReportValuation(
+                price_series={},
+                price_map={},
+                price_contracts={},
+                evidence_warning="报告行情证据未通过门禁：" + "；".join(exc.quality.issues),
+                freshness=[
+                    {
+                        "symbol": symbol,
+                        "status": "unavailable",
+                        "issues": list(exc.quality.issues),
+                    }
+                    for symbol in holding_symbols
+                ],
+                holding_symbols=holding_symbols,
+                latest_trade_date=latest_trade_date,
+            )
+        return result
+
+    @staticmethod
+    def _report_nav(
+        ledger: Ledger,
+        trades: pd.DataFrame,
+        price_series: dict[str, pd.Series],
+    ) -> tuple[list[str], list[float], list[str]]:
+        """Build the optional TWR sequence only from the accepted valuation panel."""
+
+        if trades.empty or not price_series:
+            return [], [], []
+        from quantmaster.portfolio.nav import daily_nav, nav_warnings
+
+        nav = daily_nav(ledger, pd.DataFrame(price_series))
+        if nav.empty:
+            return [], [], []
+        return (
+            [pd.Timestamp(item).strftime("%Y-%m-%d") for item in nav.index],
+            [round(float(value), 6) for value in nav["twr_nav"]],
+            nav_warnings(nav),
+        )
+
     def propose(
         self,
         account_id: str,
@@ -2301,6 +2567,20 @@ class PaperService:
         sells = float(eligible.loc[eligible["side"] == "sell", "shares"].sum())
         return max(0.0, buys - sells)
 
+    @staticmethod
+    def _initial_funding_floor(ledger: Ledger, account_id: str) -> str:
+        cashflows = ledger.cashflows()
+        initial = cashflows.loc[
+            cashflows["idempotency_key"] == f"account:{account_id}:initial"
+        ]
+        if (
+            len(initial) != 1
+            or str(initial.iloc[0]["kind"]) != "deposit"
+            or float(initial.iloc[0]["amount"]) <= 0
+        ):
+            raise ValueError("初始入金凭证无效，不能撮合模拟订单")
+        return str(initial.iloc[0]["date"])
+
     def process(  # noqa: C901, RUF100 -- ordered matching stages share one lease fence
         self,
         account_id: str,
@@ -2349,6 +2629,7 @@ class PaperService:
             return {"status": "idle", "account_id": account_id, "message": "没有待撮合订单。"}
         cycle = cycles[-1]
         ledger = self.store.ledger(account_id)
+        initial_funding_floor = self._initial_funding_floor(ledger, account_id)
         held = [position.symbol for position in ledger.positions() if position.shares > 0]
         symbols = sorted(set(cycle["target_weights"]) | set(held))
         markets = {market_for_symbol(symbol) for symbol in symbols}
@@ -2437,6 +2718,7 @@ class PaperService:
             cursor = str(
                 order.get("last_processed_at") or cycle["execution_date"] or cycle["signal_date"]
             )
+            cursor = max(cursor, initial_funding_floor)
             # Injected panels are fixtures with one explicitly supplied observation
             # instant.  Production cache frames must carry per-row first-observed
             # evidence; assigning decision_at here would make late backfills appear
@@ -2525,7 +2807,21 @@ class PaperService:
         day_open = open_prices.reindex(index=dates).loc[execution]
         day_previous = close.loc[previous] if previous is not None else pd.Series(dtype=float)
         valuation = self._prices_from_row(day_open)
-        report = ledger_report(ledger, prices=valuation, as_of=execution_date)
+        valuation_contracts = self._execution_price_contracts(
+            valuation,
+            execution_date,
+            calendar,
+            decision_at,
+            execution_source,
+            execution_provider,
+            execution_interface,
+        )
+        report = ledger_report(
+            ledger,
+            prices=valuation,
+            as_of=execution_date,
+            price_contracts=valuation_contracts,
+        )
         total_assets, cash = float(report["total_assets"]), float(report["cash"])
         current = {position.symbol: position.shares for position in ledger.positions()}
         trade_config = get_config().trade
@@ -2719,7 +3015,12 @@ class PaperService:
         cycle = self.store.update_cycle_status(cycle["id"], status, execution_date)
         if status == "completed":
             clear_resolved_execution_warning()
-        final_report = ledger_report(ledger, prices=valuation, as_of=execution_date)
+        final_report = ledger_report(
+            ledger,
+            prices=valuation,
+            as_of=execution_date,
+            price_contracts=valuation_contracts,
+        )
         if float(final_report["cash"]) < -1e-6:
             message = "撮合后现金为负，账户已暂停；请检查账本完整性。"
             self.store.set_warning(account_id, message, pause=True)
@@ -2733,9 +3034,6 @@ class PaperService:
         }
 
     def report(self, account_id: str) -> dict:
-        from quantmaster.data.storage import BarStore
-        from quantmaster.portfolio.nav import daily_nav, nav_warnings
-
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
@@ -2798,45 +3096,25 @@ class PaperService:
             }
         ledger = self.store.ledger(account_id)
         trades = ledger.trades()
-        store = BarStore(read_only=self.read_only)
-        price_series: dict[str, pd.Series] = {}
-        price_map: dict[str, float] = {}
-        symbols = sorted(trades["symbol"].unique()) if not trades.empty else []
-        freshness = []
-        for symbol in symbols:
-            cached = store.get(symbol)
-            if cached is None or cached.empty or cached["close"].dropna().empty:
-                freshness.append({"symbol": symbol, "status": "missing"})
-                continue
-            series = cached["close"].dropna()
-            price_series[symbol] = series
-            price_map[symbol] = float(series.iloc[-1])
-            freshness.append(
-                {
-                    "symbol": symbol,
-                    "status": "ready",
-                    "as_of": pd.Timestamp(series.index[-1]).strftime("%Y-%m-%d"),
-                }
-            )
-        observed_dates = [
-            str(item["as_of"])
-            for item in freshness
-            if item.get("status") == "ready" and item.get("as_of")
-        ]
+        valuation = self._report_valuation(ledger, trades)
         report = ledger_report(
             ledger,
-            prices=price_map,
-            as_of=min(observed_dates) if observed_dates else None,
+            prices=valuation.price_map,
+            as_of=valuation.latest_trade_date or None,
+            price_contracts=valuation.price_contracts,
         )
-        dates: list[str] = []
-        twr: list[float] = []
+        if valuation.evidence_warning:
+            report["evidence_status"] = "unavailable"
+            report["evidence_message"] = valuation.evidence_warning
+        elif valuation.holding_symbols:
+            report["evidence_status"] = "verified"
         warnings = list(report.get("warnings") or [])
-        if not trades.empty and price_series:
-            nav = daily_nav(ledger, pd.DataFrame(price_series))
-            if not nav.empty:
-                dates = [pd.Timestamp(item).strftime("%Y-%m-%d") for item in nav.index]
-                twr = [round(float(value), 6) for value in nav["twr_nav"]]
-                warnings.extend(nav_warnings(nav))
+        if valuation.evidence_warning:
+            warnings.insert(0, valuation.evidence_warning)
+        dates, twr, nav_issues = self._report_nav(
+            ledger, trades, valuation.price_series,
+        )
+        warnings.extend(nav_issues)
         if account["warning"]:
             warnings.insert(0, account["warning"])
         account = self._with_management(account)
@@ -2846,7 +3124,7 @@ class PaperService:
             "dates": dates,
             "twr": twr,
             "warnings": list(dict.fromkeys(warnings)),
-            "data_freshness": freshness,
+            "data_freshness": valuation.freshness,
             "cycles": self.store.cycles(account_id),
             "warning": account["warning"],
             "strategy_warning": account["strategy_warning"],
