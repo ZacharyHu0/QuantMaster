@@ -1051,6 +1051,11 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         page.get_by_role("button", name="研究", exact=True).click()
         page.wait_for_url(re.compile(r"#research/lab$"))
         page.locator(".lab-head-actions .lab-button").first.wait_for(state="visible")
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('.lab-head-actions .lab-button')]"
+            ".every(button => { const bounds = button.getBoundingClientRect(); "
+            "return bounds.width >= 300 && bounds.height >= 44; })"
+        )
         for theme in ("classic", "ink"):
             page.evaluate("theme => document.documentElement.dataset.qmTheme = theme", theme)
             action_bounds = page.locator(".lab-head-actions .lab-button").evaluate_all(
