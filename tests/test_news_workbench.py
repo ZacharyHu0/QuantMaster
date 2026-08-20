@@ -795,6 +795,7 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
     )
     store = NewsStore(tmp_path / "news.sqlite")
     store._industry_map = {}
+    custom_source = store.sources.create(source_value(name="标注资讯"))
     seen_at = {
         "窗口内": now - 60,
         "窗口内转载": now - 30,
@@ -844,6 +845,13 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
             confidence=1, importance_score=100, analysis_status="pending",
             published_at_epoch=now - 60,
         ),
+        NewsItem(
+            source=custom_source["id"], title="已标注自定义资讯", content="自定义资讯正文",
+            url="https://example.com/custom", published_at_epoch=now - 60,
+            published_at=datetime.fromtimestamp(now - 60, UTC).isoformat(),
+            symbols=["300001.SZ"], confidence=1, importance_score=100,
+            content_scope="feed_summary", analysis_status="complete",
+        ),
     ]
     assert store.save(items) == len(items)
     with store._conn() as connection:
@@ -861,14 +869,15 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
         "days": 1,
         "top_symbols": [
             {"symbol": "000001.SZ", "name": "名称-000001.SZ", "count": 1},
+            {"symbol": "300001.SZ", "name": "名称-300001.SZ", "count": 1},
             {"symbol": "600001.SH", "name": "名称-600001.SH", "count": 1},
         ],
     }
     assert [item["symbol"] for item in three_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "300001.SZ", "600001.SH",
     ]
     assert [item["symbol"] for item in thirty_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "000003.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "000003.SZ", "300001.SZ", "600001.SH",
     ]
     with pytest.raises(ValueError, match="仅支持"):
         store.event_focus(2)
@@ -1598,7 +1607,7 @@ def test_news_api_csrf_and_ui_contract():
     assert 'id="news-dead-action-count"' in page
     assert 'id="news-focus-window"' in page
     assert page.count('data-news-focus-days=') == 4
-    assert 'class="rotation-window-control news-focus-window"' in page
+    assert 'class="news-focus-window"' in page
     assert 'data-news-focus-days="7" aria-pressed="true"' in page
     assert 'id="news-focus-feedback"' in page
     assert 'name="llm.max_concurrency"' in page
@@ -1623,6 +1632,7 @@ def test_news_api_csrf_and_ui_contract():
     assert "loadEventFocus(state.eventFocusRetryDays)" in chart_source
     assert "过去 ${days} 日暂无达到质量门槛的标的提及" in chart_source
     assert "--news-scroll-edge: 12px" in news_styles
+    assert '.news-focus-window button[aria-pressed="true"]::after' in news_styles
     assert news_styles.count("padding-inline-end: var(--news-scroll-edge)") == 2
     assert "data-news-retry" in chart_source
     assert "原因：${html(reason)}" in chart_source

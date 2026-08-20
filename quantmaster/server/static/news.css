@@ -548,8 +548,43 @@
 .news-symbol-row .news-symbol-identity { color: var(--ink-2); text-align: left; }
 
 .news-focus-window {
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  gap: 2px;
   margin-top: 12px;
+  border-bottom: 1px solid var(--axis);
 }
+
+.news-focus-window button {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 5px 10px 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  white-space: nowrap;
+  transition: color 160ms var(--ease-out-quart), transform 120ms var(--ease-out-quart);
+}
+
+.news-focus-window button:hover { color: var(--ink); }
+.news-focus-window button:active { transform: scale(.97); }
+.news-focus-window button[aria-pressed="true"] { color: var(--ink); font-weight: 620; }
+.news-focus-window button[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  inset-inline: 10px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--s1);
+}
+.news-focus-window button:focus-visible { outline: 2px solid var(--s1); outline-offset: -3px; }
+.news-focus-window button:disabled { opacity: .42; cursor: not-allowed; }
 .news-focus-feedback {
   display: flex;
   align-items: center;

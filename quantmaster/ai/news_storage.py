@@ -598,7 +598,6 @@ WITH base AS (
                * n.factor_importance_score / 100.0
                AS quality_weight
       FROM news n
-      LEFT JOIN news_sources s ON s.id=n.source_id
      WHERE n.published_at_epoch>=? AND n.published_at_epoch<=?
        AND n.first_seen_at>0 AND n.first_seen_at<=?
        AND n.content_version_at>0 AND n.content_version_at<=?
@@ -607,40 +606,42 @@ WITH base AS (
        AND n.factor_importance_score>0 AND n.factor_importance_score<=100
        AND n.factor_weight_at_analysis>0 AND n.factor_weight_at_analysis<=3
        AND n.content_scope IN ('full_text','full_article','feed_summary')
-       AND n.is_official=1 AND COALESCE(s.is_official,0)=1
-       AND COALESCE(s.built_in,0)=1
-       AND n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1
-       AND n.evidence_binding_hash<>''
-       AND n.ingest_window_id<>'' AND n.ingest_batch_id<>''
-       AND qm_news_article_evidence_valid(
-           n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,
-           n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,
-           n.content_hash,n.evidence_binding_hash)=1
-       AND EXISTS (
-           SELECT 1 FROM news_raw_manifest h
-            WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key
-       )
-       AND EXISTS (
-           SELECT 1 FROM news_article_evidence_manifest e
-            WHERE e.binding_hash=n.evidence_binding_hash
-              AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key
-              AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id
-              AND e.content_hash=n.content_hash AND e.title=n.title
-              AND e.content=n.content AND e.published_at=n.published_at
-              AND e.published_at_epoch=n.published_at_epoch
-              AND e.content_scope=n.content_scope
-              AND e.parser_version=n.parser_version
-       )
-       AND EXISTS (
-           SELECT 1 FROM news_ingest_windows w
-           JOIN news_ingest_batches b ON b.window_id=w.window_id
-           JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id
-            WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id
-              AND w.status='complete' AND w.completed_batch_id<>''
-              AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id
-              AND ba.evidence_binding_hash=n.evidence_binding_hash
-              AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id
-              AND ba.raw_cache_key=n.raw_cache_key
+       AND (
+           (n.raw_cache_key='' AND n.evidence_binding_hash='')
+           OR (
+               n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1
+               AND n.evidence_binding_hash<>''
+               AND qm_news_article_evidence_valid(
+                   n.source_id,n.raw_cache_key,n.url,n.provider_item_id,n.title,n.content,
+                   n.published_at,n.published_at_epoch,n.content_scope,n.parser_version,
+                   n.content_hash,n.evidence_binding_hash)=1
+               AND EXISTS (
+                   SELECT 1 FROM news_raw_manifest h
+                    WHERE h.source_id=n.source_id AND h.raw_cache_key=n.raw_cache_key
+               )
+               AND EXISTS (
+                   SELECT 1 FROM news_article_evidence_manifest e
+                    WHERE e.binding_hash=n.evidence_binding_hash
+                      AND e.source_id=n.source_id AND e.raw_cache_key=n.raw_cache_key
+                      AND e.article_url=n.url AND e.provider_item_id=n.provider_item_id
+                      AND e.content_hash=n.content_hash AND e.title=n.title
+                      AND e.content=n.content AND e.published_at=n.published_at
+                      AND e.published_at_epoch=n.published_at_epoch
+                      AND e.content_scope=n.content_scope
+                      AND e.parser_version=n.parser_version
+               )
+               AND EXISTS (
+                   SELECT 1 FROM news_ingest_windows w
+                   JOIN news_ingest_batches b ON b.window_id=w.window_id
+                   JOIN news_ingest_batch_articles ba ON ba.batch_id=b.batch_id
+                    WHERE w.window_id=n.ingest_window_id AND w.source_id=n.source_id
+                      AND w.status='complete' AND w.completed_batch_id<>''
+                      AND b.batch_id=n.ingest_batch_id AND b.source_id=n.source_id
+                      AND ba.evidence_binding_hash=n.evidence_binding_hash
+                      AND ba.source_id=n.source_id AND ba.provider_item_id=n.provider_item_id
+                      AND ba.raw_cache_key=n.raw_cache_key
+               )
+           )
        )
 ), ranked AS (
     SELECT *,ROW_NUMBER() OVER (
