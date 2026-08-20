@@ -76,6 +76,9 @@ def create_lifespan(*, bootstrap_rotation: bool):
             get_runtime_worker().start(bootstrap_rotation=bootstrap_rotation)
         else:
             os.environ["QM_WEB_PROCESS"] = "1"
+        from quantmaster.runtime.release_staging import start_release_staging
+
+        start_release_staging()
         cfg = get_config()
         log_path = current_log_path()
         logger.info(

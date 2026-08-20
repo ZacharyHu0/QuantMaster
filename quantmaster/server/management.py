@@ -523,7 +523,7 @@ def retry_settings_apply(request: Request) -> dict:
 
 @router.get("/system/update")
 def system_update(request: Request) -> dict[str, object]:
-    """Expose only local staged immutable-slot state; never inspect Git or remote releases."""
+    """Expose cached local staging state without doing network I/O in the request."""
 
     _require_local(request)
     from quantmaster.runtime.update import update_status
