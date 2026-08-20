@@ -55,6 +55,12 @@ def _read_json(path: Path) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+def _release_staging_status(app_root: Path) -> dict[str, object] | None:
+    from quantmaster.runtime.release_staging import read_release_staging_status
+
+    return read_release_staging_status(app_root)
+
+
 def _identity(registry: SlotRegistry, build_sha: str, role: str) -> dict[str, str]:
     meta = _slot_metadata(registry, build_sha)
     if meta and str(meta.get("version") or ""):
@@ -144,7 +150,7 @@ def _pointer_blocker(registry: SlotRegistry, active: str) -> dict[str, str] | No
     return None
 
 
-def _local_main_marker_blocker(registry: SlotRegistry, build_sha: str) -> dict[str, str] | None:
+def _stage_marker_blocker(registry: SlotRegistry, build_sha: str) -> dict[str, str] | None:
     marker = registry.slot(build_sha) / ".quantmaster-stage.json"
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
@@ -158,6 +164,45 @@ def _local_main_marker_blocker(registry: SlotRegistry, build_sha: str) -> dict[s
         return {
             "code": "candidate_invalid",
             "message": "staging marker 不是结构化 object",
+            "build_sha": build_sha,
+        }
+    source = str(payload.get("source") or "local-main")
+    if source == "github-release":
+        digest = payload.get("asset_sha256")
+        size = payload.get("size")
+        smoke = payload.get("smoke")
+        attestation = payload.get("attestation")
+        complete = (
+            payload.get("asset") == "QuantMaster-windows.exe"
+            and isinstance(digest, str) and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            and isinstance(payload.get("release_tag"), str)
+            and str(payload["release_tag"]).startswith("v")
+            and isinstance(size, Mapping) and size.get("mode") == "github-release-onefile"
+            and size.get("build_sha") == build_sha
+            and size.get("within_hard_limits") is True
+            and isinstance(smoke, Mapping) and smoke.get("layout") == "onefile"
+            and smoke.get("help_ok") is True
+            and smoke.get("build_sha") == build_sha and smoke.get("slot_id") == build_sha
+            and isinstance(attestation, Mapping)
+            and attestation.get("repository") == "ZacharyHu0/QuantMaster"
+            and attestation.get("repository_id") == 1_313_070_611
+            and attestation.get("workflow") == ".github/workflows/release.yml"
+            and attestation.get("ref") == f"refs/tags/{payload['release_tag']}"
+            and attestation.get("subject_sha256") == digest
+            and attestation.get("verified") is True
+        )
+        if complete:
+            return None
+        return {
+            "code": "github_release_evidence_required",
+            "message": "候选槽缺少完整 GitHub release digest/SBOM/provenance/smoke 证据",
+            "build_sha": build_sha,
+        }
+    if source != "local-main":
+        return {
+            "code": "candidate_source_unknown",
+            "message": "候选槽 staging 来源不受支持",
             "build_sha": build_sha,
         }
     source_task = payload.get("source_task")
@@ -190,11 +235,18 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
     except ActivationBlocked as exc:
         blockers.append(_blocker(exc, build_sha=build_sha))
     if not blockers:
-        local_main_blocker = _local_main_marker_blocker(registry, build_sha)
-        if local_main_blocker is not None:
-            blockers.append(local_main_blocker)
+        marker_blocker = _stage_marker_blocker(registry, build_sha)
+        if marker_blocker is not None:
+            blockers.append(marker_blocker)
     eligible = not blockers and build_sha != active
     metadata = _candidate_release_metadata(registry, build_sha)
+    try:
+        marker = json.loads(
+            (registry.slot(build_sha) / ".quantmaster-stage.json").read_text(encoding="utf-8")
+        )
+        source = str(marker.get("source") or "local-main") if isinstance(marker, Mapping) else ""
+    except (ActivationBlocked, OSError, UnicodeError, json.JSONDecodeError):
+        source = ""
     return {
         "build_sha": build_sha,
         "slot_id": build_sha,
@@ -206,6 +258,7 @@ def _candidate(registry: SlotRegistry, build_sha: str, *, active: str, previous:
         "release_date": metadata["release_date"],
         "title": metadata["title"],
         "changelog": metadata["changelog"],
+        "source": source,
     }
 
 
@@ -250,6 +303,7 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
             },
             "blockers": [_blocker(exc)],
             "operation": None,
+            "release_staging": None,
         }
     try:
         state = registry.read()
@@ -266,6 +320,7 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
             },
             "blockers": [_blocker(exc)],
             "operation": _read_json(operation_path(registry.app_root)),
+            "release_staging": _release_staging_status(registry.app_root),
         }
 
     active = str(state.get("active") or "")
@@ -311,6 +366,7 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
         },
         "blockers": blockers,
         "operation": _read_json(operation_path(registry.app_root)),
+        "release_staging": _release_staging_status(registry.app_root),
     }
 
 
@@ -354,10 +410,10 @@ def start_activation(build_sha: str, app_root: str | Path | None = None) -> dict
         if pointer_blocker is not None:
             raise ActivationBlocked(pointer_blocker["code"], pointer_blocker["message"])
         candidate = registry.validate_candidate(build_sha)
-        local_main_blocker = _local_main_marker_blocker(registry, candidate.build_sha)
-        if local_main_blocker is not None:
+        marker_blocker = _stage_marker_blocker(registry, candidate.build_sha)
+        if marker_blocker is not None:
             raise ActivationBlocked(
-                local_main_blocker["code"], local_main_blocker["message"], build_sha=candidate.build_sha,
+                marker_blocker["code"], marker_blocker["message"], build_sha=candidate.build_sha,
             )
         if build_sha == state.get("active"):
             result: dict[str, object] = {

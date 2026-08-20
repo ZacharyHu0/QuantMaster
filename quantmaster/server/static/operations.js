@@ -6,6 +6,7 @@ let bound = false;
 let snapshot = null;
 
 const TERMINAL_OPERATIONS = new Set(['activated', 'already_active', 'rolled_back', 'blocked']);
+const RELEASE_STAGING_ACTIVE = new Set(['checking', 'downloading']);
 
 function text(value) {
   return String(value ?? '').trim();
@@ -129,7 +130,10 @@ function renderCandidates(data) {
     const reasons = Array.isArray(candidate?.blockers) ? candidate.blockers : [];
     detail.textContent = reasons.length
       ? reasons.map(reason => `${text(reason?.code) || 'blocked'}：${text(reason?.message) || '证据不足'}`).join('；')
-      : candidate?.current ? '当前稳定槽，无需重复激活。' : '完整 local-main package/smoke 证据已通过。';
+      : candidate?.current ? '当前稳定槽，无需重复激活。'
+        : candidate?.source === 'github-release'
+          ? '官方 GitHub release 的 digest、SBOM、provenance 与本地 smoke 已通过。'
+          : '完整 local-main package/smoke 证据已通过。';
     const summary = document.createElement('p');
     summary.className = 'operations-candidate-changelog';
     summary.textContent = changelogText(candidate?.changelog);
@@ -162,7 +166,14 @@ function render(data) {
     : '尚无切换记录。';
   const progress = document.getElementById('operations-progress');
   const currentStatus = operationState(data);
-  progress.textContent = operation && !TERMINAL_OPERATIONS.has(currentStatus)
+  const releaseStage = data?.release_staging;
+  progress.textContent = RELEASE_STAGING_ACTIVE.has(text(releaseStage?.status))
+    ? releaseStage.status === 'downloading'
+      ? `正在下载并验证官方 v${text(releaseStage?.version)} release，完成后会自动出现在本地槽位。`
+      : '正在后台检查官方稳定版…'
+    : releaseStage?.status === 'blocked'
+      ? `官方 release staging 已阻断：${text(releaseStage?.message) || text(releaseStage?.code)}`
+    : operation && !TERMINAL_OPERATIONS.has(currentStatus)
     ? `正在执行稳定切换：${statusLabel(currentStatus)}。服务重启期间页面会自动重连。`
     : data?.status === 'blocked' ? '稳定更新被阻断，请先处理下方证据或指针问题。'
       : `当前状态：${statusLabel(data?.status)}`;
@@ -175,7 +186,11 @@ async function load(isPoll = false) {
     if (!mounted) return;
     render(data);
     const status = operationState(data);
-    if (isPoll && !TERMINAL_OPERATIONS.has(status)) schedulePoll();
+    const releaseActive = RELEASE_STAGING_ACTIVE.has(text(data?.release_staging?.status));
+    if (releaseActive) {
+      pollDeadline ||= Date.now() + 120_000;
+      schedulePoll();
+    } else if (isPoll && !TERMINAL_OPERATIONS.has(status)) schedulePoll();
     else if (status === 'accepted' || status === 'running') {
       pollDeadline ||= Date.now() + 20_000;
       schedulePoll();

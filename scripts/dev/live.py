@@ -660,6 +660,7 @@ def _stage_candidate(
                 payload: dict[str, object] = {
                     "schema": STAGE_SCHEMA,
                     "status": "staged",
+                    "source": "local-main",
                     "idempotent": False,
                     "source_task": slug,
                     "source_task_commit": evidence["commit"],
