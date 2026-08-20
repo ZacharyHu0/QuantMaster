@@ -348,11 +348,12 @@ def _verify_attestation(*, digest: str, tag: str, commit: str, opener: OpenURL) 
         internal = definition.get("internalParameters") if isinstance(definition, Mapping) else None
         github = internal.get("github") if isinstance(internal, Mapping) else None
         resolved = definition.get("resolvedDependencies") if isinstance(definition, Mapping) else None
+        resolved_items = resolved if isinstance(resolved, list) else []
         commit_bound = any(
             isinstance(item, Mapping)
             and isinstance(item.get("digest"), Mapping)
             and str(item["digest"].get("gitCommit") or "") == commit
-            for item in resolved if isinstance(resolved, list)
+            for item in resolved_items
         )
         try:
             repository_id = (
