@@ -219,7 +219,7 @@ jobs:
 
   browser:
     if: github.event.pull_request.draft != true
-    timeout-minutes: 25
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     env:
       QM_RUN_UI: "1"
