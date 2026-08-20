@@ -243,10 +243,7 @@ const newsFeature = (() => {
     recovery: '恢复中', dead_letter: '已暂停',
   };
 
-  function statusLabel(status) {
-    const value = String(status || '').trim();
-    return NEWS_STATUS_LABELS[value] || '状态未知';
-  }
+  const statusLabel = status => NEWS_STATUS_LABELS[String(status || '').trim()] || '状态未知';
 
   function failureTemplate(item) {
     const status = String(item.analysis_status || '');
