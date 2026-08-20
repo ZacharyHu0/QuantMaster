@@ -1668,6 +1668,7 @@ def test_remove_task_artifacts_recovers_acl_from_accessible_parent(monkeypatch, 
         calls.append("restore")
         environment = kwargs["env"]
         assert "item.Parent" in command[-1]
+        assert "System.UnauthorizedAccessException" in command[-1]
         assert (
             "Import-Module Microsoft.PowerShell.Security -Force "
             "-ErrorAction SilentlyContinue" in command[-1]
