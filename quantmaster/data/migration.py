@@ -779,6 +779,16 @@ def register_builtin_migrations() -> None:
     """Register all built-in migrators from the consolidated module."""
     import importlib
 
+    # Some migrators access a schema factory only while inspecting a durable
+    # store.  The offline maintenance entry point starts from this module, so
+    # register every built-in schema provider before it can construct a plan.
+    for module in (
+        "quantmaster.backtest.paper_accounts",
+        "quantmaster.lab.store",
+        "quantmaster.rotation.store",
+    ):
+        importlib.import_module(module)
+
     _decision_module = "quantmaster" + "." + "decision" + "." + "migration"
     _decision_module_object = importlib.import_module(_decision_module)
     decision_legacy_migrator = _decision_module_object.decision_legacy_migrator
