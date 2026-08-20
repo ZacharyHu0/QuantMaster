@@ -238,12 +238,14 @@ const newsFeature = (() => {
     return {relative, absolute};
   }
 
+  const NEWS_STATUS_LABELS = {
+    complete: '已标注', pending: '待标注', failed: '退避重试',
+    recovery: '恢复中', dead_letter: '已暂停',
+  };
+
   function statusLabel(status) {
     const value = String(status || '').trim();
-    return {
-      complete: '已标注', pending: '待标注', failed: '退避重试',
-      recovery: '恢复中', dead_letter: '已暂停',
-    }[value] || '状态未知';
+    return NEWS_STATUS_LABELS[value] || '状态未知';
   }
 
   function failureTemplate(item) {
@@ -284,7 +286,7 @@ const newsFeature = (() => {
     const sectors = Array.isArray(item.sectors) ? item.sectors : [];
     const symbols = Array.isArray(item.symbols) ? item.symbols : [];
     const status = String(item.analysis_status || '').trim();
-    const statusClass = ['complete', 'pending', 'failed', 'recovery', 'dead_letter'].includes(status)
+    const statusClass = Object.hasOwn(NEWS_STATUS_LABELS, status)
       ? status : 'unknown';
     const tags = [
       item.is_official ? '<span class="news-tag official">官方</span>' : '',

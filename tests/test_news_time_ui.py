@@ -19,6 +19,6 @@ def test_news_ui_distinguishes_queue_status_from_symbol_association() -> None:
         Path(__file__).parents[1] / "quantmaster" / "server" / "static" / "news.js"
     ).read_text(encoding="utf-8")
     assert "|| status || '待标注'" not in script
-    assert "}[value] || '状态未知';" in script
+    assert "NEWS_STATUS_LABELS[value] || '状态未知';" in script
     assert "status === 'complete' && symbols.length === 0" in script
     assert "未关联直接标的" in script
