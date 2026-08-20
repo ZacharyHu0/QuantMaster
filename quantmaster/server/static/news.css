@@ -552,7 +552,6 @@
   align-items: stretch;
   max-width: 100%;
   gap: 2px;
-  overflow: visible;
   margin-top: 12px;
   border-bottom: 1px solid var(--axis);
 }
