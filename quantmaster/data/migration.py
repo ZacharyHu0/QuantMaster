@@ -783,7 +783,6 @@ def register_builtin_migrations() -> None:
     # store.  The offline maintenance entry point starts from this module, so
     # register every built-in schema provider before it can construct a plan.
     for module in (
-        "quantmaster.runtime.jobs",
         "quantmaster.backtest.paper_accounts",
         "quantmaster.lab.store",
         "quantmaster.rotation.store",
