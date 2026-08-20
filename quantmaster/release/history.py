@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.0"
-RELEASE_DATE = "2026-08-18"
+VERSION = "1.18.1"
+RELEASE_DATE = "2026-08-20"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -24,6 +24,34 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "资讯事件与标注语义",
+                "items": (
+                    (
+                        "事件聚焦切换器由资讯页自身样式定义；达到现有质量门槛且原始证据完整的"
+                        "自定义来源标注可进入提及排行，不改变情绪分的官方证据口径。"
+                    ),
+                    (
+                        "事件流明确区分已完成但未关联直接标的、状态未知和待标注；"
+                        "空状态不再被显示为待标注。"
+                    ),
+                ),
+            },
+            {
+                "title": "离线迁移规划",
+                "items": (
+                    (
+                        "离线旧契约规划在计算启动 schema 目标前注册内置 schema factory；"
+                        "干净进程可识别最小 paper schema 升级，规划阶段不会创建备份或自动迁移。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.0",
+        "date": "2026-08-18",
         "sections": (
             {
                 "title": "市场全景与交互",
