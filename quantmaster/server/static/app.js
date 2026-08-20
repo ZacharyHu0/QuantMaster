@@ -2006,7 +2006,7 @@ function acceptMarketFearGreed(data) {
   const note = document.getElementById('market-fear-greed-note');
   if (status) status.textContent = marketFearGreed.status === 'stale'
     ? '本地缓存 · CNN 刷新失败' : marketFearGreed.status === 'ready'
-      ? '全球风险背景' : 'CNN 指数暂不可用';
+      ? '美股风险背景' : 'CNN 指数暂不可用';
   if (timestamp) {
     const formatted = fearGreedAsOf(marketFearGreed.as_of);
     timestamp.textContent = formatted
@@ -2016,7 +2016,7 @@ function acceptMarketFearGreed(data) {
     else timestamp.removeAttribute('datetime');
   }
   if (note) note.textContent = marketFearGreed.warning ||
-    'CNN 指数是美国市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。';
+    'CNN 指数是美股市场风险情绪参考；每个大盘与板块使用自己的日线 RSI(14)。';
   refreshSentimentBindings();
 }
 

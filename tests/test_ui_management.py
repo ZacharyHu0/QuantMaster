@@ -627,7 +627,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
             page.locator('[data-market-method="amount"]').first
         ).to_have_attribute("aria-selected", "true")
         assert page.locator("#market-method-compare > button").count() == 5
-        assert page.locator(".market-decision-strip > article").count() >= 6
+        assert page.locator(".market-decision-strip > :is(article,.market-decision-metric)").count() >= 6
         assert page.locator("#tab-market *").count() <= 2500
         assert _active_chart_count(page) <= 4
         focus = page.locator(".market-focus").bounding_box()
@@ -660,6 +660,15 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
         page.screenshot(path=str(desktop_shot), full_page=True)
         assert desktop_shot.stat().st_size > 10_000
 
+        page.set_viewport_size({"width": 3840, "height": 2160})
+        page.locator("#market-board-chart canvas").wait_for(state="visible")
+        workbench_box = page.locator(".market-workbench").bounding_box()
+        focus_box = page.locator(".market-three-column > .market-focus").bounding_box()
+        chart_box = page.locator("#market-board-chart").bounding_box()
+        assert workbench_box and workbench_box["width"] >= 3600
+        assert focus_box and focus_box["width"] >= 2400
+        assert chart_box and chart_box["width"] >= 2400
+
         page.set_viewport_size({"width": 390, "height": 844})
         _wait_for_document_fit(page)
         assert page.locator(".market-three-column").evaluate(
@@ -673,7 +682,7 @@ def test_market_workbench_deep_link_algorithms_keyboard_and_budgets(live_server,
         browser.close()
 
 
-def test_market_workbench_on_demand_history_cleanup_removed_routes_and_failure(live_server):
+def test_market_workbench_on_demand_history_restored_detail_routes_and_failure(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
         browser = manager.chromium.launch()
@@ -697,11 +706,25 @@ def test_market_workbench_on_demand_history_cleanup_removed_routes_and_failure(l
             "Object.keys(window.charts || {}).filter(key => key.startsWith('market-')).length"
         ) == 0
 
-        for legacy in ("quotes", "temperature", "style", "rotation"):
-            page.goto(f"{url}/#today/{legacy}")
-            page.locator("#market-route-removed").wait_for(state="visible")
-            assert page.url.endswith(f"#today/{legacy}")
-            playwright_sync.expect(page.locator("#market-route-removed h2")).to_contain_text("页面已移除")
+        for detail, selector in (
+            ("quotes", "#market-quotes-view"),
+            ("temperature", "#market-temperature-view"),
+            ("style", "#market-style-view"),
+            ("rotation", "#rotation-overview-view"),
+        ):
+            page.goto(f"{url}/#today/{detail}")
+            page.locator(selector).wait_for(state="visible")
+            assert page.url.endswith(f"#today/{detail}")
+            assert page.locator("#market-workbench-view").is_hidden()
+
+        page.goto(f"{url}/#today/market")
+        page.locator('a[href="#today/quotes?focus=ashare-fear-greed"]').click()
+        page.locator("#market-ashare-fear-greed").wait_for(state="visible")
+        assert "focus=ashare-fear-greed" in page.url
+        page.goto(f"{url}/#today/market")
+        page.locator('a[href="#today/quotes?focus=fear-greed"]').click()
+        page.locator("#market-fear-greed").wait_for(state="visible")
+        assert "focus=fear-greed" in page.url
 
         failed = browser.new_page(viewport={"width": 390, "height": 844})
         _install_market_workbench_routes(failed, list_status=503)
@@ -1454,6 +1477,10 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         ]
         assert page.locator('[data-workspace-pages="today"] button').all_inner_texts() == [
             "市场全景",
+            "行情",
+            "市场温度",
+            "市场风格",
+            "轮动总览",
             "行业周期",
             "细分题材",
             "ETF 研究",

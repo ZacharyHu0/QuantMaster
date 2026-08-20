@@ -7,7 +7,7 @@ const WORKSPACES = {
 
 const PAGES = {
   today: {
-    market: 'market', quotes: 'market', temperature: 'market', style: 'market', rotation: 'market',
+    market: 'market', quotes: 'market', temperature: 'market', style: 'market', rotation: 'rotation',
     industry: 'rotation', themes: 'rotation', etfs: 'rotation', news: 'news',
     'after-close': 'after-close', candidates: 'candidates',
     'stock-analysis': 'stock-analysis', decision: 'decision',

@@ -5,10 +5,9 @@ let mountedFeature = null;
 
 const FEATURE_RESOURCES = {
   market: ['/static/market-workbench.css', '../market-workbench.js'],
-  quotes: ['/static/market-workbench.css', '../market-workbench.js'],
-  temperature: ['/static/market-workbench.css', '../market-workbench.js'],
-  style: ['/static/market-workbench.css', '../market-workbench.js'],
-  rotation: ['/static/market-workbench.css', '../market-workbench.js'],
+  temperature: ['/static/rotation.css', '../rotation.js'],
+  style: ['/static/rotation.css', '../rotation.js'],
+  rotation: ['/static/rotation.css', '../rotation.js'],
   industry: ['/static/rotation.css', '../rotation.js'],
   themes: ['/static/rotation.css', '../rotation.js'],
   etfs: ['/static/rotation.css', '../rotation.js'],
@@ -38,10 +37,23 @@ async function feature(page) {
 }
 
 async function loadPage(page) {
-  if (['market', 'quotes', 'temperature', 'style', 'rotation', 'industry', 'themes', 'etfs', 'news'].includes(page)) {
+  if (page === 'quotes') {
+    document.querySelectorAll('[data-market-view]').forEach(view => {
+      view.hidden = view.dataset.marketView !== page;
+    });
+    await Promise.all([context.shell.loadAssetLists(false), context.shell.loadMarket()]);
+    document.getElementById('market-workbench-view')?.setAttribute('hidden', '');
+    const focus = context.route?.focus;
+    if (focus) requestAnimationFrame(() => document.getElementById(`market-${focus}`)?.scrollIntoView({block:'start'}));
+    return;
+  }
+  if (['market', 'temperature', 'style', 'rotation', 'industry', 'themes', 'etfs', 'news'].includes(page)) {
     const {loadAdvancedCharts} = await import('../advanced-charts.js');
     const [, module] = await Promise.all([loadAdvancedCharts(), feature(page)]);
     await module?.mount?.(page, context);
+    if (['temperature', 'style'].includes(page)) {
+      document.getElementById('market-workbench-view')?.setAttribute('hidden', '');
+    }
     mountedFeature = module;
     return;
   }

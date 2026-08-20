@@ -1,7 +1,6 @@
 const marketWorkbench = (() => {
   'use strict';
 
-  const LEGACY_PAGES = new Set(['quotes', 'temperature', 'style', 'rotation']);
   const METHODS = {
     equal:'等权', float_mv:'流通市值', amount:'成交额', volume:'成交量', total_mv:'总市值',
   };
@@ -101,14 +100,14 @@ const marketWorkbench = (() => {
           <div class="market-board-list" id="market-board-list" role="listbox" aria-label="板块排名"><div class="market-loading-line"><i></i><span>读取排名…</span></div></div>
           <div class="market-list-pages" id="market-list-pages"></div>
         </aside>
-        <main class="market-focus" aria-labelledby="market-focus-title">
+        <section class="market-focus" aria-labelledby="market-focus-title">
           <div class="market-focus-head" id="market-focus-head"><div><span>02 / BOARD INDEX</span><h2 id="market-focus-title">选择一个板块</h2></div></div>
           <div class="market-method-tabs" role="tablist" aria-label="板块指数算法">
             ${Object.entries(METHODS).map(([value,label]) => `<button type="button" role="tab" data-market-method="${value}" aria-selected="${String(value === state.method)}" tabindex="${value === state.method ? 0 : -1}">${label}</button>`).join('')}
           </div>
           <div class="market-chart-wrap"><div class="market-board-chart" id="market-board-chart" role="img" aria-label="选中板块指数日线"></div><div class="market-chart-empty" id="market-chart-empty">等待板块详情</div></div>
           <section class="market-method-compare" id="market-method-compare" aria-label="五算法阶段收益"></section>
-        </main>
+        </section>
         <aside class="market-evidence" aria-labelledby="market-evidence-title">
           <div class="market-pane-head"><div><span>03 / EVIDENCE</span><h2 id="market-evidence-title">状态与成分</h2></div></div>
           <div id="market-board-evidence"><div class="market-loading-line"><i></i><span>等待板块选择…</span></div></div>
@@ -125,8 +124,9 @@ const marketWorkbench = (() => {
     return `<div class="market-state" data-state="error"><strong>数据未能读取</strong><p>${esc(message || '请稍后重试')}</p>${retry ? `<button type="button" ${retry}>重试</button>` : ''}</div>`;
   }
 
-  function metricMarkup(label, value, note = '', valueTone = '') {
-    return `<article><span>${esc(label)}</span><strong class="${valueTone}">${esc(String(value ?? '—'))}</strong><small>${esc(note)}</small></article>`;
+  function metricMarkup(label, value, note = '', valueTone = '', href = '') {
+    const content = `<span>${esc(label)}</span><strong class="${valueTone}">${esc(String(value ?? '—'))}</strong><small>${esc(note)}</small>`;
+    return href ? `<a class="market-decision-metric" href="${href}">${content}</a>` : `<article>${content}</article>`;
   }
 
   function renderDecisionStrip(results) {
@@ -149,9 +149,9 @@ const marketWorkbench = (() => {
     target.dataset.state = snapshot.state || quality.status || 'ready';
     target.innerHTML = [
       ...indexes.map(item => metricMarkup(item.name || item.symbol, number(item.last,2), percent(item.change_pct), tone(item.change_pct))),
-      metricMarkup('A股恐贪', number(ashareFear.score,0), ashareFear.rating_label || statusLabel(ashareFear.status)),
-      metricMarkup('海外恐贪', number(globalFear.score,0), globalFear.rating_label || statusLabel(globalFear.status)),
-      metricMarkup('市场温度', number(temperature,0), temperature == null ? '等待快照' : '0–100'),
+      metricMarkup('A股恐贪', number(ashareFear.score,0), ashareFear.rating_label || statusLabel(ashareFear.status), '', '#today/quotes?focus=ashare-fear-greed'),
+      metricMarkup('美股恐贪', number(globalFear.score,0), globalFear.rating_label || statusLabel(globalFear.status), '', '#today/quotes?focus=fear-greed'),
+      metricMarkup('市场温度', number(temperature,0), temperature == null ? '等待快照' : '0–100', '', '#today/temperature'),
       metricMarkup('数据覆盖', coverage, `${date} · ${statusLabel(quality.status || snapshot.state)}`),
     ].join('');
   }
@@ -487,15 +487,8 @@ const marketWorkbench = (() => {
     context = nextContext;
     const root = document.getElementById('market-workbench-root');
     const workbench = document.getElementById('market-workbench-view');
-    const removed = document.getElementById('market-route-removed');
-    if (LEGACY_PAGES.has(page)) {
-      mounted = false;
-      workbench.hidden = true; removed.hidden = false;
-      removed.querySelector('h2').textContent = `“${({quotes:'行情',temperature:'市场温度',style:'市场风格',rotation:'轮动总览'})[page]}”页面已移除`;
-      return;
-    }
     mounted = true; generation += 1;
-    workbench.hidden = false; removed.hidden = true;
+    workbench.hidden = false;
     restoreRoute(nextContext.route || {});
     root.innerHTML = shellMarkup();
     bindEvents(root);
