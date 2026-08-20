@@ -107,7 +107,12 @@ class FakeController:
             "runtime_generation": identity.runtime_generation,
         }
 
-    def stop_generation(self, generation: _Generation, _timeout: float) -> None:
+    def stop_generation(
+        self,
+        generation: _Generation,
+        _identity: ApplicationIdentity,
+        _timeout: float,
+    ) -> None:
         self.calls.append(("stop-generation", generation.sha))
         generation.stopped = True
         if self.current == generation.sha:
@@ -153,6 +158,42 @@ def test_candidate_failure_rolls_back_previous_slot(tmp_path):
     assert registry.read()["pending"] == ""
     assert (tmp_path / "launcher.target").read_text(encoding="ascii") == f"{SHA_A}\n"
     assert ("start", SHA_A) in controller.calls
+
+
+def test_candidate_cleanup_failure_blocks_without_restarting_previous(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+
+    class CleanupFailController(FakeController):
+        def start_generation(self, _slot: Path, identity: ApplicationIdentity):
+            self.calls.append(("start", identity.build_sha))
+            self.current = identity.build_sha
+            return _Generation(identity.build_sha)
+
+        def wait_ready(
+            self,
+            _generation: _Generation,
+            _identity: ApplicationIdentity,
+            _timeout: float,
+        ):
+            raise ActivationBlocked("candidate_not_ready", "fixture candidate not ready")
+
+        def stop_generation(
+            self,
+            generation: _Generation,
+            identity: ApplicationIdentity,
+            timeout: float,
+        ) -> None:
+            super().stop_generation(generation, identity, timeout)
+            raise ActivationBlocked("candidate_cleanup_failed", "fixture candidate still listening")
+
+    controller = CleanupFailController(SHA_A, fail=SHA_B)
+    result = ActivationCoordinator(SlotRegistry(tmp_path), controller).activate(SHA_B)
+
+    assert result["status"] == "blocked"
+    assert controller.calls.count(("start", SHA_A)) == 0
+    assert "candidate_cleanup_failed" in str(SlotRegistry(tmp_path).read()["last_error"])
 
 
 def test_stop_failure_releases_drain_before_retry(tmp_path):
@@ -412,6 +453,54 @@ def test_packaged_controller_marks_activation_generation_as_detached(monkeypatch
     assert captured["command"] == [str(slot / "QuantMaster.exe"), "serve"]
     assert captured["environment"][activation.DETACHED_ACTIVATION_ENV] == "1"
     assert "QM_WINDOWS_APP_JOB_ROOT" not in captured["environment"]
+
+
+def test_packaged_controller_confirms_candidate_port_is_released(monkeypatch):
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    controller = SubprocessGenerationController()
+    health = {
+        "build_sha": SHA_B,
+        "slot_id": SHA_B,
+        "process_pid": 123,
+    }
+    responses = iter([health, None])
+    kill_calls = []
+    monkeypatch.setattr(controller, "_health", lambda: next(responses))
+    monkeypatch.setattr(activation.os, "name", "nt")
+    monkeypatch.setattr(
+        activation.subprocess,
+        "run",
+        lambda command, **kwargs: kill_calls.append((command, kwargs)),
+    )
+
+    class Process:
+        pid = 123
+
+        def poll(self):
+            return 0
+
+    controller.stop_generation(Process(), identity, 0.2)
+    assert kill_calls[0][0] == ["taskkill", "/PID", "123", "/T", "/F"]
+
+
+def test_packaged_controller_blocks_when_candidate_still_owns_port(monkeypatch):
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    controller = SubprocessGenerationController()
+    monkeypatch.setattr(activation.subprocess, "run", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(controller, "_health", lambda: {
+        "build_sha": SHA_B,
+        "slot_id": SHA_B,
+        "process_pid": 123,
+    })
+
+    class Process:
+        def poll(self):
+            return 0
+
+    with pytest.raises(ActivationBlocked) as exc_info:
+        controller.stop_generation(Process(), identity, 0.1)
+
+    assert exc_info.value.code == "candidate_cleanup_failed"
 
 
 def test_packaged_controller_releases_the_drain_lease(monkeypatch, tmp_path):

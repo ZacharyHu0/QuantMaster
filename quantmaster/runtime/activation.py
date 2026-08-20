@@ -436,7 +436,12 @@ class GenerationController(Protocol):
         self, generation: object, identity: ApplicationIdentity, timeout: float,
     ) -> Mapping[str, object]: ...
 
-    def stop_generation(self, generation: object, timeout: float) -> None: ...
+    def stop_generation(
+        self,
+        generation: object,
+        identity: ApplicationIdentity,
+        timeout: float,
+    ) -> None: ...
 
 
 def _mapping_identity(value: Mapping[str, object] | None) -> tuple[str, str] | None:
@@ -665,9 +670,15 @@ class SubprocessGenerationController:
             time.sleep(0.1)
         raise ActivationBlocked("candidate_not_ready", "候选槽未在 15 秒内完成 Web/runtime/compute 身份检查")
 
-    def stop_generation(self, generation: object, timeout: float) -> None:
+    def stop_generation(
+        self,
+        generation: object,
+        identity: ApplicationIdentity,
+        timeout: float,
+    ) -> None:
         process: Any = generation
         if getattr(process, "poll", lambda: None)() is not None:
+            self._wait_generation_gone(identity, timeout)
             return
         process.terminate()
         try:
@@ -675,6 +686,37 @@ class SubprocessGenerationController:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=max(0.1, timeout))
+        self._wait_generation_gone(identity, timeout)
+
+    def _wait_generation_gone(self, identity: ApplicationIdentity, timeout: float) -> None:
+        """Do not restart another slot while the candidate still owns the port."""
+
+        deadline = time.monotonic() + max(0.1, timeout)
+        taskkill_attempted = False
+        while time.monotonic() < deadline:
+            health = self._health()
+            if _mapping_identity(health) != (identity.build_sha, identity.slot_id):
+                return
+            if not taskkill_attempted and os.name == "nt":
+                raw_pid = health.get("process_pid") if health is not None else None
+                pid = raw_pid if isinstance(raw_pid, int) else None
+                if pid is not None and pid > 0:
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/PID", str(pid), "/T", "/F"],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=max(0.1, timeout),
+                        )
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+                    taskkill_attempted = True
+            time.sleep(0.05)
+        raise ActivationBlocked(
+            "candidate_cleanup_failed",
+            "候选槽停止后仍占用 Web 端口，已阻止回滚重启旧槽",
+        )
 
 
 class ActivationCoordinator:
@@ -699,6 +741,7 @@ class ActivationCoordinator:
         )
         self.allow_unrecoverable_current = bool(allow_unrecoverable_current)
         self._schema_handoff = False
+        self._generation_identity: ApplicationIdentity | None = None
 
     def _failure(self, exc: BaseException) -> str:
         if isinstance(exc, ActivationBlocked):
@@ -710,14 +753,15 @@ class ActivationCoordinator:
     def _start_and_wait(self, sha: str, timeout: float) -> tuple[object, Mapping[str, object]]:
         candidate = self.registry.validate_candidate(sha)
         identity = self.generation_factory(candidate.build_sha)
+        self._generation_identity = identity
         generation = self.controller.start_generation(candidate.slot, identity)
         try:
             health = self.controller.wait_ready(generation, identity, timeout)
-        except _ACTIVATION_FAILURES:
+        except _ACTIVATION_FAILURES as wait_exc:
             try:
-                self.controller.stop_generation(generation, timeout)
-            except _ACTIVATION_FAILURES:
-                pass
+                self.controller.stop_generation(generation, identity, timeout)
+            except _ACTIVATION_FAILURES as cleanup_exc:
+                raise cleanup_exc from wait_exc
             raise
         return generation, health
 
@@ -764,13 +808,12 @@ class ActivationCoordinator:
         self.controller.stop_current(self.ready_timeout)
         return True
 
-    def _stop_candidate(self, generation: object | None) -> None:
+    def _stop_candidate(self, generation: object | None, identity: ApplicationIdentity | None) -> None:
         if generation is None:
             return
-        try:
-            self.controller.stop_generation(generation, self.rollback_timeout)
-        except _ACTIVATION_FAILURES:
-            pass
+        if identity is None:
+            raise ActivationBlocked("candidate_identity_missing", "无法确认候选槽身份，拒绝清理")
+        self.controller.stop_generation(generation, identity, self.rollback_timeout)
 
     def _rollback_transition(
         self,
@@ -781,7 +824,26 @@ class ActivationCoordinator:
         current_stopped: bool,
     ) -> dict[str, object]:
         failure = self._failure(exc)
-        self._stop_candidate(generation)
+        try:
+            self._stop_candidate(generation, getattr(self, "_generation_identity", None))
+        except _ACTIVATION_FAILURES as cleanup_exc:
+            blocked = self.registry.mark_blocked(
+                f"candidate_cleanup_failed: {self._failure(cleanup_exc)}; {failure}"
+            )
+            return {
+                "status": "blocked",
+                "active": blocked["active"],
+                "previous": blocked["previous"],
+                "last_error": blocked["last_error"],
+            }
+        if isinstance(exc, ActivationBlocked) and exc.code == "candidate_cleanup_failed":
+            blocked = self.registry.mark_blocked(failure)
+            return {
+                "status": "blocked",
+                "active": blocked["active"],
+                "previous": blocked["previous"],
+                "last_error": blocked["last_error"],
+            }
         if self._schema_handoff:
             blocked = self.registry.mark_blocked(
                 "schema_handoff_candidate_failed: " + failure
