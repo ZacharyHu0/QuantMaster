@@ -231,7 +231,7 @@ jobs:
           python-version: "3.12.13"
           enable-cache: true
       - run: uv sync --locked --extra dev --extra ui
-      - run: uv run playwright install --with-deps chromium
+      - run: uv run playwright install chromium
       - name: Chromium management flows
         run: >-
           mkdir -p .artifacts/reports &&
