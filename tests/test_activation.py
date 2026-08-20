@@ -466,6 +466,7 @@ def test_packaged_controller_confirms_candidate_port_is_released(monkeypatch):
     responses = iter([health, None])
     kill_calls = []
     monkeypatch.setattr(controller, "_health", lambda: next(responses))
+    monkeypatch.setattr(activation.os, "name", "nt")
     monkeypatch.setattr(
         activation.subprocess,
         "run",
