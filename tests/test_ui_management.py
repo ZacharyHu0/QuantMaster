@@ -734,6 +734,36 @@ def test_market_workbench_on_demand_history_restored_detail_routes_and_failure(l
         browser.close()
 
 
+@pytest.mark.parametrize(
+    ("source", "label", "view"),
+    [
+        ("quotes", "行情", "#market-quotes-view"),
+        ("temperature", "市场温度", "#market-temperature-view"),
+        ("style", "市场风格", "#market-style-view"),
+    ],
+)
+def test_market_subpages_can_return_to_panorama_without_refresh(
+    live_server, source, label, view,
+):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _install_market_workbench_routes(page)
+        page.goto(f"{url}/#today/market")
+        page.locator(".market-workbench").wait_for(state="visible")
+
+        page.get_by_role("tab", name=label, exact=True).click()
+        page.wait_for_url(re.compile(fr"#today/{source}$"))
+        page.locator(view).wait_for(state="visible")
+        page.get_by_role("tab", name="市场全景", exact=True).click()
+
+        page.locator(view).wait_for(state="hidden", timeout=2_000)
+        page.locator(".market-workbench").wait_for(state="visible")
+        assert re.search(r"#today/market\?", page.url)
+        browser.close()
+
+
 def _legacy_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {
