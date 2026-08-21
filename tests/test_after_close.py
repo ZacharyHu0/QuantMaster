@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -137,6 +138,7 @@ def service(tmp_path, isolated_config, monkeypatch):
         "quantmaster.after_close.service.expected_session",
         lambda: SessionExpectation(ready=False, reason="test"),
     )
+    monkeypatch.setattr("quantmaster.after_close.service.market_date", lambda: date(2026, 8, 6))
     monkeypatch.setattr(
         "quantmaster.data.index_membership.load_cached_csi800_members_as_of",
         lambda as_of, **_kwargs: {
