@@ -1478,6 +1478,7 @@ class NewsStore:
         with self._conn() as conn:
             counts = conn.execute(
                 "SELECT COUNT(*) AS total,"
+                "SUM(first_seen_at>=? AND first_seen_at<=?) AS ingested_24h,"
                 "SUM(analysis_status='complete') AS annotated,"
                 "SUM(analysis_status='pending') AS pending,"
                 "SUM(analysis_status='failed') AS failed,"
@@ -1485,7 +1486,8 @@ class NewsStore:
                 "SUM(alert_importance_score>=80) AS important,"
                 "SUM(sentiment>0.15 AND analysis_status='complete') AS positive,"
                 "SUM(sentiment<-0.15 AND analysis_status='complete') AS negative "
-                "FROM news WHERE first_seen_at>=? AND first_seen_at<=?", (cutoff, now),
+                "FROM news WHERE first_seen_at>=? AND first_seen_at<=?",
+                (now - 86400, now, cutoff, now),
             ).fetchone()
             queue_counts = conn.execute(
                 "SELECT SUM(analysis_status='pending') AS pending,"
