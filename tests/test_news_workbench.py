@@ -852,6 +852,14 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
             symbols=["300001.SZ"], confidence=1, importance_score=100,
             content_scope="feed_summary", analysis_status="complete",
         ),
+        NewsItem(
+            source="sina_live", title="已标注实时快讯", content="实时快讯摘要",
+            url="https://zhibo.sina.com.cn/?id=focus", published_at_epoch=now - 60,
+            published_at=datetime.fromtimestamp(now - 60, UTC).isoformat(),
+            provider_item_id="focus", raw_cache_key="sha256:" + "a" * 64,
+            symbols=["300002.SZ"], confidence=1, importance_score=100,
+            content_scope="provider_excerpt", analysis_status="complete",
+        ),
     ]
     assert store.save(items) == len(items)
     with store._conn() as connection:
@@ -870,14 +878,15 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
         "top_symbols": [
             {"symbol": "000001.SZ", "name": "名称-000001.SZ", "count": 1},
             {"symbol": "300001.SZ", "name": "名称-300001.SZ", "count": 1},
+            {"symbol": "300002.SZ", "name": "名称-300002.SZ", "count": 1},
             {"symbol": "600001.SH", "name": "名称-600001.SH", "count": 1},
         ],
     }
     assert [item["symbol"] for item in three_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "300001.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "300001.SZ", "300002.SZ", "600001.SH",
     ]
     assert [item["symbol"] for item in thirty_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "000003.SZ", "300001.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "000003.SZ", "300001.SZ", "300002.SZ", "600001.SH",
     ]
     with pytest.raises(ValueError, match="仅支持"):
         store.event_focus(2)

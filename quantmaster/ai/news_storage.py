@@ -605,9 +605,9 @@ WITH base AS (
        AND n.analysis_status='complete' AND n.confidence>=?
        AND n.factor_importance_score>0 AND n.factor_importance_score<=100
        AND n.factor_weight_at_analysis>0 AND n.factor_weight_at_analysis<=3
-       AND n.content_scope IN ('full_text','full_article','feed_summary')
+       AND n.content_scope IN ('full_text','full_article','feed_summary','provider_excerpt')
        AND (
-           (n.raw_cache_key='' AND n.evidence_binding_hash='')
+           n.evidence_binding_hash=''
            OR (
                n.raw_cache_key<>'' AND qm_news_raw_valid(n.raw_cache_key)=1
                AND n.evidence_binding_hash<>''
