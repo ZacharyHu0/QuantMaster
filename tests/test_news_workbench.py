@@ -655,6 +655,29 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     }
 
 
+def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    items = [
+        official_news(store, title=f"窗口资讯 {index}", content=f"窗口正文 {index}")
+        for index in range(3)
+    ]
+    assert store.save(items) == 3
+    now = time.time()
+    with store._conn() as connection:
+        for item, first_seen_at in zip(
+            items, (now - 2 * 3600, now - 23 * 3600, now - 25 * 3600), strict=True,
+        ):
+            connection.execute(
+                "UPDATE news SET first_seen_at=? WHERE provider_item_id=?",
+                (first_seen_at, item.provider_item_id),
+            )
+
+    stats = store.stats(30)
+
+    assert stats["total"] == 3
+    assert stats["ingested_24h"] == 2
+
+
 def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     store.save([NewsItem(source="unit", title="待标注", content="pending")])
@@ -1646,6 +1669,7 @@ def test_news_api_csrf_and_ui_contract():
     assert "data-news-retry" in chart_source
     assert "原因：${html(reason)}" in chart_source
     assert "queue?.manual_recoverable_dead_letter" in chart_source
+    assert "news-stat-ingested-24h" in chart_source
     assert "value?.manual_recoverable_dead_letter ?? value?.dead_letter" in chart_source
     assert "正在认领可手动恢复的暂停项" in chart_source
     assert "恢复暂停项" in chart_source

@@ -485,6 +485,7 @@ const newsFeature = (() => {
 
   function renderStats(data) {
     document.getElementById('news-stat-total').textContent = Number(data.total || 0).toLocaleString();
+    document.getElementById('news-stat-ingested-24h').textContent = Number(data.ingested_24h || 0).toLocaleString();
     document.getElementById('news-stat-coverage').textContent = `${Math.round(Number(data.coverage || 0) * 100)}%`;
     document.getElementById('news-stat-pending').textContent =
       `${Number(data.pending || 0)} / ${Number(data.failed || 0)} / ${Number(data.dead_letter || 0)}`;
