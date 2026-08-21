@@ -1637,6 +1637,7 @@ def test_news_api_csrf_and_ui_contract():
     assert "data-news-retry" in chart_source
     assert "原因：${html(reason)}" in chart_source
     assert "queue?.manual_recoverable_dead_letter" in chart_source
+    assert "value?.manual_recoverable_dead_letter ?? value?.dead_letter" in chart_source
     assert "正在认领可手动恢复的暂停项" in chart_source
     assert "恢复暂停项" in chart_source
     assert "死信" not in chart_source
