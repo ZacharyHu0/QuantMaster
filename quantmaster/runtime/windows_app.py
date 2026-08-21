@@ -307,8 +307,24 @@ def start_windows_role_process(process: Any, role: str) -> None:
             process.start()
             return
         previous = spawn.get_executable()
+        previous_reset = os.environ.get("PYINSTALLER_RESET_ENVIRONMENT")
+        reset_onefile = (
+            getattr(sys, "frozen", False)
+            and str(role).strip().casefold() == "compute worker"
+        )
         multiprocessing.set_executable(executable)
         try:
+            # A managed StockDB restart can leave the parent onefile overlay
+            # with a native DLL lifetime that a fresh compute child cannot
+            # initialise (0xC0000142).  Give only compute children a private
+            # PyInstaller extraction; the parent keeps its own environment.
+            if reset_onefile:
+                os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
             process.start()
         finally:
+            if reset_onefile:
+                if previous_reset is None:
+                    os.environ.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
+                else:
+                    os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = previous_reset
             multiprocessing.set_executable(os.fsdecode(previous))
