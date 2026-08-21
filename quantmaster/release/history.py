@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.1"
-RELEASE_DATE = "2026-08-20"
+VERSION = "1.18.2"
+RELEASE_DATE = "2026-08-21"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -24,6 +24,35 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "本地更新与激活",
+                "items": (
+                    (
+                        "运行中的 Windows 发行版会发现并 staged 最新稳定 GitHub Release；"
+                        "候选必须通过 tag 提交、SHA-256、SBOM、构建证明和 frozen smoke 验证，"
+                        "下载或证据不完整时保持当前版本并显式失败。"
+                    ),
+                    (
+                        "激活后的 onefile 服务会重置 PyInstaller 运行环境并拥有独立解压生命周期；"
+                        "短命 helper 退出后不再清理新服务仍在使用的静态资源。"
+                    ),
+                ),
+            },
+            {
+                "title": "发布质量门禁",
+                "items": (
+                    (
+                        "盘后回归测试固定样本市场日期，避免测试随自然日期推进后误判历史样本过期，"
+                        "发布矩阵可稳定复验相同边界。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.1",
+        "date": "2026-08-20",
         "sections": (
             {
                 "title": "资讯事件与标注语义",
