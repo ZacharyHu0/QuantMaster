@@ -451,6 +451,7 @@ def test_packaged_controller_marks_activation_generation_as_detached(monkeypatch
 
     assert isinstance(result, Process)
     assert captured["command"] == [str(slot / "QuantMaster.exe"), "serve"]
+    assert captured["environment"]["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
     assert captured["environment"][activation.DETACHED_ACTIVATION_ENV] == "1"
     assert "QM_WINDOWS_APP_JOB_ROOT" not in captured["environment"]
 
