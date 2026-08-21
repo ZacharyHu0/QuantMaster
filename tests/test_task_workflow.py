@@ -15,9 +15,11 @@ from scripts.dev.pytest_windows_acl import prepare_pytest_directory
 from scripts.dev.tasks import (
     Impact,
     _release_source_equivalent,
+    ensure_task_manifest,
     full_validation_identity,
     gc_task_artifacts,
     has_full_validation,
+    read_task_manifest,
     ready,
     record_full_validation,
     record_task_remove_intent,
@@ -31,6 +33,7 @@ from scripts.dev.tasks import (
     task_artifact_lease,
     task_artifacts_active,
     task_changed_paths,
+    task_manifest_path,
     task_remove_intent_path,
     validate_ready_state,
 )
@@ -355,6 +358,45 @@ def test_task_context_rejects_registered_branch_mismatch(monkeypatch, tmp_path):
 
     with pytest.raises(SystemExit, match="branch_mismatch"):
         tasks.require_task_context(target)
+
+
+def test_task_manifest_binds_one_slug_to_one_worktree_and_artifact_root(tmp_path):
+    primary = tmp_path / "primary"
+    artifacts = primary / ".artifacts" / "worktrees" / "alpha"
+    artifacts.mkdir(parents=True)
+    payload = ensure_task_manifest(primary, "alpha")
+
+    assert payload["state"] == "active"
+    assert payload["branch"] == "codex/alpha"
+    assert payload["worktree"] == ".worktrees/alpha"
+    assert payload["artifacts"] == ".artifacts/worktrees/alpha"
+    assert read_task_manifest(primary, "alpha") == payload
+    assert task_manifest_path(primary, "alpha").is_file()
+
+
+def test_preflight_rejects_pending_cleanup_as_reusable_task(monkeypatch, tmp_path):
+    from scripts.dev import tasks
+
+    primary = tmp_path / "primary"
+    target = primary / ".worktrees" / "alpha"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(tasks, "worktree_branches", lambda _root: {
+        target.resolve(): "refs/heads/codex/alpha",
+    })
+    tasks._write_task_manifest(primary, "alpha", state="pending_cleanup")
+
+    with pytest.raises(SystemExit, match="pending_cleanup"):
+        tasks.preflight_task(primary, "alpha")
+
+
+def test_task_manifest_corruption_fails_closed(tmp_path):
+    primary = tmp_path / "primary"
+    manifest = task_manifest_path(primary, "alpha")
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="unreadable task manifest"):
+        read_task_manifest(primary, "alpha")
 
 
 def test_task_admin_lease_reports_busy_without_mutation(monkeypatch, tmp_path):
@@ -1322,7 +1364,7 @@ def test_remove_recovers_after_git_registration_was_already_removed(monkeypatch,
     assert ["branch", "-D", "codex/recovery"] in calls
 
 
-def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_path):
+def test_remove_records_pending_cleanup_after_git_lifecycle(monkeypatch, tmp_path):
     from scripts.dev import tasks
 
     primary = tmp_path / "primary"
@@ -1341,7 +1383,7 @@ def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_pa
 
     def blocked_artifacts(*_args, **_kwargs):
         calls.append("artifacts")
-        raise SystemExit("Windows ACL blocked")
+        raise SystemExit(f"{tasks.TASK_ARTIFACT_ACL_UNRECOVERABLE}: Windows ACL blocked")
 
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
     monkeypatch.setattr(tasks, "registered_worktrees", lambda root: set())
@@ -1352,11 +1394,11 @@ def test_remove_preserves_branch_when_artifact_cleanup_fails(monkeypatch, tmp_pa
     monkeypatch.setattr(tasks, "remove_task_artifacts", blocked_artifacts)
     monkeypatch.setattr(tasks, "git", fake_git)
 
-    with pytest.raises(SystemExit, match="ACL blocked"):
-        remove("recovery")
+    remove("recovery")
 
-    assert calls == ["completion", "artifacts"]
+    assert calls == ["completion", "artifacts", "branch"]
     assert artifacts.exists()
+    assert read_task_manifest(primary, "recovery")["state"] == "pending_cleanup"
 
 
 def test_remove_intent_recovers_checkout_after_git_partially_removed_it(monkeypatch, tmp_path):
