@@ -459,7 +459,8 @@ const newsFeature = (() => {
       recovery: Number(value?.recovery || 0),
       dead_letter: Number(value?.dead_letter || 0),
       manual_recoverable_dead_letter: Number(
-        value?.manual_recoverable_dead_letter ?? value?.recoverable_dead_letter ?? 0),
+        value?.manual_recoverable_dead_letter ?? value?.dead_letter
+        ?? value?.recoverable_dead_letter ?? 0),
       recoverable_dead_letter: Number(value?.recoverable_dead_letter || 0),
     };
     const queue = state.queue;
