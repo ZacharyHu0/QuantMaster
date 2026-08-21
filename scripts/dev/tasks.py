@@ -52,6 +52,7 @@ VALIDATION_EVIDENCE = "validation/full.json"
 TASK_LEASE = ".task-running.lock"
 COMPLETION_SCHEMA = 1
 REMOVE_INTENT_SCHEMA = 1
+TASK_MANIFEST_SCHEMA = 1
 TASK_ARTIFACT_ACL_UNRECOVERABLE = "TASK_ARTIFACT_ACL_UNRECOVERABLE"
 TASK_CHECKOUT_ACL_UNRECOVERABLE = "TASK_CHECKOUT_ACL_UNRECOVERABLE"
 PRIMARY_CONTROL_INVALID = "PRIMARY_CONTROL_INVALID"
@@ -404,6 +405,113 @@ def valid_task_completion(primary: Path, slug: str) -> bool:
     ).returncode == 0
 
 
+def task_manifest_path(primary: Path, slug: str) -> Path:
+    return primary / ".artifacts" / "task-manifests" / f"{slug}.json"
+
+
+def _write_task_manifest(
+    primary: Path, slug: str, *, state: str, last_error: str = "",
+) -> Path:
+    path = task_manifest_path(primary, slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict[str, object] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            existing = {}
+    payload = {
+        "schema": TASK_MANIFEST_SCHEMA,
+        "slug": slug,
+        "branch": f"codex/{slug}",
+        "worktree": f".worktrees/{slug}",
+        "artifacts": f".artifacts/worktrees/{slug}",
+        "state": state,
+        "owner": str(existing.get("owner") or os.environ.get("USERNAME") or "unknown"),
+        "pid": int(existing.get("pid") or os.getpid()),
+        "created_at": str(existing.get("created_at") or datetime.now(UTC).isoformat()),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "last_error": last_error,
+    }
+    temporary = path.with_name(f".{slug}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    return path
+
+
+def read_task_manifest(primary: Path, slug: str) -> dict[str, object] | None:
+    path = task_manifest_path(primary, slug)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"{TASK_CONTEXT_INVALID}: unreadable task manifest for {slug}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: task manifest is not an object for {slug}")
+    expected = {
+        "schema": TASK_MANIFEST_SCHEMA,
+        "slug": slug,
+        "branch": f"codex/{slug}",
+        "worktree": f".worktrees/{slug}",
+        "artifacts": f".artifacts/worktrees/{slug}",
+    }
+    if any(payload.get(key) != value for key, value in expected.items()):
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: task manifest mismatch for {slug}")
+    if payload.get("state") not in {"active", "pending_cleanup", "removed"}:
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: task manifest state invalid for {slug}")
+    return payload
+
+
+def ensure_task_manifest(primary: Path, slug: str) -> dict[str, object]:
+    payload = read_task_manifest(primary, slug)
+    if payload is not None:
+        return payload
+    artifacts = (primary / ".artifacts" / "worktrees" / slug).resolve()
+    if os.environ.get("QM_TASK_LEASE_HELD") == str(artifacts):
+        _write_task_manifest(primary, slug, state="active")
+        payload = read_task_manifest(primary, slug)
+        assert payload is not None
+        return payload
+    with task_artifact_lease(artifacts):
+        payload = read_task_manifest(primary, slug)
+        if payload is None:
+            _write_task_manifest(primary, slug, state="active")
+            payload = read_task_manifest(primary, slug)
+    assert payload is not None
+    return payload
+
+
+def update_task_manifest(
+    primary: Path, slug: str, *, state: str, last_error: str = "",
+) -> None:
+    if state not in {"active", "pending_cleanup", "removed"}:
+        raise ValueError(f"invalid task manifest state: {state}")
+    _write_task_manifest(primary, slug, state=state, last_error=last_error)
+
+
+def preflight_task(primary: Path, slug: str) -> dict[str, object]:
+    if not SLUG_PATTERN.fullmatch(slug):
+        raise SystemExit("无效 slug")
+    branches = worktree_branches(primary)
+    target = (primary / ".worktrees" / slug).resolve()
+    if target not in branches:
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: unregistered_worktree（未登记）for {slug}")
+    if branches[target] != f"refs/heads/codex/{slug}":
+        raise SystemExit(f"{TASK_CONTEXT_INVALID}: task branch/worktree mismatch for {slug}")
+    payload = ensure_task_manifest(primary, slug)
+    if payload["state"] != "active":
+        raise SystemExit(
+            f"{TASK_CONTEXT_INVALID}: task {slug} is {payload['state']}; "
+            "do not reuse it for a new session"
+        )
+    return payload
+
+
 def task_remove_intent_path(primary: Path, slug: str) -> Path:
     return primary / ".artifacts" / "task-remove" / f"{slug}.json"
 
@@ -652,6 +760,11 @@ def start(slug: str) -> None:
     target = primary / ".worktrees" / slug
     if target.exists():
         raise SystemExit(f"worktree 已存在：{target}")
+    if git(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=primary, check=False,
+    ).returncode == 0:
+        raise SystemExit(f"任务分支已存在：{branch}；请使用原 task slug，禁止复用分支")
     git(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], cwd=primary)
     git(["worktree", "add", "-b", branch, str(target), "origin/main"], cwd=primary)
     artifact_root = primary / ".artifacts" / "worktrees" / slug
@@ -666,6 +779,7 @@ def start(slug: str) -> None:
         artifact_root / "runtime" / "tests" / "provider-cache",
     ):
         prepare_pytest_directory(directory)
+    _write_task_manifest(primary, slug, state="active")
     print(f"[task] created {branch} (local path omitted)")
 
 
@@ -699,6 +813,7 @@ def serve(
     branch = git(["branch", "--show-current"], cwd=target).stdout.strip()
     if branch != f"codex/{slug}":
         raise SystemExit(f"任务 worktree 分支不匹配：{branch or 'detached HEAD'}")
+    preflight_task(primary, slug)
 
     task_targets = sorted(
         path for path in registered
@@ -1231,6 +1346,7 @@ def _remove_locked(
     if not SLUG_PATTERN.fullmatch(slug):
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
+    ensure_task_manifest(primary, slug)
     target = (primary / ".worktrees" / slug).resolve()
     expected_parent = (primary / ".worktrees").resolve()
     if target.parent != expected_parent:
@@ -1257,7 +1373,17 @@ def _remove_locked(
                 f"{branch} 仅剩孤儿工件但缺少完成凭据；"
                 "请使用 gc --adopt-legacy-orphans 做一次性所有者授权清理"
             )
-        remove_task_artifacts(primary, slug, retry_command=retry_command)
+        try:
+            remove_task_artifacts(primary, slug, retry_command=retry_command)
+        except SystemExit as exc:
+            if not str(exc).startswith(TASK_ARTIFACT_ACL_UNRECOVERABLE):
+                raise
+            update_task_manifest(
+                primary, slug, state="pending_cleanup", last_error=str(exc),
+            )
+            print(f"[task] {branch} 已完成 Git 清理；工件进入 pending_cleanup，可重试")
+            return
+        update_task_manifest(primary, slug, state="removed")
         print(f"[task] {branch} 已清理")
         return
     if branch_exists and not task_integrated(primary, branch) and replacement is None:
@@ -1288,15 +1414,24 @@ def _remove_locked(
     record_task_completion(
         primary, slug, branch=branch, superseded_by=replacement,
     )
-    # Artifacts may be owned by the current sandbox identity while Git metadata
-    # requires a different one.  Clean them before the final Git write so the
-    # documented retry can finish branch removal without stranding ACLs.
-    remove_task_artifacts(primary, slug, retry_command=retry_command)
+    cleanup_pending = False
+    try:
+        remove_task_artifacts(primary, slug, retry_command=retry_command)
+    except SystemExit as exc:
+        if not str(exc).startswith(TASK_ARTIFACT_ACL_UNRECOVERABLE):
+            raise
+        cleanup_pending = True
+        update_task_manifest(primary, slug, state="pending_cleanup", last_error=str(exc))
     if branch_exists:
         git(["branch", "-D", branch], cwd=primary)
     task_remove_intent_path(primary, slug).unlink(missing_ok=True)
+    if not cleanup_pending:
+        update_task_manifest(primary, slug, state="removed")
     evidence = f"; superseded by main commit {replacement}" if replacement else ""
-    print(f"[task] removed {branch} and {target}{evidence}")
+    if cleanup_pending:
+        print(f"[task] removed {branch} and {target}{evidence}; artifacts pending_cleanup")
+    else:
+        print(f"[task] removed {branch} and {target}{evidence}")
 
 
 def remove(
@@ -1307,11 +1442,19 @@ def remove(
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
     artifacts = primary / ".artifacts" / "worktrees" / slug
-    with task_artifact_lease(artifacts):
-        _remove_locked(
-            slug, superseded_by=superseded_by,
-            adopt_partial_removal=adopt_partial_removal,
-        )
+    previous_lease = os.environ.get("QM_TASK_LEASE_HELD")
+    os.environ["QM_TASK_LEASE_HELD"] = str(artifacts.resolve())
+    try:
+        with task_artifact_lease(artifacts):
+            _remove_locked(
+                slug, superseded_by=superseded_by,
+                adopt_partial_removal=adopt_partial_removal,
+            )
+    finally:
+        if previous_lease is None:
+            os.environ.pop("QM_TASK_LEASE_HELD", None)
+        else:
+            os.environ["QM_TASK_LEASE_HELD"] = previous_lease
     cleanup_task_lease_marker(primary, slug)
 
 
@@ -1343,6 +1486,8 @@ def parser() -> argparse.ArgumentParser:
     gc_parser.add_argument("--apply", action="store_true")
     gc_parser.add_argument("--retention-days", type=int, default=7)
     gc_parser.add_argument("--adopt-legacy-orphans", action="store_true")
+    preflight_parser = commands.add_parser("preflight")
+    preflight_parser.add_argument("slug")
     return result
 
 
@@ -1371,6 +1516,10 @@ def dispatch(args: argparse.Namespace, cwd: Path) -> None:
             apply=args.apply, retention_days=args.retention_days,
             adopt_legacy_orphans=args.adopt_legacy_orphans,
         )
+    elif args.command == "preflight":
+        primary = require_primary_control(cwd)
+        preflight_task(primary, args.slug)
+        print("[task] PREFLIGHT OK")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1378,14 +1527,18 @@ def main(argv: list[str] | None = None) -> int:
     cwd = Path.cwd().resolve()
 
     try:
-        if args.command in {"start", "remove", "gc"}:
+        if args.command in {"start", "remove", "gc", "preflight"}:
             primary = require_primary_control(cwd)
             with task_admin_lease(primary):
                 require_primary_control(cwd)
                 dispatch(args, cwd)
         else:
             if args.command in {"check", "ready"}:
-                require_task_context(cwd)
+                primary, slug = require_task_context(cwd)
+                preflight_task(primary, slug)
+            elif args.command == "serve":
+                primary = primary_root(ROOT)
+                preflight_task(primary, args.slug)
             dispatch(args, cwd)
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"[task] FAILED: {redact_public_text(exc)}", file=sys.stderr)

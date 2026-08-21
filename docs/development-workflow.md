@@ -108,6 +108,25 @@ practical.
 
 ## 6. Classify stale tasks from evidence
 
+### Session preflight and concurrent worktrees
+
+Every new session must use a unique task slug. From the primary checkout, verify an existing
+task before editing it:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\dev\tasks.py preflight <task-slug>
+```
+
+`tasks.py` records a task manifest under `.artifacts/task-manifests/<task-slug>.json` and checks
+the exact branch/worktree/artifact mapping before `serve`, `check`, `ready`, or `remove` proceeds.
+Different sessions must use different slugs; the admin lease serializes lifecycle changes and
+the per-task lease isolates writable state.
+
+Artifact deletion is resumable. If a Windows lock or permission boundary prevents physical
+deletion, `remove` records `pending_cleanup` after completing the Git lifecycle. Retry the same
+managed command or the managed janitor after the external lock is gone; do not delete paths by
+hand or treat a pending artifact as an active development task.
+
 Failure of automatic integration detection does not mean a task is active. Assign every stale task
 to exactly one category:
 
@@ -119,8 +138,10 @@ to exactly one category:
    same two phases.
 
 If a task artifact root cannot be inspected or have its ACL restored by the current identity,
-`tasks.py remove` reports `TASK_ARTIFACT_ACL_UNRECOVERABLE`, preserves the artifact and branch,
-and remains the only retry interface after the required path permission is available.
+`tasks.py remove` reports `TASK_ARTIFACT_ACL_UNRECOVERABLE`, records `pending_cleanup`, and
+keeps the artifact manifest as the retry record. The Git lifecycle may already be complete;
+after the required path permission is available, retry `tasks.py remove <task-slug>` (or the
+managed janitor) until the artifact root is gone. Never delete paths by hand.
 
 Delete an old task only after its value is proven present on `main` or the owner explicitly
 abandons it. Report the exact category; never describe every non-removable task as active,

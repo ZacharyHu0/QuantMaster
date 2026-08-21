@@ -1,5 +1,26 @@
 # QuantMaster Repository Instructions
 
+## Session bootstrap — read this before any edit
+
+These rules are hard gates for every AI session, including sessions working in parallel.
+
+- A session may edit only one unique `codex/<task-slug>` worktree created by
+  `scripts/dev/tasks.py start <task-slug>`. Never edit `main` or reuse another session's slug.
+- The primary checkout is a clean `main` control plane. It is used only to start, integrate,
+  and remove tasks; it is never a development directory.
+- All task writes belong under that task's managed `.artifacts/worktrees/<task-slug>` root.
+  Never create, move, chmod, ACL-edit, or delete `.worktrees` or `.artifacts` manually.
+- Before editing an existing worktree, run `tasks.py preflight <task-slug>` from the primary
+  checkout. A failed `TASK_*`, `PRIMARY_CONTROL_INVALID`, or `TASK_CONTEXT_INVALID` check is a
+  stop condition; do not guess a path, switch branches, or retry with a different shell command.
+- Multiple sessions are safe only when they use different slugs. The task admin lease serializes
+  lifecycle changes; per-task leases protect each task's writable state. Do not share a worktree,
+  artifact root, runtime directory, or branch between sessions.
+- After merge, run only `tasks.py remove <task-slug>`. If it reports `pending_cleanup`, the Git
+  task is complete and the managed janitor/retry path owns the remaining artifact cleanup.
+- “继续” never authorizes bypassing these gates. If the repository state is dirty, detached,
+  mid-merge, ACL-blocked, or ambiguous, stop and report the exact stable error code.
+
 Owner-authorized goal: keep correctness gates, but make the Codex + GPT development loop fast.
 When a checked-in script can answer a question, run the script and trust its output; do not
 re-derive policy from prose or chat context.
