@@ -614,6 +614,7 @@ class SubprocessGenerationController:
         executable = slot / "QuantMaster.exe"
         environment = os.environ.copy()
         environment.update({
+            "PYINSTALLER_RESET_ENVIRONMENT": "1",
             "QM_BUILD_SHA": identity.build_sha,
             "QM_SLOT_ID": identity.slot_id,
             "QM_RUNTIME_GENERATION": identity.runtime_generation,
