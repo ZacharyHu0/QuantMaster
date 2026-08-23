@@ -60,7 +60,7 @@ dev = [
 ]
 quality = [
     "build>=1.5.0",
-    "coverage[toml]>=7.6",
+    "coverage[toml]>=7.15.4",
     "mypy>=1.11",
     "pip-audit==2.10.1",
 ]
