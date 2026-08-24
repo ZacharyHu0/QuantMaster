@@ -79,7 +79,8 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 - [ ] Draft PR 使用 `Closes #<issue>`，按模板填写验证与回滚证据；
 - [ ] Draft 快检与 Ready 后完整 CI 均绿；`tasks.py ready --accept-ci`（或本地 ready）已记录；
 - [ ] PR Ready 后 squash merge，Issue/Project 状态已同步；
-- [ ] `tasks.py remove <slug>` 已清理，无手工删除的 worktree 残余；
+- [ ] 已调用 `tasks.py remove <slug>`；若出现 `pending_cleanup`，按登记记录重试至工件清理完成，
+      无手工删除的 worktree 残余；
 - [ ] 没有未经 owner 确认的 Release tag 或 GitHub Release。
 
 ## 7. 仓库入口
