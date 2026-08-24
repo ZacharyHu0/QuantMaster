@@ -33,7 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 # 免费数据源（推荐安装）
 data = [
-    "akshare>=1.18.92",
+    "akshare>=1.18.94",
     "yfinance>=1.6.0",
 ]
 # 可选数据源
