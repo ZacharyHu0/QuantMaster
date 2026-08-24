@@ -129,6 +129,11 @@ def initialize_windows_app_process(*, root: bool = False) -> bool:
     global _ROOT_JOB
     if os.name != "nt":
         return False
+    # The bootloader has already consumed this instruction when starting an
+    # activated top-level onefile instance.  It must not leak from that
+    # instance into multiprocessing workers, which are required to reuse the
+    # parent's unpacked application environment.
+    os.environ.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
     try:
         _set_app_user_model_id()
     except OSError:
@@ -307,8 +312,13 @@ def start_windows_role_process(process: Any, role: str) -> None:
             process.start()
             return
         previous = spawn.get_executable()
+        previous_reset = os.environ.get("PYINSTALLER_RESET_ENVIRONMENT")
         multiprocessing.set_executable(executable)
         try:
+            if getattr(sys, "frozen", False):
+                os.environ.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
             process.start()
         finally:
+            if previous_reset is not None:
+                os.environ["PYINSTALLER_RESET_ENVIRONMENT"] = previous_reset
             multiprocessing.set_executable(os.fsdecode(previous))
