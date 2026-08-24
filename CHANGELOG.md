@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.18.3（2026-08-24）
+
+### 本地 StockDB 与更新提示
+- free-stockdb 官方动态切换到 WorkBuddy HTTPS 地址；旧域缓存立即失效，设置页和前端详情链接只接受新的官方域，0.3.2 公告可重新获取
+
+### Windows 发行可靠性
+- frozen 计算子进程复用父 onefile 解包环境；顶层激活指令不会泄漏到 multiprocessing worker，StockDB 重启后的 schema bootstrap 保持可用
+
+### 开发与依赖质量
+- 任务会话通过清单、管理租约和任务租约绑定唯一分支、worktree 与可写工件；异常清理保留 pending_cleanup 证据并由受控重试路径接管
+- Python 依赖最低版本与 uv.lock 同步更新，包含 AkShare 1.18.94、PyArrow 25.0.1、Ruff 0.16.4 及配套质量工具
+
 ## v1.18.2（2026-08-21）
 
 ### 本地更新与激活
