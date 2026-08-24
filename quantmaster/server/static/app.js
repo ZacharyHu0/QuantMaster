@@ -1563,8 +1563,8 @@ async function streamJson(path, opts, onProgress) {
     if (notice.version) details.push(`最新版本 ${notice.version}`);
     vendorSummary.textContent = details.join(' · ');
     vendorState.textContent = notice.status === 'stale' ? '最近一次动态' : '最新动态';
-    vendorLink.href = String(notice.url || '').startsWith('https://a.123128.xyz/')
-      ? notice.url : 'https://a.123128.xyz/';
+    vendorLink.href = String(notice.url || '').startsWith('https://www.app.workbuddy.link/')
+      ? notice.url : 'https://www.app.workbuddy.link/';
     vendorPanel.hidden = false;
     try {
       vendorUnread.hidden = localStorage.getItem('qm-free-stockdb-release-seen') === vendorFingerprint;

@@ -281,15 +281,15 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
 
 def test_vendor_notice_parser_extracts_notice_date_and_version() -> None:
     notice = FreeStockDBRuntime._parse_vendor_notice(
-        '<span class="tag-blue">更新至: 2026-08-17</span>'
-        '<h3 class="card-title">[08-14] 全市场实时 Ticks 行情</h3>'
-        "<p>最新版本 v0.3.1-online-more-power，直接解压覆盖即可。</p>"
+        '<span class="tag-blue">更新至: 2026-08-24</span>'
+        '<h3 class="card-title">[08-23 HTTPS版] 客户端程序下载</h3>'
+        "<p>最新版本 v0.3.2-online-more-power，直接解压覆盖 stockdb 目录即可。</p>"
     )
 
     assert notice == {
-        "notice_updated_on": "2026-08-17",
-        "version": "0.3.1-online-more-power",
-        "announcement": "[08-14] 全市场实时 Ticks 行情",
+        "notice_updated_on": "2026-08-24",
+        "version": "0.3.2-online-more-power",
+        "announcement": "[08-23 HTTPS版] 客户端程序下载",
     }
 
 
@@ -390,6 +390,11 @@ def test_closed_official_calendar_session_nominates_update_target(monkeypatch) -
 def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     cache_path = tmp_path / "vendor-notice.json"
+    cache_path.write_text(json.dumps({
+        "checked_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+        "url": "https://a.123128.xyz/",
+        "version": "0.3.1-online-more-power",
+    }), encoding="utf-8")
     calls = []
 
     class Response:
@@ -427,8 +432,8 @@ def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) 
     assert first["fingerprint"] == "2026-08-06|3.0.0|[08-06] 新增私有存储"
     assert first["notice_updated_on"] == "2026-08-06"
     assert second == first
-    assert first["url"] == "https://a.123128.xyz/"
-    assert calls.count("https://a.123128.xyz/tabs/notice.html") == 1
+    assert first["url"] == "https://www.app.workbuddy.link/"
+    assert calls.count("https://www.app.workbuddy.link/tabs/notice.html") == 1
     assert cache_path.is_file()
 
 

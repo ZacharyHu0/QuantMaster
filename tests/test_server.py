@@ -754,6 +754,8 @@ class TestBasics:
         assert 'id="free-stockdb-release"' in stockdb_popover
         assert 'id="stockdb-popover-session"' in stockdb_popover
         assert '/api/v1/settings/free-stockdb/vendor-notice' in app_script
+        assert "https://www.app.workbuddy.link/" in app_script
+        assert "https://www.app.workbuddy.link/" in resp.text
         assert "官网动态更新于" in app_script
         assert "/api/v1/system/reload" not in app_script
         assert "/api/v1/system/update/activate" not in app_script

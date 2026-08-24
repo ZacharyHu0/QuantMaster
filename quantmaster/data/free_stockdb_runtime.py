@@ -41,7 +41,7 @@ class StockDBUpdateEvent:
 def _monotonic() -> float:
     return time.monotonic()
 
-_VENDOR_HOME = "https://a.123128.xyz/"
+_VENDOR_HOME = "https://www.app.workbuddy.link/"
 _VENDOR_NOTICE_URL = f"{_VENDOR_HOME}tabs/notice.html"
 _VENDOR_NOTICE_TTL = 6 * 60 * 60
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
@@ -973,7 +973,7 @@ class FreeStockDBRuntime:
         """Read the vendor announcement without ever opening the vendor website."""
         cached = self._read_vendor_cache()
         checked_at = str(cached.get("checked_at") or "")
-        if checked_at and not force:
+        if checked_at and cached.get("url") == _VENDOR_HOME and not force:
             try:
                 age = datetime.now(ZoneInfo("Asia/Shanghai")) - datetime.fromisoformat(checked_at)
                 if age.total_seconds() < _VENDOR_NOTICE_TTL:
