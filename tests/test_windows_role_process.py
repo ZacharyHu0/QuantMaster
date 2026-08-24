@@ -87,7 +87,7 @@ def test_frozen_role_process_reuses_onefile_archive_without_copying(tmp_path, mo
     assert not (tmp_path / "QuantMaster Compute Worker.exe").exists()
 
 
-def test_frozen_compute_child_gets_a_private_onefile_environment(monkeypatch):
+def test_frozen_compute_child_reuses_parent_onefile_environment(monkeypatch):
     from quantmaster.runtime import windows_app
 
     captured: list[str | None] = []
@@ -102,12 +102,12 @@ def test_frozen_compute_child_gets_a_private_onefile_environment(monkeypatch):
     monkeypatch.setattr(windows_app, "_role_executable", lambda _role: "C:/QuantMaster.exe")
     monkeypatch.setattr(windows_app.spawn, "get_executable", lambda: b"C:/python.exe")
     monkeypatch.setattr(windows_app.multiprocessing, "set_executable", lambda _value: None)
-    monkeypatch.delenv("PYINSTALLER_RESET_ENVIRONMENT", raising=False)
+    monkeypatch.setenv("PYINSTALLER_RESET_ENVIRONMENT", "1")
 
     windows_app.start_windows_role_process(Process(), "Compute Worker")
 
-    assert captured == ["1"]
-    assert "PYINSTALLER_RESET_ENVIRONMENT" not in windows_app.os.environ
+    assert captured == [None]
+    assert windows_app.os.environ["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
 
 
 def test_windows_role_sanitizes_filename_without_losing_job_identity():
