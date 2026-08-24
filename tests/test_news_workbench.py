@@ -655,6 +655,29 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     }
 
 
+def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
+    store = NewsStore(tmp_path / "news.sqlite")
+    items = [
+        official_news(store, title=f"窗口资讯 {index}", content=f"窗口正文 {index}")
+        for index in range(3)
+    ]
+    assert store.save(items) == 3
+    now = time.time()
+    with store._conn() as connection:
+        for item, first_seen_at in zip(
+            items, (now - 2 * 3600, now - 23 * 3600, now - 25 * 3600), strict=True,
+        ):
+            connection.execute(
+                "UPDATE news SET first_seen_at=? WHERE provider_item_id=?",
+                (first_seen_at, item.provider_item_id),
+            )
+
+    stats = store.stats(30)
+
+    assert stats["total"] == 3
+    assert stats["ingested_24h"] == 2
+
+
 def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     store.save([NewsItem(source="unit", title="待标注", content="pending")])
@@ -852,6 +875,14 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
             symbols=["300001.SZ"], confidence=1, importance_score=100,
             content_scope="feed_summary", analysis_status="complete",
         ),
+        NewsItem(
+            source="sina_live", title="已标注实时快讯", content="实时快讯摘要",
+            url="https://zhibo.sina.com.cn/?id=focus", published_at_epoch=now - 60,
+            published_at=datetime.fromtimestamp(now - 60, UTC).isoformat(),
+            provider_item_id="focus", raw_cache_key="sha256:" + "a" * 64,
+            symbols=["300002.SZ"], confidence=1, importance_score=100,
+            content_scope="provider_excerpt", analysis_status="complete",
+        ),
     ]
     assert store.save(items) == len(items)
     with store._conn() as connection:
@@ -870,14 +901,15 @@ def test_news_event_focus_uses_rolling_window_and_quality_gates(tmp_path, monkey
         "top_symbols": [
             {"symbol": "000001.SZ", "name": "名称-000001.SZ", "count": 1},
             {"symbol": "300001.SZ", "name": "名称-300001.SZ", "count": 1},
+            {"symbol": "300002.SZ", "name": "名称-300002.SZ", "count": 1},
             {"symbol": "600001.SH", "name": "名称-600001.SH", "count": 1},
         ],
     }
     assert [item["symbol"] for item in three_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "300001.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "300001.SZ", "300002.SZ", "600001.SH",
     ]
     assert [item["symbol"] for item in thirty_days["top_symbols"]] == [
-        "000001.SZ", "000002.SZ", "000003.SZ", "300001.SZ", "600001.SH",
+        "000001.SZ", "000002.SZ", "000003.SZ", "300001.SZ", "300002.SZ", "600001.SH",
     ]
     with pytest.raises(ValueError, match="仅支持"):
         store.event_focus(2)
@@ -1637,6 +1669,8 @@ def test_news_api_csrf_and_ui_contract():
     assert "data-news-retry" in chart_source
     assert "原因：${html(reason)}" in chart_source
     assert "queue?.manual_recoverable_dead_letter" in chart_source
+    assert "news-stat-ingested-24h" in chart_source
+    assert "value?.manual_recoverable_dead_letter ?? value?.dead_letter" in chart_source
     assert "正在认领可手动恢复的暂停项" in chart_source
     assert "恢复暂停项" in chart_source
     assert "死信" not in chart_source

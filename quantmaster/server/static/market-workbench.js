@@ -488,6 +488,7 @@ const marketWorkbench = (() => {
     const root = document.getElementById('market-workbench-root');
     const workbench = document.getElementById('market-workbench-view');
     mounted = true; generation += 1;
+    document.querySelectorAll('[data-market-view]').forEach(view => { view.hidden = true; });
     workbench.hidden = false;
     restoreRoute(nextContext.route || {});
     root.innerHTML = shellMarkup();
