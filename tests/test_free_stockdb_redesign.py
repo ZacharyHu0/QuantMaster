@@ -1555,3 +1555,52 @@ def test_stockdb_audit_api_projects_latest_manifest_without_live_catalog(
     assert payload["capabilities"]["daily_bars"]["state"] == "locally_validated"
     assert payload["catalog"] == {"securities": 1, "delisted_records": 1}
     assert payload["boards"]["total"] == 1
+
+
+def test_stockdb_audit_uses_actual_barstore_frontier_and_discloses_partial_state(
+    monkeypatch,
+    isolated_config,
+):
+    root = isolated_config.data_root / "stockdb-runtime"
+    root.mkdir(parents=True)
+    isolated_config.data.free_stockdb_root = str(root)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2,
+        "validated_session": "2026-08-10",
+        "target_session": "2026-08-10",
+        "updated_at": "2026-08-10T18:00:00+08:00",
+        "validation": {
+            "accepted": True,
+            "complete": False,
+            "target_session": "2026-08-10",
+            "actual_session": "2026-08-10",
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "quantmaster.data.storage.BarStore.metadata_many",
+        lambda _self: {
+            "600000.SH": {
+                # coverage_end is the requested range, not the observed frontier.
+                "end": "2026-08-08",
+                "coverage_end": "2026-08-10",
+                "last_status": "ready",
+                "quality_json": json.dumps({"partial": False, "stale": False}),
+            },
+            "000001.SZ": {
+                "end": "2026-08-10",
+                "coverage_end": "2026-08-10",
+                "last_status": "stale",
+                "quality_json": json.dumps({"partial": True, "stale": True}),
+            },
+        },
+    )
+
+    payload = TestClient(app).get("/api/v1/data-sources/free-stockdb/audit").json()
+
+    assert payload["bar_store"]["latest_session"] == "2026-08-10"
+    assert payload["bar_store"]["session_coverage_ratio"] == 0.5
+    assert payload["bar_store"]["usable_session_coverage_ratio"] == 0.0
+    assert payload["bar_store"]["status"] == "stale"
+    assert payload["bar_store"]["missing_session_symbols"] == ["600000.SH"]
+    assert payload["bar_store"]["stale_symbols"] == ["000001.SZ"]
+    assert any("逐标的覆盖" in issue for issue in payload["issues"])
