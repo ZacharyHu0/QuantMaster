@@ -583,8 +583,11 @@ class FreeStockDBSource(DataSource):
             raise FreeStockDBProviderError("stock_sdk 资金流合同错误：预期单行对象")
 
         def number(name: str) -> float | None:
+            raw = payload.get(name)
+            if raw is None:
+                return None
             try:
-                value = float(payload.get(name))
+                value = float(raw)
             except (TypeError, ValueError):
                 return None
             return value if math.isfinite(value) else None
