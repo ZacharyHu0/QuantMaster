@@ -555,6 +555,55 @@ class FreeStockDBSource(DataSource):
         frame = self._frame(records, intraday=False).loc[start:end]
         return self._bind_formal_acceptance(frame, end)
 
+    def capital_flow(self, symbol: str, session: str | None = None) -> dict[str, Any]:
+        """Read the post-2026-08-26 full capital-flow row from native StockDB."""
+        code = symbol.partition(".")[0].zfill(6)
+        if len(code) != 6 or not code.isdigit():
+            return {}
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        if acceptance is None:
+            return {}
+        target = str(session or acceptance.session).replace("-", "")[:8]
+        if len(target) != 8 or not target.isdigit() or target > acceptance.session.replace("-", "")[:8]:
+            return {}
+        client = self._sdk_client()
+        if client is None:
+            return {}
+        key = json.dumps(
+            {"sdk": True, "table": "资金流", "code": code, "date": target},
+            separators=(",", ":"),
+        )
+        payload = provider_call(
+            self.name,
+            key,
+            lambda: client.rd.get("资金流", code, int(target)).do(),
+            local_snapshot=self.name == "free-stockdb" and not self._trust_env,
+        )
+        if not isinstance(payload, dict):
+            raise FreeStockDBProviderError("stock_sdk 资金流合同错误：预期单行对象")
+
+        def number(name: str) -> float | None:
+            try:
+                value = float(payload.get(name))
+            except (TypeError, ValueError):
+                return None
+            return value if math.isfinite(value) else None
+
+        main = number("main_net")
+        main_in = number("main_in")
+        main_out = number("main_out")
+        denominator = (abs(main_in) + abs(main_out)) if main_in is not None and main_out is not None else 0.0
+        return {
+            "main_force": main,
+            "main_pct": main / denominator * 100 if main is not None and denominator else None,
+            "super_large": number("jumbo_net"),
+            "large": number("big_net"),
+            "medium": number("mid_net"),
+            "small": number("small_net"),
+            "date": f"{target[:4]}-{target[4:6]}-{target[6:8]}",
+            "provider": "free-stockdb:资金流",
+        }
+
     def daily_many(
         self,
         symbols: list[str],
