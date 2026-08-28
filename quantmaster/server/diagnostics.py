@@ -14,6 +14,7 @@ from quantmaster.server.problems import collect_health_report, make_problem
 
 _TTL_SECONDS = 5.0
 _WAIT_SECONDS = 2.0
+_REFRESH_TIMEOUT_SECONDS = 10.0
 _lock = threading.Lock()
 _ready = threading.Event()
 _refreshing = False
@@ -21,6 +22,8 @@ _cached: dict[str, Any] | None = None
 _cached_at = 0.0
 _sampler_stop = threading.Event()
 _sampler: threading.Thread | None = None
+_refresh_thread: threading.Thread | None = None
+_refresh_generation = 0
 logger = logging.getLogger(__name__)
 _problem_history: dict[str, dict[str, Any]] = {}
 _recovered_history: list[dict[str, Any]] = []
@@ -34,8 +37,11 @@ def invalidate_diagnostics() -> None:
         _cached_at = 0.0
 
 
-def _refresh() -> None:
+def _refresh(generation: int | None = None) -> None:
     global _cached, _cached_at, _refreshing
+    if generation is None:
+        with _lock:
+            generation = _refresh_generation
     try:
         report = collect_health_report()
         from quantmaster.runtime.llm import get_llm_execution_coordinator
@@ -101,10 +107,42 @@ def _refresh() -> None:
         }
         _decorate_problem_history(report)
     with _lock:
+        if generation != _refresh_generation:
+            return
         _cached = report
         _cached_at = time.monotonic()
         _refreshing = False
         _ready.set()
+
+
+def _expire_refresh(generation: int) -> None:
+    """Publish a bounded failure without letting a hung probe block health."""
+
+    global _cached, _cached_at, _refreshing, _refresh_generation
+    expired = False
+    with _lock:
+        if generation != _refresh_generation or not _refreshing:
+            return
+        _refresh_generation += 1
+        _refreshing = False
+        _cached = {
+            "level": "warning",
+            "checked_at": datetime.now(UTC).isoformat(),
+            "refreshing": False,
+            "issues": [make_problem(
+                "diagnostics_timeout",
+                severity="warning",
+                source="后台状态",
+                title="完整诊断超时",
+                message="诊断任务超过时间预算，已记录失败并继续提供健康检查。",
+                action="稍后重试并查看服务日志。",
+            )],
+        }
+        _cached_at = time.monotonic()
+        _ready.set()
+        expired = True
+    if expired:
+        logger.warning("完整诊断刷新超时 generation=%s", generation)
 
 
 def _decorate_problem_history(report: dict[str, Any]) -> None:
@@ -168,13 +206,25 @@ def _redact_report(value: Any) -> Any:
 
 
 def _start_refresh() -> None:
-    global _refreshing
+    global _refreshing, _refresh_thread, _refresh_generation
     with _lock:
         if _refreshing:
             return
+        if _refresh_thread is not None and _refresh_thread.is_alive():
+            return
         _refreshing = True
+        _refresh_generation += 1
+        generation = _refresh_generation
         _ready.clear()
-    threading.Thread(target=_refresh, name="qm-diagnostics", daemon=True).start()
+        _refresh_thread = threading.Thread(
+            target=_refresh, args=(generation,), name="qm-diagnostics", daemon=True,
+        )
+        _refresh_thread.start()
+    timer = threading.Timer(
+        _REFRESH_TIMEOUT_SECONDS, _expire_refresh, args=(generation,),
+    )
+    timer.daemon = True
+    timer.start()
 
 
 def start_diagnostics_sampler(interval_seconds: float = _TTL_SECONDS) -> None:

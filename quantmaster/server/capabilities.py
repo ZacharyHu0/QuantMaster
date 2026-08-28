@@ -47,6 +47,10 @@ router = APIRouter(tags=["capabilities"])
 
 WEB_BLOCKING_TOKENS = 16
 WEB_THREAD_WARNING = 64
+HEALTH_PATH = "/api/v1/health"
+HEALTH_COMPAT_PATHS = frozenset({
+    "/api/v1/health/live", "/api/v1/health/ready",
+})
 _web_blocking_slots = threading.BoundedSemaphore(WEB_BLOCKING_TOKENS)
 _web_stream_lock = threading.Lock()
 _web_stream_runtime = None
@@ -335,7 +339,7 @@ def create_browser_session(request: Request, response: Response) -> dict:
     return {"csrf_token": token, "expires_in": 8 * 60 * 60, "local_only": True}
 
 
-@router.get("/api/v1/health")
+@router.get(HEALTH_PATH)
 async def liveness() -> dict:
     """Sole constant-time health probe; it deliberately performs no store access.
 
@@ -360,6 +364,26 @@ async def liveness() -> dict:
         "web_threads": threads,
         "thread_status": "warning" if threads > WEB_THREAD_WARNING else "ok",
     }
+
+
+async def _compat_health(response: Response) -> dict:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = f"<{HEALTH_PATH}>; rel=\"canonical\""
+    return await liveness()
+
+
+@router.get("/api/v1/health/live", include_in_schema=False, deprecated=True,
+            name="health_live_compat")
+async def health_live_compat(response: Response) -> dict:
+    """Deprecated alias retained for launchers and watchdogs during migration."""
+    return await _compat_health(response)
+
+
+@router.get("/api/v1/health/ready", include_in_schema=False, deprecated=True,
+            name="health_ready_compat")
+async def health_ready_compat(response: Response) -> dict:
+    """Deprecated alias retained for launchers and watchdogs during migration."""
+    return await _compat_health(response)
 
 
 @router.get("/api/v1/external/sentiment")

@@ -224,7 +224,6 @@ def _persistent_work_issues() -> list[dict[str, Any]]:
 
 def _api_issues() -> list[dict[str, Any]]:
     from quantmaster.server.app import app
-
     paths = _route_paths(app.routes)
     issues: list[dict[str, Any]] = []
     required = {
@@ -241,12 +240,39 @@ def _api_issues() -> list[dict[str, Any]]:
         issues.append(_issue(
             "legacy_api_present", "high", "旧版 API 路径仍可路由", ", ".join(old[:30]),
         ))
-    if "/api/v1/health/live" in paths or "/api/v1/health/ready" in paths:
+    obsolete = _noncompatibility_health_paths(app.routes)
+    if obsolete:
         issues.append(_issue(
             "obsolete_health_route_present", "high", "废弃健康检查路由重新进入公共契约",
-            "仅可使用 /api/v1/health；可选组件状态请使用 /api/v1/diagnostics",
+            "仅可使用 /api/v1/health；旧路径仅允许作为临时兼容别名",
         ))
     return issues
+
+
+def _noncompatibility_health_paths(routes: Any, *, prefix: str = "") -> set[str]:
+    """Return health aliases that are not explicitly compatibility routes."""
+
+    from quantmaster.server.capabilities import HEALTH_COMPAT_PATHS
+
+    result: set[str] = set()
+    for route in routes:
+        path = getattr(route, "path", None)
+        if path is not None:
+            full_path = f"{prefix}{path}"
+            if full_path in HEALTH_COMPAT_PATHS and not str(
+                getattr(route, "name", "")
+            ).endswith("_compat"):
+                result.add(full_path)
+        original_router = getattr(route, "original_router", None)
+        nested_routes = getattr(original_router, "routes", None)
+        if nested_routes is None:
+            continue
+        context = getattr(route, "include_context", None)
+        include_prefix = str(getattr(context, "prefix", "") or "")
+        result.update(_noncompatibility_health_paths(
+            nested_routes, prefix=f"{prefix}{include_prefix}",
+        ))
+    return result
 
 
 def _route_paths(

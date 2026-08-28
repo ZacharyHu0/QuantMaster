@@ -319,11 +319,13 @@ async def request_context_and_migration_lock(request: Request, call_next):
     request_id = _new_request_id()
     request.state.request_id = request_id
     path = request.url.path
+    health_paths = {
+        "/api/v1/health", "/api/v1/health/live", "/api/v1/health/ready",
+    }
     llm_request_token = enter_http_request()
     allowed = (
         path
-        in {
-            "/api/v1/health",
+        in health_paths | {
             "/api/v1/diagnostics",
             "/api/v1/release",
             "/api/v1/session",
@@ -413,7 +415,7 @@ async def request_context_and_migration_lock(request: Request, call_next):
         response.headers["X-QM-Worker-Generation"] = os.environ.get("QM_WEB_GENERATION", "0")
         duration_ms = (time.perf_counter() - started) * 1000
         response.headers["Server-Timing"] = f"app;dur={duration_ms:.2f}"
-        if path != "/api/v1/health":
+        if path not in health_paths:
             try:
                 route = getattr(request.scope.get("route"), "path", None) or path
                 get_runtime_metrics_recorder = __import__(

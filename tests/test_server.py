@@ -137,8 +137,12 @@ class TestBasics:
         health = client.get("/api/v1/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert client.get("/api/v1/health/live").status_code == 404
-        assert client.get("/api/v1/health/ready").status_code == 404
+        for path in ("/api/v1/health/live", "/api/v1/health/ready"):
+            compatibility = client.get(path)
+            assert compatibility.status_code == 200
+            assert compatibility.json()["status"] == health.json()["status"]
+            assert compatibility.headers["Deprecation"] == "true"
+            assert "/api/v1/health" in compatibility.headers["Link"]
 
     def test_health_reports_exact_application_identity(self, monkeypatch):
         from quantmaster.runtime.identity import (
@@ -309,6 +313,23 @@ class TestBasics:
         assert live.json()["thread_status"] in {"ok", "warning"}
         assert live.json()["core_ready"] is True
         assert live.json()["readiness_status"] == "ready"
+
+    def test_diagnostics_timeout_lands_failure_and_recovers(self, monkeypatch):
+        from quantmaster.server import diagnostics as diagnostics_module
+
+        diagnostics_module._cached = None
+        diagnostics_module._cached_at = 0.0
+        diagnostics_module._refreshing = False
+        diagnostics_module._refresh_thread = None
+        monkeypatch.setattr(diagnostics_module, "_REFRESH_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(diagnostics_module, "collect_health_report", lambda: time.sleep(1))
+
+        pending = diagnostics_module.diagnostics(wait_for_first=False, refresh=True)
+        assert pending["issues"][0]["code"] == "diagnostics_pending"
+        time.sleep(0.05)
+        failed = diagnostics_module.diagnostics(wait_for_first=False, refresh=False)
+        assert failed["issues"][0]["code"] == "diagnostics_timeout"
+        assert failed["refreshing"] is False
 
     def test_retry_settings_apply_ignores_scalar_document_sections(self, monkeypatch):
         from quantmaster.server import management

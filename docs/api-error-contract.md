@@ -9,7 +9,11 @@ validation never returns rejected values or Pydantic context.
 liveness; the response also carries the lightweight, store-free `core_ready` and
 `readiness_status` projection. It does not run full diagnostics or contact
 news, rotation, LLM, Feishu, or a provider. Optional component state is reported
-by `GET /api/v1/diagnostics`; `/health/live` and `/health/ready` were removed.
+by `GET /api/v1/diagnostics`. The canonical probe is `/api/v1/health`; the
+legacy `/api/v1/health/live` and `/api/v1/health/ready` paths remain temporary
+compatibility aliases, return the same payload, and include `Deprecation: true`
+with a canonical `Link` header so launchers and watchdogs can migrate without
+causing false 404 failures.
 
 Evidence found in local logs (parameters are intentionally not logged):
 
