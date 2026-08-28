@@ -465,7 +465,7 @@ class TestBasics:
         app_script = anonymous.get("/static/app.js")
         assert app_script.status_code == 200
         assert "csrfRefreshPromise" in app_script.text
-        assert "csrfCodes.has(String(rejection?.problem?.code || ''))" in app_script.text
+        assert "csrfCodes.has(String(rejection?.problem?.code || rejection?.code || ''))" in app_script.text
 
         stale_browser = TestClient(app)
         stale_browser.cookies.set(

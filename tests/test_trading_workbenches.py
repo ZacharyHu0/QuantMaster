@@ -1482,6 +1482,30 @@ def test_unproven_legacy_fill_blocks_report_and_cycle_projection(tmp_path):
     assert "停止计算持仓、净值和收益" in payload["warnings"][0]
 
 
+def test_unproven_order_pauses_paper_operations_until_recovery(tmp_path):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(account_spec("待核验操作"), symbols=["600000.SH"])
+    cycle, _ = store.create_cycle(
+        account, "2024-01-05", {"600000.SH": 1.0}, {"600000.SH": 10.0}, [],
+    )
+    order = cycle["orders"][0]
+    with store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_orders SET status='unproven',integrity_code='legacy_fill_unproven' WHERE id=?",
+            (order["id"],),
+        )
+    service = PaperService(store)
+
+    with pytest.raises(ValueError, match="待核验历史成交"):
+        service.process(account["id"], panel={})
+    assert store.account(account["id"])["status"] == "paused"
+    assert "请先完成人工核验" in store.account(account["id"])["runtime_warning"]
+
+    store.update_account(account["id"], status="active")
+    with pytest.raises(ValueError, match="待核验历史成交"):
+        service.propose(account["id"], panel={})
+
+
 def test_paper_report_uses_accepted_native_prices_after_a_fill(tmp_path, monkeypatch):
     service, account = make_paper_service(tmp_path, "报告本地估值")
     service.store.ledger(account["id"]).add_trade(
@@ -1594,6 +1618,7 @@ def test_unproven_legacy_fill_requires_matching_manual_recovery_evidence(tmp_pat
     assert recovered["status"] == "filled"
     assert recovered["integrity_code"] == ""
     assert recovered["side"] == "buy"
+    assert store.account(account["id"])["runtime_warning"] == ""
     assert store.cycle(cycle["id"])["status"] == "completed"
     assert store.order_fills(order["id"])[0]["market_ref"] == "statement:1"
 

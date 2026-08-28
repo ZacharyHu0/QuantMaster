@@ -996,7 +996,10 @@ const tradingFeature = (() => {
       document.getElementById('paper-account-meta').textContent = `${account.universe || '候选未知'} · ${strategyLabel(account.strategy)} · ${account.mode === 'auto' ? '每日自动交易' : '手动运行'}${account.strategy_hash ? ` · 快照 ${account.strategy_hash.slice(0, 10)}` : ''}`;
       edit.textContent = '编辑账户与策略';
       edit.title = '修改策略、候选或调仓频率后，按 15:00 分界排入后续真实交易日开盘';
-      edit.disabled = account.status === 'archived' || !account.management?.strategy_editable;
+      const integrityBlocked = payload.report?.evidence_status === 'unproven';
+      document.getElementById('paper-propose').disabled = account.status !== 'active' || integrityBlocked;
+      document.getElementById('paper-process').disabled = account.status !== 'active' || integrityBlocked;
+      edit.disabled = account.status === 'archived' || integrityBlocked || !account.management?.strategy_editable;
       paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderAutomation(payload.automation)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);

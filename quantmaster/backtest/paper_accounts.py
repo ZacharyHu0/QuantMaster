@@ -1529,6 +1529,8 @@ class PaperStore:
             recovery_of_unproven=True,
             side=side,
         )
+        if not self.unproven_orders(str(order["account_id"])):
+            self.clear_runtime_warning(str(order["account_id"]))
         return recovered
 
     @staticmethod
@@ -2400,6 +2402,10 @@ class PaperService:
             raise KeyError("模拟账户不存在")
         if account["status"] != "active":
             raise ValueError("账户已暂停或归档，不能生成新提案")
+        if self.store.unproven_orders(account_id):
+            message = "账户含待核验历史成交，已暂停生成新提案；请先完成人工核验后恢复账户。"
+            self.store.set_runtime_warning(account_id, message, pause=True)
+            raise ValueError(message)
 
         def clear_resolved_proposal_warning() -> None:
             if str(account.get("runtime_warning") or "").startswith(
@@ -2638,6 +2644,10 @@ class PaperService:
                 "account_id": account_id,
                 "message": "账户已暂停或归档，待开盘订单没有处理。",
             }
+        if self.store.unproven_orders(account_id):
+            message = "账户含待核验历史成交，已暂停处理待开盘订单；请先完成人工核验后恢复账户。"
+            self.store.set_runtime_warning(account_id, message, pause=True)
+            raise ValueError(message)
         from quantmaster.market_capabilities import (
             MarketCapability,
             require_symbols_capability,

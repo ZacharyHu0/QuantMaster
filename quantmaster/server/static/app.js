@@ -52,7 +52,7 @@ async function protectedFetch(path, options = {}) {
   if (['POST','PUT','PATCH','DELETE'].includes(method) && response.status === 403) {
     const rejection = await response.clone().json().catch(() => ({}));
     const csrfCodes = new Set(['csrf_missing','csrf_mismatch','csrf_expired','csrf_invalid']);
-    if (csrfCodes.has(String(rejection?.problem?.code || ''))) {
+    if (csrfCodes.has(String(rejection?.problem?.code || rejection?.code || ''))) {
       const headers = new Headers(prepared.headers || {});
       headers.set('X-CSRF-Token', await ensureCsrfToken(true));
       response = await fetch(path, {...prepared, headers});
