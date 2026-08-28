@@ -627,6 +627,14 @@ def _default_capital(symbol: str) -> dict[str, Any]:  # pragma: no cover - 网�
     if not (len(code) == 6 and code.isdigit() and suffix in {"SH", "SZ"}):
         return {}
     try:
+        from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+        local = FreeStockDBSource().capital_flow(symbol)
+        if local:
+            return local
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logger.debug("本机 free-stockdb 资金流不可用 %s: %s", symbol, type(exc).__name__)
+    try:
         import akshare as ak
 
         from quantmaster.data.resilience import akshare_call

@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.3"
-RELEASE_DATE = "2026-08-24"
+VERSION = "1.18.4"
+RELEASE_DATE = "2026-08-28"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -25,6 +25,18 @@ RELEASES = (
         "version": VERSION,
         "date": RELEASE_DATE,
         "sections": (
+            {
+                "title": "行情数据与自动更新",
+                "items": (
+                    (
+                        "free-stockdb 新增全量资金流读取；市场数据在更新事件后自动刷新，"
+                        "目标交易日尚未发布时继续使用最近一次已验收数据。"
+                    ),
+                    (
+                        "市场全景在存在陈旧或缺失标的时明确显示部分可用，不再把可用快照误报为证据待补。"
+                    ),
+                ),
+            },
             {
                 "title": "本地 StockDB 与更新提示",
                 "items": (
