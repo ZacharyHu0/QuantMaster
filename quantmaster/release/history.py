@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.4"
-RELEASE_DATE = "2026-08-28"
+VERSION = "1.18.5"
+RELEASE_DATE = "2026-08-29"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -24,6 +24,44 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "模拟盘与管理完整性",
+                "items": (
+                    (
+                        "纸盘（模拟盘）未核验历史成交会暂停提案、撮合与自动运行；人工恢复完成后清除告警，"
+                        "管理操作不再让未证明状态继续扩散。"
+                    ),
+                    (
+                        "策略变更和账户归档会收敛所有非终态订单；过期自动租约与未完成周期保留为可恢复状态，"
+                        "避免重复提案或静默丢失管理状态。"
+                    ),
+                ),
+            },
+            {
+                "title": "行情证据",
+                "items": (
+                    (
+                        "StockDB 审计新增逐标的 BarStore 会话覆盖、陈旧/部分状态和缺失标的证据，"
+                        "正式撮合前可明确识别尚未对齐的行情前沿。"
+                    ),
+                ),
+            },
+            {
+                "title": "诊断与健康探针",
+                "items": (
+                    (
+                        "健康探针保留统一 `/api/v1/health` 契约，旧 live/ready 路径仅作为带弃用标记的"
+                        "兼容别名；"
+                        "完整诊断刷新增加有界超时，探针不会被卡住。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.4",
+        "date": "2026-08-28",
         "sections": (
             {
                 "title": "行情数据与自动更新",
