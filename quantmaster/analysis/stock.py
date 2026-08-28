@@ -632,7 +632,7 @@ def _default_capital(symbol: str) -> dict[str, Any]:  # pragma: no cover - 网�
         local = FreeStockDBSource().capital_flow(symbol)
         if local:
             return local
-    except Exception as exc:
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         logger.debug("本机 free-stockdb 资金流不可用 %s: %s", symbol, type(exc).__name__)
     try:
         import akshare as ak
