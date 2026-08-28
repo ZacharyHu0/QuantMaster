@@ -756,6 +756,32 @@ def test_zero_exit_with_stale_data_schedules_bounded_retry(tmp_path, monkeypatch
     assert not (root / ".quantmaster-update.json").exists()
 
 
+@pytest.mark.parametrize("actual_session", ["2026-08-06", ""])
+def test_scheduled_update_defers_without_taking_healthy_service_offline(
+    tmp_path, monkeypatch, actual_session,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    marker = tmp_path / ".quantmaster-update.json"
+    marker.write_text(json.dumps({"validated_session": "2026-08-06"}), encoding="utf-8")
+    monkeypatch.setattr(runtime, "_marker_path", lambda: marker)
+    monkeypatch.setattr(runtime, "_validate_data", lambda _target: {
+        "target_session": "2026-08-07", "actual_session": actual_session,
+        "accepted": False, "complete": False, "warnings": [],
+        "issues": ["provider unavailable"],
+    })
+    monkeypatch.setattr(runtime, "_stop_service", lambda: pytest.fail("service stopped"))
+    monkeypatch.setattr(runtime, "_run_updater", lambda *_args, **_kwargs: pytest.fail("updater started"))
+
+    assert runtime.update_now("schedule", target_session="2026-08-07") is True
+
+    status = runtime.status()
+    assert status["state"] == "running"
+    assert status["update_result"] == "deferred"
+    assert status["validated_session"] == "2026-08-06"
+    assert runtime._deferred_target == "2026-08-07"
+
+
 def test_final_validation_failure_emits_one_durable_event(tmp_path, monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     runtime._owner = True

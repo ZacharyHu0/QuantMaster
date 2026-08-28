@@ -43,6 +43,29 @@ def _delivery(source, calls):
     )
 
 
+def test_available_event_queues_market_refresh():
+    calls = []
+    delivery = StockDBEventDelivery(
+        _Source(),
+        after_close_jobs=SimpleNamespace(submit=lambda **kwargs: None),
+        rotation_worker=SimpleNamespace(submit=lambda spec: None),
+        automation_runtime=SimpleNamespace(service=SimpleNamespace()),
+        paper_automation_worker=SimpleNamespace(requeue_market_data=lambda target: 0),
+        reset_after_close=lambda: None,
+        reset_etf_research=lambda: None,
+        data_refresh_manager=SimpleNamespace(
+            create=lambda **kwargs: calls.append(kwargs) or {"id": "job-1"},
+        ),
+    )
+
+    delivery.deliver(StockDBUpdateEvent(
+        "market_session_partial:2026-08-10", "market_session_partial",
+        {"target_session": "2026-08-10"},
+    ))
+
+    assert calls == [{"scope": "market"}]
+
+
 def test_complete_event_dispatches_all_real_consumers(isolated_config):
     isolated_config.data.after_close_enabled = True
     isolated_config.data.after_close_auto_run = True

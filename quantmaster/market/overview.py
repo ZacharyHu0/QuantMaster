@@ -270,7 +270,7 @@ def _market_overview_response(
     observed_total = ready_total + stale_total
     quality_status = (
         "unavailable" if total and not observed_total
-        else "degraded" if degraded_total or stale_total or missing_total
+        else "partial" if degraded_total or stale_total or missing_total
         else "verified"
     )
     lineage = [

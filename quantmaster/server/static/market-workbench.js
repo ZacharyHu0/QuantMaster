@@ -31,7 +31,7 @@ const marketWorkbench = (() => {
   const tone = value => finite(value) > 0 ? 'up' : finite(value) < 0 ? 'down' : '';
   const statusLabel = value => ({
     complete:'完整', partial:'部分可用', ready:'可用', verified:'已验证', stale:'陈旧',
-    unavailable:'不可用', cold:'等待快照', degraded:'证据待补', loading:'计算中',
+    unavailable:'不可用', cold:'等待快照', degraded:'部分可用', partial:'部分可用', loading:'计算中',
   })[String(value || '').toLowerCase()] || String(value || '未知');
 
   function abort(owner) {

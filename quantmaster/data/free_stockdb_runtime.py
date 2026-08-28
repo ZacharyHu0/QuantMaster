@@ -258,6 +258,10 @@ class FreeStockDBRuntime:
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
+        # Automatic checks may run before the vendor publishes the next
+        # trading session.  Remember that target so we do not repeatedly stop
+        # a healthy local service for the same unavailable data.
+        self._deferred_target = ""
         self._status: dict[str, Any] = {"state": "stopped", "message": "尚未启动"}
 
     @staticmethod
@@ -1246,6 +1250,7 @@ class FreeStockDBRuntime:
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
+        self._deferred_target = ""
         self._record_update(code, target, validation, attempt)
         self._set_status(
             "running", message,
@@ -1369,6 +1374,31 @@ class FreeStockDBRuntime:
             return self._finish_success(
                 target=target, validation=preflight, code=0, attempt=attempt, trigger=trigger,
             )
+        # A scheduled check commonly runs before free-stockdb has published
+        # today's session (or while its provider circuit is open).  If an
+        # already accepted session exists, keep serving it and defer the
+        # updater instead of taking the local service offline for 30 minutes.
+        last_validated = self._last_update_date()
+        actual_session = str(preflight.get("actual_session") or "")
+        if (
+            trigger in {"schedule", "retry"}
+            and last_validated
+            and (not actual_session or actual_session <= last_validated)
+        ):
+            self._deferred_target = target
+            message = (
+                f"目标日 {target} 尚无新数据，继续使用已验收 {last_validated}"
+                if actual_session
+                else f"free-stockdb 暂不可用，继续使用已验收 {last_validated}"
+            )
+            self._set_status(
+                "running", message, phase="deferred", update_result="deferred",
+                trigger=trigger, target_session=target,
+                actual_session=actual_session, validated_session=last_validated,
+                attempt=attempt, max_attempts=_AUTO_MAX_ATTEMPTS,
+                next_retry_at="", validation=preflight, managed=self._is_managed(),
+            )
+            return True
         if not updater.is_file():
             return self._finish_failure(
                 target=target, validation=preflight, code=-1, attempt=attempt,
@@ -1673,7 +1703,11 @@ class FreeStockDBRuntime:
                     if force_notice:
                         self._last_vendor_force = time.time()
                     target, _source = self._target_session(force_notice=force_notice)
-                    if target and target > self._last_update_date():
+                    if (
+                        target
+                        and target > self._last_update_date()
+                        and target != self._deferred_target
+                    ):
                         self.update_now("schedule", target_session=target, attempt=1)
                         continue
                 with self._lock:
