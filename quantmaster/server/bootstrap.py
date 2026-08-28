@@ -61,12 +61,14 @@ class StockDBEventDelivery:
         paper_automation_worker: Any,
         reset_after_close: Callable[[], None],
         reset_etf_research: Callable[[], None],
+        data_refresh_manager: Any | None = None,
     ) -> None:
         self.source = source
         self.after_close_jobs = after_close_jobs
         self.rotation_worker = rotation_worker
         self.automation_runtime = automation_runtime
         self.paper_automation_worker = paper_automation_worker
+        self.data_refresh_manager = data_refresh_manager
         self.reset_after_close = reset_after_close
         self.reset_etf_research = reset_etf_research
         self._stop = threading.Event()
@@ -82,6 +84,12 @@ class StockDBEventDelivery:
             from quantmaster.rotation.contracts import RotationJobSpec
 
             target = str(payload.get("target_session") or "")
+            if self.data_refresh_manager is not None:
+                try:
+                    self.data_refresh_manager.create(scope="market")
+                    logger.info("free-stockdb %s，已提交市场数据自动刷新", target or "事件")
+                except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+                    logger.warning("free-stockdb 事件触发市场数据自动刷新失败", exc_info=True)
             if kind in {"update_succeeded", "market_session_partial"}:
                 self.reset_after_close()
                 self.reset_etf_research()
@@ -269,6 +277,7 @@ class _DefaultWorkerPlan:
             rotation_worker=self.rotation_worker,
             automation_runtime=self.runtime,
             paper_automation_worker=self.paper_automation_worker,
+            data_refresh_manager=self.data_refresh_manager,
             reset_after_close=reset_after_close_service,
             reset_etf_research=reset_etf_research_service,
         )
