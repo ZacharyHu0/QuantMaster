@@ -569,6 +569,85 @@ def free_stockdb_status(request: Request) -> dict:
     return free_stockdb_runtime.status()
 
 
+def _bar_store_row(symbol: str, value: dict[str, Any]) -> tuple[str, str, bool, bool]:
+    try:
+        quality = json.loads(str(value.get("quality_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        quality = {}
+    if not isinstance(quality, dict):
+        quality = {}
+    status = str(value.get("last_status") or "")
+    actual = str(value.get("end") or quality.get("observed_end") or "")[:10]
+    stale = bool(quality.get("stale")) or status in {"stale", "refresh_failed"}
+    partial = bool(quality.get("partial")) or status in {"degraded", "partial"}
+    return str(symbol), actual, stale, partial
+
+
+def _bar_store_audit_summary(
+    expected_session: str,
+    metadata: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    rows = [_bar_store_row(symbol, value) for symbol, value in metadata.items()]
+    latest = max((row[1] for row in rows if row[1]), default="")
+    missing = [row[0] for row in rows if expected_session and row[1] < expected_session]
+    stale_symbols = [row[0] for row in rows if row[2]]
+    partial_symbols = [row[0] for row in rows if row[3]]
+    total = len(rows)
+    covered = sum(bool(expected_session and row[1] >= expected_session) for row in rows)
+    usable = sum(
+        bool(expected_session and row[1] >= expected_session and not row[2] and not row[3])
+        for row in rows
+    )
+    if not rows:
+        state = "unavailable"
+    elif not expected_session:
+        state = "unverified"
+    elif stale_symbols:
+        state = "stale"
+    elif partial_symbols or missing:
+        state = "partial"
+    else:
+        state = "verified"
+    issues: list[str] = []
+    if not expected_session:
+        issues.append("运行时尚无 validated_session；无法把 BarStore 覆盖与 StockDB 会话对齐")
+    if stale_symbols or partial_symbols or missing:
+        issues.append(
+            "BarStore 逐标的覆盖未与 validated_session 对齐；"
+            "请按标的重试行情刷新后再进行正式撮合"
+        )
+    return {
+        "status": state,
+        "expected_session": expected_session,
+        "latest_session": latest,
+        "symbol_count": total,
+        "session_coverage_ratio": round(covered / total, 6) if expected_session and total else None,
+        "usable_session_coverage_ratio": round(usable / total, 6) if expected_session and total else None,
+        "stale_count": len(stale_symbols),
+        "partial_count": len(partial_symbols),
+        "missing_session_count": len(missing),
+        "stale_symbols": stale_symbols[:50],
+        "partial_symbols": partial_symbols[:50],
+        "missing_session_symbols": missing[:50],
+        "issues": issues,
+    }
+
+
+def _bar_store_audit(expected_session: str) -> dict[str, Any]:
+    empty = _bar_store_audit_summary(expected_session, {})
+    empty["issues"] = ["BarStore 元数据不可用；无法证明逐标的行情覆盖"]
+    try:
+        from quantmaster.data.storage import BarStore
+
+        return _bar_store_audit_summary(
+            expected_session,
+            BarStore(read_only=True).metadata_many(),
+        )
+    except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        logger.info("无法读取 BarStore 元数据用于 StockDB 审计", exc_info=True)
+        return empty
+
+
 @router.get("/data-sources/free-stockdb/audit")
 def free_stockdb_audit(request: Request) -> dict[str, Any]:
     """Project published StockDB evidence; never probe from a page GET."""
@@ -611,86 +690,7 @@ def free_stockdb_audit(request: Request) -> dict[str, Any]:
             pass
     runtime = free_stockdb_runtime.status()
     validated_session = str(runtime.get("validated_session") or "")[:10]
-    bar_store = {
-        "status": "unavailable",
-        "expected_session": validated_session,
-        "latest_session": "",
-        "symbol_count": 0,
-        "session_coverage_ratio": None,
-        "usable_session_coverage_ratio": None,
-        "stale_count": 0,
-        "partial_count": 0,
-        "missing_session_count": 0,
-        "stale_symbols": [],
-        "partial_symbols": [],
-        "missing_session_symbols": [],
-        "issues": ["BarStore 元数据不可用；无法证明逐标的行情覆盖"],
-    }
-    try:
-        from quantmaster.data.storage import BarStore
-
-        metadata = BarStore(read_only=True).metadata_many()
-        rows: list[tuple[str, str, bool, bool]] = []
-        for symbol, value in metadata.items():
-            try:
-                quality = json.loads(str(value.get("quality_json") or "{}"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                quality = {}
-            if not isinstance(quality, dict):
-                quality = {}
-            status = str(value.get("last_status") or "")
-            actual = str(value.get("end") or quality.get("observed_end") or "")[:10]
-            stale = bool(quality.get("stale")) or status in {"stale", "refresh_failed"}
-            partial = bool(quality.get("partial")) or status in {"degraded", "partial"}
-            rows.append((str(symbol), actual, stale, partial))
-        latest = max((row[1] for row in rows if row[1]), default="")
-        missing = [row[0] for row in rows if validated_session and row[1] < validated_session]
-        stale_symbols = [row[0] for row in rows if row[2]]
-        partial_symbols = [row[0] for row in rows if row[3]]
-        total = len(rows)
-        covered = sum(bool(validated_session and row[1] >= validated_session) for row in rows)
-        usable = sum(
-            bool(validated_session and row[1] >= validated_session and not row[2] and not row[3])
-            for row in rows
-        )
-        if not rows:
-            state = "unavailable"
-        elif not validated_session:
-            state = "unverified"
-        elif stale_symbols:
-            state = "stale"
-        elif partial_symbols or missing:
-            state = "partial"
-        else:
-            state = "verified"
-        bar_store = {
-            "status": state,
-            "expected_session": validated_session,
-            "latest_session": latest,
-            "symbol_count": total,
-            "session_coverage_ratio": round(covered / total, 6) if validated_session and total else None,
-            "usable_session_coverage_ratio": (
-                round(usable / total, 6) if validated_session and total else None
-            ),
-            "stale_count": len(stale_symbols),
-            "partial_count": len(partial_symbols),
-            "missing_session_count": len(missing),
-            "stale_symbols": stale_symbols[:50],
-            "partial_symbols": partial_symbols[:50],
-            "missing_session_symbols": missing[:50],
-            "issues": [],
-        }
-        if not validated_session:
-            bar_store["issues"].append(
-                "运行时尚无 validated_session；无法把 BarStore 覆盖与 StockDB 会话对齐"
-            )
-        if stale_symbols or partial_symbols or missing:
-            bar_store["issues"].append(
-                "BarStore 逐标的覆盖未与 validated_session 对齐；"
-                "请按标的重试行情刷新后再进行正式撮合"
-            )
-    except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
-        logger.info("无法读取 BarStore 元数据用于 StockDB 审计", exc_info=True)
+    bar_store = _bar_store_audit(validated_session)
     artifact = StockDBArtifactIdentity.discover(
         resolve_free_stockdb_sdk_path(),
         root,
