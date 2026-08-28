@@ -86,6 +86,51 @@ def test_free_stockdb_sdk_supplies_daily_and_minute_bars(monkeypatch) -> None:
     assert daily.attrs["adjustment"] == "qfq"
 
 
+def test_free_stockdb_reads_capital_flow_after_accepted_update(monkeypatch) -> None:
+    source, _client = _source(monkeypatch)
+
+    class Reader:
+        def get(self, table: str, code: str, stamp: int):
+            assert (table, code, stamp) == ("资金流", "000001", 20260827)
+            return SimpleNamespace(do=lambda: {
+                "code": code,
+                "date": stamp,
+                "main_net": 990480,
+                "jumbo_net": -17572677,
+                "big_net": 18563158,
+                "mid_net": -81335416,
+                "small_net": 80344936,
+                "main_in": 476172839,
+                "main_out": 475182359,
+            })
+
+    source._client.rd = Reader()
+    monkeypatch.setattr(
+        free_stockdb,
+        "read_stockdb_session_acceptance",
+        lambda _root: SimpleNamespace(session="2026-08-27"),
+    )
+
+    result = source.capital_flow("000001.SZ")
+
+    assert result["main_force"] == 990480
+    assert result["super_large"] == -17572677
+    assert result["large"] == 18563158
+    assert result["main_pct"] == pytest.approx(0.1041125, rel=1e-5)
+    assert result["date"] == "2026-08-27"
+    assert result["provider"] == "free-stockdb:资金流"
+
+
+def test_free_stockdb_capital_flow_requires_accepted_session(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+    calls: list[object] = []
+    client.rd = SimpleNamespace(get=lambda *args: calls.append(args))
+    monkeypatch.setattr(free_stockdb, "read_stockdb_session_acceptance", lambda _root: None)
+
+    assert source.capital_flow("000001.SZ") == {}
+    assert calls == []
+
+
 def test_free_stockdb_cross_section_is_raw_with_confirmed_local_units(monkeypatch) -> None:
     source, _client = _source(monkeypatch)
 
