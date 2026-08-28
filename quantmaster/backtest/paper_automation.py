@@ -118,8 +118,17 @@ class PaperAutomationWorker:
         results = []
         for account in accounts:
             account_id = str(account["id"])
+            unresolved = self.service.store.reportable_auto_run(
+                account_id, through=run_date,
+            )
+            claim_date = (
+                str(unresolved["run_date"])
+                if unresolved is not None
+                and unresolved.get("status") in {"running", "failed", "manual_recovery"}
+                else run_date
+            )
             token = self.service.store.claim_auto_run(
-                run_date,
+                claim_date,
                 account_id,
                 self.identity.value,
             )
@@ -129,7 +138,7 @@ class PaperAutomationWorker:
             try:
                 with _paper_auto_heartbeat(
                     self.service.store,
-                    run_date,
+                    claim_date,
                     account_id,
                     self.identity.value,
                     token,
@@ -137,18 +146,19 @@ class PaperAutomationWorker:
                     def lease_current(
                         account_id: str = account_id,
                         token: str = token,
+                        claim_date: str = claim_date,
                     ) -> bool:
                         return lease_alive.is_set() and self.service.store.auto_run_lease_current(
-                            run_date, account_id, self.identity.value, token,
+                            claim_date, account_id, self.identity.value, token,
                         )
 
                     result = self.service.run_auto_account(
                         account_id,
-                        expected_signal_date=run_date,
+                        expected_signal_date=claim_date,
                         lease_guard=lease_current,
                     )
                     completed = lease_alive.is_set() and self.service.store.complete_auto_run(
-                        run_date,
+                        claim_date,
                         account_id,
                         self.identity.value,
                         token,
@@ -176,7 +186,7 @@ class PaperAutomationWorker:
                 )
                 self.service.store.set_warning(account_id, message)
                 self.service.store.fail_auto_run(
-                    run_date,
+                    claim_date,
                     account_id,
                     self.identity.value,
                     token,

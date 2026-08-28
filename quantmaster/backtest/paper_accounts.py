@@ -63,6 +63,7 @@ ORDER_TERMINAL_STATUSES = frozenset({
 ORDER_WAITING_STATUSES = frozenset({
     "waiting_market_open", "waiting_price", "waiting_market_data", "waiting_external",
 })
+PROCESS_BLOCKING_STATUSES = frozenset({"waiting_market_data", "blocked"})
 _ABORTED = {"cancelled", "expired", "rejected", "superseded"}
 ORDER_TRANSITIONS = {
     "proposed": frozenset({"queued", "accepted", "cancelled", "rejected", "superseded"}),
@@ -586,10 +587,12 @@ class PaperStore:
             ).fetchone()
             if row is None:
                 raise KeyError("模拟账户不存在")
+            terminal = tuple(sorted(ORDER_TERMINAL_STATUSES))
+            placeholders = ",".join("?" for _ in terminal)
             conn.execute(
                 "UPDATE paper_orders SET status='superseded',reason='strategy_changed',"
-                "updated_at=? WHERE account_id=? AND status IN ('proposed','queued','blocked')",
-                (now, account_id),
+                f"updated_at=? WHERE account_id=? AND status NOT IN ({placeholders})",
+                (now, account_id, *terminal),
             )
             conn.execute(
                 "UPDATE paper_cycles SET status='superseded',finished_at=? WHERE account_id=? "
@@ -639,10 +642,12 @@ class PaperStore:
             ).fetchone()
             if row is None:
                 raise KeyError("模拟账户不存在")
+            terminal = tuple(sorted(ORDER_TERMINAL_STATUSES))
+            placeholders = ",".join("?" for _ in terminal)
             conn.execute(
                 "UPDATE paper_orders SET status='superseded',reason='account_archived',updated_at=? "
-                "WHERE account_id=? AND status IN ('proposed','queued','blocked')",
-                (now, account_id),
+                f"WHERE account_id=? AND status NOT IN ({placeholders})",
+                (now, account_id, *terminal),
             )
             conn.execute(
                 "UPDATE paper_cycles SET status='superseded',finished_at=? "
@@ -986,6 +991,28 @@ class PaperStore:
             row = conn.execute(
                 "SELECT * FROM paper_auto_runs WHERE account_id=? ORDER BY run_date DESC LIMIT 1",
                 (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        value["result"] = json.loads(value.pop("result_json") or "{}")
+        return value
+
+    def reportable_auto_run(self, account_id: str, *, through: str | None = None) -> dict | None:
+        """Return the oldest unresolved run, falling back to the latest resolved run."""
+        params: list[object] = [account_id]
+        through_clause = ""
+        if through is not None:
+            through_clause = " AND run_date<=?"
+            params.append(through)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_auto_runs WHERE account_id=?"
+                + through_clause
+                + " ORDER BY CASE WHEN status IN ('running','failed','manual_recovery') "
+                "THEN 0 ELSE 1 END, CASE WHEN status IN "
+                "('running','failed','manual_recovery') THEN run_date END ASC, run_date DESC LIMIT 1",
+                params,
             ).fetchone()
         if row is None:
             return None
@@ -3037,11 +3064,14 @@ class PaperService:
         account = self.store.account(account_id)
         if account is None:
             raise KeyError("模拟账户不存在")
-        automation = self.store.latest_auto_run(account_id)
+        automation = self.store.reportable_auto_run(account_id)
         if automation is not None:
             automation["health"] = (
                 "needs_manual_recovery"
                 if automation.get("status") == "manual_recovery"
+                else "lease_expired"
+                if automation.get("status") == "running"
+                and float(automation.get("lease_expires") or 0) <= time.time()
                 else "healthy"
                 if automation.get("status") == "completed"
                 else "retrying"
@@ -3152,6 +3182,12 @@ class PaperService:
         processed = self.process(account_id, lease_guard=lease_guard)
         if lease_guard is not None and not lease_guard():
             raise RuntimeError("paper_auto_lease_lost")
+        if processed.get("status") in PROCESS_BLOCKING_STATUSES:
+            return {
+                "status": processed["status"],
+                "account_id": account_id,
+                "processed": processed,
+            }
         proposal = self.propose(account_id)
         signal_date = str(proposal.get("signal_date") or "")
         if expected_signal_date and signal_date < expected_signal_date:
@@ -3202,7 +3238,10 @@ class PaperService:
             row: dict = {"account_id": account["id"], "name": account["name"]}
             try:
                 row["processed"] = self.process(account["id"])
-                if account["mode"] == "auto":
+                if (
+                    account["mode"] == "auto"
+                    and row["processed"].get("status") not in PROCESS_BLOCKING_STATUSES
+                ):
                     row["proposal"] = self.propose(account["id"])
                 row["status"] = "ok"
             except (KeyError, OSError, RuntimeError, ValueError, sqlite3.Error) as exc:

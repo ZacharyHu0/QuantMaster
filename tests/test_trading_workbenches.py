@@ -1179,6 +1179,34 @@ def test_daily_orchestration_processes_all_active_and_proposes_only_auto(tmp_pat
     assert result["failed"] == 0
 
 
+@pytest.mark.parametrize("process_status", ["waiting_market_data", "blocked"])
+def test_auto_account_does_not_propose_while_prior_cycle_is_unfinished(
+    tmp_path, monkeypatch, process_status,
+):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("自动等待账户").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    service = PaperService(store)
+    monkeypatch.setattr(
+        service,
+        "process",
+        lambda *_args, **_kwargs: {"status": process_status},
+    )
+    monkeypatch.setattr(
+        service,
+        "propose",
+        lambda *_args, **_kwargs: pytest.fail("未完成订单存在时不得生成新提案"),
+    )
+
+    result = service.run_auto_account(account["id"])
+
+    assert result["status"] == process_status
+    assert result["processed"] == {"status": process_status}
+    assert "proposal" not in result
+
+
 def test_auto_account_runs_daily_without_manual_buttons_and_is_idempotent(tmp_path, monkeypatch):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     manual = store.create_account(account_spec("人工账户"), symbols=["600000.SH"])
@@ -1225,6 +1253,44 @@ def test_auto_account_runs_daily_without_manual_buttons_and_is_idempotent(tmp_pa
     assert proposed == [automatic["id"]]
     assert manual["id"] not in processed
     assert store.latest_auto_run(automatic["id"])["status"] == "completed"
+
+
+@pytest.mark.parametrize("operation", ["replace", "archive"])
+def test_strategy_replacement_and_archive_fence_every_unfinished_order(
+    tmp_path, operation,
+):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    spec = account_spec("订单围栏账户")
+    account = store.create_account(spec, symbols=["600000.SH"])
+    unfinished = [
+        "proposed", "created", "accepted", "queued", "open", "blocked",
+        "partially_filled", "waiting_market_open", "waiting_price",
+        "waiting_market_data", "waiting_external",
+    ]
+    order_ids = []
+    for index, status in enumerate(unfinished, start=1):
+        cycle, _ = store.create_cycle(
+            account,
+            f"2026-07-{index:02d}",
+            {"600000.SH": 1.0},
+            {"600000.SH": 10.0},
+            [],
+        )
+        order_id = cycle["orders"][0]["id"]
+        order_ids.append(order_id)
+        with store._conn() as conn:
+            conn.execute("UPDATE paper_orders SET status=? WHERE id=?", (status, order_id))
+
+    if operation == "replace":
+        store.replace_strategy(account["id"], spec, symbols=["600000.SH"])
+        reason = "strategy_changed"
+    else:
+        store.archive_account(account["id"])
+        reason = "account_archived"
+
+    orders = {order["id"]: order for order in store.orders(account_id=account["id"], limit=100)}
+    assert all(orders[order_id]["status"] == "superseded" for order_id in order_ids)
+    assert all(orders[order_id]["reason"] == reason for order_id in order_ids)
 
 
 def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
@@ -1550,6 +1616,55 @@ def test_paper_auto_run_health_distinguishes_expired_lease_and_reclaim(tmp_path)
     assert latest["diagnostic_code"] == "lease_reclaimed"
     assert latest["reclaim_count"] == 1
     assert store.scan_auto_run_health(now=201) == []
+
+
+def test_paper_report_surfaces_and_worker_reclaims_older_expired_run(tmp_path, monkeypatch):
+    store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
+    account = store.create_account(
+        account_spec("旧租约恢复").model_copy(update={"mode": "auto"}),
+        symbols=["600000.SH"],
+    )
+    account_id = account["id"]
+    expired = store.claim_auto_run("2026-08-04", account_id, "dead-worker", now=100)
+    assert expired
+    newer = store.claim_auto_run("2026-08-05", account_id, "newer-worker", now=100)
+    assert newer
+    assert store.complete_auto_run(
+        "2026-08-05", account_id, "newer-worker", newer, {"status": "ok"}, now=100,
+    )
+
+    report = PaperService(store).report(account_id)
+
+    assert report["automation"]["run_date"] == "2026-08-04"
+    assert report["automation"]["health"] == "lease_expired"
+
+    service = PaperService(store)
+    monkeypatch.setattr(
+        service,
+        "run_auto_account",
+        lambda *_args, **_kwargs: {"status": "ok", "account_id": account_id},
+    )
+    worker = PaperAutomationWorker(
+        service,
+        session_resolver=lambda _now: SessionExpectation(
+            "2026-08-06", "unit", True, "fixture",
+        ),
+    )
+
+    result = worker.run_due_once()
+
+    recovered = store.reportable_auto_run(account_id)
+    assert result["status"] == "completed"
+    assert recovered["run_date"] == "2026-08-05"
+    assert recovered["status"] == "completed"
+    with store._conn() as conn:
+        older = dict(conn.execute(
+            "SELECT * FROM paper_auto_runs WHERE run_date='2026-08-04' AND account_id=?",
+            (account_id,),
+        ).fetchone())
+    assert older["status"] == "completed"
+    assert older["diagnostic_code"] == "lease_reclaimed"
+    assert older["reclaim_count"] == 1
 
 
 def test_paper_auto_run_reclaims_expired_lease_at_retry_ceiling(tmp_path):

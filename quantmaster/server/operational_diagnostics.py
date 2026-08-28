@@ -307,7 +307,7 @@ def collect_operational_metrics() -> dict[str, Any]:
     paper = PaperStore()
     runs = [
         value for account in paper.accounts(include_archived=True)
-        if (value := paper.latest_auto_run(str(account["id"]))) is not None
+        if (value := paper.reportable_auto_run(str(account["id"]))) is not None
     ]
     completed = [value for value in runs if value.get("status") == "completed"]
     result["paper_automation"] = {

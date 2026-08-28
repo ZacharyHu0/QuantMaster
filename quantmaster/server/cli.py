@@ -882,7 +882,7 @@ def cmd_daily(args) -> None:
         30 15 * * 1-5  cd /path/to/QuantMaster && qm daily >> daily.log 2>&1
     """
     from quantmaster.ai.crawler import AICrawler
-    from quantmaster.backtest.paper_accounts import get_paper_service
+    from quantmaster.backtest.paper_accounts import PROCESS_BLOCKING_STATUSES, get_paper_service
     from quantmaster.backtest.spec import PaperAccountSpec
     from quantmaster.data.industry import load_industry_analysis_context
     from quantmaster.data.names import read_stock_names
@@ -992,7 +992,11 @@ def cmd_daily(args) -> None:
         if account["strategy"] != desired_strategy or account["universe"] != args.universe:
             raise ValueError("每日例程模拟盘的策略快照不同；请新建账户或恢复原参数")
     processed = service.process(account["id"], panel=panel)
-    proposal = service.propose(account["id"], panel=panel)
+    proposal = (
+        None
+        if processed.get("status") in PROCESS_BLOCKING_STATUSES
+        else service.propose(account["id"], panel=panel)
+    )
     _print_json({"selection": selection, "processed": processed, "proposal": proposal})
 
 
