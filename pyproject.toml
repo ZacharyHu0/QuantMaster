@@ -51,7 +51,7 @@ rust = ["maturin==1.14.1"]
 dev = [
     "pytest>=8.0",
     "httpx2>=2.10.0,<3",
-    "pytest-split>=0.10,<1",
+    "pytest-split>=0.11.0,<1",
     "pytest-timeout>=2.4.0,<3",
     "ruff>=0.16.4",
     # The full test suite exercises Ridge and Spearman contracts even when the
