@@ -7,7 +7,8 @@ before spending time on `main` movement.
 ## 1. Start once and fix the development baseline
 
 Create every independent task with `scripts/dev/tasks.py start <slug>` from the primary checkout.
-Choose and record one development baseline at task creation.
+`start` records the development commit SHA in the task manifest. `check` defaults to that SHA,
+not the moving `origin/main` ref. Legacy manifests require an explicit `check --base <recorded-SHA>`.
 
 The primary checkout is the task control plane and permanently holds a clean `main`. Do not edit
 or switch branches there. For concurrent work, the coordinating agent creates every task first,
@@ -75,7 +76,7 @@ Only after development is complete:
    Without GitHub/CI access, run `tasks.py ready` locally (add `--ui` / `--rust` / `--package` for
    those lanes).
 7. Update the PR with the exact evidence. After review passes, squash-merge as one independently
-   revertible `main` commit, then run `tasks.py remove <slug>` from the primary checkout.
+   revertible `main` commit, then run `tasks.py finish <slug> --pr <number>` from the primary checkout.
 
 The integration baseline is fixed for that attempt. A genuine dependency or conflicting change
 requires a deliberate new integration attempt, not a background loop that chases `main`.
@@ -122,10 +123,36 @@ the exact branch/worktree/artifact mapping before `serve`, `check`, `ready`, or 
 Different sessions must use different slugs; the admin lease serializes lifecycle changes and
 the per-task lease isolates writable state.
 
-Artifact deletion is resumable. If a Windows lock or permission boundary prevents physical
-deletion, `remove` records `pending_cleanup` after completing the Git lifecycle. Retry the same
-managed command or the managed janitor after the external lock is gone; do not delete paths by
-hand or treat a pending artifact as an active development task.
+Cleanup has explicit durable phases:
+
+| State | Meaning | Action |
+| --- | --- | --- |
+| `active` | Development task | Preserve |
+| `checkout_pending_cleanup` | Checkout or branch removal unfinished | Release own processes/handles, retry |
+| `pending_cleanup` | Git lifecycle finished; artifact/archive work remains | Retry artifact cleanup |
+| `removed` | Checkout, branch and disposable artifacts removed | Deliverables remain archived |
+
+Use `tasks.py status` for a read-only JSON inventory and `tasks.py retry-cleanup` to preview
+queued work. `retry-cleanup --apply` processes due entries; `retry-cleanup <slug> --apply`
+retries that task immediately. `start` (before creating the new task) and `gc --apply` also
+process due entries. Backoff starts at 60 seconds and is capped at one hour, with five automatic
+attempts before requiring an explicit retry. No always-running janitor is installed.
+
+`finish <slug> --pr <number>` records an already merged GitHub PR before touching the checkout.
+The receipt binds repository, PR, branch head, PR base and merge SHA. It survives squash merges
+and later overlapping main changes. A changed branch head or merge absent from local main
+blocks removal. `finish` may fetch and fast-forward main once; it never resolves a main conflict.
+An interrupted call can be repeated; a saved receipt avoids repeating the merge.
+
+With merge authorization, `finish <slug> --pr <number> --merge` checks the Ready PR and full
+exact-SHA gate, then uses GitHub CLI's `--match-head-commit` protection. Queue/asynchronous merges
+return `TASK_MERGE_PENDING`; retry after GitHub completes them. This command does not post
+bookkeeping comments: run `github_sync.py reconcile` separately to preview those changes.
+
+Before deleting task artifacts, the tool atomically moves non-disposable entries into
+`.artifacts/task-deliverables/<slug>`. Existing destination names block rather than overwrite.
+Only `cache`, `pytest`, `uv-cache`, and `runtime` are disposable; store final reports at the task
+artifact root or in `deliverables/`. Archive retention is explicit and independent of GC.
 
 Failure of automatic integration detection does not mean a task is active. Assign every stale task
 to exactly one category:
@@ -141,7 +168,7 @@ If a task artifact root cannot be inspected or have its ACL restored by the curr
 `tasks.py remove` reports `TASK_ARTIFACT_ACL_UNRECOVERABLE`, records `pending_cleanup`, and
 keeps the artifact manifest as the retry record. The Git lifecycle may already be complete;
 after the required path permission is available, retry `tasks.py remove <task-slug>` (or the
-managed janitor) until the artifact root is gone. Never delete paths by hand.
+`retry-cleanup <task-slug> --apply`) until the artifact root is gone. Never delete paths by hand.
 
 Delete an old task only after its value is proven present on `main` or the owner explicitly
 abandons it. Report the exact category; never describe every non-removable task as active,
@@ -179,7 +206,7 @@ development-phase view:
 4. Complete the one-time integration alignment and push the aligned Draft commit.
 5. Wait for Draft fast/core, mark the PR Ready, and let the full CI matrix run.
 6. Record the green exact-SHA evidence with `tasks.py ready --accept-ci`, resolve review,
-   squash-merge, then `tasks.py remove <slug>`.
+   squash-merge, then `tasks.py finish <slug> --pr <number>`.
 
 Discussions host architecture proposals and evidence-backed decisions. Irreversible migrations,
 required features that exceed a hard package budget, or inconclusive SciPy/Rust benchmarks pause
@@ -189,3 +216,15 @@ limits, and a recommendation is published.
 Ordinary merges do not create tags or releases. The agent owns merge and tag mechanics, but the
 tag workflow publishes a GitHub Release, so a release tag is pushed only after the owner explicitly
 confirms that Release.
+
+### Legacy recovery
+
+Start with `tasks.py status`; it includes branch-only tasks, unregistered checkouts, missing
+manifests and old removal intents. Inventory does not grant deletion permission. For a clean
+legacy task with a known merged PR, use `finish <slug> --pr <number>`; repository and exact head
+must match. Otherwise establish patch equivalence or reviewed superseding evidence. Dirty,
+active, ambiguous and independently valuable work remains protected. Slugs with receipts or
+archives cannot be reused.
+
+CLI merge behavior: [GitHub CLI merge reference](https://cli.github.com/manual/gh_pr_merge).
+Receipt fields: [GitHub pull request API](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request).

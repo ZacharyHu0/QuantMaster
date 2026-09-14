@@ -2,7 +2,8 @@
 
 本文件是 QuantMaster 的 GitHub 项目管理操作规范，与根目录 `AGENTS.md` 一起构成仓库规则。
 核心原则：**Issue/PR 是权威记录，Project 是阶段状态，状态对账由脚本自动完成**；
-上下文、聊天消息或个人习惯与本文件冲突时，以 `AGENTS.md`、本文件和仓库配置为准。
+通常遵守 `AGENTS.md`、本文件和仓库配置；owner 明确授权的工作流修复例外优先，
+应记录例外范围，保留数据保护和验证要求。
 
 ## 1. 一个任务一个管理记录
 
@@ -79,7 +80,8 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 - [ ] Draft PR 使用 `Closes #<issue>`，按模板填写验证与回滚证据；
 - [ ] Draft 快检与 Ready 后完整 CI 均绿；`tasks.py ready --accept-ci`（或本地 ready）已记录；
 - [ ] PR Ready 后 squash merge，Issue/Project 状态已同步；
-- [ ] 已调用 `tasks.py remove <slug>`；若出现 `pending_cleanup`，按登记记录重试至工件清理完成，
+- [ ] 已调用 `tasks.py finish <slug> --pr <number>` 保存合并凭据并清理；
+      `checkout_pending_cleanup` 与 `pending_cleanup` 分别表示 checkout 和工件待重试，
       无手工删除的 worktree 残余；
 - [ ] 没有未经 owner 确认的 Release tag 或 GitHub Release。
 
@@ -92,3 +94,7 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 - PR 模板：`.github/pull_request_template.md`
 - CI 与发布 workflow：`.github/workflows/`
 - 人类贡献者入口：[CONTRIBUTING.md](../CONTRIBUTING.md)
+
+本地收尾命令、重试预算和交付物保留规则见 [开发工作流](development-workflow.md#6-classify-stale-tasks-from-evidence)。
+`finish --merge` 必须已有合并授权；默认 `finish` 只接管已合并 PR。
+GitHub 对账与本地清理分开：自动重试不会重复发评论，也不会自动发布版本。

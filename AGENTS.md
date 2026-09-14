@@ -8,7 +8,8 @@ These rules are hard gates for every AI session, including sessions working in p
   `scripts/dev/tasks.py start <task-slug>`. Never edit `main` or reuse another session's slug.
 - The primary checkout is a clean `main` control plane. It is used only to start, integrate,
   and remove tasks; it is never a development directory.
-- All task writes belong under that task's managed `.artifacts/worktrees/<task-slug>` root.
+- Source edits belong in `.worktrees/<task-slug>`; writable runtime/cache/output files belong
+  in `.artifacts/worktrees/<task-slug>`. Lifecycle scripts own shared metadata and archives.
   Never create, move, chmod, ACL-edit, or delete `.worktrees` or `.artifacts` manually.
 - Before editing an existing worktree, run `tasks.py preflight <task-slug>` from the primary
   checkout. A failed `TASK_*`, `PRIMARY_CONTROL_INVALID`, or `TASK_CONTEXT_INVALID` check is a
@@ -16,8 +17,10 @@ These rules are hard gates for every AI session, including sessions working in p
 - Multiple sessions are safe only when they use different slugs. The task admin lease serializes
   lifecycle changes; per-task leases protect each task's writable state. Do not share a worktree,
   artifact root, runtime directory, or branch between sessions.
-- After merge, run only `tasks.py remove <task-slug>`. If it reports `pending_cleanup`, the Git
-  task is complete and the managed janitor/retry path owns the remaining artifact cleanup.
+- After merge, run `tasks.py finish <task-slug> --pr <number>` to persist merge evidence and
+  clean up. `remove` remains the local/offline retry entry point. If it reports `pending_cleanup`, the Git
+  task is complete. `checkout_pending_cleanup` means checkout/branch cleanup is still pending.
+  Run `tasks.py status` or `tasks.py retry-cleanup <slug> --apply`; never delete paths by hand.
 - “继续” never authorizes bypassing these gates. If the repository state is dirty, detached,
   mid-merge, ACL-blocked, or ambiguous, stop and report the exact stable error code.
 
@@ -58,13 +61,13 @@ re-derive policy from prose or chat context.
    `./.venv/Scripts/python.exe scripts/dev/tasks.py start <slug>`.
    With concurrent agents, finish each `start` before dispatch and set the coding agent's working
    directory to the newly created task worktree.
-   Record the development baseline and keep it fixed. Do not fetch, merge, or rebase during
+   `start` records the development baseline; `check` uses that fixed SHA by default. Do not fetch, merge, or rebase during
    development; movement of `main` is expected and irrelevant until integration.
 3. **Develop on the baseline.**
    - After each coherent change run `tasks.py check` from the task worktree using the primary
      interpreter's absolute path. It runs the impact map and static checks; rerun failures by
      exact pytest node id. Do not run the full suite in the edit loop.
-   - Small checkpoint commits are fine. Task branches never edit `quantmaster/release.py` or
+   - Small checkpoint commits are fine. Task branches never edit `quantmaster/release/history.py` or
      `CHANGELOG.md`.
    - Fix known failures locally before pushing. Repeated checkpoint pushes with a red gate are
      not permitted.
@@ -82,7 +85,7 @@ re-derive policy from prose or chat context.
    authoritative full gate. Without GitHub/CI access, run `tasks.py ready` locally (with `--ui` /
    `--rust` / `--package` when those lanes changed).
 7. **Merge and clean up.** Resolve review, confirm the integration gate passed, squash-merge, then
-   immediately `tasks.py remove <slug>` from the primary checkout and finish with
+   immediately `tasks.py finish <slug> --pr <number>` from the primary checkout and finish with
    `github_sync.py reconcile --apply`.
 
 ## Validation layers (do not duplicate)
@@ -117,12 +120,12 @@ re-derive policy from prose or chat context.
 
 ## Releases and versioning
 
-- Task branches never edit `quantmaster/release.py` or `CHANGELOG.md`. Ordinary squash merges
+- Task branches never edit `quantmaster/release/history.py` or `CHANGELOG.md`. Ordinary squash merges
   never bump versions or create releases.
 - Version bumps are centralized in one explicit version PR requested by the owner. That PR alone
   updates `VERSION`, `RELEASE_DATE`, `RELEASES`, and the top of `CHANGELOG.md` together.
   PR bodies never speculate about a target version.
-- `quantmaster/release.py` is the only runtime version source.
+- `quantmaster/release/history.py` is the only runtime version source.
 - Tags and GitHub Releases are owner-authorized only. Never infer authorization from a merge,
   changelog edit, or version bump. Tag mechanics follow `scripts/release/sync.py`; run
   `python scripts/release/sync.py install` once after cloning.
@@ -144,3 +147,16 @@ first, and use `git -C <absolute-worktree>` in the write command itself.
   `tasks.py` 有缺陷：保留证据，另开任务修复生命周期工具，再重跑同一个 `remove`。
 - 不要手工创建 worktree/分支或绕过 PR 直接改 `main`，除非 owner 明确授权紧急例外。
 - 不要为“机械增长”的质量 ratchet 反复推分支：先在本地解决或按 policy 记录审计，再推一次。
+
+## Resumable cleanup
+
+- `finish <slug> --pr <number>` records an already merged PR. Add `--merge` only when the
+  owner has authorized merging; it requires a Ready PR, exact local/remote head and the full gate.
+- `status` is a read-only JSON inventory, including legacy checkouts without manifests.
+- `retry-cleanup` previews the pending queue; `--apply` retries due entries. An explicit slug
+  retries immediately. `start` and `gc --apply` also service due entries, at most five automatic
+  attempts with bounded backoff. There is no installed background daemon.
+- Non-disposable artifacts are retained in `.artifacts/task-deliverables/<slug>`; only cache,
+  pytest, uv-cache and runtime directories are disposable. Do not store deliverables there.
+- Legacy tasks without an immutable baseline must pass `check --base <recorded-SHA>`. Never
+  fabricate merge receipts or use an arbitrary main SHA as superseding evidence.

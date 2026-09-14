@@ -41,6 +41,264 @@ from scripts.dev.tasks import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def recovery_repo(tmp_path, monkeypatch):
+    """Real Git history: squash merge followed by an overlapping main edit."""
+    from scripts.dev import tasks
+
+    primary = tmp_path / "repo"
+    primary.mkdir()
+    tasks.git(["init", "-b", "main"], cwd=primary)
+    tasks.git(["config", "user.name", "Workflow test"], cwd=primary)
+    tasks.git(["config", "user.email", "workflow@example.invalid"], cwd=primary)
+    tasks.git(["config", "core.autocrlf", "false"], cwd=primary)
+    tasks.git(["remote", "add", "origin", "https://github.com/example/project.git"], cwd=primary)
+    (primary / ".gitignore").write_text(".artifacts/\n.worktrees/\n", encoding="utf-8")
+    (primary / "code.txt").write_text("baseline\n", encoding="utf-8")
+    tasks.git(["add", "."], cwd=primary)
+    tasks.git(["commit", "-m", "baseline"], cwd=primary)
+    base = tasks.git(["rev-parse", "HEAD"], cwd=primary).stdout.strip()
+    tasks.git(["update-ref", "refs/remotes/origin/main", base], cwd=primary)
+    monkeypatch.setattr(tasks, "ROOT", primary)
+    tasks.start("recovery")
+    target = primary / ".worktrees" / "recovery"
+    (target / "code.txt").write_text("task\n", encoding="utf-8")
+    tasks.git(["commit", "-am", "task"], cwd=target)
+    (target / "contract.txt").write_text("second commit\n", encoding="utf-8")
+    tasks.git(["add", "contract.txt"], cwd=target)
+    tasks.git(["commit", "-m", "task contract"], cwd=target)
+    head = tasks.git(["rev-parse", "HEAD"], cwd=target).stdout.strip()
+    tasks.git(["merge", "--squash", "codex/recovery"], cwd=primary)
+    tasks.git(["commit", "-m", "squash"], cwd=primary)
+    merged = tasks.git(["rev-parse", "HEAD"], cwd=primary).stdout.strip()
+    (primary / "code.txt").write_text("later main edit\n", encoding="utf-8")
+    tasks.git(["commit", "-am", "later"], cwd=primary)
+    pr = {
+        "number": 12, "merged": True, "merge_commit_sha": merged,
+        "head": {"sha": head, "ref": "codex/recovery", "repo": {"full_name": "example/project"}},
+        "base": {"sha": base, "ref": "main", "repo": {"full_name": "example/project"}},
+    }
+    return primary, target, pr
+
+
+def test_merge_receipt_survives_overlapping_main_edits_and_archives_report(recovery_repo):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    assert not tasks.task_integrated(primary, "codex/recovery")
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    artifacts = primary / ".artifacts/worktrees/recovery"
+    (artifacts / "report.md").write_text("deliverable", encoding="utf-8")
+    tasks.remove("recovery")
+    tasks.remove("recovery")
+    assert not target.exists()
+    assert not artifacts.exists()
+    assert (primary / ".artifacts/task-deliverables/recovery/report.md").read_text() == "deliverable"
+    assert tasks.read_task_manifest(primary, "recovery")["state"] == "removed"
+    assert task_recovery.read_receipt(primary, "recovery")["head_sha"] == pr["head"]["sha"]
+
+
+def test_merge_receipt_rejects_new_commit_and_dirty_checkout(recovery_repo):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    (target / "new.txt").write_text("keep", encoding="utf-8")
+    with pytest.raises(SystemExit, match="TASK_DIRTY"):
+        tasks.remove("recovery")
+    tasks.git(["add", "new.txt"], cwd=target)
+    tasks.git(["commit", "-m", "unmerged work"], cwd=target)
+    with pytest.raises(SystemExit, match="TASK_HEAD_MOVED"):
+        tasks.remove("recovery")
+    assert (target / "new.txt").read_text() == "keep"
+
+
+def test_finish_records_external_merge_and_retry_does_not_call_github(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr)
+    task_recovery.finish("recovery", 12)
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pytest.fail("must use durable receipt"))
+    task_recovery.finish("recovery", 12)
+    assert not target.exists()
+    assert tasks.read_task_manifest(primary, "recovery")["state"] == "removed"
+
+
+def test_finish_interruption_after_receipt_is_resumable(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr)
+    actual_remove = tasks.remove
+
+    def interrupt(_slug):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(tasks, "remove", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        task_recovery.finish("recovery", 12)
+    assert target.exists()
+    assert task_recovery.read_receipt(primary, "recovery")
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pytest.fail("must use receipt"))
+    monkeypatch.setattr(tasks, "remove", actual_remove)
+    task_recovery.finish("recovery", 12)
+    assert not target.exists()
+
+
+def test_check_uses_recorded_baseline_after_origin_main_moves(recovery_repo, monkeypatch):
+    from scripts.dev import tasks
+
+    primary, target, pr = recovery_repo
+    tasks.git(["update-ref", "refs/remotes/origin/main", "main"], cwd=primary)
+    seen = []
+    monkeypatch.setattr(tasks, "changed_paths", lambda cwd, **kwargs: seen.append(kwargs["base"]) or [])
+    monkeypatch.setattr(tasks, "project_python", lambda cwd: Path("unused"))
+    tasks.check(target)
+    assert seen == [pr["base"]["sha"]]
+
+
+def test_finish_requires_explicit_merge_option_for_open_pr(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery
+
+    primary, target, pr = recovery_repo
+    pr["merged"] = False
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr)
+    monkeypatch.setattr(task_recovery, "merge_ready_pr", lambda *args: pytest.fail("not authorized"))
+    with pytest.raises(SystemExit, match="TASK_MERGE_PENDING"):
+        task_recovery.finish("recovery", 12)
+    assert target.exists()
+    assert not task_recovery.receipt_path(primary, "recovery").exists()
+
+
+def test_finish_merge_requires_green_gate_before_remote_write(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    pr.update(merged=False, draft=False, state="open")
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr)
+
+    def red_gate(*args, **kwargs):
+        assert kwargs["accept_ci"] is True
+        raise SystemExit("CI gate failed")
+
+    monkeypatch.setattr(tasks, "ready", red_gate)
+    with pytest.raises(SystemExit, match="CI gate failed"):
+        task_recovery.finish("recovery", 12, merge=True)
+    assert target.exists()
+    assert not task_recovery.receipt_path(primary, "recovery").exists()
+
+
+def test_finish_merge_pins_remote_head_and_records_receipt(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    pr.update(merged=False, draft=False, state="open")
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr.copy())
+    gates = []
+    monkeypatch.setattr(tasks, "ready", lambda *args, **kwargs: gates.append("ready"))
+    actual_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[:3] == ["gh", "pr", "merge"]:
+            assert gates == ["ready"]
+            assert command[-2:] == ["--match-head-commit", pr["head"]["sha"]]
+            assert "--admin" not in command
+            pr["merged"] = True
+            return SimpleNamespace(returncode=0)
+        return actual_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    task_recovery.finish("recovery", 12, merge=True)
+    assert not target.exists()
+    assert task_recovery.read_receipt(primary, "recovery")["pr"] == 12
+
+
+@pytest.mark.parametrize("field", ["head", "base"])
+def test_finish_rejects_wrong_pr_repository(recovery_repo, monkeypatch, field):
+    from scripts.dev import task_recovery
+
+    primary, target, pr = recovery_repo
+    pr[field]["repo"]["full_name"] = "another/repository"
+    monkeypatch.setattr(task_recovery, "github_pr", lambda *args: pr)
+    with pytest.raises(SystemExit, match="TASK_PR_MISMATCH"):
+        task_recovery.finish("recovery", 12)
+    assert target.exists()
+    assert not task_recovery.receipt_path(primary, "recovery").exists()
+
+
+def test_cleanup_queue_retries_checkout_failure_and_keeps_intent(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    actual_git = tasks.git
+
+    def locked(args, **kwargs):
+        if args[:2] == ["worktree", "remove"]:
+            return SimpleNamespace(returncode=1)
+        return actual_git(args, **kwargs)
+
+    monkeypatch.setattr(tasks, "git", locked)
+    tasks.remove("recovery")
+    manifest = tasks.read_task_manifest(primary, "recovery")
+    assert manifest["state"] == "checkout_pending_cleanup"
+    assert manifest["cleanup_attempts"] == 1
+    assert manifest["baseline_commit"] == pr["base"]["sha"]
+    assert tasks.task_remove_intent_path(primary, "recovery").exists()
+    assert task_recovery.retry_cleanup(primary, apply=False)[0]["outcome"] == "waiting"
+    monkeypatch.setattr(tasks, "git", actual_git)
+    result = task_recovery.retry_cleanup(primary, apply=True, slug="recovery")
+    assert result == [{"slug": "recovery", "outcome": "removed"}]
+    assert not target.exists()
+    assert not tasks.task_remove_intent_path(primary, "recovery").exists()
+
+
+def test_cleanup_queue_bounds_retries_and_inventory_does_not_write(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, _pr = recovery_repo
+    for _ in range(task_recovery.MAX_AUTOMATIC_ATTEMPTS):
+        task_recovery.queue_cleanup(primary, "recovery", "checkout_pending_cleanup", "locked")
+    monkeypatch.setattr(tasks, "remove", lambda *args: pytest.fail("retry budget exhausted"))
+    assert task_recovery.retry_cleanup(primary, apply=True)[0]["outcome"] == "manual_retry_required"
+    before = {p: p.stat().st_mtime_ns for p in (primary / ".artifacts").rglob("*")}
+    item = task_recovery.inventory(primary)[0]
+    after = {p: p.stat().st_mtime_ns for p in (primary / ".artifacts").rglob("*")}
+    assert before == after
+    assert item["registered"] and item["dirty"] is False
+    assert str(primary) not in json.dumps(item)
+    assert target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Windows sharing violation")
+def test_windows_open_handle_cleanup_recovers_without_acl_changes(recovery_repo, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    monkeypatch.setattr(tasks, "restore_acl_inheritance", lambda *args: pytest.fail("lock is not ACL damage"))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(target / "code.txt"), 0x80000000, 1, None, 3, 0, None)
+    assert handle != wintypes.HANDLE(-1).value
+    try:
+        tasks.remove("recovery")
+        assert tasks.read_task_manifest(primary, "recovery")["state"] == "checkout_pending_cleanup"
+        assert (target / "code.txt").exists()
+    finally:
+        kernel.CloseHandle(handle)
+    task_recovery.retry_cleanup(primary, slug="recovery", apply=True)
+    assert not target.exists()
+    assert tasks.read_task_manifest(primary, "recovery")["state"] == "removed"
+
+
 def _assert_ordered(text: str, *needles: str) -> None:
     positions = [text.index(needle) for needle in needles]
     assert positions == sorted(positions)
@@ -1317,6 +1575,8 @@ def test_remove_cleans_ignored_task_venv_after_git_leaves_residual(
             registered.clear()
         if args[0] == "rev-parse" and args[1].startswith("codex/recovery"):
             return Result(stdout="a" * 40)
+        if args == ["branch", "--show-current"]:
+            return Result(stdout="codex/recovery")
         return Result()
 
     monkeypatch.setattr(tasks, "primary_root", lambda cwd: primary)
@@ -1396,7 +1656,7 @@ def test_remove_records_pending_cleanup_after_git_lifecycle(monkeypatch, tmp_pat
 
     remove("recovery")
 
-    assert calls == ["completion", "artifacts", "branch"]
+    assert calls == ["completion", "branch", "artifacts"]
     assert artifacts.exists()
     assert read_task_manifest(primary, "recovery")["state"] == "pending_cleanup"
 
@@ -1959,17 +2219,15 @@ def test_remove_accepts_explicit_superseding_main_commit(monkeypatch, tmp_path):
         tasks, "remove_task_artifacts",
         lambda *args, **kwargs: artifact_calls.append(kwargs),
     )
-    monkeypatch.setattr(tasks, "git", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(tasks, "git", lambda args, **kwargs: SimpleNamespace(
+        returncode=0, stdout="codex/recovery" if args == ["branch", "--show-current"] else "",
+    ))
 
     commit = "a" * 40
     remove("recovery", superseded_by=commit)
 
-    assert artifact_calls == [{
-        "retry_command": (
-            ".\\.venv\\Scripts\\python.exe scripts/dev/tasks.py remove recovery "
-            f"--superseded-by {commit}"
-        ),
-    }]
+    assert artifact_calls == [{"retry_command": "scripts/dev/tasks.py remove recovery"}]
+    assert read_task_manifest(primary, "recovery")["superseded_by"] == commit
 
 
 def test_remove_verified_residual_requires_clean_checkout(monkeypatch, tmp_path):

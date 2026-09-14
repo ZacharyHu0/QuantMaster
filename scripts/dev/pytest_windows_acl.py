@@ -34,6 +34,8 @@ def make_writable(function: Any, path: str | bytes, error: BaseException) -> Non
     """Clear a read-only file attribute before retrying a tree removal."""
     if not isinstance(error, PermissionError):
         raise error
+    if getattr(error, "winerror", None) in {32, 33, 145}:
+        raise error
     os.chmod(path, stat.S_IWRITE)
     function(path)
 
@@ -100,6 +102,7 @@ def restore_acl_inheritance(path: Path) -> None:
             encoding="utf-8",
             errors="replace",
             check=False,
+            timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise AclRecoveryError(
