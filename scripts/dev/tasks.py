@@ -783,6 +783,7 @@ def start(slug: str) -> None:
     if any((primary / ".artifacts" / folder / name).exists() for folder, name in (
         ("worktrees", slug), ("task-remove", f"{slug}.json"), ("task-merges", f"{slug}.json"),
         ("task-deliverables", slug),
+        ("task-archives", slug),
     )):
         raise SystemExit("TASK_SLUG_REUSED: existing artifacts or receipts; choose a new slug")
     if target.exists():
@@ -1403,6 +1404,11 @@ def _remove_locked(
         raise SystemExit("无效 slug")
     primary = primary_root(ROOT)
     manifest = ensure_task_manifest(primary, slug)
+    from scripts.dev.task_archive import archive_root, remove_archived
+
+    if (archive_root(primary, slug) / "receipt.json").exists():
+        remove_archived(primary, slug)
+        return
     target = (primary / ".worktrees" / slug).resolve()
     if target != (primary / ".worktrees").resolve() / slug:
         raise SystemExit("拒绝移除预期目录之外的 worktree")
@@ -1532,6 +1538,12 @@ def parser() -> argparse.ArgumentParser:
     finish_parser.add_argument(
         "--merge", action="store_true", help="also squash-merge an exact-head green Ready PR",
     )
+    archive_parser = commands.add_parser(
+        "archive", help="archive unfinished task, verify backup, then remove",
+    )
+    archive_parser.add_argument("slug")
+    archive_parser.add_argument("--apply", action="store_true", required=True,
+                                help="explicit owner-authorized archival and removal")
     return result
 
 
@@ -1577,7 +1589,7 @@ def main(argv: list[str] | None = None) -> int:
     cwd = Path.cwd().resolve()
 
     try:
-        if args.command in {"start", "remove", "gc", "preflight", "finish", "retry-cleanup"}:
+        if args.command in {"start", "remove", "gc", "preflight", "finish", "retry-cleanup", "archive"}:
             primary = require_primary_control(cwd)
             with task_admin_lease(primary):
                 require_primary_control(cwd)

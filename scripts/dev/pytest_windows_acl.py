@@ -36,6 +36,15 @@ def make_writable(function: Any, path: str | bytes, error: BaseException) -> Non
         raise error
     if getattr(error, "winerror", None) in {32, 33, 145}:
         raise error
+    if getattr(error, "winerror", None) == 5:
+        # Legacy pytest directories may deny enumeration but grant DELETE_CHILD
+        # through their parent. Removing an empty directory needs no ACL rewrite.
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+        else:
+            return
     os.chmod(path, stat.S_IWRITE)
     function(path)
 

@@ -41,6 +41,127 @@ from scripts.dev.tasks import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_cleanup_removes_empty_access_denied_leaf_without_rewriting_acl(tmp_path, monkeypatch):
+    from scripts.dev import pytest_windows_acl
+
+    leaf = tmp_path / "legacy-empty"
+    leaf.mkdir()
+    error = PermissionError(13, "access denied", str(leaf))
+    error.winerror = 5
+    monkeypatch.setattr(pytest_windows_acl.os, "chmod", lambda *args: pytest.fail("unnecessary ACL change"))
+    pytest_windows_acl.make_writable(os.scandir, str(leaf), error)
+    assert not leaf.exists()
+
+
+def test_cleanup_never_removes_nonempty_denied_leaf_as_empty(tmp_path, monkeypatch):
+    from scripts.dev import pytest_windows_acl
+
+    leaf = tmp_path / "legacy-nonempty"
+    leaf.mkdir()
+    valuable = leaf / "keep.txt"
+    valuable.write_text("keep", encoding="utf-8")
+    error = PermissionError(13, "access denied", str(leaf))
+    error.winerror = 5
+
+    def denied(*args):
+        raise error
+
+    monkeypatch.setattr(pytest_windows_acl.os, "chmod", denied)
+    with pytest.raises(PermissionError):
+        pytest_windows_acl.make_writable(os.scandir, str(leaf), error)
+    assert valuable.read_text() == "keep"
+
+
+def test_archive_preserves_unmerged_head_dirty_and_ignored_files(recovery_repo, tmp_path):
+    import zipfile
+
+    from scripts.dev import task_archive, tasks
+
+    primary, target, pr = recovery_repo
+    (target / "code.txt").write_text("uncommitted edit", encoding="utf-8")
+    (target / "notes.txt").write_text("untracked note", encoding="utf-8")
+    (target / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (target / "ignored.txt").write_text("ignored but valuable", encoding="utf-8")
+    task_archive.archive_task(primary, "recovery")
+    root = task_archive.archive_root(primary, "recovery")
+    assert not target.exists()
+    assert tasks.read_task_manifest(primary, "recovery")["disposition"] == "archived_unmerged"
+    with zipfile.ZipFile(root / "checkout.zip") as snapshot:
+        assert snapshot.read("code.txt") == b"uncommitted edit"
+        assert snapshot.read("notes.txt") == b"untracked note"
+        assert snapshot.read("ignored.txt") == b"ignored but valuable"
+    restored = tmp_path / "restored"
+    tasks.git(
+        ["clone", "--branch", "codex/recovery", str(root / "history.bundle"), str(restored)], cwd=primary,
+    )
+    assert tasks.git(["rev-parse", "HEAD"], cwd=restored).stdout.strip() == pr["head"]["sha"]
+    tasks.remove("recovery")
+    assert root.exists()
+
+
+def test_archive_changed_file_after_backup_is_preserved(recovery_repo, monkeypatch):
+    from scripts.dev import task_archive, tasks
+
+    primary, target, _pr = recovery_repo
+    actual_remove = tasks.remove
+    monkeypatch.setattr(tasks, "remove", lambda slug: None)
+    task_archive.archive_task(primary, "recovery")
+    (target / "new.txt").write_text("arrived after backup", encoding="utf-8")
+    monkeypatch.setattr(tasks, "remove", actual_remove)
+    with pytest.raises(SystemExit, match="TASK_ARCHIVE_CHANGED"):
+        tasks.remove("recovery")
+    assert (target / "new.txt").exists()
+
+
+def test_archive_corrupted_backup_blocks_deletion(recovery_repo, monkeypatch):
+    from scripts.dev import task_archive, tasks
+
+    primary, target, _pr = recovery_repo
+    actual_remove = tasks.remove
+    monkeypatch.setattr(tasks, "remove", lambda slug: None)
+    task_archive.archive_task(primary, "recovery")
+    (task_archive.archive_root(primary, "recovery") / "checkout.zip").write_bytes(b"damaged")
+    monkeypatch.setattr(tasks, "remove", actual_remove)
+    with pytest.raises(SystemExit, match="TASK_ARCHIVE_INVALID"):
+        tasks.remove("recovery")
+    assert target.exists()
+
+
+def test_archive_retry_recovers_partial_checkout_removal(recovery_repo, monkeypatch):
+    from scripts.dev import task_archive, tasks
+
+    primary, target, _pr = recovery_repo
+    actual_git = tasks.git
+
+    def partial(args, **kwargs):
+        if args[:2] == ["worktree", "remove"]:
+            (target / "code.txt").unlink()
+            return SimpleNamespace(returncode=1)
+        return actual_git(args, **kwargs)
+
+    monkeypatch.setattr(tasks, "git", partial)
+    task_archive.archive_task(primary, "recovery")
+    assert tasks.read_task_manifest(primary, "recovery")["state"] == "checkout_pending_cleanup"
+    monkeypatch.setattr(tasks, "git", actual_git)
+    tasks.remove("recovery")
+    assert not target.exists()
+    assert tasks.read_task_manifest(primary, "recovery")["state"] == "removed"
+
+
+def test_archive_refuses_in_progress_merge(recovery_repo):
+    from scripts.dev import task_archive, tasks
+
+    primary, target, pr = recovery_repo
+    marker = Path(tasks.git(["rev-parse", "--git-path", "MERGE_HEAD"], cwd=target).stdout.strip())
+    marker.write_text(pr["base"]["sha"], encoding="utf-8")
+    try:
+        with pytest.raises(SystemExit, match="TASK_CONTEXT_INVALID"):
+            task_archive.archive_task(primary, "recovery")
+        assert target.exists()
+    finally:
+        marker.unlink()
+
+
 @pytest.fixture
 def recovery_repo(tmp_path, monkeypatch):
     """Real Git history: squash merge followed by an overlapping main edit."""

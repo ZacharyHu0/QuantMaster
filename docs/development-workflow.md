@@ -219,6 +219,20 @@ confirms that Release.
 
 ### Legacy recovery
 
+With explicit owner authorization to retain unfinished work as an archive and remove its
+original checkout/branch, use `tasks.py archive <slug> --apply` from the primary checkout.
+The tool writes `.artifacts/task-archives/<slug>/history.bundle`, `checkout.zip`, and
+`receipt.json`. The bundle contains the exact branch history; the ZIP preserves tracked,
+modified, untracked and ignored checkout files (except the linked `.git` pointer).
+Links and in-progress Git operations fail closed. SHA-256 and Git bundle verification must
+pass before removal. A changed file/head invalidates the receipt; interrupted deletion may
+only remove surviving files that still match the archive. `remove` and `retry-cleanup` resume
+that operation without claiming the archived branch was merged.
+
+To restore elsewhere, clone `history.bundle` with `--branch codex/<slug>`, then overlay
+`checkout.zip` to recover uncommitted state. Validate the SHA-256 values in `receipt.json`
+first. These archives are permanent until explicitly disposed of; GC never removes them.
+
 Start with `tasks.py status`; it includes branch-only tasks, unregistered checkouts, missing
 manifests and old removal intents. Inventory does not grant deletion permission. For a clean
 legacy task with a known merged PR, use `finish <slug> --pr <number>`; repository and exact head

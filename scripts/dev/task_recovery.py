@@ -23,7 +23,11 @@ MAX_AUTOMATIC_ATTEMPTS = 5
 
 
 def dispatch_recovery(args: argparse.Namespace, primary: Path) -> None:
-    if args.command == "finish":
+    if args.command == "archive":
+        from scripts.dev.task_archive import archive_task
+
+        archive_task(primary, args.slug)
+    elif args.command == "finish":
         finish(args.slug, args.pr, merge=args.merge)
     elif args.command == "status":
         print(json.dumps(inventory(primary), ensure_ascii=False, indent=2))
