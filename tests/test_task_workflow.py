@@ -397,6 +397,15 @@ def _capture_task_launches(
                 return subprocess.CompletedProcess(
                     command, 0, stdout=branches[Path(kwargs["cwd"]).name] + "\n", stderr="",
                 )
+            if (
+                git_args[:3] == ["rev-parse", "--path-format=absolute", "--git-path"]
+                and git_args[3] in {
+                    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply",
+                }
+            ):
+                path = primary / ".git" / "worktrees" / Path(kwargs["cwd"]).name / git_args[3]
+                return subprocess.CompletedProcess(command, 0, stdout=str(path), stderr="")
+            pytest.fail(f"unexpected Git call in simulated task repo: {git_args}")
         return real_run(command, *args, **kwargs)
 
     monkeypatch.setattr(tasks, "ROOT", primary)
@@ -641,10 +650,39 @@ def test_preflight_rejects_pending_cleanup_as_reusable_task(monkeypatch, tmp_pat
     monkeypatch.setattr(tasks, "worktree_branches", lambda _root: {
         target.resolve(): "refs/heads/codex/alpha",
     })
+    monkeypatch.setattr(tasks, "git", lambda args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=str(primary / ".git" / "worktrees" / "alpha" / args[-1]),
+    ))
     tasks._write_task_manifest(primary, "alpha", state="pending_cleanup")
 
     with pytest.raises(SystemExit, match="pending_cleanup"):
         tasks.preflight_task(primary, "alpha")
+
+
+@pytest.mark.parametrize("operation", [
+    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply",
+])
+def test_real_task_git_operation_blocks_preflight_and_remove(recovery_repo, operation):
+    from scripts.dev import task_recovery, tasks
+
+    primary, target, pr = recovery_repo
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    marker = Path(tasks.git(
+        ["rev-parse", "--path-format=absolute", "--git-path", operation], cwd=target,
+    ).stdout.strip())
+    if operation.startswith("rebase-"):
+        marker.mkdir()
+    else:
+        marker.write_text(pr["base"]["sha"] + "\n", encoding="utf-8")
+    try:
+        with pytest.raises(SystemExit, match=r"TASK_CONTEXT_INVALID.*in-progress"):
+            tasks.preflight_task(primary, "recovery")
+        with pytest.raises(SystemExit, match=r"TASK_CONTEXT_INVALID.*in-progress"):
+            tasks.remove("recovery")
+        assert target.exists()
+        assert tasks.read_task_manifest(primary, "recovery")["state"] == "active"
+    finally:
+        marker.rmdir() if marker.is_dir() else marker.unlink()
 
 
 def test_task_manifest_corruption_fails_closed(tmp_path):
