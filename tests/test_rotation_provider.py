@@ -483,7 +483,13 @@ def test_provider_uses_akshare_concept_code_for_member_lookup(tmp_path, monkeypa
     assert store.themes()[0]["members"] == ["000001.SZ", "600001.SH"]
 
 
-def test_provider_persists_stockdb_metadata_before_remote_sources(tmp_path):
+def test_provider_persists_stockdb_metadata_before_remote_sources(tmp_path, monkeypatch):
+    # The fixture includes an ETF that was still eligible before its delisting.
+    # Exercise the offline fallback without consulting host calendar caches or time.
+    monkeypatch.setattr("quantmaster.rotation.provider.expected_market_session", lambda: "")
+    monkeypatch.setattr(
+        "quantmaster.rotation.provider.market_date", lambda: pd.Timestamp("2026-07-31").date(),
+    )
     class LocalInstruments:
         def list(self, *, market=""):
             assert market == "CN"
