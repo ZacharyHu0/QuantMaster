@@ -2494,3 +2494,33 @@ def test_remove_verified_residual_retries_after_restoring_acl_inheritance(
 
     assert calls == ["remove", "restore", "remove"]
     assert not target.exists()
+def test_gc_invalid_checkout_only_removes_empty_unregistered_tree(monkeypatch, tmp_path):
+    from scripts.dev import task_recovery, tasks
+
+    root = tmp_path / ".worktrees"
+    empty = root / "legacy invalid" / "nested"
+    empty.mkdir(parents=True)
+    protected = root / "registered invalid"
+    protected.mkdir()
+    content = root / "content invalid"
+    content.mkdir()
+    (content / "keep.txt").write_text("preserve", encoding="utf-8")
+    monkeypatch.setattr(tasks, "registered_worktrees", lambda _: {protected})
+    task_recovery.gc_invalid_checkouts(tmp_path, apply=False)
+    assert empty.exists()
+    task_recovery.gc_invalid_checkouts(tmp_path, apply=True)
+    assert not empty.parent.exists()
+    assert protected.exists()
+    assert (content / "keep.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_inventory_reports_invalid_legacy_name(monkeypatch, tmp_path):
+    from scripts.dev import task_recovery, tasks
+
+    (tmp_path / ".worktrees" / "invalid legacy").mkdir(parents=True)
+    monkeypatch.setattr(tasks, "worktree_branches", lambda _: {})
+    monkeypatch.setattr(tasks, "git_lines", lambda *args, **kwargs: [])
+    assert task_recovery.inventory(tmp_path) == [{
+        "slug": "invalid legacy", "state": "invalid",
+        "reason": "TASK_CONTEXT_INVALID: invalid legacy name; inspect gc preview",
+    }]

@@ -1157,6 +1157,9 @@ def gc_task_artifacts(
     if retention_days < 0:
         raise SystemExit("retention days 不能为负数")
     primary = primary_root(ROOT)
+    from scripts.dev.task_recovery import gc_invalid_checkouts
+
+    gc_invalid_checkouts(primary, apply=apply)
     root = (primary / ".artifacts" / "worktrees").resolve()
     root.mkdir(parents=True, exist_ok=True)
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)

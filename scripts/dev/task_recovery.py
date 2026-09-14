@@ -254,12 +254,52 @@ def inventory(primary: Path) -> list[dict[str, object]]:
     items = []
     for slug in sorted(slugs):
         if not tasks.SLUG_PATTERN.fullmatch(slug):
+            items.append({"slug": slug, "state": "invalid",
+                          "reason": "TASK_CONTEXT_INVALID: invalid legacy name; inspect gc preview"})
             continue
         try:
             items.append(_inventory_item(primary, slug, branches))
         except (SystemExit, OSError, subprocess.SubprocessError) as exc:
             items.append({"slug": slug, "state": "invalid", "reason": tasks.redact_public_text(exc)})
     return items
+
+
+def gc_invalid_checkouts(primary: Path, *, apply: bool) -> None:
+    """Remove only empty, unregistered directory trees with invalid task names."""
+    root = (primary / ".worktrees").resolve()
+    if not root.is_dir():
+        return
+    registered = tasks.registered_worktrees(primary)
+    for target in sorted(root.iterdir()):
+        if tasks.SLUG_PATTERN.fullmatch(target.name):
+            continue
+        if any(path == target or target in path.parents for path in registered):
+            print("[task-gc] protected registered legacy checkout")
+            continue
+        directories = _empty_directory_tree(target, root)
+        if directories is None:
+            print("[task-gc] protected invalid checkout: contains files, links or unknown content")
+            continue
+        print("[task-gc] eligible empty invalid checkout tree")
+        if apply:
+            # rmdir never deletes files, including files arriving after the scan.
+            for directory in reversed(directories):
+                directory.rmdir()
+            print("[task-gc] removed empty invalid checkout tree")
+
+
+def _empty_directory_tree(target: Path, root: Path) -> list[Path] | None:
+    if target.resolve().parent != root or target.is_symlink() or target.is_junction():
+        return None
+    if not target.is_dir():
+        return None
+    directories = [target]
+    for directory in directories:
+        for entry in directory.iterdir():
+            if entry.is_symlink() or entry.is_junction() or not entry.is_dir():
+                return None
+            directories.append(entry)
+    return directories
 
 
 def _inventory_item(primary: Path, slug: str, branches: dict[Path, str | None]) -> dict[str, object]:
