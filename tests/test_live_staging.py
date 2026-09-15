@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
@@ -209,10 +211,69 @@ def test_stage_builds_from_fixed_git_snapshot_when_primary_changes(
         lambda executable, *, layout: smoke_calls.append((executable, layout))
         or _smoke_report(sha),
     )
+    slots = tmp_path / "localappdata" / "QuantMaster" / "app" / "slots"
+    slots.mkdir(parents=True)
+    # Model a distinct future cleanup identity without creating an OS account.
+    # A private tempfile DACL loses this inherited grant, even after rename.
+    _cleanup_identity_acl(slots, grant=True)
     result = live.stage("task", cwd=primary)
 
     assert result["build_sha"] == sha
     assert smoke_calls == [(Path(result["slot"]) / "QuantMaster.exe", "onedir")]
+    _cleanup_identity_acl(Path(result["slot"]), grant=False)
+    shutil.rmtree(slots)
+    assert not slots.exists()
+
+
+def _cleanup_identity_acl(path: Path, *, grant: bool) -> None:
+    script = """
+    $ErrorActionPreference='Stop'
+    $sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-21-12345-67890-98765-4001')
+    $target=$env:QM_TEST_ACL_PATH
+    if($env:QM_TEST_ACL_GRANT -eq 'yes') {
+      $acl=[System.IO.Directory]::GetAccessControl($target)
+      $rule=[System.Security.AccessControl.FileSystemAccessRule]::new(
+        $sid,'Modify','ContainerInherit,ObjectInherit','None','Allow')
+      $acl.AddAccessRule($rule)
+      [System.IO.Directory]::SetAccessControl($target,$acl)
+    } else {
+      $items=@(Get-Item -LiteralPath $target) + @(Get-ChildItem -LiteralPath $target -Recurse -Force)
+      foreach($item in $items) {
+        $acl=if($item.PSIsContainer){[System.IO.Directory]::GetAccessControl($item.FullName)}
+          else{[System.IO.File]::GetAccessControl($item.FullName)}
+        $rules=@($acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) |
+          Where-Object { $_.IdentityReference -eq $sid -and $_.IsInherited -and
+            $_.AccessControlType -eq 'Allow' -and
+            ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Modify) -eq
+              [System.Security.AccessControl.FileSystemRights]::Modify })
+        if($acl.AreAccessRulesProtected -or $rules.Count -eq 0) {throw 'cleanup identity grant was lost'}
+      }
+    }
+    """
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        env={**os.environ, "QM_TEST_ACL_PATH": str(path), "QM_TEST_ACL_GRANT": "yes" if grant else "no"},
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows private tempfile ACL regression")
+def test_private_tempfile_slot_loses_cleanup_grant_and_recovery_really_writes(tmp_path):
+    slots = tmp_path / "slots"
+    slots.mkdir()
+    _cleanup_identity_acl(slots, grant=True)
+    archive = _archive(tmp_path / "slot.zip", ("QuantMaster/QuantMaster.exe", b"exe"))
+    slot = slots / "permanent"
+    with tempfile.TemporaryDirectory(dir=slots) as private:
+        extracted = live._extract_archive(archive, Path(private))
+        os.replace(extracted, slot)
+    with pytest.raises(AssertionError, match="cleanup identity grant was lost"):
+        _cleanup_identity_acl(slot, grant=False)
+    live.tasks.restore_acl_inheritance(slot)
+    _cleanup_identity_acl(slot, grant=False)
+    shutil.rmtree(slots)
+    assert not slots.exists()
 
 
 @pytest.mark.parametrize("protected_name", ["active", "previous"])

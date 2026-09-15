@@ -11,7 +11,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -425,6 +424,23 @@ def _snapshot_main(primary: Path, main_sha: str, build_root: Path) -> Path:
     return snapshot
 
 
+@contextlib.contextmanager
+def _staging_directory(parent: Path, prefix: str):
+    """Keep build/extraction descendants on the destination's inherited ACL.
+
+    tempfile creates a private 0700 DACL on Windows. Moving its descendants
+    into a permanent slot can retain that ACL and strand the next identity.
+    The caller already holds the task and application lifecycle leases.
+    """
+    parent = parent.resolve()
+    directory = parent / f"{prefix}{uuid.uuid4().hex}"
+    directory.mkdir()
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, onexc=tasks.make_writable)
+
+
 def _safe_member_name(name: str) -> PurePosixPath:
     if "\\" in name or ":" in name or not name.startswith("QuantMaster/"):
         _block("unsafe_archive", f"ZIP member 不在 QuantMaster 根目录：{name}")
@@ -634,8 +650,8 @@ def _stage_candidate(
         slots.mkdir(parents=True, exist_ok=True)
         owned_slot = False
         try:
-            with tempfile.TemporaryDirectory(
-                prefix=f"stage-{main_sha[:12]}-", dir=task_artifacts,
+            with _staging_directory(
+                task_artifacts, prefix=f"stage-{main_sha[:12]}-",
             ) as raw_build:
                 build_root = Path(raw_build)
                 snapshot = _snapshot_main(primary, main_sha, build_root)
@@ -648,8 +664,8 @@ def _stage_candidate(
                     task_artifacts,
                     build_root,
                 )
-                with tempfile.TemporaryDirectory(
-                    prefix=f".{main_sha[:12]}-", dir=slots,
+                with _staging_directory(
+                    slots, prefix=f".{main_sha[:12]}-",
                 ) as raw_extract:
                     extracted_root = _extract_archive(archive, Path(raw_extract))
                     if slot.exists():

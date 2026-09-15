@@ -82,7 +82,8 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 - [ ] PR Ready 后 squash merge，Issue/Project 状态已同步；
 - [ ] 已调用 `tasks.py finish <slug> --pr <number>` 保存合并凭据并清理；
       `checkout_pending_cleanup` 与 `pending_cleanup` 分别表示 checkout 和工件待重试，
-      无手工删除的 worktree 残余；
+      两者都不是清理完成。`status --require-clean` 通过后才可声称残余清零；
+      权限阻塞由协调任务保留 Blocked Issue 和恢复条件，无手工删除的 worktree 残余；
 - [ ] 没有未经 owner 确认的 Release tag 或 GitHub Release。
 
 ## 7. 仓库入口

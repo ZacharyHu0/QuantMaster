@@ -242,3 +242,25 @@ archives cannot be reused.
 
 CLI merge behavior: [GitHub CLI merge reference](https://cli.github.com/manual/gh_pr_merge).
 Receipt fields: [GitHub pull request API](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request).
+
+### Physical cleanup acceptance
+
+Git completion and physical cleanup are separate: inventory exposes `git_complete` and
+`cleanup_complete`. `remove`, `finish`, `archive`, `retry-cleanup --apply` and `gc --apply`
+return exit 2 (`TASK_CLEANUP_PENDING`) if their cleanup scope still contains pending state.
+`status` stays read-only with exit 0; `status --require-clean` returns 2 for pending or invalid
+entries. An active development task does not count as cleanup debt.
+
+Permission errors (`inspection_denied`, `deletion_denied`) report
+`permission_handoff_required` and stop automatic retries, including GC. Existing manifests
+are classified by their saved error too. Transient sharing violations retain bounded retry.
+The coordinating session owns a Blocked Issue with the slug, stable error and access-change
+condition. After an authorized maintenance identity can access the residual artifacts,
+retry the explicit slug, verify `cleanup_complete=true`, and only then close the cleanup Issue.
+This is an explicit handoff; no administrator escalation or background daemon is installed.
+
+Local staging creates unique build/extraction directories under its already leased roots
+with inherited permissions. It does not promote private `tempfile` directories into durable
+slots. The Windows staging regression checks a separate cleanup SID's inherited Modify grant
+through extraction and slot rename, then removes the result. It checks the ACL contract;
+it does not pretend that a same-user process is a different authenticated OS identity.

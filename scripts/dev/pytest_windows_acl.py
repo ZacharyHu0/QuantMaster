@@ -77,9 +77,10 @@ def restore_acl_inheritance(path: Path) -> None:
         "};"
         "};"
         "if($null -eq $acl){throw '无法读取目标或父目录 ACL'};"
-        "if($acl.AreAccessRulesProtected){"
+        # Always mark the DACL modified, including a fallback ACL read from
+        # an inheriting parent. Otherwise SetAccessControl can be a no-op.
         "$acl.SetAccessRuleProtection($false,$true)"
-        "};"
+        ";"
         "if($item.PSIsContainer){"
         "[System.IO.Directory]::SetAccessControl($item.FullName,$acl)"
         "}else{"
@@ -95,6 +96,10 @@ def restore_acl_inheritance(path: Path) -> None:
         "[System.IO.File]::SetAccessControl($item.FullName,$fileAcl)"
         "}"
         "}"
+        ";$verified=if($item.PSIsContainer){"
+        "[System.IO.Directory]::GetAccessControl($item.FullName)"
+        "}else{[System.IO.File]::GetAccessControl($item.FullName)};"
+        "if($verified.AreAccessRulesProtected){throw 'ACL inheritance remains protected'}"
     )
     environment = os.environ.copy()
     system_root = environment.get("SystemRoot", r"C:\Windows").rstrip("\\/")

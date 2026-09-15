@@ -19,8 +19,10 @@ These rules are hard gates for every AI session, including sessions working in p
   artifact root, runtime directory, or branch between sessions.
 - After merge, run `tasks.py finish <task-slug> --pr <number>` to persist merge evidence and
   clean up. `remove` remains the local/offline retry entry point. If it reports `pending_cleanup`, the Git
-  task is complete. `checkout_pending_cleanup` means checkout/branch cleanup is still pending.
-  Run `tasks.py status` or `tasks.py retry-cleanup <slug> --apply`; never delete paths by hand.
+  task is complete, but cleanup is NOT complete. Cleanup commands return exit 2 with
+  `TASK_CLEANUP_PENDING` while residual state remains. `checkout_pending_cleanup` means
+  checkout/branch cleanup is still pending. Verify `tasks.py status --require-clean` before
+  claiming cleanup complete; never delete paths by hand.
 - “继续” never authorizes bypassing these gates. If the repository state is dirty, detached,
   mid-merge, ACL-blocked, or ambiguous, stop and report the exact stable error code.
 
@@ -156,6 +158,13 @@ first, and use `git -C <absolute-worktree>` in the write command itself.
 - `retry-cleanup` previews the pending queue; `--apply` retries due entries. An explicit slug
   retries immediately. `start` and `gc --apply` also service due entries, at most five automatic
   attempts with bounded backoff. There is no installed background daemon.
+- `inspection_denied` / `deletion_denied` require a permission handoff, not automatic retry.
+  The coordinating session keeps the Issue Blocked with the task slug, stable error and
+  unblock condition. Once an authorized maintenance identity can access the artifacts,
+  run `retry-cleanup <slug> --apply`; do not mark cleanup Done until `cleanup_complete=true`.
+- Managed build/extraction directories that outlive their creator must inherit destination
+  permissions. Never promote a private `TemporaryDirectory` subtree into a persistent slot.
+  Verify future cleanup identity grants survive extraction and same-volume rename.
 - Non-disposable artifacts are retained in `.artifacts/task-deliverables/<slug>`; only cache,
   pytest, uv-cache and runtime directories are disposable. Do not store deliverables there.
 - Legacy tasks without an immutable baseline must pass `check --base <recorded-SHA>`. Never

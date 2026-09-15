@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -197,6 +198,25 @@ def preserve_deliverables(primary: Path, slug: str) -> None:
         entry.rename(archived)
 
 
+def requires_cleanup_handoff(manifest: dict) -> bool:
+    """Permission failures need an access change, not a timer or more retries."""
+    error = str(manifest.get("last_error", ""))
+    return any(f"kind={kind}" in error for kind in ("inspection_denied", "deletion_denied"))
+
+
+def cleanup_exit_code(primary: Path, slug: str | None = None) -> int:
+    """Git completion must never be mistaken for physical cleanup completion."""
+    pending = [item for item in inventory(primary)
+               if (slug is None or item["slug"] == slug)
+               and (item["state"] not in {"active", "removed"}
+                    or (item["state"] == "removed" and not item["cleanup_complete"]))]
+    if pending:
+        print("TASK_CLEANUP_PENDING: " + ", ".join(str(item["slug"]) for item in pending),
+              file=sys.stderr)
+        return 2
+    return 0
+
+
 def queue_cleanup(primary: Path, slug: str, state: str, error: object) -> None:
     manifest = tasks.ensure_task_manifest(primary, slug)
     attempts = int(manifest.get("cleanup_attempts", 0)) + 1
@@ -204,7 +224,8 @@ def queue_cleanup(primary: Path, slug: str, state: str, error: object) -> None:
     tasks.update_task_manifest(primary, slug, state=state,
         last_error=tasks.redact_public_text(error), fields={
             "cleanup_attempts": attempts,
-            "next_retry_at": (datetime.now(UTC) + delay).isoformat(),
+            "next_retry_at": None if requires_cleanup_handoff({"last_error": error})
+            else (datetime.now(UTC) + delay).isoformat(),
         })
 
 
@@ -224,8 +245,10 @@ def retry_cleanup(primary: Path, *, apply: bool, slug: str | None = None) -> lis
         if not manifest or manifest["state"] not in PENDING_STATES:
             continue
         due = datetime.fromisoformat(str(manifest.get("next_retry_at") or datetime.now(UTC).isoformat()))
-        paused = int(manifest.get("cleanup_attempts", 0)) >= MAX_AUTOMATIC_ATTEMPTS
-        outcome = "manual_retry_required" if paused else "waiting"
+        handoff = requires_cleanup_handoff(manifest)
+        paused = handoff or int(manifest.get("cleanup_attempts", 0)) >= MAX_AUTOMATIC_ATTEMPTS
+        outcome = ("permission_handoff_required" if handoff
+                   else "manual_retry_required" if paused else "waiting")
         if slug or (not paused and due <= datetime.now(UTC)):
             outcome = "eligible"
             if apply:
@@ -323,4 +346,11 @@ def _inventory_item(primary: Path, slug: str, branches: dict[Path, str | None]) 
         "last_error": (manifest or {}).get("last_error", ""),
         "cleanup_attempts": (manifest or {}).get("cleanup_attempts", 0),
         "next_retry_at": (manifest or {}).get("next_retry_at"),
+        "git_complete": bool(manifest and manifest["state"] in {"removed", "pending_cleanup"}
+                             and target not in branches and not target.exists() and not branch_exists),
+        "cleanup_complete": bool(manifest and manifest["state"] == "removed"
+                                 and target not in branches and not target.exists() and not branch_exists
+                                 and not (primary / ".artifacts/worktrees" / slug).exists()),
+        "cleanup_action": "restore_access_then_explicit_retry"
+        if requires_cleanup_handoff(manifest or {}) else None,
     }

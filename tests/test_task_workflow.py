@@ -392,6 +392,49 @@ def test_cleanup_queue_bounds_retries_and_inventory_does_not_write(recovery_repo
     assert target.exists()
 
 
+@pytest.mark.parametrize("kind", ["deletion_denied", "inspection_denied"])
+def test_permission_failure_requires_handoff_but_explicit_retry_can_recover(recovery_repo, monkeypatch, kind):
+    from scripts.dev import task_recovery, tasks
+
+    primary, _target, pr = recovery_repo
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    task_recovery.queue_cleanup(primary, "recovery", "pending_cleanup",
+                                f"TASK_ARTIFACT_ACL_UNRECOVERABLE: kind={kind}")
+    manifest = tasks.read_task_manifest(primary, "recovery")
+    assert manifest["next_retry_at"] is None
+    with monkeypatch.context() as protected:
+        protected.setattr(tasks, "remove", lambda *args: pytest.fail("permissions do not improve with time"))
+        assert task_recovery.retry_cleanup(primary, apply=True) == [
+            {"slug": "recovery", "outcome": "permission_handoff_required"},
+        ]
+    assert task_recovery.retry_cleanup(primary, apply=True, slug="recovery") == [
+        {"slug": "recovery", "outcome": "removed"},
+    ]
+
+
+def test_cleanup_cli_reports_git_complete_without_claiming_artifacts_removed(recovery_repo, monkeypatch):
+    from scripts.dev import task_recovery, tasks
+
+    primary, _target, pr = recovery_repo
+    monkeypatch.chdir(primary)
+    task_recovery.record_merge(primary, "recovery", 12, pr, "example/project")
+    with monkeypatch.context() as blocked:
+        def deny(*args, **kwargs):
+            raise SystemExit("TASK_ARTIFACT_ACL_UNRECOVERABLE: kind=deletion_denied")
+        blocked.setattr(tasks, "remove_task_artifacts", deny)
+        assert tasks.main(["remove", "recovery"]) == 2
+    item = task_recovery.inventory(primary)[0]
+    assert item["git_complete"] is True
+    assert item["cleanup_complete"] is False
+    assert item["cleanup_action"] == "restore_access_then_explicit_retry"
+    assert tasks.main(["status", "--require-clean"]) == 2
+    assert tasks.main(["status"]) == 0
+    assert tasks.main(["retry-cleanup", "--apply"]) == 2
+    assert tasks.main(["retry-cleanup", "recovery", "--apply"]) == 0
+    assert tasks.main(["status", "--require-clean"]) == 0
+    assert task_recovery.inventory(primary)[0]["cleanup_complete"] is True
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real Windows sharing violation")
 def test_windows_open_handle_cleanup_recovers_without_acl_changes(recovery_repo, monkeypatch):
     import ctypes

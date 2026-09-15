@@ -1157,7 +1157,7 @@ def gc_task_artifacts(
     if retention_days < 0:
         raise SystemExit("retention days 不能为负数")
     primary = primary_root(ROOT)
-    from scripts.dev.task_recovery import gc_invalid_checkouts
+    from scripts.dev.task_recovery import gc_invalid_checkouts, requires_cleanup_handoff
 
     gc_invalid_checkouts(primary, apply=apply)
     root = (primary / ".artifacts" / "worktrees").resolve()
@@ -1197,6 +1197,10 @@ def gc_task_artifacts(
                 print(f"[task-gc] failed: {slug}: {exc}")
             continue
         target = (primary / ".worktrees" / slug).resolve()
+        if requires_cleanup_handoff(read_task_manifest(primary, slug) or {}):
+            counts["protected"] += 1
+            print(f"[task-gc] permission handoff required: {slug}; restore access then retry explicitly")
+            continue
         branch = f"codex/{slug}"
         branch_exists = git(
             ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
@@ -1531,7 +1535,9 @@ def parser() -> argparse.ArgumentParser:
     gc_parser.add_argument("--adopt-legacy-orphans", action="store_true")
     preflight_parser = commands.add_parser("preflight")
     preflight_parser.add_argument("slug")
-    commands.add_parser("status", help="read-only task inventory as JSON")
+    status_parser = commands.add_parser("status", help="read-only task inventory as JSON")
+    status_parser.add_argument("--require-clean", action="store_true",
+                               help="exit 2 when pending or invalid cleanup state remains")
     retry_parser = commands.add_parser("retry-cleanup", help="preview or retry the managed cleanup queue")
     retry_parser.add_argument("slug", nargs="?")
     retry_parser.add_argument("--apply", action="store_true")
@@ -1608,6 +1614,13 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
         print(f"[task] FAILED: {redact_public_text(exc)}", file=sys.stderr)
         return 1
+    cleanup_command = args.command in {"remove", "finish", "archive"} or (
+        args.command in {"retry-cleanup", "gc"} and args.apply
+    ) or (args.command == "status" and args.require_clean)
+    if cleanup_command:
+        from scripts.dev.task_recovery import cleanup_exit_code
+
+        return cleanup_exit_code(primary_root(ROOT), getattr(args, "slug", None))
     return 0
 
 
