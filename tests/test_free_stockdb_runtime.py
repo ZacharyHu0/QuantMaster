@@ -486,7 +486,11 @@ def test_running_updater_closes_only_after_changed_data_is_stable_and_accepted(
     runtime = FreeStockDBRuntime()
     process = SimpleNamespace(pid=42, returncode=None)
     process.poll = lambda: process.returncode
-    fingerprints = iter((("before", 1, 1), ("after", 2, 2), ("after", 2, 2)))
+    fingerprints = iter((
+        (("before", 1, 1),),
+        (("after", 2, 2),),
+        (("after", 2, 2),),
+    ))
     events: list[str] = []
 
     monkeypatch.setattr(
@@ -574,6 +578,7 @@ def test_failed_live_validation_waits_for_a_new_stable_data_change(
     )
     monkeypatch.setattr(runtime, "_data_fingerprint", lambda _root: next(fingerprints))
     monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
+    monkeypatch.setattr(runtime, "_listening", lambda: True)
     monkeypatch.setattr("quantmaster.data.free_stockdb_runtime._DATA_STABILITY_SECONDS", 0)
     monkeypatch.setattr("quantmaster.data.free_stockdb_runtime._DATA_QUIESCENCE_POLL_SECONDS", 0)
     monkeypatch.setattr(
@@ -594,6 +599,50 @@ def test_failed_live_validation_waits_for_a_new_stable_data_change(
         trigger="manual", target="2026-08-18",
     ) == 0
     assert events == ["validate", "validate", "close"]
+
+
+def test_running_updater_closes_committed_data_when_service_is_offline(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    process = SimpleNamespace(pid=42, returncode=None)
+    process.poll = lambda: process.returncode
+    fingerprints = iter((
+        (("data1/before.ldb", 1, 1),),
+        (("data1/after.ldb.part", 2, 2),),
+        (("data1/after.ldb.part", 2, 2),),
+        (("data1/after.ldb", 2, 3),),
+        (("data1/after.ldb", 2, 3),),
+    ))
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda _root: next(fingerprints))
+    monkeypatch.setattr(runtime._stop, "wait", lambda _seconds: False)
+    monkeypatch.setattr(runtime, "_listening", lambda: False)
+    monkeypatch.setattr("quantmaster.data.free_stockdb_runtime._DATA_STABILITY_SECONDS", 0)
+    monkeypatch.setattr("quantmaster.data.free_stockdb_runtime._DATA_QUIESCENCE_POLL_SECONDS", 0)
+    monkeypatch.setattr(
+        runtime,
+        "_validate_data",
+        lambda _target: events.append("validate") or {"accepted": False},
+    )
+
+    def close(candidate, **_kwargs):
+        events.append(f"close:{candidate.pid}")
+        candidate.returncode = 0
+        return True
+
+    monkeypatch.setattr(runtime, "_close_process_window", close)
+
+    assert runtime._run_updater(
+        tmp_path / "数据更新.exe", tmp_path,
+        trigger="manual", target="2026-09-15",
+    ) == 0
+    assert events == ["validate", "close:42"]
 
 
 def test_normal_window_close_targets_only_the_tracked_process(monkeypatch) -> None:
