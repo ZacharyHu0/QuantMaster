@@ -137,12 +137,12 @@ Windows onefile 在 bootloader 自解压前显示官方 Splash，呈现真实解
 只读取内存中的本地存储 readiness 投影，不等待完整 diagnostics、资讯、轮动或远端服务。
 
 “应用更新”表示激活一个已经验证的完整候选槽，而不是只重载 FastAPI worker。用户已接受
-5–15 秒协调重启，因此不跨版本维护蓝绿 socket 或两套并发 worker：
+5–30 秒协调重启，因此不跨版本维护蓝绿 socket 或两套并发 worker：
 
 1. helper 验证 staged 槽、完整 main SHA 与 package gate，并原子记录 pending；
 2. 当前槽停止领取新任务，Web、调度器和任务 worker 有界排空，再停止当前 owned Job Object；
 3. helper 从候选槽在固定端口启动完整应用；
-4. 15 秒内检查 Web `core_ready`、worker 可用性及 Web/runtime/compute 的精确 `build_sha`；
+4. 30 秒内检查 Web `core_ready`、worker 可用性及 Web/runtime/compute 的精确 `build_sha`；
 5. 健康后原子提交 active/previous 指针；失败则从 previous 槽恢复，并保留错误诊断。
 
 FreeStockDB 等由 supervisor 托管、数据目录位于槽外的 sidecar 可以跨激活继续存在，但控制它的

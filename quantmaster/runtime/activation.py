@@ -27,7 +27,7 @@ LIFECYCLE_LOCK = ".lifecycle.lock"
 LAUNCHER_TARGET = "launcher.target"
 RECOVERY_HANDOFF_MARKER = ".schema-handoff.json"
 DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
-READY_TIMEOUT_SECONDS = 15.0
+READY_TIMEOUT_SECONDS = 30.0
 ROLLBACK_TIMEOUT_SECONDS = 15.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 10.0
 WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS = 2.0
@@ -669,7 +669,10 @@ class SubprocessGenerationController:
             if getattr(generation, "poll", lambda: None)() is not None:
                 break
             time.sleep(0.1)
-        raise ActivationBlocked("candidate_not_ready", "候选槽未在 15 秒内完成 Web/runtime/compute 身份检查")
+        raise ActivationBlocked(
+            "candidate_not_ready",
+            f"候选槽未在 {timeout:g} 秒内完成 Web/runtime/compute 身份检查",
+        )
 
     def stop_generation(
         self,
