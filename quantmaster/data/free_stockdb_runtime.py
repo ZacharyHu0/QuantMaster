@@ -41,7 +41,7 @@ class StockDBUpdateEvent:
 def _monotonic() -> float:
     return time.monotonic()
 
-_VENDOR_HOME = "https://www.app.workbuddy.link/"
+_VENDOR_HOME = "https://dns.novapi.cc/"
 _VENDOR_NOTICE_URL = f"{_VENDOR_HOME}tabs/notice.html"
 _VENDOR_NOTICE_TTL = 6 * 60 * 60
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"

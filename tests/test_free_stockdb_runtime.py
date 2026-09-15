@@ -281,15 +281,15 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
 
 def test_vendor_notice_parser_extracts_notice_date_and_version() -> None:
     notice = FreeStockDBRuntime._parse_vendor_notice(
-        '<span class="tag-blue">更新至: 2026-08-24</span>'
-        '<h3 class="card-title">[08-23 HTTPS版] 客户端程序下载</h3>'
-        "<p>最新版本 v0.3.2-online-more-power，直接解压覆盖 stockdb 目录即可。</p>"
+        '<span class="tag-blue">更新至: 2026-09-15</span>'
+        '<h3 class="card-title">[09-08][修复]升级新版本！客户端0.3.5程序下载（多核并发版修复）</h3>'
+        "<p>最新版本 v0.3.5-online-more-power，直接解压覆盖 stockdb 目录即可。</p>"
     )
 
     assert notice == {
-        "notice_updated_on": "2026-08-24",
-        "version": "0.3.2-online-more-power",
-        "announcement": "[08-23 HTTPS版] 客户端程序下载",
+        "notice_updated_on": "2026-09-15",
+        "version": "0.3.5-online-more-power",
+        "announcement": "[09-08][修复]升级新版本！客户端0.3.5程序下载（多核并发版修复）",
     }
 
 
@@ -392,16 +392,16 @@ def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) 
     cache_path = tmp_path / "vendor-notice.json"
     cache_path.write_text(json.dumps({
         "checked_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
-        "url": "https://a.123128.xyz/",
-        "version": "0.3.1-online-more-power",
+        "url": "https://www.app.workbuddy.link/",
+        "version": "0.3.2-online-more-power",
     }), encoding="utf-8")
     calls = []
 
     class Response:
         text = (
-            "更新至: 2026-08-06"
-            '<h3 class="card-title">[08-06] 新增私有存储</h3>'
-            "最新版本 v3.0.0"
+            "更新至: 2026-09-15"
+            '<h3 class="card-title">[09-08][修复]升级新版本</h3>'
+            "最新版本 v0.3.5-online-more-power"
         )
 
         @staticmethod
@@ -429,11 +429,13 @@ def test_vendor_notice_is_cached_without_opening_browser(tmp_path, monkeypatch) 
     first = runtime.check_vendor_notice()
     second = runtime.check_vendor_notice()
 
-    assert first["fingerprint"] == "2026-08-06|3.0.0|[08-06] 新增私有存储"
-    assert first["notice_updated_on"] == "2026-08-06"
+    assert first["fingerprint"] == (
+        "2026-09-15|0.3.5-online-more-power|[09-08][修复]升级新版本"
+    )
+    assert first["notice_updated_on"] == "2026-09-15"
     assert second == first
-    assert first["url"] == "https://www.app.workbuddy.link/"
-    assert calls.count("https://www.app.workbuddy.link/tabs/notice.html") == 1
+    assert first["url"] == "https://dns.novapi.cc/"
+    assert calls.count("https://dns.novapi.cc/tabs/notice.html") == 1
     assert cache_path.is_file()
 
 
