@@ -23,6 +23,7 @@ from quantmaster.lab.models import (
     normalize_factor_name,
     utc_now,
 )
+from quantmaster.lab.strategy import execution_evidence_gate
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 from quantmaster.trading_sessions import daily_signal_cutoff
 
@@ -1733,6 +1734,10 @@ class LabStore:
                 "sealed_evidence": "sealed_json", "return_curve": "return_curve_json",
                 "shadow_summary": "shadow_json", "paper_summary": "paper_json",
             }[field])
+        evidence = value["sealed_evidence"]
+        evidence["gates"] = execution_evidence_gate(
+            evidence.get("metrics") or {}, evidence.get("gates") or {},
+        )
         return value
 
     def _strategy_snapshot_from_conn(
@@ -1797,7 +1802,9 @@ class LabStore:
             raise ValueError("组合成分权重必须在 5%–35% 之间")
         if abs(sum(weights) - 1.0) > 1e-6:
             raise ValueError("组合成分权重之和必须为 1")
-        gate = sealed_evidence.get("gates") or {}
+        gate = execution_evidence_gate(
+            sealed_evidence.get("metrics") or {}, sealed_evidence.get("gates") or {},
+        )
         status = "shadow_challenger" if gate.get("passed") else "historical_candidate"
         now = utc_now()
         with self._conn() as conn:
@@ -1905,8 +1912,12 @@ class LabStore:
         self, strategy_id: str, *, signal_date: str, mature_date: str,
         payload: dict[str, Any], realized: dict[str, Any] | None = None,
     ) -> dict:
-        if self.strategy(strategy_id) is None:
+        candidate = self.strategy(strategy_id)
+        if candidate is None:
             raise KeyError("策略候选不存在")
+        gate = (candidate.get("sealed_evidence") or {}).get("gates") or {}
+        if not gate.get("passed"):
+            raise ValueError(f"策略执行证据未通过，不能生成影子信号: {gate.get('failures', [])}")
         status = "matured" if realized else "pending"
         signal_id = uuid.uuid4().hex
         with self._conn() as conn:

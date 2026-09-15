@@ -12,6 +12,7 @@ from quantmaster.config import get_config
 from quantmaster.lab.horizons import SUPPORTED_HORIZONS, require_supported_horizon
 
 TRADING_DAYS = 244
+EXECUTION_CONTRACT = "self_financing_open_v1"
 ENSEMBLE_MIN_COMPONENTS = 3
 ENSEMBLE_MAX_COMPONENTS = 8
 MAX_COMPONENT_CORRELATION = 0.70
@@ -77,6 +78,8 @@ def target_weights(
     """Convert cross-sectional scores to diversified daily target weights."""
     if not 10 <= top_n <= 15:
         raise ValueError("组合持仓数必须在 10–15 只之间")
+    if not math.isfinite(cap_weight) or not 0 < cap_weight <= 1:
+        raise ValueError("cap_weight 必须为 (0, 1] 内的有限数")
     ranks = scores.rank(axis=1, ascending=False, method="first")
     selected = (ranks <= top_n) & scores.notna()
     if industry_map:
@@ -99,6 +102,39 @@ def target_weights(
     return weights.clip(upper=cap_weight)
 
 
+def _execute_budgeted_day(
+    wanted: pd.Series, previous: pd.Series, prices: pd.Series,
+    date: pd.Timestamp, panel: dict[str, pd.DataFrame], buy_rate: float, sell_rate: float,
+) -> tuple[pd.Series, float, float]:
+    """Execute sells first; scale only executable buys to the fee-inclusive cash budget."""
+    delta = wanted - previous
+    for symbol in delta.index[delta.abs() > 1e-12]:
+        side = "buy" if delta[symbol] > 0 else "sell"
+        price = float(prices[symbol])
+        if not math.isfinite(price) or price <= 0 or _blocked_trade(symbol, date, side, panel):
+            delta[symbol] = 0.0
+    sales = -delta.clip(upper=0)
+    purchases = delta.clip(lower=0)
+    sold = float(sales.sum())
+    cash = max(0.0, 1.0 - float(previous.sum()) + sold * (1 - sell_rate))
+    requested = float(purchases.sum())
+    if requested > 0:
+        purchases *= min(1.0, cash / (requested * (1 + buy_rate)))
+    bought = float(purchases.sum())
+    return previous - sales + purchases, bought * buy_rate + sold * sell_rate, (bought + sold) / 2
+
+
+def execution_evidence_gate(metrics: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+    """Keep old evidence readable without granting it the current execution contract."""
+    if metrics.get("execution_contract") == EXECUTION_CONTRACT:
+        return dict(gate)
+    reason = "LAB_EXECUTION_REVALIDATION_REQUIRED: 执行证据已过期，需要重新运行研究"
+    failures = list(gate.get("failures") or [])
+    if reason not in failures:
+        failures.append(reason)
+    return {**gate, "passed": False, "override_allowed": False, "failures": failures}
+
+
 def execute_daily_targets(
     scores: pd.DataFrame,
     panel: dict[str, pd.DataFrame],
@@ -113,11 +149,18 @@ def execute_daily_targets(
 
     The forecast horizon changes the signal/evidence; target positions still roll every
     trading day.  Returns are next-open to following-open so no T close information is
-    credited before it can be traded.
+    credited before it can be traded. Weights, cash and costs use pre-trade NAV as
+    their denominator; cash is after fees. Holdings drift with returns before the
+    next rebalance. This is a fractional-weight simulation, without board lots or
+    minimum commissions.
     """
     require_supported_horizon(horizon)
     open_prices = panel["open"].astype(float).sort_index()
     signal, opens = scores.align(open_prices, join="inner")
+    opens = opens.where(np.isfinite(opens) & (opens > 0))
+    asset_returns = opens.shift(-1).div(opens).sub(1.0)
+    if len(asset_returns):
+        asset_returns.iloc[-1] = 0.0
     desired = target_weights(
         signal, top_n=top_n, cap_weight=cap_weight, industry_map=industry_map,
     ).shift(1).fillna(0.0)
@@ -126,28 +169,31 @@ def execute_daily_targets(
     executed = pd.DataFrame(0.0, index=dates, columns=columns)
     costs = pd.Series(0.0, index=dates)
     turnover = pd.Series(0.0, index=dates)
+    cash_weights = pd.Series(1.0, index=dates)
     cfg = get_config().trade
     buy_rate = float(cfg.commission_rate + cfg.transfer_fee_rate + cfg.slippage)
     sell_rate = float(buy_rate + cfg.stamp_tax_rate)
     previous = pd.Series(0.0, index=columns)
     for date in dates:
-        wanted = desired.loc[date].fillna(0.0)
-        current = wanted.copy()
-        changed = (wanted - previous).abs() > 1e-12
-        for symbol in columns[changed.to_numpy()]:
-            delta = float(wanted[symbol] - previous[symbol])
-            side = "buy" if delta > 0 else "sell"
-            if pd.isna(opens.at[date, symbol]) or _blocked_trade(symbol, date, side, panel):
-                current[symbol] = previous[symbol]
-        delta = current - previous
-        buys = float(delta.clip(lower=0).sum())
-        sells = float((-delta.clip(upper=0)).sum())
-        costs.at[date] = buys * buy_rate + sells * sell_rate
-        turnover.at[date] = 0.5 * float(delta.abs().sum())
+        current, cost, traded = _execute_budgeted_day(
+            desired.loc[date], previous, opens.loc[date], date, panel, buy_rate, sell_rate,
+        )
+        day_returns = asset_returns.loc[date]
+        invalid = (current > 0) & ~np.isfinite(day_returns)
+        if invalid.any():
+            raise ValueError(
+                f"LAB_EXECUTION_PRICE_INVALID: {date.date()} "
+                f"持仓缺少有效的相邻开盘估值: {list(columns[invalid])}"
+            )
+        growth = 1.0 + float((current * day_returns).sum()) - cost
+        if not math.isfinite(growth) or growth <= 0:
+            raise ValueError("LAB_EXECUTION_NAV_INVALID: 扣费后净值必须为正有限数")
+        costs.at[date] = cost
+        turnover.at[date] = traded
+        cash_weights.at[date] = max(0.0, 1.0 - float(current.sum()) - cost)
         executed.loc[date] = current
-        previous = current
+        previous = current * (1.0 + day_returns.fillna(0.0)) / growth
 
-    asset_returns = opens.shift(-1).div(opens).sub(1.0)
     gross = (executed * asset_returns).sum(axis=1, min_count=1).fillna(0.0)
     net = gross - costs
     if benchmark_returns is None:
@@ -170,9 +216,11 @@ def execute_daily_targets(
         "daily_excess": excess,
         "nav": nav,
         "weights": executed,
+        "cash_weights": cash_weights,
         "costs": costs,
         "turnover_series": turnover,
         "metrics": {
+            "execution_contract": EXECUTION_CONTRACT,
             "net_information_ratio": net_ir,
             "net_annual_excess_return": annual,
             "max_drawdown": max_drawdown,
@@ -320,7 +368,9 @@ def strategy_sealed_gate(
         failures.append("最大回撤高于 25%")
     if float(metrics.get("calmar") or 0) < baseline_calmar:
         failures.append("Calmar 低于规则基线")
-    return {"passed": not failures, "failures": failures, "override_allowed": False}
+    return execution_evidence_gate(metrics, {
+        "passed": not failures, "failures": failures, "override_allowed": False,
+    })
 
 
 def holding_actions(

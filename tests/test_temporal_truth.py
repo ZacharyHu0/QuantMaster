@@ -22,6 +22,7 @@ from quantmaster.lab.dataset import (
 from quantmaster.lab.errors import LabError
 from quantmaster.lab.models import FactorSpec
 from quantmaster.lab.store import LabStore
+from quantmaster.lab.strategy import EXECUTION_CONTRACT
 from quantmaster.rotation.etf_research import (
     EtfResearchService,
     EtfResearchStore,
@@ -167,6 +168,7 @@ def _paper_candidate(
         sealed_evidence={
             "gates": {"passed": True},
             "metrics": {
+                "execution_contract": EXECUTION_CONTRACT,
                 "net_information_ratio": information_ratio,
                 "max_drawdown": 0.20,
                 "net_annual_excess_return": 0.10,
