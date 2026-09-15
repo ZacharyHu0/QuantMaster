@@ -730,6 +730,8 @@ class FreeStockDBRuntime:
     ]:
         if current == baseline or stable_for < _DATA_STABILITY_SECONDS:
             return validated, accepted, False
+        if any(path.casefold().endswith(".part") for path, _size, _mtime in current):
+            return validated, accepted, False
         if validated != current:
             from quantmaster.data.free_stockdb_source import _invalidate_sdk_clients
 
@@ -748,6 +750,13 @@ class FreeStockDBRuntime:
                     phase="syncing", trigger=trigger, update_result="running",
                     target_session=target, validation=validation,
                 )
+        if accepted is None and not self._listening():
+            self._set_status(
+                "updating", "数据文件已提交，正在关闭更新器并恢复服务验收",
+                phase="closing", trigger=trigger, update_result="running",
+                target_session=target,
+            )
+            return validated, accepted, self._close_process_window(process)
         closed = accepted == current and self._close_process_window(process)
         return validated, accepted, closed
 
