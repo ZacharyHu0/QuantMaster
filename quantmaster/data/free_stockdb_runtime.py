@@ -47,7 +47,7 @@ _VENDOR_NOTICE_TTL = 6 * 60 * 60
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
 _AUTO_MAX_ATTEMPTS = 3
 _AUTO_RETRY_SECONDS = 15 * 60
-_UPDATER_TIMEOUT_SECONDS = 30 * 60
+_UPDATER_TIMEOUT_SECONDS = 60 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
 _SERVICE_CHECK_SECONDS = 5
 _SERVICE_RESTART_BACKOFF_BASE_SECONDS = 2 * 60
@@ -1438,7 +1438,9 @@ class FreeStockDBRuntime:
         try:
             code = self._run_updater(updater, root, trigger=trigger, target=target)
         except subprocess.TimeoutExpired:
-            updater_error = "原生更新器运行超过 30 分钟，已终止"
+            updater_error = (
+                f"原生更新器运行超过 {_UPDATER_TIMEOUT_SECONDS // 60} 分钟，已终止"
+            )
             logger.error(updater_error)
         except OSError as exc:
             updater_error = f"原生更新器启动失败：{str(exc)[:300]}"

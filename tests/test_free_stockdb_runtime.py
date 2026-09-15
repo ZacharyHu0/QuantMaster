@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from datetime import datetime
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from quantmaster.data import free_stockdb_runtime
 from quantmaster.data.free_stockdb_runtime import FreeStockDBRuntime
 from quantmaster.settings import DataSettings
 
@@ -556,6 +558,47 @@ def test_running_updater_never_closes_when_vendor_data_did_not_change(
         tmp_path / "数据更新.exe", tmp_path,
         trigger="manual", target="2026-08-18",
     ) == 0
+
+
+def test_running_updater_allows_thirty_minutes_but_stops_at_sixty(
+    tmp_path, monkeypatch,
+) -> None:
+    runtime = FreeStockDBRuntime()
+    process = SimpleNamespace(pid=42, returncode=None)
+    process.poll = lambda: process.returncode
+    clock = SimpleNamespace(now=0.0, waits=0)
+
+    def wait(_seconds):
+        clock.waits += 1
+        clock.now = 30 * 60 + 1 if clock.waits == 1 else 60 * 60
+        return False
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime.time.monotonic", lambda: clock.now,
+    )
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda _root: (("same", 1, 1),))
+    monkeypatch.setattr(runtime._stop, "wait", wait)
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_runtime._DATA_STABILITY_SECONDS", 24 * 60 * 60,
+    )
+    monkeypatch.setattr(
+        runtime, "_terminate_process",
+        lambda *_args, **_kwargs: setattr(process, "returncode", -1),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        runtime._run_updater(
+            tmp_path / "数据更新.exe", tmp_path,
+            trigger="manual", target="2026-09-15",
+        )
+
+    assert clock.waits == 2
+    assert caught.value.timeout == 60 * 60
+    assert free_stockdb_runtime._UPDATER_TIMEOUT_SECONDS == 60 * 60
 
 
 def test_failed_live_validation_waits_for_a_new_stable_data_change(
