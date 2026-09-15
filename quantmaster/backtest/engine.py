@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Real
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,11 @@ from quantmaster.backtest.execution import (
 )
 from quantmaster.backtest.execution import price_limit as price_limit
 from quantmaster.config import TradeConfig, get_config
+
+_PRODUCTION_FIELDS = (
+    "up_limit", "down_limit", "suspended", "adj_factor",
+    "execution_open", "execution_close",
+)
 
 
 @dataclass
@@ -181,11 +187,7 @@ def _prepare_market_data(panel: dict[str, pd.DataFrame]) -> _MarketData:
 
 
 def _missing_production_fields(panel: dict[str, pd.DataFrame]) -> list[str]:
-    required = (
-        "up_limit", "down_limit", "suspended", "adj_factor",
-        "execution_open", "execution_close",
-    )
-    return [name for name in required if panel.get(name) is None]
+    return [name for name in _PRODUCTION_FIELDS if panel.get(name) is None]
 
 
 def _validate_production_panel(
@@ -197,6 +199,41 @@ def _validate_production_panel(
     missing = _missing_production_fields(panel)
     if missing:
         raise ValueError("production 回测缺少真实成交字段：" + "、".join(missing))
+    for name in _PRODUCTION_FIELDS:
+        frame = panel[name]
+        if not isinstance(frame, pd.DataFrame) or not frame.index.is_unique or not frame.columns.is_unique:
+            raise ValueError(f"PRODUCTION_EXECUTION_EVIDENCE_INVALID: field={name}; ambiguous panel axes")
+
+
+def _valid_production_value(field_name: str, value: object) -> bool:
+    if field_name == "suspended":
+        return isinstance(value, (Real, bool, np.bool_)) and value in (0, 1)
+    return (isinstance(value, Real) and not isinstance(value, (bool, np.bool_))
+            and bool(np.isfinite(value)) and value > 0)
+
+
+def _validate_production_day(
+    panel: dict[str, pd.DataFrame], state: _BacktestState, date,
+) -> list[str]:
+    """Require evidence before changing or valuing holdings, including retry days.
+
+    Unheld symbols with no positive target may have lifecycle gaps (e.g. before
+    listing). They do not authorize a trade and need not block the portfolio.
+    """
+    targets = state.pending if state.pending is not None else pd.Series(dtype=float)
+    symbols = [symbol for symbol, shares in state.shares.items()
+               if shares > 0 or targets.get(symbol, 0.0) > 0]
+    if not symbols:
+        return symbols
+    for name in _PRODUCTION_FIELDS:
+        row = _series_at(panel[name], date, symbols)
+        for symbol in symbols:
+            if not _valid_production_value(name, row[symbol]):
+                raise ValueError(
+                    f"PRODUCTION_EXECUTION_EVIDENCE_INVALID: field={name}; "
+                    f"date={date.date()}; symbol={symbol}"
+                )
+    return symbols
 
 
 def _initial_state(config: BacktestConfig, symbols: list[str]) -> _BacktestState:
@@ -611,6 +648,7 @@ def run_backtest(
     from quantmaster.backtest.metrics import performance_metrics
 
     config = config or BacktestConfig()
+    _validate_production_panel(panel, config)
     market = _prepare_market_data(panel)
     from quantmaster.market_capabilities import (
         MarketCapability,
@@ -618,7 +656,6 @@ def run_backtest(
     )
 
     require_symbols_capability(market.symbols, MarketCapability.BACKTEST)
-    _validate_production_panel(panel, config)
     target_weights = target_weights.reindex(
         index=market.dates,
         columns=market.symbols,
@@ -628,11 +665,14 @@ def run_backtest(
 
     for index, date in enumerate(market.dates):
         date_str = str(date.date())
+        factor_symbols = market.symbols
+        if config.research_tier == "production":
+            factor_symbols = _validate_production_day(panel, state, date)
         if market.adj_factor is not None:
             factors = market.adj_factor.reindex(
                 index=[date], columns=market.symbols
             ).iloc[0]
-            _apply_adjustment_factors(state, factors, market.symbols)
+            _apply_adjustment_factors(state, factors, factor_symbols)
         stopped_today = _execute_risk_exits(
             state, market, config, previous_close, date, date_str
         )
