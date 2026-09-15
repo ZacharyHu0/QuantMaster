@@ -2909,7 +2909,10 @@ class LabService:
             *store.strategies(status="paper", limit=30),
             *store.strategies(status="champion", limit=30),
         ]
-        return [item for item in candidates if item]
+        return [
+            item for item in candidates
+            if item and ((item.get("sealed_evidence") or {}).get("gates") or {}).get("passed")
+        ]
 
     def _shadow_raw_values(
         self, candidates: list[dict[str, Any]], panel: dict[str, pd.DataFrame], start: str, end: str,
