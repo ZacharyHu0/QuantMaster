@@ -26,6 +26,22 @@ def test_worker_supervisor_is_single_instance_and_runs_outside_web_process(tmp_p
         assert int(pid) != os.getpid()
         assert bootstrap == "1"
         assert secondary.start() == "attached"
+        assert secondary.owned is False
+
+        primary.stop()
+        deadline = time.monotonic() + 10
+        while not secondary.owned and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert secondary.owned is True
+
+        replacement_deadline = time.monotonic() + 10
+        while marker.read_text(encoding="utf-8") == f"{pid}|1" and (
+            time.monotonic() < replacement_deadline
+        ):
+            time.sleep(0.05)
+        replacement_pid, replacement_bootstrap = marker.read_text(encoding="utf-8").split("|")
+        assert replacement_pid != pid
+        assert replacement_bootstrap == "1"
     finally:
         primary.stop()
         secondary.stop()
