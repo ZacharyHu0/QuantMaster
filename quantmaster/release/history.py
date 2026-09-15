@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.6"
+VERSION = "1.18.7"
 RELEASE_DATE = "2026-09-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,22 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "正式版本切换",
+                "items": (
+                    (
+                        "候选 Web 代次暂时无法取得 runtime-worker 单实例锁时会继续监视；"
+                        "旧代次释放锁后自动接管并启动新 worker，在既有 15 秒门限内完成"
+                        "Web/runtime/compute 精确身份核验。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.6",
+        "date": "2026-09-16",
         "sections": (
             {
                 "title": "本地 StockDB 0.3.5",
