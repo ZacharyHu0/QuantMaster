@@ -13,8 +13,8 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.5"
-RELEASE_DATE = "2026-08-29"
+VERSION = "1.18.6"
+RELEASE_DATE = "2026-09-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
 _RELEASE_ENTRY_FIELDS = ("version", "date", "build_sha", "sections")
@@ -24,6 +24,43 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "本地 StockDB 0.3.5",
+                "items": (
+                    (
+                        "free-stockdb 官方动态切换到 NovaAPI HTTPS 地址；旧域缓存立即失效，"
+                        "设置页和详情链接改为识别 0.3.5 公告。"
+                    ),
+                    (
+                        "0.3.5 更新器保持窗口运行时，会等待 `.part` 分片完成提交后正常关闭，"
+                        "再恢复 StockDB 并执行严格目标交易日验收。"
+                    ),
+                ),
+            },
+            {
+                "title": "执行边界与证据",
+                "items": (
+                    (
+                        "生产执行会拒绝缺少完整成交证据的结果；实验室日频执行约束在实际持仓与"
+                        "可用现金范围内，避免产生无法兑现的交易。"
+                    ),
+                ),
+            },
+            {
+                "title": "开发任务可靠性",
+                "items": (
+                    (
+                        "任务清理会保存未完成状态和合并凭据，隔离 Git 探测与测试缓存，并将"
+                        "残留 checkout 的物理清理纳入完成门禁。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.5",
+        "date": "2026-08-29",
         "sections": (
             {
                 "title": "模拟盘与管理完整性",
