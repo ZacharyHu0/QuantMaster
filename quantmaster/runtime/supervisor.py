@@ -207,6 +207,12 @@ class WorkerSupervisor:
                 self._release_lock()
                 self._owned = False
             if not self._acquire_lock():
+                # During an application slot handoff the previous Web process
+                # can disappear just before its runtime-worker releases this
+                # lock.  Keep watching so this generation takes ownership as
+                # soon as the old process tree finishes, without requiring a
+                # second Web restart.
+                self._start_monitor_locked(bootstrap_rotation=bootstrap_rotation)
                 return "attached"
             self._owned = True
             self._restart_attempts = 0
