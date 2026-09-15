@@ -25,6 +25,98 @@ def flat_panel(price: float = 10.0, days: int = 30, symbols: tuple = ("600000.SH
             "close": df.copy(), "volume": df * 1e5}
 
 
+def production_panel():
+    panel = flat_panel(days=5)
+    price = panel["open"]
+    panel.update({
+        "execution_open": price.copy(), "execution_close": price.copy(),
+        "up_limit": price * 1.1, "down_limit": price * 0.9,
+        "suspended": price == 0, "adj_factor": price / 10,
+    })
+    weights = price * np.nan
+    weights.iloc[0] = 0.5
+    config = BacktestConfig(research_tier="production", trade=TradeConfig(
+        commission_rate=0, commission_min=0, transfer_fee_rate=0, stamp_tax_rate=0, slippage=0,
+    ))
+    return panel, weights, config
+
+
+class TestProductionExecutionEvidence:
+    @pytest.mark.parametrize("field_name", [
+        "suspended", "adj_factor", "up_limit", "down_limit", "execution_open", "execution_close",
+    ])
+    @pytest.mark.parametrize("gap", ["empty", "all_nan", "date", "symbol", "cell"])
+    def test_missing_evidence_is_rejected_before_execution(self, field_name, gap):
+        panel, weights, config = production_panel()
+        date = weights.index[1]
+        frame = panel[field_name].astype(float)
+        if gap == "empty":
+            frame = pd.DataFrame()
+        elif gap == "all_nan":
+            frame.loc[:, :] = np.nan
+        elif gap == "date":
+            frame = frame.drop(index=date)
+        elif gap == "symbol":
+            frame = frame.drop(columns="600000.SH")
+        else:
+            frame.at[date, "600000.SH"] = np.nan
+        panel[field_name] = frame
+        with pytest.raises(ValueError, match=(
+            rf"PRODUCTION_EXECUTION_EVIDENCE_INVALID: field={field_name}; "
+            rf"date={date.date()}; symbol=600000.SH"
+        )):
+            run_backtest(panel, weights, config)
+
+    @pytest.mark.parametrize("field_name,value", [
+        ("suspended", "False"), ("suspended", 2), ("suspended", np.inf),
+        ("adj_factor", np.inf), ("adj_factor", 0), ("adj_factor", -1), ("adj_factor", True),
+        ("up_limit", np.inf), ("down_limit", -1),
+        ("execution_open", 0), ("execution_close", np.inf),
+    ])
+    def test_invalid_evidence_is_not_coerced_to_permission(self, field_name, value):
+        panel, weights, config = production_panel()
+        panel[field_name] = panel[field_name].astype(object)
+        panel[field_name].iat[1, 0] = value
+        with pytest.raises(ValueError, match=f"PRODUCTION_EXECUTION_EVIDENCE_INVALID: field={field_name}"):
+            run_backtest(panel, weights, config)
+
+    @pytest.mark.parametrize("field_name", ["adj_factor", "execution_close", "suspended"])
+    def test_evidence_gap_while_holding_cannot_produce_valid_nav(self, field_name):
+        panel, weights, config = production_panel()
+        date = weights.index[3]
+        panel[field_name] = panel[field_name].astype(float)
+        panel[field_name].at[date, "600000.SH"] = np.nan
+        with pytest.raises(ValueError, match=rf"field={field_name}; date={date.date()}"):
+            run_backtest(panel, weights, config)
+
+    def test_valid_evidence_adjusts_holdings_without_blocking_unrelated_lifecycle_gaps(self):
+        panel, weights, config = production_panel()
+        for name in ("execution_open", "execution_close", "up_limit", "down_limit"):
+            panel[name].iloc[2:] /= 2
+        panel["adj_factor"].iloc[2:] = 2.0
+        for frame in panel.values():
+            frame["000001.SZ"] = np.nan  # Never targeted or held.
+        result = run_backtest(panel, weights, config)
+        assert len(result.trades) == 1
+        assert not result.blocked_orders
+        np.testing.assert_allclose(result.nav, 1.0)
+        np.testing.assert_allclose(result.positions["600000.SH"].iloc[1:], 500_000.0)
+
+    def test_known_suspension_blocks_buy_and_retries_when_trading_resumes(self):
+        panel, weights, config = production_panel()
+        panel["suspended"].iloc[1:3] = True
+        result = run_backtest(panel, weights, config)
+        assert [trade.date for trade in result.trades] == [str(weights.index[3].date())]
+        assert [order.reason for order in result.blocked_orders] == ["suspended", "suspended"]
+
+    @pytest.mark.parametrize("axis", ["index", "columns"])
+    def test_ambiguous_evidence_axes_fail_explicitly(self, axis):
+        panel, weights, config = production_panel()
+        panel["adj_factor"] = pd.concat([panel["adj_factor"]] * 2, axis=0 if axis == "index" else 1)
+        with pytest.raises(ValueError, match=r"PRODUCTION_EXECUTION_EVIDENCE_INVALID.*ambiguous panel axes"):
+            run_backtest(panel, weights, config)
+
+
 class TestEngineDecisions:
     def test_missing_production_fields_preserve_contract_order(self):
         panel = flat_panel(days=3)
