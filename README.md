@@ -15,7 +15,7 @@
 [![GitHub issues](https://img.shields.io/github/issues/ZacharyHu0/QuantMaster)](https://github.com/ZacharyHu0/QuantMaster/issues)
 [![Last Commit](https://img.shields.io/github/last-commit/ZacharyHu0/QuantMaster)](https://github.com/ZacharyHu0/QuantMaster/commits/main)
 
-为已开户的个人投资者设计：假定你有不错的编程能力（计算机本科水平），
+为已开户的个人投资者设计：
 数学与金融只需本科基础——文档与代码注释会把用到的量化概念讲清楚。
 
 </div>
