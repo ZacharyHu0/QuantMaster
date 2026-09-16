@@ -321,6 +321,10 @@ class DataRefreshManager:
             "current_symbol": str(state.get("current_symbol") or ""),
             "outcome": str(state.get("outcome") or ""),
         })
+        value["can_retry"] = bool(value["can_retry"]) and (
+            job["status"] in {"failed", "cancelled", "interrupted"}
+            or value["outcome"] == "completed_with_warnings"
+        )
         return value
 
     def get(self, job_id: str) -> dict[str, Any]:

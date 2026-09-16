@@ -846,6 +846,20 @@ def test_data_refresh_api_requires_preview_confirmation_and_supports_resume(monk
     assert client.post("/api/v1/jobs/job-1/retry", headers=headers).json()["status"] == "running"
 
 
+@pytest.mark.parametrize("can_retry", [False, True])
+def test_data_refresh_public_job_preserves_domain_retry_permission(can_retry):
+    from quantmaster.server.jobs import _public_job
+
+    job = _public_job("data", {
+        "id": "refresh", "status": "completed", "outcome": "completed_with_warnings",
+        "failed": 2, "can_retry": can_retry, "can_cancel": False,
+    })
+    assert job["can_retry"] is can_retry
+    assert job["can_cancel"] is False
+    assert job["outcome"] == "completed_with_warnings"
+    assert job["failed"] == 2
+
+
 def test_data_refresh_fails_fast_when_runtime_worker_is_unavailable(monkeypatch):
     monkeypatch.setattr(
         "quantmaster.runtime.worker.runtime_worker_status",

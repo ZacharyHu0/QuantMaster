@@ -5200,6 +5200,89 @@ def test_stock_analysis_slow_cancel_cannot_regress_terminal_poll(live_server):
         browser.close()
 
 
+@pytest.mark.parametrize(
+    ("status", "failed", "can_retry", "label"),
+    [
+        ("completed", 0, False, "增量同步完成"),
+        ("completed", 1, True, "同步部分完成"),
+        ("completed", 2, True, "同步未成功"),
+        ("completed", 2, False, "同步未成功"),
+        ("failed", 0, True, "同步失败"),
+        ("cancelled", 0, True, "已取消"),
+        ("interrupted", 0, True, "服务重启中断"),
+    ],
+)
+def test_settings_refresh_tracks_queue_and_honest_terminal_result(
+    live_server, status, failed, can_retry, label,
+):
+    url, _ = live_server
+    current = {
+        "id": "refresh-contract", "status": "queued", "next_index": 0, "total": 2,
+        "succeeded": 0, "failed": 0, "can_cancel": True, "can_retry": False,
+    }
+    polls = []
+
+    def jobs(route):
+        polls.append(route.request.url)
+        route.fulfill(json=current)
+
+    def retry_job(route):
+        assert route.request.method == "POST"
+        current.update(status="queued", next_index=0, progress=0, can_retry=False, can_cancel=True)
+        route.fulfill(json=current)
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route(
+            "**/api/v1/jobs?domain=data&limit=1", lambda route: route.fulfill(json={"items": [current]}),
+        )
+        page.route("**/api/v1/jobs/refresh-contract", jobs)
+        page.route("**/api/v1/jobs/refresh-contract/retry", retry_job)
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="local-data"]').click()
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待同步")
+        playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_visible()
+        page.wait_for_timeout(950)
+        assert len(polls) >= 2
+
+        # Navigation pauses queued polling and remount resumes the same job.
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        paused = len(polls)
+        page.wait_for_timeout(950)
+        assert len(polls) == paused
+        current["status"] = "running"
+        page.get_by_role("button", name="设置", exact=True).click()
+        page.wait_for_url(re.compile(r"#runtime/settings$"))
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("增量同步中")
+
+        current.update(
+            status=status, failed=failed, succeeded=2 - failed, next_index=2, progress=100,
+            outcome="completed_with_warnings" if failed else "completed",
+            can_cancel=False, can_retry=can_retry,
+            failures=[{"symbol": "FIXTURE", "error": "缺少证据"}] if failed else [],
+        )
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text(label)
+        retry = page.locator("#data-refresh-resume")
+        if can_retry:
+            playwright_sync.expect(retry).to_be_visible()
+        else:
+            playwright_sync.expect(retry).to_be_hidden()
+        playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_hidden()
+        terminal_polls = len(polls)
+        page.wait_for_timeout(950)
+        assert len(polls) == terminal_polls
+        assert page.evaluate("async () => (await import('/static/settings.js')).state.dataRefreshId") == ""
+        if can_retry:
+            retry.click()
+            playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待同步")
+            page.wait_for_timeout(950)
+            assert len(polls) > terminal_polls
+        browser.close()
+
+
 def test_settings_remount_resumes_pending_autosave_and_active_data_poll(live_server):
     url, _ = live_server
     data_polls = {"count": 0}
