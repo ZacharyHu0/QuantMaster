@@ -580,7 +580,7 @@ def test_running_updater_allows_thirty_minutes_but_stops_at_sixty(
     monkeypatch.setattr(
         "quantmaster.data.free_stockdb_runtime.time.monotonic", lambda: clock.now,
     )
-    monkeypatch.setattr(runtime, "_data_fingerprint", lambda _root: (("same", 1, 1),))
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda _root: (("data.part", clock.now, 1),))
     monkeypatch.setattr(runtime._stop, "wait", wait)
     monkeypatch.setattr(
         "quantmaster.data.free_stockdb_runtime._DATA_STABILITY_SECONDS", 24 * 60 * 60,
@@ -599,6 +599,77 @@ def test_running_updater_allows_thirty_minutes_but_stops_at_sixty(
     assert clock.waits == 2
     assert caught.value.timeout == 60 * 60
     assert free_stockdb_runtime._UPDATER_TIMEOUT_SECONDS == 60 * 60
+
+
+@pytest.mark.parametrize("normal_close", [True, False])
+def test_idle_updater_is_closed_with_explicit_failure(tmp_path, monkeypatch, normal_close):
+    runtime = FreeStockDBRuntime()
+    process = SimpleNamespace(pid=42, returncode=None)
+    process.poll = lambda: process.returncode
+    clock = SimpleNamespace(now=0.0)
+    events = []
+
+    def wait(seconds):
+        clock.now += seconds
+        return False
+
+    def close(candidate):
+        events.append(("close", candidate.pid))
+        if normal_close:
+            candidate.returncode = 0
+        return normal_close
+
+    def terminate(candidate, **kwargs):
+        events.append(("terminate", candidate.pid))
+        candidate.returncode = -1
+
+    monkeypatch.setattr(free_stockdb_runtime.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(free_stockdb_runtime.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda root: (("data/old.ldb", 1, 1),))
+    monkeypatch.setattr(runtime._stop, "wait", wait)
+    monkeypatch.setattr(runtime, "_close_process_window", close)
+    monkeypatch.setattr(runtime, "_terminate_process", terminate)
+
+    with pytest.raises(free_stockdb_runtime.StockDBUpdateStalled, match="STOCKDB_UPDATE_STALLED"):
+        runtime._run_updater(tmp_path / "updater.exe", tmp_path, trigger="manual", target="2026-09-15")
+    assert 120 <= clock.now <= 125
+    assert events == [("close", 42)] + ([] if normal_close else [("terminate", 42)])
+    assert runtime._updater_process is None
+
+
+@pytest.mark.parametrize("result,changed", [(0, False), (1, True), ("stalled", False), (0, True)])
+def test_update_waits_for_validation_only_after_changed_success(tmp_path, monkeypatch, result, changed):
+    runtime = FreeStockDBRuntime()
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"fixture")
+    events = []
+    validation = {"accepted": False, "actual_session": "", "issues": ["missing"]}
+    fingerprints = iter(((('data/old.ldb', 1, 1),), (('data/new.ldb' if changed else 'data/old.ldb', 1, 1),)))
+
+    def run(*args, **kwargs):
+        if result == "stalled":
+            raise free_stockdb_runtime.StockDBUpdateStalled("STOCKDB_UPDATE_STALLED: no progress")
+        return result
+
+    monkeypatch.setattr(runtime, "_paths", lambda: (tmp_path, tmp_path / "stockdb.exe", updater))
+    monkeypatch.setattr(runtime, "_is_managed", lambda: True)
+    monkeypatch.setattr(runtime, "_last_update_date", lambda: "2026-08-28")
+    monkeypatch.setattr(runtime, "_stop_service", lambda: events.append("stop") or True)
+    monkeypatch.setattr(runtime, "_start_service", lambda: events.append("restore") or True)
+    monkeypatch.setattr(runtime, "_run_updater", run)
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda root: next(fingerprints))
+    monkeypatch.setattr(runtime, "_wait_for_data_quiescent", lambda root: True)
+    monkeypatch.setattr(runtime, "_validate_data", lambda target: events.append("validate") or validation)
+    monkeypatch.setattr(runtime, "_validate_until_ready", lambda *a: events.append("wait") or validation)
+    monkeypatch.setattr(runtime, "_set_status", lambda *a, **k: None)
+    failures = []
+    monkeypatch.setattr(runtime, "_finish_failure", lambda **k: failures.append(k) or False)
+
+    assert runtime.update_now("manual", target_session="2026-09-15") is False
+    assert events == ["validate", "stop", "restore", "wait" if result == 0 and changed else "validate"]
+    assert len(failures) == 1
+    if result == "stalled":
+        assert failures[0]["message"].startswith("STOCKDB_UPDATE_STALLED")
 
 
 def test_failed_live_validation_waits_for_a_new_stable_data_change(

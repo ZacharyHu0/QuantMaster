@@ -9,10 +9,11 @@ import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from quantmaster.config import get_config
 from quantmaster.data.free_stockdb_runtime import StockDBUpdateEvent
+from quantmaster.data.maintenance import RefreshScope
 from quantmaster.lab.store import LabSchemaMigrationRequired
 from quantmaster.runtime.identity import get_application_identity
 from quantmaster.runtime.supervisor import (
@@ -419,13 +420,13 @@ class _DefaultWorkerPlan:
     ) -> dict[str, Any]:
         if operation == "data.refresh.preview":
             return self.data_refresh_manager.preview(
-                str(payload.get("scope") or "market"),
+                cast(RefreshScope, str(payload.get("scope") or "market")),
                 str(payload.get("universe") or ""),
                 str(payload.get("start") or ""),
             )
         if operation == "data.refresh.create":
             return self.data_refresh_manager.create(
-                str(payload.get("scope") or "market"),
+                cast(RefreshScope, str(payload.get("scope") or "market")),
                 str(payload.get("universe") or ""),
                 str(payload.get("start") or ""),
             )
@@ -504,6 +505,9 @@ def run_runtime_worker(stop_event: _StopEvent, bootstrap_rotation: bool) -> None
     initialize_windows_app_process()
     os.environ["QM_WORKER_SUPERVISOR"] = "1"
     os.environ.pop("QM_WEB_PROCESS", None)
+    from quantmaster.logging_config import configure_logging
+
+    configure_logging(verbose=os.environ.get("QM_SERVER_RELOAD_VERBOSE") == "1")
     worker = get_runtime_worker()
     state, detail = "stopped", ""
     try:

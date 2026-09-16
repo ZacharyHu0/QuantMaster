@@ -48,6 +48,7 @@ _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
 _AUTO_MAX_ATTEMPTS = 3
 _AUTO_RETRY_SECONDS = 15 * 60
 _UPDATER_TIMEOUT_SECONDS = 60 * 60
+_UPDATER_IDLE_SECONDS = 2 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
 _SERVICE_CHECK_SECONDS = 5
 _SERVICE_RESTART_BACKOFF_BASE_SECONDS = 2 * 60
@@ -56,6 +57,10 @@ _DATA_STABILITY_SECONDS = 10
 _DATA_QUIESCENCE_POLL_SECONDS = 5
 _OWNER_STALE_SECONDS = 120
 _MIN_UPDATE_SYMBOL_COVERAGE = 0.98
+
+
+class StockDBUpdateStalled(RuntimeError):
+    """The owned updater stopped making observable filesystem progress."""
 
 
 class _RuntimeControl:
@@ -779,8 +784,8 @@ class FreeStockDBRuntime:
     def _run_updater(
         self, updater: Path, root: Path, *, trigger: str, target: str,
     ) -> int:
-        # 当前发行包没有公开、可验证的静默参数，因此保留原生窗口；只有
-        # 本地目标日验收通过后才按本次 PID 请求正常关闭。
+        # The vendor has no verified headless result protocol. Track actual file
+        # progress separately from its lifetime; a failed window can stay open.
         baseline = self._data_fingerprint(root)
         process = subprocess.Popen(
             [str(updater)], cwd=root, stdin=subprocess.DEVNULL,
@@ -824,6 +829,13 @@ class FreeStockDBRuntime:
                     validated_fingerprint = None
                     accepted_fingerprint = None
                     continue
+                if now - stable_since >= _UPDATER_IDLE_SECONDS:
+                    if not self._close_process_window(process):
+                        self._terminate_process(process, timeout=5)
+                    raise StockDBUpdateStalled(
+                        f"STOCKDB_UPDATE_STALLED: 更新器连续 {_UPDATER_IDLE_SECONDS} 秒"
+                        "没有数据文件变化；已停止等待，请检查原生更新器的数据源或网络错误"
+                    )
                 validated_fingerprint, accepted_fingerprint, closed = (
                     self._check_stable_updater_data(
                         process, target=target, trigger=trigger,
@@ -1435,8 +1447,12 @@ class FreeStockDBRuntime:
             )
         code = -1
         updater_error = ""
+        before_update = self._data_fingerprint(root)
         try:
             code = self._run_updater(updater, root, trigger=trigger, target=target)
+        except StockDBUpdateStalled as exc:
+            updater_error = str(exc)
+            logger.error(updater_error)
         except subprocess.TimeoutExpired:
             updater_error = (
                 f"原生更新器运行超过 {_UPDATER_TIMEOUT_SECONDS // 60} 分钟，已终止"
@@ -1452,6 +1468,7 @@ class FreeStockDBRuntime:
                 target=target, validation=preflight, code=code, attempt=attempt,
                 trigger=trigger, message=message,
             )
+        data_changed = self._data_fingerprint(root) != before_update
         restored = False
         if not self._stop.is_set():
             self._set_status(
@@ -1482,7 +1499,11 @@ class FreeStockDBRuntime:
             max_attempts=_AUTO_MAX_ATTEMPTS if trigger != "manual" else 1,
                     next_retry_at="", validation=preflight, managed=self._is_managed(),
         )
-        validation = self._validate_until_ready(target, root)
+        validation = (
+            self._validate_until_ready(target, root)
+            if code == 0 and not updater_error and data_changed
+            else self._validate_data(target)
+        )
         if validation.get("accepted"):
             return self._finish_success(
                 target=target, validation=validation, code=code,
