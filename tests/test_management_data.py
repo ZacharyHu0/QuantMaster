@@ -35,6 +35,36 @@ class RootSwitcher:
         self.target = str(target)
 
 
+def test_refresh_calls_registered_membership_loader_once(monkeypatch):
+    from quantmaster.data import schema_access
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    monkeypatch.setattr(schema_access, "_factories", {})
+    calls = []
+
+    def membership(start, end):
+        calls.append((start, end))
+        return pd.DataFrame({"600000.SH": [True], "000001.SZ": [False]})
+
+    schema_access.register_membership_loader(membership)
+    assert DataRefreshManager._resolve_symbols(
+        "universe", "csi800", "2026-09-01", "2026-09-15",
+    ) == ["600000.SH"]
+    assert calls == [("2026-09-01", "2026-09-15")]
+
+
+def test_refresh_publication_accepts_non_callable_result(monkeypatch, caplog):
+    from quantmaster.data import schema_access
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    monkeypatch.setattr(schema_access, "_factories", {})
+    calls = []
+    schema_access.register_market_overview_publisher(lambda: calls.append("published"))
+    DataRefreshManager._publish_market_snapshot()
+    assert calls == ["published"]
+    assert "数据刷新后发布市场快照失败" not in caplog.text
+
+
 def test_data_migration_preflight_is_side_effect_free_and_reports_capacity(
     tmp_path, monkeypatch,
 ):

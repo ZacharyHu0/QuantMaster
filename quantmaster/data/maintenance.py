@@ -107,7 +107,7 @@ class DataRefreshManager:
         if universe.lower() == "csi800":
             from quantmaster.data.schema_access import schema_target
 
-            membership = schema_target("membership_loader")(start, end)
+            membership = schema_target("membership_loader", start, end)
             return sorted(symbol for symbol in membership if membership[symbol].any())
         from quantmaster.data.universe import load_universe
 
@@ -238,7 +238,7 @@ class DataRefreshManager:
         try:
             from quantmaster.data.schema_access import schema_target
 
-            schema_target("market_overview_publisher")()
+            schema_target("market_overview_publisher")
         except (OSError, RuntimeError, ValueError, TypeError):
             logger.warning("数据刷新后发布市场快照失败", exc_info=True)
 

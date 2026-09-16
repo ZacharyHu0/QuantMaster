@@ -5,6 +5,28 @@ from typing import Any
 import pytest
 
 
+def test_spawn_entry_initializes_runtime_logging_before_consumers(monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    from quantmaster.server import bootstrap
+
+    events = []
+    monkeypatch.setenv("QM_WEB_PROCESS", "1")
+    monkeypatch.setenv("QM_WORKER_SUPERVISOR", "0")
+    monkeypatch.setattr("quantmaster.runtime.windows_app.initialize_windows_app_process", lambda: None)
+    monkeypatch.setattr("quantmaster.logging_config.configure_logging", lambda **kwargs: events.append((
+        "logging", os.environ.get("QM_WEB_PROCESS"), os.environ.get("QM_WORKER_SUPERVISOR"),
+    )))
+    worker = SimpleNamespace(
+        start=lambda **kwargs: events.append("start"), stop=lambda: events.append("stop"),
+    )
+    monkeypatch.setattr(bootstrap, "get_runtime_worker", lambda: worker)
+    monkeypatch.setattr(bootstrap, "publish_worker_supervisor_status", lambda *a, **k: None)
+    bootstrap.run_runtime_worker(SimpleNamespace(wait=lambda seconds: True), False)
+    assert events == [("logging", None, "1"), "start", "stop"]
+
+
 class _CommandServer:
     def __init__(self, handler):
         self.handler = handler
