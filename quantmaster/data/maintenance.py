@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import builtins
+import hashlib
+import json
 import logging
 import os
 import sqlite3
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import asdict
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 from quantmaster.config import get_config
+from quantmaster.data.base import MarketDataUnavailable
 from quantmaster.data.registry import RefreshMode, refresh_history
 from quantmaster.data.storage import BarStore
 from quantmaster.runtime.jobs import (
@@ -21,12 +26,13 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
-from quantmaster.trading_sessions import market_date
+from quantmaster.trading_sessions import market_date, market_now
 
 RefreshScope = Literal["market", "universe", "all_cached"]
 DATA_REFRESH_TASK_TYPE = "data.refresh"
 REFRESH_RESULT_KIND = "data.refresh.result"
 REFRESH_CHECKPOINT = "data.refresh.progress"
+REFRESH_SCHEMA = "2.0"
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +57,8 @@ class DataRefreshManager:
         self._lock = threading.RLock()
         self._runtime = runtime
         self._fixed_runtime = runtime is not None
+        self._stop = threading.Event()
+        self._scheduler: threading.Thread | None = None
 
     @staticmethod
     def _owns_runtime() -> bool:
@@ -71,7 +79,7 @@ class DataRefreshManager:
                     raise RuntimeError("行情刷新仍在旧数据目录运行，拒绝切换任务账本")
                 self._runtime.stop()
             self._runtime = UnifiedJobRuntime(
-                UnifiedJobStore(path), max_workers=self.MAX_PARALLEL_SYMBOLS,
+                UnifiedJobStore(path), max_workers=1,
                 dispatch=self._owns_runtime(),
             )
             self._runtime.register(DATA_REFRESH_TASK_TYPE, self._handle)
@@ -137,7 +145,7 @@ class DataRefreshManager:
             "unhealthy_sources": unhealthy,
             "message": (
                 f"将增量同步 {len(symbols)} 个日线标的；"
-                "已缓存标的只请求尾部重叠区间，未缓存标的才按起始日期初始化"
+                "优先复用本地缓存，只补齐缺失或过期区间"
             ),
         }, symbols
 
@@ -151,16 +159,46 @@ class DataRefreshManager:
         self, scope: RefreshScope, universe: str = "", start: str = "",
     ) -> dict[str, Any]:
         preview, symbols = self._plan(scope, universe, start)
+        with self._lock:
+            return self._submit(scope, universe, str(preview["start"]), str(preview["end"]), symbols)
+
+    @staticmethod
+    def _fingerprint(symbols: list[str]) -> str:
+        from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+        metadata = BarStore(read_only=True).metadata_many(symbols) if symbols else {}
+        cfg = get_config().data
+        # Bound reuse by a short freshness epoch as well as actual local inputs.
+        # A worker restart must not turn an old success into permanent freshness.
+        inputs = {
+            "epoch": int(time.time() // min(3600, max(60, cfg.cache_days * 86400))),
+            "day": str(market_date()),
+            "after_close": (market_now().hour, market_now().minute) >= (15, 30),
+            "stockdb": free_stockdb_runtime._data_fingerprint(get_config().free_stockdb_root),
+            "bars": metadata,
+            "source_config": asdict(cfg),
+        }
+        return hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
+
+    def _submit(
+        self, scope: str, universe: str, start: str, end: str, symbols: list[str],
+    ) -> dict[str, Any]:
         runtime = self._ensure_runtime()
+        spec = {
+            "scope": scope, "universe": universe, "start": start, "end": end,
+            "symbols": sorted(set(symbols)), "refresh_schema": REFRESH_SCHEMA,
+        }
+        fingerprint = self._fingerprint(symbols)
+        existing = self._reusable(runtime.store, spec, fingerprint)
+        if existing:
+            value = self.get(str(existing["id"]))
+            value.update(created=False, coalesced=True, reused=existing["status"] == "completed")
+            return value
         job, created = runtime.store.submit(
             DATA_REFRESH_TASK_TYPE,
-            {
-                "scope": scope,
-                "universe": universe,
-                "start": preview["start"],
-                "end": preview["end"],
-                "symbols": symbols,
-            },
+            spec,
+            input_fingerprint=fingerprint,
+            algorithm_version=REFRESH_SCHEMA,
             deadline_seconds=3600,
             max_attempts=8,
         )
@@ -169,6 +207,21 @@ class DataRefreshManager:
         value = self.get(str(job["id"]))
         value.update(created=created, coalesced=not created)
         return value
+
+    @staticmethod
+    def _reusable(
+        store: UnifiedJobStore, spec: dict[str, Any], fingerprint: str,
+    ) -> dict[str, Any] | None:
+        for job in store.list(200, job_type=DATA_REFRESH_TASK_TYPE):
+            if job["spec"] != spec:
+                continue
+            if job["status"] in {"queued", "running", "cancelling", "interrupted"}:
+                return job
+            if job["status"] == "completed":
+                artifact = store.latest_artifact(job["id"], REFRESH_RESULT_KIND)
+                if artifact and artifact["payload"].get("local_fingerprint") == fingerprint:
+                    return job
+        return None
 
     def _start(self, _job_id: str) -> None:
         self._ensure_runtime().start()
@@ -191,100 +244,137 @@ class DataRefreshManager:
 
     @staticmethod
     def _initial_state(context: JobContext, spec: dict[str, Any]) -> dict[str, Any]:
+        if spec.get("refresh_schema") != REFRESH_SCHEMA:
+            raise ValueError("REFRESH_SCHEMA_UNSUPPORTED: 请新建刷新任务，旧任务证据不支持续跑")
+        checkpoint = context.load_checkpoint(REFRESH_CHECKPOINT, context.spec_hash)
+        if checkpoint and checkpoint.get("schema_version") != REFRESH_SCHEMA:
+            raise ValueError("REFRESH_SCHEMA_UNSUPPORTED: 检查点版本不支持续跑")
         previous = context.store.latest_artifact(context.job_id, REFRESH_RESULT_KIND)
+        previous_attempt = int(previous["payload"].get("attempt", 0)) if previous else 0
+        if checkpoint and int(checkpoint.get("attempt", 0)) > previous_attempt:
+            return dict(checkpoint)
         if context.attempt > 1 and previous:
             payload = dict(previous["payload"])
-            retry_symbols = [str(item["symbol"]) for item in payload.get("failures") or ()]
+            retry_symbols = [str(item["symbol"]) for item in payload.get("failures") or ()
+                             if item.get("retryable")]
             if retry_symbols:
                 return {
-                    "schema_version": "1.0",
+                    "schema_version": REFRESH_SCHEMA,
+                    "attempt": context.attempt,
                     "original_symbols": list(payload.get("original_symbols") or spec["symbols"]),
                     "symbols": retry_symbols,
                     "next_index": 0,
                     "succeeded": 0,
                     "failures": [],
                     "current_symbol": "",
+                    "completed_symbols": [],
+                    "blocked_failures": [item for item in payload.get("failures") or ()
+                                         if not item.get("retryable")],
                 }
-        checkpoint = context.load_checkpoint(REFRESH_CHECKPOINT, context.spec_hash)
         if checkpoint:
             return dict(checkpoint)
         return {
-            "schema_version": "1.0",
+            "schema_version": REFRESH_SCHEMA,
+            "attempt": context.attempt,
             "original_symbols": list(spec["symbols"]),
             "symbols": list(spec["symbols"]),
             "next_index": 0,
             "succeeded": 0,
             "failures": [],
             "current_symbol": "",
+            "completed_symbols": [],
+            "blocked_failures": [],
         }
 
     @staticmethod
-    def _refresh_one(store: BarStore, symbol: str, start: str, end: str) -> str:
+    def _refresh_one(store: BarStore, symbol: str, start: str, end: str) -> dict[str, Any] | None:
         try:
             envelope = refresh_history(
                 symbol, start, end, store=store,
-                mode=RefreshMode.INCREMENTAL, work_class="maintenance",
+                mode=RefreshMode.AUTO, work_class="maintenance",
             )
             envelope.require_data()
             if envelope.quality.status != "verified":
-                return "；".join(envelope.quality.issues) or "行情证据仍为降级状态"
+                return DataRefreshManager._failure(MarketDataUnavailable(envelope.quality))
         except Exception as exc:
-            from quantmaster.logging_config import redact_sensitive_text
+            return DataRefreshManager._failure(exc)
+        return None
 
-            return redact_sensitive_text(exc)[:300]
-        return ""
+    @staticmethod
+    def _failure(exc: Exception) -> dict[str, Any]:
+        from quantmaster.data.resilience import classify_provider_failure
+        from quantmaster.logging_config import redact_sensitive_text
+
+        code = classify_provider_failure(exc)
+        if isinstance(exc, MarketDataUnavailable) and code == "transient_upstream":
+            code = "data_incomplete" if exc.quality.stale else "evidence_missing"
+        retryable = code in {
+            "transient_network", "transient_upstream", "rate_limit", "empty_response", "data_incomplete",
+        }
+        if isinstance(exc, MarketDataUnavailable) and any(marker in str(exc) for marker in (
+            "单位", "unit_", "factor_contract", "continuous_contract", "MARKET_SESSION_UNSUPPORTED",
+            "证券主数据", "semantics_", "来源契约",
+        )):
+            code, retryable = "evidence_missing", False
+        retryable = retryable or code.endswith("_upstream") or code == "upstream_5xx"
+        return {"error": redact_sensitive_text(exc)[:300], "code": code, "retryable": retryable}
+
+    def _execute(self, context: JobContext, spec: dict[str, Any], state: dict[str, Any]) -> None:
+        state["attempt"] = context.attempt
+        store = BarStore()
+        completed = set(state["completed_symbols"])
+        remaining = iter(symbol for symbol in state["symbols"] if symbol not in completed)
+        with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL_SYMBOLS,
+                                thread_name_prefix="data-refresh") as executor:
+            pending: dict[Future[dict[str, Any] | None], str] = {}
+            exhausted = False
+            while pending or not exhausted:
+                context.ensure_active()
+                while not exhausted and len(pending) < self.MAX_PARALLEL_SYMBOLS:
+                    context.ensure_active()
+                    symbol = next(remaining, None)
+                    if symbol is None:
+                        exhausted = True
+                        break
+                    coverage = store.coverage(symbol)
+                    start = coverage[0] if spec["scope"] == "all_cached" and coverage else spec["start"]
+                    pending[executor.submit(self._refresh_one, store, symbol, start, spec["end"])] = symbol
+                done, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                for future in done:
+                    symbol = pending.pop(future)
+                    error = future.result()
+                    if error:
+                        state["failures"].append({"symbol": symbol, **error})
+                    else:
+                        state["succeeded"] += 1
+                    state["completed_symbols"].append(symbol)
+                    state["next_index"] = len(state["completed_symbols"])
+                    state["current_symbol"] = ", ".join(pending.values())
+                    context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
+                    context.progress(round(100 * state["next_index"] / max(1, len(state["symbols"]))),
+                                     "同步行情", f"已完成 {state['next_index']}/{len(state['symbols'])}")
+                    context.completed_unit(symbol)
 
     def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
         state = self._initial_state(context, spec)
-        store = BarStore()
         symbols = [str(symbol) for symbol in state["symbols"]]
-        while int(state["next_index"]) < len(symbols):
-            context.ensure_active()
-            index = int(state["next_index"])
-            batch = symbols[index:index + self.MAX_PARALLEL_SYMBOLS]
-            plans: list[tuple[str, str]] = []
-            for symbol in batch:
-                coverage = store.coverage(symbol)
-                start = coverage[0] if spec["scope"] == "all_cached" and coverage else spec["start"]
-                plans.append((symbol, str(start)))
-            state["current_symbol"] = f"正在并行同步 {len(plans)} 个标的"
-            context.progress(
-                round(100 * index / max(1, len(symbols))),
-                "同步行情",
-                str(state["current_symbol"]),
-            )
-            errors = [""] * len(plans)
-            with ThreadPoolExecutor(
-                max_workers=len(plans), thread_name_prefix=f"data-refresh-{context.job_id[-8:]}",
-            ) as executor:
-                futures = {
-                    executor.submit(self._refresh_one, store, symbol, start, str(spec["end"])): offset
-                    for offset, (symbol, start) in enumerate(plans)
-                }
-                for future in as_completed(futures):
-                    errors[futures[future]] = future.result()
-            context.ensure_active()
-            for (symbol, _start), error in zip(plans, errors, strict=True):
-                if error:
-                    state["failures"].append({"symbol": symbol, "error": error})
-                else:
-                    state["succeeded"] = int(state["succeeded"]) + 1
-            state["next_index"] = index + len(plans)
-            state["current_symbol"] = ""
-            context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
-            context.completed_unit(f"已同步 {state['next_index']}/{len(symbols)} 个标的")
-        failures = list(state["failures"])
+        self._execute(context, spec, state)
+        failures = [*state["blocked_failures"], *state["failures"]]
         outcome = "completed_with_warnings" if failures else "completed"
         result = {
             **state,
+            "failures": failures,
+            "current_symbol": "",
             "outcome": outcome,
-            "total": len(symbols),
+            "total": len(symbols) + len(state["blocked_failures"]),
+            "next_index": len(symbols) + len(state["blocked_failures"]),
             "failed": len(failures),
+            "local_fingerprint": self._fingerprint(list(spec["symbols"])),
         }
         artifact = context.write_artifact(
             REFRESH_RESULT_KIND,
             result,
-            {"schema_version": "1.0", "lineage": {"spec_hash": context.spec_hash}},
+            {"schema_version": REFRESH_SCHEMA, "lineage": {"spec_hash": context.spec_hash}},
         )
         context.emit("data_refresh_completed", {"outcome": outcome, "failed": len(failures)})
         self._publish_market_snapshot()
@@ -293,7 +383,7 @@ class DataRefreshManager:
     @staticmethod
     def _state(store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
         artifact = store.latest_artifact(str(job["id"]), REFRESH_RESULT_KIND)
-        if artifact:
+        if artifact and job["status"] == "completed":
             return dict(artifact["payload"])
         checkpoint = store.checkpoint(
             str(job["id"]), REFRESH_CHECKPOINT, str(job["spec_hash"]),
@@ -323,8 +413,8 @@ class DataRefreshManager:
         })
         value["can_retry"] = bool(value["can_retry"]) and (
             job["status"] in {"failed", "cancelled", "interrupted"}
-            or value["outcome"] == "completed_with_warnings"
-        )
+            or any(item.get("retryable") for item in failures)
+        ) and spec.get("refresh_schema") == REFRESH_SCHEMA
         return value
 
     def get(self, job_id: str) -> dict[str, Any]:
@@ -361,13 +451,11 @@ class DataRefreshManager:
     def resume(self, job_id: str) -> dict[str, Any]:
         runtime = self._ensure_runtime()
         source = self._project(runtime.store, runtime.store.get(job_id))
-        retryable = source["status"] in {"failed", "cancelled", "interrupted"}
-        retryable = retryable or source.get("outcome") == "completed_with_warnings"
-        if not retryable:
+        if not source["can_retry"]:
             raise ValueError("当前任务不能续跑")
         return self._project(runtime.store, runtime.retry(job_id))
 
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+    def events(self, job_id: str, after: int = 0, limit: int = 500) -> builtins.list[dict[str, Any]]:
         store = self._read_store()
         self._project(store, store.get(job_id))
         return store.events(job_id, after, limit)
@@ -375,8 +463,59 @@ class DataRefreshManager:
     def start(self) -> None:
         if self._owns_runtime():
             self._ensure_runtime().start()
+            if os.environ.get("QM_WORKER_SUPERVISOR") == "1":
+                with self._lock:
+                    if self._scheduler is None or not self._scheduler.is_alive():
+                        self._stop.clear()
+                        self._scheduler = threading.Thread(
+                            target=self._maintain, name="data-maintenance-intake", daemon=True,
+                        )
+                        self._scheduler.start()
+
+    def maintain_consumed(self) -> builtins.list[dict[str, Any]]:
+        """Worker-only intake; page reads remain strictly local and read-only."""
+        cfg = get_config()
+        jobs = [self.create("market")]
+        if cfg.automation.watchlist:
+            jobs.append(self._submit(
+                "watchlist", "", str(market_date() - timedelta(days=365)),
+                str(market_date()), cfg.automation.watchlist,
+            ))
+        universes = {cfg.automation.primary_universe}
+        if cfg.lab.enabled:
+            universes.add(cfg.lab.universe)
+        for universe in sorted(universes - {""}):
+            try:
+                jobs.append(self.create("universe", universe=universe))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                logger.warning("消费范围暂不可用，保留缺口并等待下次检查: %s", universe, exc_info=True)
+        return jobs
+
+    def _maintain(self) -> None:
+        while not self._stop.is_set():
+            try:
+                # Existing automatic-maintenance switch also bounds intake.
+                if get_config().data.repair_enabled:
+                    for job in self.maintain_consumed():
+                        if self._retry_due(job):
+                            self.resume(str(job["id"]))
+            except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+                logger.warning("数据自动维护接纳失败，稍后重试", exc_info=True)
+            self._stop.wait(60)
+
+    @staticmethod
+    def _retry_due(job: dict[str, Any]) -> bool:
+        if not job.get("can_retry") or not job.get("finished_at"):
+            return False
+        finished = datetime.fromisoformat(str(job["finished_at"]))
+        delay = min(3600, 60 * 2 ** max(0, int(job.get("attempt") or 1) - 1))
+        return (datetime.now(UTC) - finished).total_seconds() >= delay
 
     def shutdown(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        scheduler = self._scheduler
+        if scheduler is not None:
+            scheduler.join(timeout=timeout)
         with self._lock:
             runtime = self._runtime
         if runtime is not None:

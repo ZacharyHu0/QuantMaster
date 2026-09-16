@@ -809,6 +809,40 @@ def test_job_partial_completion_and_retry_are_auditable(tmp_path):
     assert any(item["type"] == "job_retried" for item in store.events("lab-partial"))
 
 
+def test_prepare_data_refills_slot_before_slow_symbol_finishes(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _config(tmp_path)
+    service = LabService(LabStore(tmp_path / "lab.sqlite"))
+    blocked, started_c = threading.Event(), threading.Event()
+    checkpoints = []
+    targets = [{"symbol": symbol, "repair_start": "2024-01-01", "repair_end": "2024-02-01"}
+               for symbol in ("A.SH", "B.SH", "C.SH")]
+
+    def refresh(symbol, *args, **kwargs):
+        if symbol == "A.SH":
+            assert blocked.wait(10)
+        if symbol == "C.SH":
+            started_c.set()
+        return SimpleNamespace(require_data=lambda: None,
+                               quality=SimpleNamespace(to_dict=lambda: {"status": "verified"}))
+
+    monkeypatch.setattr("quantmaster.data.refresh_history", refresh)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        result = pool.submit(service._repair_data_targets, targets, "free-stockdb", None, None,
+                             lambda *args, **kw: checkpoints.append(kw), lambda *args: None)
+        try:
+            assert started_c.wait(5)
+            assert any(row.get("partition") == "B.SH" for row in checkpoints)
+            assert not result.done()
+        finally:
+            blocked.set()
+        failures, degraded, persisted = result.result(timeout=10)
+    assert failures == degraded == {}
+    assert set(persisted) == {"A.SH", "B.SH", "C.SH"}
+
+
 def test_prepare_data_keeps_partition_checkpoints_and_partial_result(tmp_path, monkeypatch):
     _config(tmp_path)
     service = LabService(LabStore(tmp_path / "lab.sqlite"))

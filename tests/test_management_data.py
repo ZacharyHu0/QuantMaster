@@ -418,7 +418,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     assert completed["failed"] == 1
     assert completed["can_retry"] is True
     assert {item[0] for item in calls} == set(symbols)
-    assert all(item[3]["mode"] == RefreshMode.INCREMENTAL for item in calls)
+    assert all(item[3]["mode"] == RefreshMode.AUTO for item in calls)
     assert all(item[3]["work_class"] == "maintenance" for item in calls)
 
     # 领域 outcome 保留失败标的；统一 lifecycle retry 只重跑失败项。
@@ -524,3 +524,219 @@ def test_refresh_manager_only_recovers_expired_foreign_lease(isolated_config, mo
     monkeypatch.setattr("quantmaster.runtime.jobs.time.time", lambda: future)
     second._ensure_runtime().store.recover_expired()
     assert second.get(job["id"])["status"] == "interrupted"
+
+
+def test_refresh_slow_symbol_does_not_block_checkpoint_or_next_symbol(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import REFRESH_CHECKPOINT, DataRefreshManager
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    monkeypatch.setattr(manager, "MAX_PARALLEL_SYMBOLS", 2)
+    monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: ["A", "B", "C"])
+    monkeypatch.setattr(manager, "_start", lambda _: None)
+    monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
+    release_a, started_c = threading.Event(), threading.Event()
+
+    def refresh(store, symbol, start, end):
+        if symbol == "A":
+            assert release_a.wait(10)
+        if symbol == "C":
+            started_c.set()
+        return None
+
+    monkeypatch.setattr(manager, "_refresh_one", refresh)
+    job = manager.create("market")
+    runtime = manager._ensure_runtime()
+    runtime.dispatch_job(job["id"])
+    try:
+        assert started_c.wait(5), "C must start while A is still blocked"
+        spec_hash = runtime.store.get(job["id"])["spec_hash"]
+        checkpoint = runtime.store.checkpoint(job["id"], REFRESH_CHECKPOINT, spec_hash)
+        assert "B" in checkpoint["completed_symbols"]
+        assert "A" not in checkpoint["completed_symbols"]
+        assert manager.get(job["id"])["next_index"] >= 1
+    finally:
+        release_a.set()
+        runtime.wait(job["id"], timeout=10)
+        manager.shutdown()
+    assert manager.get(job["id"])["succeeded"] == 3
+
+
+def test_refresh_resume_skips_durable_success_and_rejects_legacy_checkpoint(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import REFRESH_SCHEMA, DataRefreshManager
+
+    saved = {"schema_version": REFRESH_SCHEMA, "symbols": ["A", "B", "C"],
+             "completed_symbols": ["B"], "next_index": 1, "succeeded": 1,
+             "failures": [], "blocked_failures": []}
+    context = SimpleNamespace(
+        attempt=1, spec_hash="fixture", ensure_active=lambda: None,
+        write_checkpoint=lambda *args: None, progress=lambda *args: None,
+        completed_unit=lambda *args: None,
+    )
+    calls = []
+    manager = DataRefreshManager()
+    monkeypatch.setattr(manager, "_refresh_one", lambda store, symbol, *args: calls.append(symbol))
+    manager._execute(context, {"scope": "market", "start": "2024-01-01", "end": "2024-02-01"}, saved)
+    assert set(calls) == {"A", "C"}
+    assert saved["succeeded"] == 3
+    with pytest.raises(ValueError, match="REFRESH_SCHEMA_UNSUPPORTED"):
+        manager._initial_state(context, {"symbols": ["A"]})
+    context.attempt = 1
+    context.job_id = "fixture"
+    context.store = SimpleNamespace(latest_artifact=lambda *args: None)
+    context.load_checkpoint = lambda *args: {"schema_version": "1.0", "next_index": 1}
+    with pytest.raises(ValueError, match="REFRESH_SCHEMA_UNSUPPORTED"):
+        manager._initial_state(context, {"refresh_schema": REFRESH_SCHEMA})
+    # A retry interrupted after saving B resumes that checkpoint, not the older failure result.
+    context.attempt = 3
+    saved["attempt"] = 2
+    context.load_checkpoint = lambda *args: saved
+    context.store.latest_artifact = lambda *args: {"payload": {
+        "attempt": 1, "failures": [{"symbol": "B", "retryable": True}],
+    }}
+    assert manager._initial_state(context, {"refresh_schema": REFRESH_SCHEMA}) == saved
+
+
+def test_refresh_reuses_result_without_hiding_evidence_failure(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    generation = ["first"]
+    calls = []
+    monkeypatch.setattr(manager, "_fingerprint", lambda symbols: generation[0])
+    monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: ["A"])
+    monkeypatch.setattr(manager, "_start", lambda _: None)
+    monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
+
+    def refresh(*args):
+        calls.append(1)
+        generation[0] = "after-local-write"
+        return {"error": "unit evidence missing", "code": "evidence_missing", "retryable": False}
+
+    monkeypatch.setattr(manager, "_refresh_one", refresh)
+    job = manager.create("market")
+    # Intermediate local writes do not create a duplicate active task.
+    generation[0] = "during-write"
+    assert manager.create("market")["id"] == job["id"]
+    manager._run(job["id"])
+    reused = manager.create("market")
+    assert reused["id"] == job["id"]
+    assert reused["reused"] is True
+    assert reused["outcome"] == "completed_with_warnings"
+    assert reused["can_retry"] is False
+    assert calls == [1]
+    with pytest.raises(ValueError, match="不能续跑"):
+        manager.resume(job["id"])
+    generation[0] = "new-source-generation"
+    assert manager.create("market")["id"] != job["id"]
+    manager.shutdown()
+
+
+def test_refresh_failure_classification_preserves_quality_gate():
+    from quantmaster.data.base import MarketDataUnavailable
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    blocked = MarketDataUnavailable(BarDataQuality(
+        status="degraded", requested_start="2024-01-01", requested_end="2024-02-01",
+        issues=("continuous_contract_unconfirmed",),
+    ))
+    assert DataRefreshManager._failure(blocked)["retryable"] is False
+    assert DataRefreshManager._failure(ConnectionError("offline"))["retryable"] is True
+    assert DataRefreshManager._failure(PermissionError("permission denied"))["retryable"] is False
+
+
+def test_refresh_worker_intake_tracks_consumed_scopes(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    isolated_config.automation.watchlist = ["600000.SH"]
+    isolated_config.automation.primary_universe = "selected"
+    isolated_config.lab.enabled = True
+    isolated_config.lab.universe = "research"
+    calls = []
+    manager = DataRefreshManager()
+    monkeypatch.setattr(manager, "create", lambda scope, **kw: calls.append((scope, kw)) or {})
+    monkeypatch.setattr(manager, "_submit", lambda *args: calls.append(args) or {})
+    assert len(manager.maintain_consumed()) == 4
+    assert ("market", {}) in calls
+    assert ("universe", {"universe": "selected"}) in calls
+    assert ("universe", {"universe": "research"}) in calls
+    assert any(call[0] == "watchlist" for call in calls)
+
+
+def test_ordinary_refresh_reuses_fresh_cache_without_provider_calls(isolated_config, monkeypatch):
+    from quantmaster.data import registry
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.data.storage import BarStore
+    from quantmaster.trading_sessions import market_date
+
+    end = str(market_date())
+    store = BarStore()
+    data = pd.DataFrame({"open": [10.0], "high": [11.0], "low": [9.0],
+                         "close": [10.0], "volume": [100.0]}, index=pd.to_datetime([end]))
+    store.put("600000.SH", data, request_start=end, request_end=end)
+
+    provider_calls = []
+
+    def reject_fetch(*args, **kwargs):
+        provider_calls.append(1)
+        raise AssertionError("fresh complete cache must not acquire a provider")
+
+    monkeypatch.setattr(registry, "_fetch_segment", reject_fetch)
+    monkeypatch.setattr(registry, "_full_refresh", reject_fetch)
+    # Quality may remain degraded; the point is zero provider work, not fabricated eligibility.
+    DataRefreshManager._refresh_one(store, "600000.SH", end, end)
+    DataRefreshManager._refresh_one(store, "600000.SH", end, end)
+    assert provider_calls == []
+
+
+def test_refresh_fingerprint_expires_and_tracks_local_source_changes(isolated_config, monkeypatch):
+    from quantmaster.data import maintenance
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+    clock = [7200.0]
+    generation = [()]
+    monkeypatch.setattr(maintenance.time, "time", lambda: clock[0])
+    monkeypatch.setattr(free_stockdb_runtime, "_data_fingerprint", lambda root: generation[0])
+    first = maintenance.DataRefreshManager._fingerprint(["A"])
+    assert maintenance.DataRefreshManager._fingerprint(["A"]) == first
+    generation[0] = (("data/current", 100, 200),)
+    changed = maintenance.DataRefreshManager._fingerprint(["A"])
+    assert changed != first
+    clock[0] += 3600
+    assert maintenance.DataRefreshManager._fingerprint(["A"]) != changed
+
+
+def test_refresh_cancel_stops_dispatch_and_retry_has_backoff(isolated_config, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    monkeypatch.setattr(manager, "MAX_PARALLEL_SYMBOLS", 1)
+    calls = []
+    cancelled = [False]
+
+    def active():
+        if cancelled[0]:
+            raise InterruptedError("cancelled")
+
+    def checkpoint(*args):
+        cancelled[0] = True
+
+    context = SimpleNamespace(
+        attempt=1, spec_hash="fixture", ensure_active=active, write_checkpoint=checkpoint,
+        progress=lambda *args: None, completed_unit=lambda *args: None,
+    )
+    state = {"symbols": ["A", "B"], "completed_symbols": [], "succeeded": 0, "failures": []}
+    monkeypatch.setattr(manager, "_refresh_one", lambda store, symbol, *args: calls.append(symbol))
+    with pytest.raises(InterruptedError):
+        manager._execute(context, {"scope": "market", "start": "2024-01-01", "end": "2024-02-01"}, state)
+    assert calls == ["A"]
+    assert state["completed_symbols"] == ["A"]
+    now = datetime.now(UTC)
+    assert not manager._retry_due({"can_retry": True, "finished_at": now.isoformat(), "attempt": 1})
+    older = (now - timedelta(seconds=65)).isoformat()
+    assert manager._retry_due({"can_retry": True, "finished_at": older, "attempt": 1})
+    assert not manager._retry_due({"can_retry": True, "finished_at": older, "attempt": 2})
+    assert not manager._retry_due({"can_retry": False, "finished_at": older, "attempt": 1})

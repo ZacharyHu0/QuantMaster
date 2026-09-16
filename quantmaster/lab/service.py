@@ -1075,12 +1075,32 @@ class LabService:
             retryable=True, context=context,
         )
 
+    @staticmethod
+    def _repair_completed(targets: list[dict[str, Any]], workers: int, repair, cancelled, require_space):
+        from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+
+        completed = 0
+        submitted = 0
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
+            futures: dict[Future[tuple[str, dict[str, Any]]], dict[str, Any]] = {}
+            while futures or submitted < len(targets):
+                if cancelled and cancelled():
+                    raise InterruptedError("数据补齐已取消")
+                while submitted < len(targets) and len(futures) < workers:
+                    item = targets[submitted]
+                    require_space("bars", [*futures.values(), *targets[submitted:]],
+                                  5 + int(82 * completed / max(1, len(targets))))
+                    futures[pool.submit(repair, item)] = item
+                    submitted += 1
+                done, _ = wait(futures, timeout=0.2, return_when=FIRST_COMPLETED)
+                for future in done:
+                    yield futures.pop(future), future
+                    completed += 1
+
     def _repair_data_targets(
         self, targets: list[dict[str, Any]], selected: str, cancelled, progress,
         checkpoint, require_space,
     ) -> tuple[dict[str, str], dict[str, dict[str, Any]], list[str]]:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         from quantmaster import data as data_api
         from quantmaster.data.registry import RefreshMode
 
@@ -1101,41 +1121,37 @@ class LabService:
         workers = min(4, max(1, int(get_config().lab.max_workers)), max(1, len(targets)))
         completed = 0
         require_space("bars", targets, 5)
-        for batch_start in range(0, len(targets), workers):
-            batch = targets[batch_start:batch_start + workers]
-            require_space("bars", targets[batch_start:], 5 + int(82 * completed / max(1, len(targets))))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lab-data-repair") as pool:
-                futures = {pool.submit(repair, item): item for item in batch}
-                for future in as_completed(futures):
-                    item = futures[future]
-                    try:
-                        repaired_symbol, quality = future.result()
-                        persisted.append(repaired_symbol)
-                        if quality.get("status") != "verified":
-                            degraded[repaired_symbol] = quality
-                        checkpoint(
-                            5 + int(82 * (completed + 1) / max(1, len(targets))),
-                            "bars", "completed", f"{repaired_symbol} 已持久化",
-                            partition=repaired_symbol, persisted=len(persisted),
-                            total=len(targets), quality_status=quality.get("status", ""),
-                        )
-                    except InterruptedError:
-                        raise
-                    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                        failure = classify_lab_error(exc)
-                        failures[str(item["symbol"])] = str(exc)[:300]
-                        checkpoint(
-                            5 + int(82 * (completed + 1) / max(1, len(targets))),
-                            "bars", "failed", str(exc)[:300], partition=str(item["symbol"]),
-                            persisted=len(persisted), total=len(targets),
-                            error_type=type(exc).__name__, diagnostic_code=failure.code,
-                        )
-                    completed += 1
-                    if progress:
-                        progress(
-                            5 + int(82 * completed / max(1, len(targets))),
-                            f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
-                        )
+        for item, future in self._repair_completed(
+            targets, workers, repair, cancelled, require_space,
+        ):
+            try:
+                repaired_symbol, quality = future.result()
+                persisted.append(repaired_symbol)
+                if quality.get("status") != "verified":
+                    degraded[repaired_symbol] = quality
+                checkpoint(
+                    5 + int(82 * (completed + 1) / max(1, len(targets))),
+                    "bars", "completed", f"{repaired_symbol} 已持久化",
+                    partition=repaired_symbol, persisted=len(persisted),
+                    total=len(targets), quality_status=quality.get("status", ""),
+                )
+            except InterruptedError:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                failure = classify_lab_error(exc)
+                failures[str(item["symbol"])] = str(exc)[:300]
+                checkpoint(
+                    5 + int(82 * (completed + 1) / max(1, len(targets))),
+                    "bars", "failed", str(exc)[:300], partition=str(item["symbol"]),
+                    persisted=len(persisted), total=len(targets),
+                    error_type=type(exc).__name__, diagnostic_code=failure.code,
+                )
+            completed += 1
+            if progress:
+                progress(
+                    5 + int(82 * completed / max(1, len(targets))),
+                    f"{selected} 补齐 {completed}/{len(targets)} · {item['symbol']}",
+                )
         return failures, degraded, persisted
 
     def prepare_data(
