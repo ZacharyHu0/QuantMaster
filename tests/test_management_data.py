@@ -416,6 +416,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     assert completed["status"] == "completed"
     assert completed["outcome"] == "completed_with_warnings"
     assert completed["failed"] == 1
+    assert completed["can_retry"] is True
     assert {item[0] for item in calls} == set(symbols)
     assert all(item[3]["mode"] == RefreshMode.INCREMENTAL for item in calls)
     assert all(item[3]["work_class"] == "maintenance" for item in calls)
@@ -429,6 +430,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     assert retried["status"] == "completed"
     assert retried["outcome"] == "completed"
     assert retried["total"] == 1
+    assert retried["can_retry"] is False
     assert [item[0] for item in calls].count("600000.SH") == 1
     assert [item[0] for item in calls].count("000001.SZ") == 2
 

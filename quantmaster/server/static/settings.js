@@ -9,6 +9,7 @@ const settingsFeature = (() => {
     migrationId: '',
     dataRefreshTimer: null,
     dataRefreshId: '',
+    dataRefreshPollRevision: 0,
     dataRefreshPreview: null,
     researchTimer: null,
     researchId: '',
@@ -1192,6 +1193,7 @@ const settingsFeature = (() => {
   }
 
   async function loadDataRefreshControls() {
+    const generation = lifecycleGeneration;
     const start = document.getElementById('data-refresh-start');
     if (!start.value) start.value = state.config?.lab?.start || '';
     try {
@@ -1208,12 +1210,17 @@ const settingsFeature = (() => {
     resetDataRefreshPreview();
     try {
       const latest = await request('/api/v1/jobs?domain=data&limit=1');
+      if (!mounted || generation !== lifecycleGeneration) return;
       const job = latest.items?.[0];
       if (job) {
         renderDataRefresh(job);
-        if (mounted && ['running', 'cancelling'].includes(job.status)) pollDataRefresh(job.id);
+        if (dataRefreshActive(job)) pollDataRefresh(job.id);
       }
     } catch (_) { /* 首次使用时没有任务是正常状态。 */ }
+  }
+
+  function dataRefreshActive(task) {
+    return ['queued', 'running', 'cancelling'].includes(task.status);
   }
 
   function renderDataRefresh(task) {
@@ -1221,38 +1228,45 @@ const settingsFeature = (() => {
     root.hidden = false;
     root.style.setProperty('--data-refresh-progress', (task.progress || 0) / 100);
     const labels = {
-      running: '增量同步中', cancelling: '正在完成当前标的', cancelled: '已取消，可继续',
-      interrupted: '服务重启中断，可继续', completed: '增量同步完成',
-      completed_with_errors: '刷新完成，部分标的失败',
+      queued: '等待同步', running: '增量同步中', cancelling: '正在取消', cancelled: '已取消',
+      interrupted: '服务重启中断', completed: '增量同步完成', failed: '同步失败',
     };
+    const active = dataRefreshActive(task);
+    const failures = task.failures || [];
+    const failed = Number(task.failed || failures.length);
+    const incomplete = task.outcome === 'completed_with_warnings' || failed > 0;
+    const warning = incomplete || ['failed', 'cancelled', 'interrupted'].includes(task.status);
+    const label = task.status === 'completed' && incomplete
+      ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
+      : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
     root.querySelector('[data-refresh-phase]').textContent =
-      `${labels[task.status] || task.status} · ${task.next_index}/${task.total}${current}`;
+      `${label} · ${task.next_index || 0}/${task.total || 0}${current}`;
     root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
-    const failures = task.failures || [];
-    root.querySelector('[data-refresh-failures]').textContent = failures.length
-      ? `${task.failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
-      : `${task.succeeded || 0} 个标的已成功同步`;
+    root.querySelector('[data-refresh-failures]').textContent = failed
+      ? `${failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
+      : warning ? (task.detail || '同步未完整完成，请查看任务详情。')
+        : `${task.succeeded || 0} 个标的已成功同步`;
     const cancel = document.getElementById('data-refresh-cancel');
-    cancel.hidden = !['running', 'cancelling'].includes(task.status);
+    cancel.hidden = !task.can_cancel;
     cancel.disabled = task.status === 'cancelling';
     cancel.dataset.jobId = task.id;
     const resume = document.getElementById('data-refresh-resume');
-    resume.hidden = !['cancelled', 'interrupted', 'completed_with_errors'].includes(task.status);
+    resume.hidden = active || !warning || !task.can_retry;
     resume.dataset.jobId = task.id;
-    state.dataRefreshId = ['running', 'cancelling'].includes(task.status) ? String(task.id || '') : '';
+    state.dataRefreshId = active ? String(task.id || '') : '';
     const runtimeKey = `persistent:health:refresh:${task.id}`;
-    if (['running', 'cancelling'].includes(task.status)) {
+    if (active) {
       window.QuantMasterRunInfo.add('info', '数据同步', '行情尾部正在增量同步', {
         detail:`进度 ${task.progress || 0}%，当前 ${task.current_symbol || '准备中'}`,
         action:'任务会在后台继续，可正常浏览其他页面。',
         key:runtimeKey, scope:'health', persistent:true,
         revision:`${task.status}:${task.progress || 0}:${task.current_symbol || ''}`,
       });
-    } else if (['interrupted', 'completed_with_errors'].includes(task.status)) {
+    } else if (warning) {
       window.QuantMasterRunInfo.add('warning', '数据刷新', '最近的数据刷新未完整完成', {
-        detail:`${task.failed || failures.length} 个标的失败或任务被中断。`,
-        action:'在设置中心查看失败项并重试。',
+        detail:failed ? `${failed} 个标的失败。` : (task.detail || label),
+        action:task.can_retry ? '查看失败原因后重试未完成项。' : '查看任务详情与失败原因。',
         key:runtimeKey, scope:'health', persistent:true,
         revision:`${task.status}:${task.failed || failures.length}`,
       });
@@ -1264,15 +1278,17 @@ const settingsFeature = (() => {
   async function pollDataRefresh(id, generation = lifecycleGeneration) {
     if (!mounted || generation !== lifecycleGeneration) return;
     clearTimeout(state.dataRefreshTimer);
+    state.dataRefreshTimer = null;
+    const revision = ++state.dataRefreshPollRevision;
     try {
       const task = await request(`/api/v1/jobs/${encodeURIComponent(id)}`);
-      if (!mounted || generation !== lifecycleGeneration) return;
+      if (!mounted || generation !== lifecycleGeneration || revision !== state.dataRefreshPollRevision) return;
       renderDataRefresh(task);
-      if (['running', 'cancelling'].includes(task.status)) {
+      if (dataRefreshActive(task)) {
         state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id, generation), 800);
       }
     } catch (error) {
-      if (!mounted || generation !== lifecycleGeneration) return;
+      if (!mounted || generation !== lifecycleGeneration || revision !== state.dataRefreshPollRevision) return;
       const root = document.getElementById('data-refresh-progress');
       root.hidden = false;
       root.querySelector('[data-refresh-phase]').textContent = error.message;
