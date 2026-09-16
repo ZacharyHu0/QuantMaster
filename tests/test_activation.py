@@ -144,6 +144,33 @@ def test_activation_commits_a_new_generation_and_preserves_previous(tmp_path):
     ]
 
 
+def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _write_state(tmp_path, active=SHA_A)
+
+    class TimeoutController(FakeController):
+        ready_timeout = 0.0
+
+        def wait_ready(
+            self,
+            generation: _Generation,
+            identity: ApplicationIdentity,
+            timeout: float,
+        ):
+            self.ready_timeout = timeout
+            return super().wait_ready(generation, identity, timeout)
+
+    controller = TimeoutController(SHA_A)
+    coordinator = ActivationCoordinator(
+        SlotRegistry(tmp_path), controller, ready_timeout=60.0,
+    )
+
+    assert coordinator.activate(SHA_B)["status"] == "activated"
+    assert activation.READY_TIMEOUT_SECONDS == 30.0
+    assert controller.ready_timeout == 30.0
+
+
 def test_candidate_failure_rolls_back_previous_slot(tmp_path):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
