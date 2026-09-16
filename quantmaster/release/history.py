@@ -13,7 +13,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-VERSION = "1.18.7"
+VERSION = "1.18.8"
 RELEASE_DATE = "2026-09-16"
 RELEASE_HISTORY_URL = "https://github.com/ZacharyHu0/QuantMaster/blob/main/CHANGELOG.md"
 
@@ -24,6 +24,21 @@ RELEASES = (
     {
         "version": VERSION,
         "date": RELEASE_DATE,
+        "sections": (
+            {
+                "title": "Windows 正式激活",
+                "items": (
+                    (
+                        "Windows onefile 候选的 Web/runtime/compute 精确身份就绪硬上限"
+                        "由 15 秒调整为 30 秒，继续保留有界失败与安全回滚。"
+                    ),
+                ),
+            },
+        ),
+    },
+    {
+        "version": "1.18.7",
+        "date": "2026-09-16",
         "sections": (
             {
                 "title": "正式版本切换",
