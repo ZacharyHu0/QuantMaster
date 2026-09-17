@@ -1370,6 +1370,63 @@ def test_rotation_provider_plan_preserves_historical_theme_contract(tmp_path, mo
     assert calls == [{"purpose": "historical_replay", "as_of": "2024-01-02"}]
 
 
+@pytest.mark.parametrize("scope", ["market", "close", "all", "etf", "industries"])
+@pytest.mark.parametrize("coverage", ["", "2026-08-20", "2026-09-17"])
+def test_etf_refresh_plan_uses_observation_date(tmp_path, monkeypatch, scope, coverage):
+    monkeypatch.setattr(
+        "quantmaster.rotation.service._expected_market_session",
+        lambda **_: "2026-09-17",
+    )
+    store = RotationStore(tmp_path / "rotation")
+    store.save_etf_observations(pd.DataFrame([{
+        "trade_date": pd.Timestamp(coverage or "2026-08-20"),
+        "symbol": "510300.SH", "shares": 100, "nav": 4.0, "close": 4.0,
+        "name": "沪深300ETF", "category": "核心宽基", "benchmark": "沪深300",
+        "total_size": None, "share_source": "tushare:fund_share",
+        "acquired_at": "2026-09-17T16:00:00+08:00",
+    }]))
+    if not coverage:
+        monkeypatch.setattr(store, "source_generations", lambda *_: [])
+    service = RotationService(store, UnifiedJobStore(tmp_path / "jobs.sqlite"))
+    plan = service._remote_requirements(
+        RotationJobSpec(scope=scope, as_of="2026-09-17"),
+        {"available": True, "as_of": "2026-09-17"},
+    )
+    assert plan["etf"] is (scope != "industries" and coverage != "2026-09-17")
+    assert plan["market"] is False
+
+
+def test_etf_reuse_keeps_requested_freshness_target(tmp_path, monkeypatch):
+    service = RotationService(
+        RotationStore(tmp_path / "rotation"), UnifiedJobStore(tmp_path / "jobs.sqlite"),
+    )
+    monkeypatch.setattr(service, "_expected_for_spec", lambda _: "2026-09-17")
+    monkeypatch.setattr(service.store, "snapshot_header", lambda _: {
+        "meta": {"as_of": "2026-08-20"},
+    })
+    result = service._reuse_result(
+        RotationJobSpec(scope="etf"), scope_snapshot_kinds=("etf_flows",),
+        need_market=False, local_state={}, input_fingerprint="old-shares",
+    )
+    assert result["expected_as_of"] == "2026-09-17"
+    assert result["fresh"] is False
+
+
+def test_etf_probe_does_not_mark_old_observations_current(tmp_path, monkeypatch):
+    service = RotationService(
+        RotationStore(tmp_path / "rotation"), UnifiedJobStore(tmp_path / "jobs.sqlite"),
+    )
+    run = _RotationBuildRun(
+        service, RotationJobSpec(scope="etf", source="local", as_of="2026-09-17"),
+        progress=lambda *_: None, cancelled=lambda: False, job_id="", checkpoint=None,
+    )
+    marked = []
+    monkeypatch.setattr(service.store, "mark_source_coverage", lambda *args: marked.append(args))
+    run.state.provider_results["etf"] = {"history_end": "2026-08-20"}
+    run._record_provider_success("etf")
+    assert marked == []
+
+
 def _board_index_checkpoint_payload(as_of="2026-08-17"):
     methods = {
         name: {

@@ -412,8 +412,6 @@ const rotationFeature = (() => {
   }
 
   function evidenceRadarChart(items, comparison) {
-    const chart = mkChart('rotation-evidence-radar');
-    if (!chart) return;
     const dimensions = [
       ['trend','趋势分布'], ['breadth','涨跌宽度'], ['volume','量能确认'],
       ['etf_capital','ETF 资金'], ['sentiment','情绪代理'],
@@ -426,6 +424,21 @@ const rotationFeature = (() => {
       const item = compared.get(id);
       return item?.previous_available && Number.isFinite(Number(item.previous_score));
     });
+    const target = document.getElementById('rotation-evidence-radar');
+    if (!target) return;
+    if (!currentComplete) {
+      disposeChart('rotation-evidence-radar');
+      const available = evidence.filter(({item}) => item?.available && Number.isFinite(Number(item.score)));
+      const unavailable = evidence.filter(({item}) => !item?.available || !Number.isFinite(Number(item.score)));
+      const availableWeight = available.reduce((total, {item}) => total + (Number(item?.weight) || 0), 0);
+      const missingMarkup = unavailable.map(({label,item}) => (
+        `<li><strong>${esc(label)}</strong><span>${esc(item?.note || '当前没有可用证据')}</span></li>`
+      )).join('');
+      target.innerHTML = `<div class="rotation-chart-state rotation-evidence-state" data-tone="partial" role="status"><strong>当前显示部分证据</strong><span>已加载 ${available.length}/${evidence.length} 个维度，保留真实有效权重 ${availableWeight}/100。</span>${missingMarkup ? `<ul>${missingMarkup}</ul>` : ''}<small>缺失维度不补零；数据恢复后雷达图会自动出现。</small></div>`;
+      return;
+    }
+    const chart = mkChart('rotation-evidence-radar');
+    if (!chart) return;
     const currentValues = evidence.map(({item}) => Number(item?.score));
     const previousValues = evidence.map(({id}) => Number(compared.get(id)?.previous_score));
     const currentLabel = `当前 · ${comparison?.current_as_of || '最新'}`;

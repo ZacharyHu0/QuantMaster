@@ -439,6 +439,12 @@ dialog.rotation-etf-drawer .etf-drawer-close:focus-visible { outline:2px solid v
 .rotation-chart-state strong { color:var(--ink-2); font-size:13px; }
 .rotation-chart-state span { max-width:48ch; font-size:10px; }
 .rotation-chart-state[data-tone="error"] strong { color:var(--bad); }
+.rotation-evidence-state { align-content:center; justify-items:start; gap:8px; padding:20px 24px; text-align:left; }
+.rotation-evidence-state > span { max-width:46ch; line-height:1.5; }
+.rotation-evidence-state ul { display:grid; gap:5px; width:100%; max-width:46ch; margin:0; padding:0; list-style:none; }
+.rotation-evidence-state li { display:grid; grid-template-columns:auto minmax(0,1fr); gap:8px; align-items:start; color:var(--muted); font-size:10px; line-height:1.4; }
+.rotation-evidence-state li strong { color:var(--ink-2); font-size:10px; white-space:nowrap; }
+.rotation-evidence-state small { max-width:46ch; color:var(--muted); font-size:9px; line-height:1.4; }
 .rotation-industry-summary {
   display:grid; align-content:start; align-self:start; gap:12px; min-width:0; padding:12px;
   border:1px solid var(--border); border-radius:8px; background:var(--surface);

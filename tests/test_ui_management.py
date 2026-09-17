@@ -3903,6 +3903,44 @@ def test_theme_focus_cards_precede_search_and_complete_catalog(live_server):
         browser.close()
 
 
+def test_temperature_partial_evidence_recovers_to_radar(live_server):
+    url, _ = live_server
+    items = [
+        {"id": key, "label": label, "weight": weight, "available": key != "etf_capital",
+         "score": None if key == "etf_capital" else 50,
+         "note": "ETF 份额仅到 2026-08-20" if key == "etf_capital" else "已加载"}
+        for key, label, weight in [
+            ("trend", "趋势分布", 40), ("breadth", "涨跌宽度", 20),
+            ("volume", "量能确认", 15), ("etf_capital", "ETF 资金", 15),
+            ("sentiment", "情绪代理", 10),
+        ]
+    ]
+    payload = {"meta": {}, "data": {
+        "current": {"temperature": 40}, "evidence": {"items": items, "available_weight": 85},
+    }}
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 1000})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route("**/api/v1/market/temperature", lambda route: route.fulfill(json=payload))
+        page.goto(f"{url}/#today/temperature")
+        state = page.locator(".rotation-evidence-state")
+        playwright_sync.expect(state).to_be_visible()
+        playwright_sync.expect(state).to_contain_text("4/5")
+        playwright_sync.expect(state).to_contain_text("85/100")
+        playwright_sync.expect(state).to_contain_text("ETF 份额仅到 2026-08-20")
+        assert page.locator("#rotation-evidence-radar canvas").count() == 0
+        page.set_viewport_size({"width": 390, "height": 844})
+        _wait_for_document_fit(page)
+        items[3].update(available=True, score=60, note="已加载")
+        page.reload()
+        playwright_sync.expect(page.locator("#rotation-evidence-radar canvas")).to_be_visible()
+        playwright_sync.expect(state).to_have_count(0)
+        assert errors == []
+        browser.close()
+
+
 def _legacy_market_temperature_change_window_rerenders_cached_evidence(live_server):
     url, _ = live_server
     current_items = [

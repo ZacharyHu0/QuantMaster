@@ -389,6 +389,24 @@ def test_provider_merges_recent_etf_share_nav_and_close_snapshots(tmp_path, monk
     )
 
 
+def test_etf_empty_response_preserves_actual_coverage(tmp_path, monkeypatch):
+    store = RotationStore(tmp_path / "rotation")
+    provider = RotationProvider(store, FakeTushare())
+    provider.sync_etf_observations(lambda *_: None, lambda: False, as_of="2026-07-30")
+    monkeypatch.setattr(provider, "_sync_etf_history", lambda *_: [])
+    monkeypatch.setattr(provider, "_sync_recent_etfs", lambda *_: ([], False))
+    result = provider.sync_etf_observations(
+        lambda *_: None, lambda: False, as_of="2026-08-20",
+    )
+    assert result["as_of"] == "2026-07-30"
+    assert result["expected_as_of"] == "2026-08-20"
+    assert result["quality_status"] == "partial"
+    assert any("2026-07-30" in issue and "2026-08-20" in issue for issue in result["issues"])
+    assert store.source_generations("rotation.etf_observations")[0]["coverage_end"][:10] == (
+        "2026-07-30"
+    )
+
+
 def test_provider_directly_falls_back_from_known_denied_etf_endpoints(
     tmp_path, monkeypatch,
 ):

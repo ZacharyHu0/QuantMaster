@@ -1972,11 +1972,18 @@ class RotationProvider:
         result = _merge_etf_rows(previous, rows)
         self.store.save_etf_observations(result)
         available_dates = result["trade_date"].dropna()
+        observed_end = str(available_dates.max().date()) if not available_dates.empty else ""
+        current = observed_end == str(end.date())
+        if not current:
+            issues.append(f"ETF 份额仅到 {observed_end or '未知日期'}，目标行情日为 {end.date()}")
         return {
+            "as_of": observed_end,
+            "expected_as_of": str(end.date()),
+            "quality_status": "complete" if current else "partial",
             "rows": len(result),
             "symbols": int(result["symbol"].nunique()),
             "history_start": str(available_dates.min().date()) if not available_dates.empty else "",
-            "history_end": str(available_dates.max().date()) if not available_dates.empty else "",
+            "history_end": observed_end,
             "metadata_source": (
                 metadata_source if local_basic.empty
                 else f"free-stockdb:security-master + {metadata_source}"
