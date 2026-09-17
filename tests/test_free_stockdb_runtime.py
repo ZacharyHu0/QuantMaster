@@ -1600,6 +1600,9 @@ def test_restart_preserves_automatic_retry_deadline(
     isolated_config, tmp_path, monkeypatch, result, attempt, next_attempt,
 ):
     runtime = FreeStockDBRuntime()
+    # start() publishes this variable; restore it with the rest of the fixture
+    # so later maintenance tests cannot inherit a removed owner mailbox.
+    monkeypatch.setenv("QM_FREE_STOCKDB_CONTROL_PATH", str(tmp_path / "control.sqlite"))
     isolated_config.data.free_stockdb_managed = False
     shared = {
         "update_result": result, "next_retry_at": "2026-08-08T16:00:00+08:00",

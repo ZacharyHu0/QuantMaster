@@ -19,6 +19,7 @@ from typing import Any, Literal
 from quantmaster.config import get_config
 from quantmaster.data.base import MarketDataUnavailable
 from quantmaster.data.registry import RefreshMode, refresh_history
+from quantmaster.data.stockdb_state import stockdb_wait_reason
 from quantmaster.data.storage import BarStore
 from quantmaster.runtime.jobs import (
     JobContext,
@@ -52,6 +53,36 @@ class DataRefreshManager:
     """Plan refresh work and project its domain result from one runtime ledger."""
 
     MAX_PARALLEL_SYMBOLS = 8
+
+    @staticmethod
+    def _stockdb_wait_reason() -> str:
+        reason = stockdb_wait_reason()
+        if reason:
+            return reason
+        from quantmaster.data.resilience import PROVIDER_HEALTH
+
+        # A pre-upgrade outage may already have opened the circuit. Preserve
+        # that evidence and let its existing cooldown expire before resuming.
+        health = PROVIDER_HEALTH.status("free-stockdb").get("free-stockdb", {})
+        if health.get("state") != "closed" and float(health.get("open_until") or 0) > time.time():
+            return "StockDB 仍在已有故障冷却期，等待冷却结束后自动继续；未重置健康记录"
+        return ""
+
+    @staticmethod
+    def _uses_stockdb(symbol: str) -> bool:
+        from quantmaster.data.registry import _factories
+        from quantmaster.market_capabilities import guess_market
+
+        try:
+            market = guess_market(symbol)
+        except ValueError:
+            return False  # Invalid identities still reach the ordinary validation path.
+        ordered = _factories().get(market, [])
+        return bool(ordered and ordered[0].name == "free-stockdb")
+
+    @staticmethod
+    def _waiting(reason: str) -> JobOutcome:
+        return JobOutcome("interrupted", reason, retry_delay_seconds=60, waiting_on="stockdb_update")
 
     def __init__(self, runtime: UnifiedJobRuntime | None = None) -> None:
         self._lock = threading.RLock()
@@ -337,6 +368,16 @@ class DataRefreshManager:
             return DataRefreshManager._failure(exc)
         return None
 
+    def _refresh_guarded(self, store: BarStore, symbol: str, start: str, end: str) -> dict[str, Any] | None:
+        if self._uses_stockdb(symbol) and self._stockdb_wait_reason():
+            return {"waiting_on": "stockdb_update"}
+        error = self._refresh_one(store, symbol, start, end)
+        # A bounded in-flight request may meet the service stopping. Retry it
+        # after recovery instead of recording planned downtime as symbol failure.
+        if error and self._uses_stockdb(symbol) and self._stockdb_wait_reason():
+            return {"waiting_on": "stockdb_update"}
+        return error
+
     @staticmethod
     def _failure(exc: Exception) -> dict[str, Any]:
         from quantmaster.data.resilience import classify_provider_failure
@@ -356,11 +397,12 @@ class DataRefreshManager:
         retryable = retryable or code.endswith("_upstream") or code == "upstream_5xx"
         return {"error": redact_sensitive_text(exc)[:300], "code": code, "retryable": retryable}
 
-    def _execute(self, context: JobContext, spec: dict[str, Any], state: dict[str, Any]) -> None:
+    def _execute(self, context: JobContext, spec: dict[str, Any], state: dict[str, Any]) -> str:
         state["attempt"] = context.attempt
         store = BarStore()
         completed = set(state["completed_symbols"])
         remaining = iter(symbol for symbol in state["symbols"] if symbol not in completed)
+        waiting = ""
         with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL_SYMBOLS,
                                 thread_name_prefix="data-refresh") as executor:
             pending: dict[Future[dict[str, Any] | None], str] = {}
@@ -373,13 +415,21 @@ class DataRefreshManager:
                     if symbol is None:
                         exhausted = True
                         break
+                    reason = self._stockdb_wait_reason() if self._uses_stockdb(symbol) else ""
+                    if reason:
+                        waiting = reason
+                        continue
                     coverage = store.coverage(symbol)
                     start = coverage[0] if spec["scope"] == "all_cached" and coverage else spec["start"]
-                    pending[executor.submit(self._refresh_one, store, symbol, start, spec["end"])] = symbol
+                    future = executor.submit(self._refresh_guarded, store, symbol, start, spec["end"])
+                    pending[future] = symbol
                 done, _ = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
                 for future in done:
                     symbol = pending.pop(future)
                     error = future.result()
+                    if error and error.get("waiting_on"):
+                        waiting = self._stockdb_wait_reason() or "StockDB 已切换更新阶段，等待重新规划"
+                        continue
                     if error:
                         state["failures"].append({"symbol": symbol, **error})
                     else:
@@ -391,12 +441,33 @@ class DataRefreshManager:
                     context.progress(round(100 * state["next_index"] / max(1, len(state["symbols"]))),
                                      "同步行情", f"已完成 {state['next_index']}/{len(state['symbols'])}")
                     context.completed_unit(symbol)
+        if not waiting and any(self._uses_stockdb(symbol) for symbol in state["symbols"]):
+            waiting = self._stockdb_wait_reason()
+        return waiting
 
     def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+        reason = self._stockdb_wait_reason()
+        if reason and spec.get("universe", "").lower() == "csi800":
+            return self._waiting(reason)  # Membership planning itself needs StockDB evidence.
         state = self._initial_state(context, spec)
+        if state.pop("stockdb_waiting", False) and not reason:
+            # The updater changes local inputs. Recheck affected earlier successes
+            # before publishing a fingerprint for the new accepted generation.
+            state["completed_symbols"] = [
+                symbol for symbol in state["completed_symbols"] if not self._uses_stockdb(symbol)
+            ]
+            state["failures"] = [item for item in state["failures"] if not self._uses_stockdb(item["symbol"])]
+            state["succeeded"] = len(state["completed_symbols"]) - len(state["failures"])
+            state["next_index"] = len(state["completed_symbols"])
+        elif reason:
+            state["stockdb_waiting"] = True
         context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
         symbols = [str(symbol) for symbol in state["symbols"]]
-        self._execute(context, spec, state)
+        waiting = self._execute(context, spec, state)
+        if waiting:
+            state["stockdb_waiting"] = True
+            context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
+            return self._waiting(waiting)
         failures = [*state["blocked_failures"], *state["failures"]]
         outcome = "completed_with_warnings" if failures else "completed"
         result = {
@@ -450,8 +521,10 @@ class DataRefreshManager:
             "failures": failures[-200:],
             "current_symbol": str(state.get("current_symbol") or ""),
             "outcome": str(state.get("outcome") or ""),
+            "waiting_on": str(job.get("waiting_on") or ""),
+            "next_retry_at": float(job.get("next_retry_at") or 0),
         })
-        value["can_retry"] = bool(value["can_retry"]) and (
+        value["can_retry"] = not value["waiting_on"] and bool(value["can_retry"]) and (
             job["status"] in {"failed", "cancelled", "interrupted"}
             or any(item.get("retryable") for item in failures)
         ) and spec.get("refresh_schema") == REFRESH_SCHEMA
@@ -515,6 +588,8 @@ class DataRefreshManager:
     def maintain_consumed(self) -> builtins.list[dict[str, Any]]:
         """Worker-only intake; page reads remain strictly local and read-only."""
         cfg = get_config()
+        if not cfg.data.repair_enabled:
+            return []
         jobs = [self.create("market")]
         if cfg.automation.watchlist:
             jobs.append(self._submit(
