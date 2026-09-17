@@ -16,6 +16,15 @@ if __name__ == "__main__":
     from quantmaster.runtime.splash import close_splash, update_splash
 
     try:
+        if sys.argv[1:] == ["--frozen-provider-smoke"]:
+            import json
+
+            from scripts.release.smoke_frozen_runtime import frozen_provider_smoke
+
+            close_splash()
+            print(json.dumps(frozen_provider_smoke(), sort_keys=True))
+            sys.exit(0)
+
         update_splash("正在加载本地配置")
         update_splash("正在装配命令入口")
 

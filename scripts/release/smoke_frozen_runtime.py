@@ -15,8 +15,11 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from ctypes import wintypes
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+from zipfile import ZipFile
 
 from quantmaster.logging_config import redact_public_text
 
@@ -28,6 +31,82 @@ _ONEDIR_CORE_READY_BUDGET_SECONDS = 5.0
 # number of warm repeats whose median is reported for trend evidence.
 _WARM_HELP_SAMPLES = 2
 _WARM_CORE_READY_SAMPLES = 2
+
+
+class _NetworkBoundaryReached(RuntimeError):
+    """Deliberately stop the smoke before sending a provider request."""
+
+
+def frozen_provider_smoke() -> dict[str, object]:
+    """Exercise packaged resource readers and the real US10Y adapter offline.
+
+    This dedicated subprocess produces no market data. Socket guards are active
+    before importing AKShare; only its expected HTTP boundary counts as success.
+    """
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("provider smoke requires a frozen executable")
+    reached: list[str] = []
+
+    def stop_request(_session, method, url, **kwargs):
+        if (
+            method.lower() != "get"
+            or url != "https://datacenter.eastmoney.com/api/data/get"
+            or kwargs.get("params", {}).get("type") != "RPTA_WEB_TREASURYYIELD"
+        ):
+            raise RuntimeError("unexpected provider request in frozen smoke")
+        reached.append("requests.Session.request")
+        raise _NetworkBoundaryReached("frozen smoke network boundary reached")
+
+    with (
+        patch("socket.socket.connect", side_effect=RuntimeError("smoke forbids sockets")),
+        patch("socket.socket.connect_ex", side_effect=RuntimeError("smoke forbids sockets")),
+        patch("socket.getaddrinfo", side_effect=RuntimeError("smoke forbids DNS")),
+        patch("requests.sessions.Session.request", new=stop_request),
+    ):
+        import akshare
+
+        from quantmaster.data.reference_market import ReferenceMarketUnavailable, fetch_reference
+
+        _check_akshare_resources()
+        versions = {name: version(name) for name in ("akshare", "tushare", "yfinance")}
+        if versions["akshare"] != akshare.__version__:
+            raise RuntimeError("AKShare distribution version differs from imported code")
+        try:
+            fetch_reference("US10Y.RATE", "2024-01-01", "2024-01-02")
+        except ReferenceMarketUnavailable as exc:
+            if len(exc.attempts) != 1 or exc.attempts[0]["code"] != "_NetworkBoundaryReached":
+                raise RuntimeError("US10Y failed before the expected network boundary") from exc
+        else:
+            raise RuntimeError("frozen provider smoke unexpectedly returned market data")
+    if reached != ["requests.Session.request"]:
+        raise RuntimeError("US10Y did not reach exactly one substituted network boundary")
+    return {
+        "frozen": True,
+        "package_versions": versions,
+        "akshare_resources_read": True,
+        "us10y_network_boundary": reached[0],
+        "network_requests_sent": 0,
+        "market_data_returned": False,
+    }
+
+
+def _check_akshare_resources() -> None:
+    from akshare.air.air_zhenqi import _get_file_content as air_resource
+    from akshare.datasets import get_crypto_info_csv, get_ths_js
+    from akshare.futures.cons import get_calendar
+    from akshare.movie.movie_yien import _get_file_content as movie_resource
+    from akshare.option.cons import get_calendar as option_calendar
+
+    if not get_calendar() or not option_calendar():
+        raise RuntimeError("AKShare calendar is empty")
+    for name in ("ths.js", "cninfo.js"):
+        if not get_ths_js(name).read_text(encoding="utf-8").strip():
+            raise RuntimeError(f"AKShare resource is empty: {name}")
+    with ZipFile(get_crypto_info_csv()) as archive:
+        if not archive.namelist() or archive.testzip() is not None:
+            raise RuntimeError("AKShare crypto resource is invalid")
+    if not all((air_resource("crypto.js"), air_resource("outcrypto.js"), movie_resource())):
+        raise RuntimeError("AKShare adjacent JS resource is empty")
 
 
 def _assert_same_identity(*members: dict[str, Any]) -> None:
@@ -314,6 +393,32 @@ def _run_deep_doctor(
     )
 
 
+def _run_provider_smoke(executable: Path, environment: dict[str, str]) -> dict[str, Any]:
+    result = subprocess.run(
+        [str(executable), "--frozen-provider-smoke"],
+        cwd=executable.parent,
+        env={**environment, "QM_AKSHARE_ENABLED": "true", "QM_AKSHARE_RETRIES": "1",
+             "PYTHONIOENCODING": "utf-8"},
+        capture_output=True, encoding="utf-8", errors="replace", timeout=90.0, check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"frozen provider smoke failed ({result.returncode})")
+    report = json.loads(result.stdout)
+    if (
+        report.get("frozen") is not True
+        or report.get("akshare_resources_read") is not True
+        or report.get("us10y_network_boundary") != "requests.Session.request"
+        or report.get("network_requests_sent") != 0
+        or report.get("market_data_returned") is not False
+        or any(
+            report.get("package_versions", {}).get(name) in (None, "", "missing")
+            for name in ("akshare", "tushare", "yfinance")
+        )
+    ):
+        raise RuntimeError("frozen provider smoke omitted required evidence")
+    return report
+
+
 def _isolated_environment(root: Path, port: int) -> tuple[dict[str, str], Path]:
     instance = root / "instance"
     instance.mkdir()
@@ -439,6 +544,7 @@ def smoke(executable: Path, *, layout: str = "onefile") -> dict[str, Any]:
         root = Path(raw_temp)
         port = _free_port()
         environment, instance = _isolated_environment(root, port)
+        provider_smoke = _run_provider_smoke(executable, environment)
         bootstrap = _run_deep_doctor(executable, environment)
         if bootstrap.returncode:
             raise RuntimeError(
@@ -511,6 +617,7 @@ def smoke(executable: Path, *, layout: str = "onefile") -> dict[str, Any]:
                 )
                 return {
                     "layout": layout,
+                    "provider_smoke": provider_smoke,
                     "build_sha": str(health["build_sha"]),
                     "slot_id": str(health["slot_id"]),
                     "runtime_generation": str(health["runtime_generation"]),
@@ -699,6 +806,7 @@ def smoke_onedir(
         environment, instance = _isolated_environment(root, port)
         instance.mkdir(exist_ok=True)
 
+        provider_smoke = _run_provider_smoke(executable, environment)
         bootstrap = _run_deep_doctor(executable, environment)
         if bootstrap.returncode:
             raise RuntimeError(
@@ -751,6 +859,7 @@ def smoke_onedir(
 
         return {
             "mode": "onedir-measurement",
+            "provider_smoke": provider_smoke,
             "layout": "onedir",
             "build_sha": build_sha,
             "help": {

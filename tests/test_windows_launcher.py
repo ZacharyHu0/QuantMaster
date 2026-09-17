@@ -268,7 +268,7 @@ def test_packaged_entry_dispatches_multiprocessing_before_app_imports() -> None:
     configure = entry.index("configure_installed_instance()")
     cli_import = entry.index("from quantmaster.server.cli import main")
     stage = entry.index('update_splash("正在加载本地配置")')
-    close = entry.index("close_splash()")
+    close = entry.index("close_splash()", cli_import)
 
     assert configure < freeze < stdout < stage < cli_import < close
     assert all("%" not in line for line in entry.splitlines() if "update_splash" in line)
@@ -614,6 +614,8 @@ def test_pyinstaller_spec_loads_identity_policy_outside_project_sys_path(
 
     hooks = ModuleType("PyInstaller.utils.hooks")
     hooks.collect_submodules = lambda *_args, **_kwargs: []
+    hooks.collect_data_files = lambda *_args, **_kwargs: []
+    hooks.copy_metadata = lambda *_args, **_kwargs: []
     monkeypatch.setitem(sys.modules, "PyInstaller", ModuleType("PyInstaller"))
     monkeypatch.setitem(sys.modules, "PyInstaller.utils", ModuleType("PyInstaller.utils"))
     monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", hooks)

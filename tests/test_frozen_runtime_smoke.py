@@ -20,6 +20,152 @@ from scripts.release.smoke_frozen_runtime import (
 )
 
 
+def test_provider_probe_requires_frozen_process():
+    from scripts.release.smoke_frozen_runtime import frozen_provider_smoke
+
+    with pytest.raises(RuntimeError, match="requires a frozen executable"):
+        frozen_provider_smoke()
+
+
+def test_provider_probe_runs_real_adapter_to_replaced_network_boundary(monkeypatch, isolated_config):
+    from scripts.release import smoke_frozen_runtime as packaging
+
+    pytest.importorskip("akshare")
+    isolated_config.data.akshare_enabled = True
+    isolated_config.data.akshare_retries = 1
+    monkeypatch.setattr(packaging.sys, "frozen", True, raising=False)
+
+    result = packaging.frozen_provider_smoke()
+
+    assert result["network_requests_sent"] == 0
+    assert result["market_data_returned"] is False
+    assert result["us10y_network_boundary"] == "requests.Session.request"
+    assert all(result["package_versions"].values())
+
+
+def test_provider_probe_rejects_missing_resource(monkeypatch, tmp_path):
+    akshare = pytest.importorskip("akshare")
+    from scripts.release import smoke_frozen_runtime as packaging
+
+    monkeypatch.setattr(packaging.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(akshare.datasets, "get_ths_js", lambda _name: tmp_path / "missing.js")
+
+    with pytest.raises(FileNotFoundError):
+        packaging.frozen_provider_smoke()
+
+
+def test_provider_probe_rejects_missing_distribution_metadata(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    from scripts.release import smoke_frozen_runtime as packaging
+
+    pytest.importorskip("akshare")
+    monkeypatch.setattr(packaging.sys, "frozen", True, raising=False)
+    original = packaging.version
+
+    def missing_tushare(name):
+        if name == "tushare":
+            raise PackageNotFoundError(name)
+        return original(name)
+
+    monkeypatch.setattr(packaging, "version", missing_tushare)
+    with pytest.raises(PackageNotFoundError):
+        packaging.frozen_provider_smoke()
+
+
+def test_provider_probe_blocks_unexpected_socket_access(monkeypatch, isolated_config):
+    import socket
+
+    akshare = pytest.importorskip("akshare")
+    from scripts.release import smoke_frozen_runtime as packaging
+
+    isolated_config.data.akshare_enabled = True
+    isolated_config.data.akshare_retries = 1
+    monkeypatch.setattr(packaging.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        akshare, "bond_zh_us_rate", lambda **_kwargs: socket.getaddrinfo("example.com", 443),
+    )
+    with pytest.raises(RuntimeError, match="failed before the expected network boundary"):
+        packaging.frozen_provider_smoke()
+
+
+def test_provider_smoke_launches_frozen_executable_and_checks_evidence(tmp_path, monkeypatch):
+    report = {
+        "frozen": True, "akshare_resources_read": True,
+        "us10y_network_boundary": "requests.Session.request",
+        "network_requests_sent": 0, "market_data_returned": False,
+        "package_versions": {"akshare": "1", "tushare": "2", "yfinance": "3"},
+    }
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report), stderr="")
+
+    monkeypatch.setattr(smoke_frozen_runtime.subprocess, "run", run)
+    executable = tmp_path / "QuantMaster.exe"
+    assert smoke_frozen_runtime._run_provider_smoke(executable, {}) == report
+    assert calls[0][0] == [str(executable), "--frozen-provider-smoke"]
+    assert calls[0][1]["env"]["QM_AKSHARE_ENABLED"] == "true"
+    report["package_versions"]["tushare"] = "missing"
+    with pytest.raises(RuntimeError, match="omitted required evidence"):
+        smoke_frozen_runtime._run_provider_smoke(executable, {})
+
+
+def test_provider_smoke_child_failure_is_fatal_without_public_traceback(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        smoke_frozen_runtime.subprocess, "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="private trace"),
+    )
+    with pytest.raises(RuntimeError, match=r"^frozen provider smoke failed \(1\)$"):
+        smoke_frozen_runtime._run_provider_smoke(tmp_path / "QuantMaster.exe", {})
+
+
+def test_restored_metadata_changes_raw_cache_key_but_preserves_bars_auto(tmp_path, monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    import pandas as pd
+
+    from quantmaster.data import resilience
+    from quantmaster.data.reference_market import _normalize_yield, refresh_reference_panel
+    from quantmaster.data.storage import BarStore
+
+    actual_version = resilience.package_metadata.version
+    params = {"ts_code": "600000.SH"}
+    raw = pd.DataFrame({"close": [10.0]})  # Synthetic cache fixture, not provider evidence.
+
+    def missing(_name):
+        raise PackageNotFoundError
+
+    monkeypatch.setattr(resilience.package_metadata, "version", missing)
+    old = resilience.EndpointFrameCache("tushare", root=tmp_path / "api")
+    old.put("daily", params, raw)
+    store = BarStore(root=tmp_path / "bars")
+    bars = _normalize_yield(pd.DataFrame({
+        "日期": ["2024-01-02"], "美国国债收益率10年": [4.0],
+    }), "2024-01-02", "2024-01-02")
+    store.put("US10Y.RATE", bars, request_start="2024-01-02", request_end="2024-01-02",
+              source="akshare:us-treasury")
+
+    monkeypatch.setattr(resilience.package_metadata, "version", actual_version)
+    current = resilience.EndpointFrameCache("tushare", root=tmp_path / "api")
+    assert current.path_for("daily", params) != old.path_for("daily", params)
+    assert current.get("daily", params, ttl_days=1) is None
+    pd.testing.assert_frame_equal(old.get("daily", params, ttl_days=1), raw)
+    current.put("daily", params, raw)
+    reopened = resilience.EndpointFrameCache("tushare", root=tmp_path / "api")
+    pd.testing.assert_frame_equal(reopened.get("daily", params, ttl_days=1), raw)
+    monkeypatch.setattr(
+        "quantmaster.data.reference_market.fetch_reference",
+        lambda *_args: pytest.fail("fresh normalized bars must not request a provider"),
+    )
+    frames, failures = refresh_reference_panel(
+        ["US10Y.RATE"], "2024-01-02", "2024-01-02", "auto", store,
+    )
+    assert failures == {}
+    pd.testing.assert_frame_equal(frames["US10Y.RATE"], bars)
+
+
 def test_frozen_runtime_smoke_requires_one_exact_application_identity():
     identity = {
         "build_sha": "a" * 40,
@@ -231,6 +377,7 @@ def test_frozen_smoke_reads_core_readiness_from_health_not_diagnostics(
 
     report = json.dumps({"metrics": {"application_identity_probe": identity}})
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", isolated)
     monkeypatch.setattr(
@@ -323,6 +470,7 @@ def test_frozen_onedir_smoke_skips_splash_and_preserves_the_slot(
 
     report = json.dumps({"metrics": {"application_identity_probe": identity}})
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", isolated)
     monkeypatch.setattr(
@@ -444,6 +592,7 @@ def test_onedir_smoke_reports_help_and_core_ready_within_budgets(
         return core_vals.pop(0)
 
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(
         smoke_frozen_runtime, "_isolated_environment",
@@ -483,6 +632,7 @@ def test_onedir_smoke_gates_only_cold_help_and_records_partial_samples(
     core_vals = [4.2, 4.0, 4.0]
 
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(
         smoke_frozen_runtime, "_isolated_environment",
@@ -518,6 +668,7 @@ def test_onedir_smoke_hard_fails_when_cold_core_ready_exceeds_five_seconds(
     executable.write_bytes(b"frozen")
 
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(
         smoke_frozen_runtime, "_isolated_environment",
@@ -560,6 +711,7 @@ def test_onedir_smoke_keeps_writable_state_under_the_given_instance_root(
         return {}, instance
 
     monkeypatch.setattr(smoke_frozen_runtime, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(smoke_frozen_runtime, "_run_provider_smoke", lambda *_args: {"frozen": True})
     monkeypatch.setattr(smoke_frozen_runtime, "_free_port", lambda: 18686)
     monkeypatch.setattr(smoke_frozen_runtime, "_isolated_environment", capture_isolated)
     monkeypatch.setattr(

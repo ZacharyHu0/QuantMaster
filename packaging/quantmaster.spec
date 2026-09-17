@@ -7,7 +7,7 @@ import runpy
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 package_layout = os.environ.get("QM_DESKTOP_LAYOUT", "onefile")
 if package_layout not in {"onefile", "onedir-measurement"}:
@@ -65,6 +65,11 @@ datas = [
     (str(project_root / "quantmaster/data/security_master.json.gz"), "quantmaster/data"),
     (str(project_root / "quantmaster/skills/stock-analysis-framework"), "quantmaster/skills/stock-analysis-framework"),
 ]
+# AKShare opens calendars at import time and JS/ZIP resources through its loaders.
+datas += collect_data_files("akshare")
+# Provider revisions use distribution metadata, not module __version__ values.
+for provider in ("akshare", "tushare", "yfinance"):
+    datas += copy_metadata(provider)
 optional_hidden = (
     collect_submodules("keyring.backends") + collect_submodules("multipart") +
     collect_submodules("apscheduler") +
