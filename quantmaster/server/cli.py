@@ -29,6 +29,7 @@ from typing import Any
 import pandas as pd
 
 from quantmaster.logging_config import redact_sensitive_text
+from quantmaster.runtime.activation import READY_TIMEOUT_SECONDS
 from quantmaster.trading_sessions import market_date, resolve_session_target
 
 
@@ -1233,7 +1234,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("activate", help="激活已验证的不可变使用槽并在失败时回滚")
     p.add_argument("build_sha", help="候选槽对应的完整 lowercase main SHA")
     p.add_argument("--root-pid", type=int, default=None, help="当前 QuantMaster root Job Object 的 PID")
-    p.add_argument("--ready-timeout", type=float, default=15.0, help="候选健康检查期限（最多 15 秒）")
+    p.add_argument(
+        "--ready-timeout", type=float, default=READY_TIMEOUT_SECONDS,
+        help=f"候选健康检查期限（默认及上限 {READY_TIMEOUT_SECONDS:g} 秒）",
+    )
     p.add_argument(
         "--recover-unavailable-current",
         action="store_true",
