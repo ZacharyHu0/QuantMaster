@@ -47,6 +47,73 @@ def test_owner_state_publishes_control_writer_lease(tmp_path, monkeypatch) -> No
     }
 
 
+@pytest.mark.parametrize("fails", [False, True])
+def test_owner_keeps_heartbeat_during_synchronous_validation(monkeypatch, fails):
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    published = []
+    pulse = threading.Event()
+
+    def write(payload):
+        published.append(dict(payload))
+        if len(published) >= 2 and payload.get("phase") == "validating":
+            pulse.set()
+
+    monkeypatch.setattr(runtime, "_ensure_control", lambda: SimpleNamespace(write_state=write))
+    monkeypatch.setattr(runtime, "_control_writer_lease", dict)
+
+    def validate(**kwargs):
+        runtime._set_status("updating", "validating", phase="validating")
+        assert pulse.wait(5), "synchronous validation must not stop owner heartbeats"
+        if fails:
+            raise ValueError("validation failed")
+        runtime._set_status("running", "accepted", phase="completed", update_result="success")
+        return True
+
+    monkeypatch.setattr(runtime, "_update_now_locked", validate)
+    if fails:
+        with pytest.raises(ValueError, match="validation failed"):
+            runtime.update_now("schedule")
+    else:
+        assert runtime.update_now("schedule")
+        assert published[-1]["phase"] == "completed"
+    assert not runtime._update_lock.locked()
+    assert not any(thread.name == "free-stockdb-update-heartbeat" for thread in threading.enumerate())
+
+
+def test_heartbeat_publication_cannot_overwrite_completed_state(monkeypatch):
+    runtime = FreeStockDBRuntime()
+    runtime._owner = True
+    runtime._status = {"state": "updating", "phase": "validating"}
+    entered, release, transition_started = threading.Event(), threading.Event(), threading.Event()
+    published = []
+
+    def write(payload):
+        if payload.get("phase") == "validating":
+            entered.set()
+            assert release.wait(5)
+        published.append(dict(payload))
+
+    def complete():
+        transition_started.set()
+        runtime._set_status("running", "accepted", phase="completed", update_result="success")
+
+    monkeypatch.setattr(runtime, "_ensure_control", lambda: SimpleNamespace(write_state=write))
+    monkeypatch.setattr(runtime, "_control_writer_lease", dict)
+    heartbeat = threading.Thread(target=runtime._write_owner_state)
+    transition = threading.Thread(target=complete)
+    heartbeat.start()
+    try:
+        assert entered.wait(5)
+        transition.start()
+        assert transition_started.wait(5)
+    finally:
+        release.set()
+        heartbeat.join(5)
+        transition.join(5)
+    assert [state["phase"] for state in published] == ["validating", "completed"]
+
+
 def test_apply_config_control_error_is_redacted(monkeypatch):
     internal = r"C:\private\control.sqlite Bearer secret-value"
 
@@ -946,7 +1013,7 @@ def test_scheduler_retries_stale_local_data_until_same_target_is_accepted(
     monkeypatch.setattr(runtime, "_is_managed", lambda: True)
     monkeypatch.setattr(runtime, "_listening", lambda: True)
     monkeypatch.setattr(runtime, "_process_command", lambda: False)
-    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda: None)
     monkeypatch.setattr(runtime, "_emit_update_event", lambda *args: None)
     monkeypatch.setattr(runtime, "_target_session", lambda **kwargs: ("2026-08-07", "calendar"))
     monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: clock.now)
@@ -1578,7 +1645,7 @@ def test_due_automatic_retry_respects_scheduler_guards(isolated_config, monkeypa
     monkeypatch.setattr(runtime, "_target_session", lambda **kw: ("2026-08-07", "calendar"))
     monkeypatch.setattr(runtime, "_process_command", lambda: False)
     monkeypatch.setattr(runtime, "_supervise_service", lambda cfg: None)
-    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda: None)
     monkeypatch.setattr(runtime, "update_now", lambda *a, **kw: pytest.fail("unexpected retry"))
     monkeypatch.setattr(runtime._stop, "wait", lambda seconds: runtime._stop.set())
     runtime._scheduler()
@@ -1610,7 +1677,7 @@ def test_restart_preserves_automatic_retry_deadline(
     }
     monkeypatch.setattr(runtime, "_ensure_control", lambda: SimpleNamespace(read_state=lambda: shared))
     monkeypatch.setattr(runtime, "_control_path", lambda: tmp_path / "control.sqlite")
-    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda: None)
     monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: 1.0)
     runtime._thread = SimpleNamespace(is_alive=lambda: True)
     runtime.start()

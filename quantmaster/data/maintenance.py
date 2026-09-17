@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from quantmaster.config import get_config
-from quantmaster.data.base import MarketDataUnavailable
+from quantmaster.data.base import BarDataEnvelope, MarketDataUnavailable
 from quantmaster.data.registry import RefreshMode, refresh_history
 from quantmaster.data.stockdb_state import stockdb_wait_reason
 from quantmaster.data.storage import BarStore
@@ -27,6 +27,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
+from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
 from quantmaster.trading_sessions import market_date, market_now
 
 RefreshScope = Literal["market", "universe", "all_cached"]
@@ -204,6 +205,7 @@ class DataRefreshManager:
 
         metadata = BarStore(read_only=True).metadata_many(symbols) if symbols else {}
         cfg = get_config().data
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
         # Bound reuse by a short freshness epoch as well as actual local inputs.
         # A worker restart must not turn an old success into permanent freshness.
         inputs = {
@@ -211,6 +213,7 @@ class DataRefreshManager:
             "day": str(market_date()),
             "after_close": (market_now().hour, market_now().minute) >= (15, 30),
             "stockdb": free_stockdb_runtime._data_fingerprint(get_config().free_stockdb_root),
+            "stockdb_acceptance": asdict(acceptance) if acceptance is not None else None,
             "bars": metadata,
             "source_config": asdict(cfg),
             "membership": DataRefreshManager._membership_fingerprint(),
@@ -355,6 +358,34 @@ class DataRefreshManager:
         }
 
     @staticmethod
+    def _prepared_with_formal_gaps(envelope: BarDataEnvelope, symbol: str, start: str, end: str) -> bool:
+        quality, frame = envelope.quality, envelope.data
+        if (
+            quality.stale or quality.observed_end != end
+            or quality.semantic_diagnostic_code not in {"", "factor_contract_incomplete"}
+            or quality.coverage_ratio not in {None, 1.0}
+            or any(unit == "unknown" for _, unit in quality.units)
+            or any(item.get("diagnostic_code") in {"provenance_missing", "provenance_incomplete"}
+                   for item in envelope.provenance)
+        ):
+            return False
+        if quality.sources == ("tushare",):
+            # Reuse the same identity/unit/factor checks that admitted an
+            # explicit same-source repair; company/PIT evidence stays separate.
+            from quantmaster.data.registry import _repair_candidate_quality
+
+            _repair_candidate_quality(symbol, frame, start, end, "tushare")
+            return True
+        acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
+        return bool(
+            quality.sources == ("free-stockdb",)
+            and acceptance is not None and acceptance.session >= end
+            and frame.attrs.get("stockdb_accepted_session") == acceptance.session
+            and frame.attrs.get("stockdb_accepted_at") == acceptance.updated_at.isoformat()
+            and frame.attrs.get("unit_status") == "verified_local_stockdb_schema_v1"
+        )
+
+    @staticmethod
     def _refresh_one(store: BarStore, symbol: str, start: str, end: str) -> dict[str, Any] | None:
         try:
             envelope = refresh_history(
@@ -363,6 +394,14 @@ class DataRefreshManager:
             )
             envelope.require_data()
             if envelope.quality.status != "verified":
+                # Daily preparation is not admission to formal research. Require
+                # a renewed local read and actual symbol coverage; a market-wide
+                # acceptance marker alone cannot fill missing bars or factors.
+                if DataRefreshManager._prepared_with_formal_gaps(envelope, symbol, start, end):
+                    return {
+                        "warning": "；".join(envelope.quality.issues),
+                        "code": "formal_evidence_missing", "formal_eligible": False,
+                    }
                 return DataRefreshManager._failure(MarketDataUnavailable(envelope.quality))
         except Exception as exc:
             return DataRefreshManager._failure(exc)
@@ -430,7 +469,10 @@ class DataRefreshManager:
                     if error and error.get("waiting_on"):
                         waiting = self._stockdb_wait_reason() or "StockDB 已切换更新阶段，等待重新规划"
                         continue
-                    if error:
+                    if error and error.get("warning"):
+                        state.setdefault("warnings", []).append({"symbol": symbol, **error})
+                        state["succeeded"] += 1
+                    elif error:
                         state["failures"].append({"symbol": symbol, **error})
                     else:
                         state["succeeded"] += 1
@@ -457,6 +499,8 @@ class DataRefreshManager:
                 symbol for symbol in state["completed_symbols"] if not self._uses_stockdb(symbol)
             ]
             state["failures"] = [item for item in state["failures"] if not self._uses_stockdb(item["symbol"])]
+            state["warnings"] = [item for item in state.get("warnings", [])
+                                 if not self._uses_stockdb(item["symbol"])]
             state["succeeded"] = len(state["completed_symbols"]) - len(state["failures"])
             state["next_index"] = len(state["completed_symbols"])
         elif reason:
@@ -469,7 +513,7 @@ class DataRefreshManager:
             context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
             return self._waiting(waiting)
         failures = [*state["blocked_failures"], *state["failures"]]
-        outcome = "completed_with_warnings" if failures else "completed"
+        outcome = "completed_with_warnings" if failures or state.get("warnings") else "completed"
         result = {
             **state,
             "failures": failures,
@@ -519,6 +563,8 @@ class DataRefreshManager:
             "succeeded": int(state.get("succeeded") or 0),
             "failed": int(state.get("failed") or len(failures)),
             "failures": failures[-200:],
+            "warnings": list(state.get("warnings") or ())[-200:],
+            "warning_count": len(state.get("warnings") or ()),
             "current_symbol": str(state.get("current_symbol") or ""),
             "outcome": str(state.get("outcome") or ""),
             "waiting_on": str(job.get("waiting_on") or ""),

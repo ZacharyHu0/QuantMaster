@@ -507,10 +507,9 @@ class FreeStockDBRuntime:
                 "supervised": self._supervised,
                 **extra,
             }
-            payload = dict(self._status)
         if self._owner:
             try:
-                self._write_owner_state(payload)
+                self._write_owner_state()
             except (OSError, sqlite3.Error):
                 logger.warning("free-stockdb 控制状态写入失败", exc_info=True)
 
@@ -526,12 +525,25 @@ class FreeStockDBRuntime:
             "control_path": str(self._control_path().resolve()),
         }
 
-    def _write_owner_state(self, payload: dict[str, Any]) -> None:
-        heartbeat = dict(payload)
-        lease = self._control_writer_lease()
-        if lease:
-            heartbeat["control_writer"] = lease
-        self._ensure_control().write_state(heartbeat)
+    def _write_owner_state(self) -> None:
+        # Snapshot and publication share the status lock: a delayed heartbeat
+        # must never overwrite a newer completed/failed transition.
+        with self._lock:
+            heartbeat = dict(self._status)
+            heartbeat.update({"owner_pid": os.getpid(), "supervised": False})
+            lease = self._control_writer_lease()
+            if lease:
+                heartbeat["control_writer"] = lease
+            self._ensure_control().write_state(heartbeat)
+
+    def _update_heartbeat(self, stopped: threading.Event) -> None:
+        while not stopped.wait(1):
+            if self._stop.is_set() or not self._owner:
+                return
+            try:
+                self._write_owner_state()
+            except (OSError, sqlite3.Error):
+                logger.warning("free-stockdb 更新期间心跳写入失败", exc_info=True)
 
     def _is_managed(self) -> bool:
         return self._daemon_started or self._process is not None
@@ -1356,11 +1368,22 @@ class FreeStockDBRuntime:
     ) -> bool:
         if not self._update_lock.acquire(blocking=False):
             return False
+        stopped = threading.Event()
+        heartbeat = None
         try:
+            if self._owner:
+                heartbeat = threading.Thread(
+                    target=self._update_heartbeat, args=(stopped,),
+                    name="free-stockdb-update-heartbeat", daemon=True,
+                )
+                heartbeat.start()
             return self._update_now_locked(
                 trigger=trigger, target_session=target_session, attempt=attempt,
             )
         finally:
+            stopped.set()
+            if heartbeat is not None:
+                heartbeat.join(timeout=2)
             self._update_lock.release()
 
     def _update_now_locked(self, *, trigger: str, target_session: str, attempt: int) -> bool:
@@ -1729,10 +1752,7 @@ class FreeStockDBRuntime:
                 self._supervise_service(cfg)
                 if self._run_due_automatic_update(now, cfg):
                     continue
-                with self._lock:
-                    heartbeat = dict(self._status)
-                heartbeat.update({"owner_pid": os.getpid(), "supervised": False})
-                self._write_owner_state(heartbeat)
+                self._write_owner_state()
             except (OSError, sqlite3.Error):
                 logger.warning("free-stockdb owner 心跳写入失败", exc_info=True)
             except Exception:

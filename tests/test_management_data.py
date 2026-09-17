@@ -39,6 +39,7 @@ def test_refresh_slow_planning_is_durable_coalesced_and_cancellable(isolated_con
     from quantmaster.data.maintenance import DataRefreshManager
     from quantmaster.runtime.worker_ipc import RuntimeCommandServer, call_worker_command
 
+    isolated_config.data.free_stockdb_managed = False
     manager = DataRefreshManager()
     manager.initialize()
     started, release = threading.Event(), threading.Event()
@@ -86,6 +87,7 @@ def test_refresh_all_false_membership_fails_with_durable_evidence(isolated_confi
     from quantmaster.data import schema_access
     from quantmaster.data.maintenance import DataRefreshManager
 
+    isolated_config.data.free_stockdb_managed = False
     manager = DataRefreshManager()
     manager.initialize()
     monkeypatch.setattr(manager, "_start", lambda _: None)
@@ -473,6 +475,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
     from quantmaster.data.maintenance import DataRefreshManager
     from quantmaster.data.registry import RefreshMode
 
+    isolated_config.data.free_stockdb_managed = False
     manager = DataRefreshManager()
     manager.initialize()
     symbols = ["600000.SH", "000001.SZ"]
@@ -536,6 +539,7 @@ def test_incremental_refresh_job_is_persistent_and_retries_only_failures(
 def test_incremental_refresh_job_limits_per_job_parallelism(isolated_config, monkeypatch):
     from quantmaster.data.maintenance import DataRefreshManager
 
+    isolated_config.data.free_stockdb_managed = False
     manager = DataRefreshManager()
     manager.initialize()
     symbols = [f"{index:06d}.SZ" for index in range(16)]

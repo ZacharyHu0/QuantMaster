@@ -509,9 +509,7 @@ def _assess_daily_frame(
     semantics, semantic_issues = _numeric_semantics(symbol, source, df, units)
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
-    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") not in {
-        "verified", "stockdb_accepted",
-    }:
+    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
         adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
     boundary_tolerance = pd.Timedelta(days=14)
@@ -2276,6 +2274,25 @@ def _load_history_locked(
         ).loc[start:end]
 
     meta = store.metadata(symbol) or {}
+    if (
+        cached is not None and not cached.empty
+        and meta.get("last_source") == "free-stockdb"
+        and (provider or cfg.data.primary_provider) == "free-stockdb"
+    ):
+        from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
+
+        acceptance = read_stockdb_session_acceptance(cfg.free_stockdb_root)
+        if (
+            acceptance is not None and acceptance.session >= end
+            and cached.attrs.get("stockdb_accepted_at") != acceptance.updated_at.isoformat()
+        ):
+            # A new local generation must replace the whole qfq history and its
+            # lineage. Neither a TTL hit nor a tail merge can renew old evidence.
+            return _full_refresh(
+                symbol, min(start, str(cached.index.min().date())),
+                max(end, str(cached.index.max().date())), cached, store, priority,
+                "free-stockdb",
+            ).loc[start:end]
     try:
         cached_quality = json.loads(str(meta.get("quality_json") or "{}"))
     except (TypeError, ValueError, json.JSONDecodeError):

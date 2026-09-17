@@ -90,6 +90,7 @@ def test_unified_jobs_exposes_repair_events_cancel_and_retry():
 def test_refresh_routes_preserve_durable_planning_through_cancel_retry_and_completion(
     isolated_config, monkeypatch,
 ):
+    isolated_config.data.free_stockdb_managed = False
     import threading
 
     from quantmaster.data.maintenance import DataRefreshManager
