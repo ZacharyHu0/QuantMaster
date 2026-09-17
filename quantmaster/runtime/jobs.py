@@ -155,6 +155,7 @@ class JobOutcome:
     detail: str = ""
     result_artifact_id: str = ""
     retry_delay_seconds: float | None = None
+    waiting_on: str = ""
 
 
 class JobHandler(Protocol):
@@ -914,7 +915,7 @@ class UnifiedJobStore:
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute(
-                "SELECT status,attempt,max_attempts,type,llm_scope,llm_revision,next_retry_at "
+                "SELECT status,attempt,max_attempts,type,llm_scope,llm_revision,next_retry_at,waiting_on "
                 "FROM runtime_jobs WHERE id=?", (job_id,),
             ).fetchone()
             if current is None:
@@ -927,7 +928,7 @@ class UnifiedJobStore:
             attempt = int(current["attempt"])
             if status not in {"queued", "interrupted"}:
                 return False
-            next_attempt = attempt + (1 if status == "interrupted" else 0)
+            next_attempt = attempt + int(status == "interrupted" and not current["waiting_on"])
             if next_attempt > int(current["max_attempts"]):
                 connection.execute(
                     "UPDATE runtime_jobs SET status='failed',phase='执行失败',"
@@ -1156,11 +1157,12 @@ class UnifiedJobStore:
             if bool(row["cancel_requested"]) or stale_revision:
                 outcome = JobOutcome("cancelled", "任务已取消；已丢弃迟到结果")
             terminal = outcome.status in TERMINAL_STATUSES
+            waiting = outcome.waiting_on if outcome.status == "interrupted" else ""
             progress = 100 if outcome.status in {"completed", "completed_with_errors"} else None
             connection.execute(
                 "UPDATE runtime_jobs SET status=?,progress=COALESCE(?,progress),phase=?,detail=?,"
                 "result_artifact_id=?,owner='',lease_token='',lease_expires=0,"
-                "last_completed_unit_at=?,finished_at=?,updated_at=? "
+                "last_completed_unit_at=?,finished_at=?,updated_at=?,waiting_on=?,next_retry_at=? "
                 "WHERE id=? AND owner=? AND lease_token=?",
                 (
                     outcome.status,
@@ -1171,6 +1173,8 @@ class UnifiedJobStore:
                     time.time(),
                     _utc_now() if terminal else "",
                     _utc_now(),
+                    waiting,
+                    time.time() + max(1.0, outcome.retry_delay_seconds or 60) if waiting else 0,
                     job_id,
                     owner,
                     str(lease_token),
@@ -1774,6 +1778,7 @@ def _run_process_handler(
             "detail": outcome.detail,
             "result_artifact_id": outcome.result_artifact_id,
             "retry_delay_seconds": outcome.retry_delay_seconds,
+            "waiting_on": outcome.waiting_on,
         })
     except BaseException as exc:  # child must report before its process exits
         if isinstance(exc, RuntimeIdentityMismatch):
@@ -2193,6 +2198,7 @@ class UnifiedJobRuntime:
                     float(message["retry_delay_seconds"])
                     if message.get("retry_delay_seconds") is not None else None
                 ),
+                str(message.get("waiting_on") or ""),
             )
         detail = str(message.get("detail") or message.get("type") or "计算子进程失败")
         error_type = str(message.get("type") or "")
