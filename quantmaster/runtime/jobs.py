@@ -1434,6 +1434,10 @@ class UnifiedJobStore:
             ).fetchone()
         if row is None:
             raise KeyError(artifact_id)
+        return self._decode_artifact(row)
+
+    def _decode_artifact(self, row: sqlite3.Row) -> dict[str, Any]:
+        """Validate the selected manifest without looking up its replaceable ID again."""
         value = dict(row)
         try:
             if str(value.get("external_path") or ""):
@@ -1459,13 +1463,13 @@ class UnifiedJobStore:
     def latest_artifact(self, job_id: str, kind: str) -> dict[str, Any] | None:
         with self._conn() as connection:
             rows = connection.execute(
-                "SELECT id FROM runtime_job_artifacts WHERE job_id=? AND kind=? "
+                "SELECT * FROM runtime_job_artifacts WHERE job_id=? AND kind=? "
                 "ORDER BY attempt DESC,created_at DESC",
                 (job_id, kind),
             ).fetchall()
         for row in rows:
             try:
-                return self.artifact(str(row["id"]))
+                return self._decode_artifact(row)
             except ArtifactIntegrityError:
                 continue
         return None
@@ -1476,7 +1480,7 @@ class UnifiedJobStore:
             return None
         with self._conn() as connection:
             rows = connection.execute(
-                "SELECT id,spec_hash FROM runtime_job_artifacts WHERE job_id=? "
+                "SELECT * FROM runtime_job_artifacts WHERE job_id=? "
                 "AND checkpoint_key=? ORDER BY attempt DESC,created_at DESC",
                 (job_id, key),
             ).fetchall()
@@ -1484,7 +1488,7 @@ class UnifiedJobStore:
             if str(row["spec_hash"]) != spec_hash:
                 continue
             try:
-                return self.artifact(str(row["id"]))["payload"]
+                return self._decode_artifact(row)["payload"]
             except ArtifactIntegrityError:
                 continue
         return None
