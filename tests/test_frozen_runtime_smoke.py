@@ -122,6 +122,7 @@ def test_provider_smoke_child_failure_is_fatal_without_public_traceback(tmp_path
 
 
 def test_restored_metadata_changes_raw_cache_key_but_preserves_bars_auto(tmp_path, monkeypatch):
+    pytest.importorskip("tushare")
     from importlib.metadata import PackageNotFoundError
 
     import pandas as pd
