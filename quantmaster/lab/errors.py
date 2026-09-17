@@ -39,6 +39,14 @@ class LabError(RuntimeError):
 
 def classify_lab_error(exc: Exception) -> LabError:
     """Normalize runtime failures without leaking paths, credentials or tracebacks."""
+    from quantmaster.data.base import HistoryRepairError
+
+    if isinstance(exc, HistoryRepairError):
+        return LabError(
+            "DATA_HISTORY_REBUILD_REQUIRED", str(exc),
+            action="保留旧缓存；补齐同源历史、因子及日历证据或修复来源/存储后重新预检",
+            context={"symbol": exc.symbol}, retryable=False,
+        )
     if isinstance(exc, LabError):
         return exc
     text = str(exc).strip() or "Quant Lab 操作失败"

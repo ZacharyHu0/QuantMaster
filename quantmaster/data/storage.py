@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -716,6 +717,8 @@ class BarStore:
         source: str = "",
         quality: dict[str, Any] | None = None,
         replace_coverage: bool = False,
+        before_commit: Callable[[], None] | None = None,
+        preserve_on_failure: bool = False,
     ) -> None:
         """写入缓存。
 
@@ -768,6 +771,8 @@ class BarStore:
                 prefix=f".{target.stem}.", suffix=".parquet.tmp", dir=self.root)
             os.close(fd)
             temp_path = Path(temp_name)
+            backup = self.root / f".{target.stem}.{uuid.uuid4().hex}.parquet.bak"
+            committed = False
             try:
                 df.to_parquet(temp_path)
                 with temp_path.open("rb+") as stream:
@@ -890,7 +895,8 @@ class BarStore:
                     "observed_start": observed_start,
                     "observed_end": observed_end,
                 }
-                backup = self.root / f".{target.stem}.{uuid.uuid4().hex}.parquet.bak"
+                if before_commit is not None:
+                    before_commit()
                 with self._conn() as conn:
                     conn.execute(
                         "INSERT OR REPLACE INTO bar_write_intents "
@@ -907,11 +913,26 @@ class BarStore:
                 metadata.update({"file_size": stat.st_size, "file_mtime_ns": stat.st_mtime_ns})
                 with self._conn() as conn:
                     self._commit_metadata(conn, metadata, clear_intent=True)
+                committed = True
                 backup.unlink(missing_ok=True)
                 _sync_directory(self.root)
                 self._resolve_integrity_repair(
                     symbol, content_hash, "cache_rewritten",
                 )
+            except (OSError, sqlite3.Error, RuntimeError, ValueError):
+                if preserve_on_failure and committed:
+                    # Publication is already durable. A retained backup is a
+                    # cleanup concern, not a failed (or rolled back) repair.
+                    logger.warning("Bar repair committed; backup cleanup pending for %s", symbol)
+                    return
+                if preserve_on_failure and not committed:
+                    if backup.exists():
+                        os.replace(backup, target)
+                    elif old_meta is None:
+                        target.unlink(missing_ok=True)
+                    with self._conn() as conn:
+                        conn.execute("DELETE FROM bar_write_intents WHERE symbol=?", (symbol,))
+                raise
             finally:
                 temp_path.unlink(missing_ok=True)
 

@@ -5283,6 +5283,57 @@ def test_settings_refresh_tracks_queue_and_honest_terminal_result(
         browser.close()
 
 
+@pytest.mark.parametrize("terminal", ["completed", "cancelled"])
+def test_settings_refresh_waits_for_stockdb_and_keeps_polling(live_server, terminal):
+    url, _ = live_server
+    current = {
+        "id": "refresh-stockdb-wait", "status": "interrupted", "waiting_on": "stockdb_update",
+        "detail": "等待 StockDB 全市场验收", "next_retry_at": time.time() + 60,
+        "can_cancel": True, "can_retry": False, "total": 300, "next_index": 8,
+    }
+    polls = []
+
+    def jobs(route):
+        polls.append(route.request.url)
+        route.fulfill(json=current)
+
+    def cancel(route):
+        assert route.request.method == "POST"
+        current.update(status="cancelled", waiting_on="", can_cancel=False)
+        route.fulfill(json=current)
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/jobs?domain=data&limit=1",
+                   lambda route: route.fulfill(json={"items": [current]}))
+        page.route("**/api/v1/jobs/refresh-stockdb-wait", jobs)
+        page.route("**/api/v1/jobs/refresh-stockdb-wait/cancel", cancel)
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="local-data"]').click()
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待 StockDB 恢复")
+        playwright_sync.expect(page.locator("[data-refresh-failures]")).to_contain_text("恢复后自动继续")
+        playwright_sync.expect(page.locator("[data-refresh-failures]")).to_contain_text("下次自动检查")
+        playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_visible()
+        playwright_sync.expect(page.locator("#data-refresh-resume")).to_be_hidden()
+        initial = len(polls)
+        if terminal == "completed":
+            current.update(status="running", waiting_on="", progress=50)
+            playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text(
+                "增量同步中", timeout=8000,
+            )
+            assert len(polls) > initial
+            current.update(status="completed", progress=100, can_cancel=False, succeeded=300)
+            playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("增量同步完成")
+        else:
+            page.locator("#data-refresh-cancel").click()
+            playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("已取消")
+        playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_hidden()
+        assert page.evaluate("async () => (await import('/static/settings.js')).state.dataRefreshId") == ""
+        browser.close()
+
+
 def test_settings_remount_resumes_pending_autosave_and_active_data_poll(live_server):
     url, _ = live_server
     data_polls = {"count": 0}

@@ -15,6 +15,7 @@ Tushare 是 AKShare 连续重试失败后的 A 股日线备用源；每次接口
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 from datetime import datetime, timedelta
 from datetime import time as datetime_time
@@ -343,22 +344,59 @@ class TushareSource(DataSource):
         )
         if raw.empty or factors.empty:
             return pd.DataFrame()
+        return self._qfq_frame(symbol, start, end, raw, factors)
+
+    def _qfq_frame(
+        self, symbol: str, start: str, end: str,
+        raw: pd.DataFrame, factors: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Bind observed factors to every price row before claiming qfq coverage.
+
+        Formula and end-date anchor: https://tushare.pro/document/2?doc_id=146
+        Factor identity/schema: https://tushare.pro/document/2?doc_id=28
+        Neither document supplies row-level PIT publication evidence.
+        """
+        params = {"ts_code": symbol, "start_date": start.replace("-", ""),
+                  "end_date": end.replace("-", "")}
+        for endpoint, frame, columns in (
+            ("daily", raw, ("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount")),
+            ("adj_factor", factors, ("ts_code", "trade_date", "adj_factor")),
+        ):
+            _validate_tushare_frame(
+                endpoint, params, frame, required_nonempty=True, required_columns=columns,
+            )
+            if frame["ts_code"].isna().any() or frame["trade_date"].duplicated().any():
+                raise ProviderContractChanged(f"Tushare {endpoint} 身份缺失或交易日重复")
+            _parse_tushare_dates(frame["trade_date"], field="trade_date")
         merged = raw.merge(
-            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
-        )
-        merged["_parsed_trade_date"] = _parse_tushare_dates(
-            merged["trade_date"], field="trade_date"
-        )
-        merged = merged.sort_values("_parsed_trade_date")
+            factors[["trade_date", "adj_factor"]], on="trade_date", how="left",
+            validate="one_to_one",
+        ).sort_values("trade_date")
         factor = pd.to_numeric(merged["adj_factor"], errors="coerce")
-        latest = factor.dropna().iloc[-1] if factor.notna().any() else None
-        if latest is None or latest == 0:
-            raise RuntimeError(f"Tushare {symbol} 复权因子为空")
-        ratio = factor / latest
+        if not (factor.map(math.isfinite) & factor.gt(0)).all():
+            raise ProviderContractChanged("Tushare 价格行缺少完整、有限且为正的复权因子")
+        anchor = factors.sort_values("trade_date").iloc[-1]
+        anchor_factor = float(anchor["adj_factor"])
+        if not math.isfinite(anchor_factor) or anchor_factor <= 0:
+            raise ProviderContractChanged("Tushare qfq anchor factor must be finite and positive")
+        ratio = factor / anchor_factor
         for column in ("open", "high", "low", "close"):
             merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
-        merged = merged.drop(columns="_parsed_trade_date")
-        return self._normalize_market_frame(merged).loc[start:end]
+        result = self._normalize_market_frame(merged).loc[start:end]
+        result.attrs.update({
+            "instrument": symbol,
+            "provider_interface": "tushare:daily+adj_factor",
+            "adjustment": "qfq",
+            "adjustment_anchor_date": pd.Timestamp(anchor["trade_date"]).date().isoformat(),
+            "adjustment_provider_definition": (
+                "tushare:doc146:daily_ohlc*adj_factor/latest_factor_at_request_end"
+            ),
+            "factor_coverage": "complete",
+            # The endpoint proves factors for price rows, not an audited event
+            # ledger or a publication timestamp. Formal eligibility stays gated.
+            "adjustment_company_actions": "",
+        })
+        return result
 
     def cached_daily(self, symbol: str, start: str, end: str) -> pd.DataFrame | None:
         """Read an already-cached daily contract without ever contacting Tushare.
@@ -400,26 +438,7 @@ class TushareSource(DataSource):
         )
         if raw is None or factors is None or raw.empty or factors.empty:
             return None
-        if not {"trade_date", "adj_factor"}.issubset(factors):
-            return None
-        merged = raw.merge(
-            factors[["trade_date", "adj_factor"]], on="trade_date", how="inner",
-        )
-        if merged.empty:
-            return None
-        merged["_parsed_trade_date"] = _parse_tushare_dates(
-            merged["trade_date"], field="trade_date"
-        )
-        merged = merged.sort_values("_parsed_trade_date")
-        factor = pd.to_numeric(merged["adj_factor"], errors="coerce")
-        latest = factor.dropna().iloc[-1] if factor.notna().any() else None
-        if latest is None or latest == 0:
-            return None
-        ratio = factor / latest
-        for column in ("open", "high", "low", "close"):
-            merged[column] = pd.to_numeric(merged[column], errors="coerce") * ratio
-        merged = merged.drop(columns="_parsed_trade_date")
-        return self._normalize_market_frame(merged).loc[start:end]
+        return self._qfq_frame(symbol, start, end, raw, factors)
 
     def research_daily(
         self, symbol: str, start: str, end: str, *, calendar: pd.DatetimeIndex | None = None,

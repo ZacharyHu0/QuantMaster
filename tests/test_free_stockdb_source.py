@@ -43,6 +43,7 @@ class _FakeClient:
         self.calls.append(kwargs)
         stamp = "20260805100500" if kwargs["frequency"] == "5m" else "20260805"
         record = {
+            "code": kwargs["code"],
             "date": stamp,
             "open": 10,
             "high": 11,
@@ -304,10 +305,8 @@ def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> 
             "float_mv": 2_000_000, "total_mv": 3_000_000,
             "pe_ttm": 20, "pb": 2, "is_st": False,
         }
-        return {
-            code: [[values.get(field) for field in fields]]
-            for code in kwargs["code"]
-        }
+        values["code"] = kwargs["code"]
+        return [[values.get(field) for field in fields]]
 
     client.get_data = positional
     frame = source.daily_cross_section(
@@ -323,10 +322,7 @@ def test_free_stockdb_cross_section_decodes_positional_sdk_rows(monkeypatch) -> 
 
 def test_projected_sdk_rows_reject_dictionary_and_wrong_width(monkeypatch) -> None:
     source, client = _source(monkeypatch)
-    client.get_data = lambda **kwargs: {
-        kwargs["code"][0]: [{"date": 20260806, "close": 10.5}],
-        kwargs["code"][1]: [[20260806]],
-    }
+    client.get_data = lambda **kwargs: [{"date": 20260806, "close": 10.5}]
 
     with pytest.raises(FreeStockDBProviderError, match="第 0 行宽度 dict"):
         source.daily_cross_section(
@@ -505,19 +501,18 @@ def test_native_sdk_rejects_client_without_data_method(tmp_path) -> None:
     assert "get_data" in str(source._sdk_error)
 
 
-def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None:
+def test_free_stockdb_daily_many_uses_single_code_reads(monkeypatch) -> None:
     source, client = _source(monkeypatch)
 
     def batch(**kwargs):
         client.calls.append(kwargs)
-        return {
-            code: [{
-                "date": "20260805", "open": 10, "high": 11, "low": 9,
-                "close": 10.5, "volume": 100,
-            }]
-            for code in kwargs["code"]
-            if code != "000858"
-        }
+        if kwargs["code"] == "000858":
+            return []
+        return [{
+            "code": kwargs["code"],
+            "date": "20260805", "open": 10, "high": 11, "low": 9,
+            "close": 10.5, "volume": 100,
+        }]
 
     client.get_data = batch
     result = source.daily_many(
@@ -525,7 +520,7 @@ def test_free_stockdb_daily_many_uses_one_native_batch_call(monkeypatch) -> None
     )
 
     assert list(result) == ["600519.SH"]
-    assert client.calls[0]["code"] == ["600519", "000858"]
+    assert [call["code"] for call in client.calls] == ["600519", "000858"]
 
 
 def test_local_page_read_allows_native_loopback_stockdb_snapshot() -> None:
@@ -538,7 +533,7 @@ def test_local_page_read_allows_native_loopback_stockdb_snapshot() -> None:
         result = source.daily_many(["600519.SH"], "2026-08-05", "2026-08-05")
 
     assert list(result) == ["600519.SH"]
-    assert client.calls[0]["code"] == ["600519"]
+    assert client.calls[0]["code"] == "600519"
 
 
 def test_online_source_is_only_in_interactive_request_factories(monkeypatch) -> None:
