@@ -1040,6 +1040,58 @@ def _legacy_today_unmount_cancels_native_chart_work_and_delayed_renders(live_ser
         browser.close()
 
 
+def _assert_lab_action_sizes(page):
+    # A translated ancestor can round a 44px DOMRect height down to 43.999969px.
+    # Measure after entrance motion finishes, keeping the exact product minimum.
+    page.locator("#tab-lab").evaluate(
+        """async node => {
+          const entrances = () => node.getAnimations().filter(a =>
+            ['qm-tab', 'qmInkRise'].includes(a.animationName) &&
+            Number.isFinite(a.effect.getComputedTiming().endTime) &&
+            a.playState !== 'finished');
+          while (entrances().length) {
+            await Promise.allSettled(entrances().map(a => a.finished));
+          }
+        }"""
+    )
+    bounds = page.locator(".lab-head-actions .lab-button").evaluate_all(
+        "nodes => nodes.map(node => node.getBoundingClientRect().toJSON())"
+    )
+    assert len(bounds) == 3, bounds
+    assert all(bound["width"] >= 300 and bound["height"] >= 44 for bound in bounds), bounds
+
+
+@pytest.mark.parametrize("theme", ["classic", "ink"])
+def test_lab_action_sizes_wait_for_motion_and_reject_undersized_css(theme):
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.set_content(
+            '<div id="tab-lab" class="tab active"><div class="lab-head-actions">'
+            + '<button class="lab-button">Action</button>' * 3 + '</div></div>'
+        )
+        for name in ("app.css", "ink-theme.css", "lab.css"):
+            page.add_style_tag(content=(STATIC_ROOT / name).read_text(encoding="utf-8"))
+        page.evaluate("theme => document.documentElement.dataset.qmTheme = theme", theme)
+        # Restart real theme motion so this check exercises the asynchronous boundary.
+        page.locator("#tab-lab").evaluate(
+            "node => node.getAnimations().forEach(a => { a.currentTime = 0; a.play(); })"
+        )
+        _assert_lab_action_sizes(page)
+        assert page.locator("#tab-lab").evaluate(
+            "node => node.getAnimations().every(a => a.playState === 'finished')"
+        )
+        _assert_lab_action_sizes(page)  # Already finished.
+        page.add_style_tag(content="#tab-lab.active { animation:none !important; }")
+        _assert_lab_action_sizes(page)  # No animation.
+        page.add_style_tag(content=(
+            ".lab-head-actions .lab-button { min-height:43.5px; height:43.5px; padding:0; }"
+        ))
+        with pytest.raises(AssertionError, match=r"43\.5"):
+            _assert_lab_action_sizes(page)
+        browser.close()
+
+
 def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -1104,18 +1156,9 @@ def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
         page.get_by_role("button", name="研究", exact=True).click()
         page.wait_for_url(re.compile(r"#research/lab$"))
         page.locator(".lab-head-actions .lab-button").first.wait_for(state="visible")
-        page.wait_for_function(
-            "() => [...document.querySelectorAll('.lab-head-actions .lab-button')]"
-            ".every(button => { const bounds = button.getBoundingClientRect(); "
-            "return bounds.width >= 300 && bounds.height >= 44; })"
-        )
         for theme in ("classic", "ink"):
             page.evaluate("theme => document.documentElement.dataset.qmTheme = theme", theme)
-            action_bounds = page.locator(".lab-head-actions .lab-button").evaluate_all(
-                "nodes => nodes.map(node => node.getBoundingClientRect().toJSON())"
-            )
-            assert len(action_bounds) == 3
-            assert all(bound["width"] >= 300 and bound["height"] >= 44 for bound in action_bounds)
+            _assert_lab_action_sizes(page)
         assert errors == []
         browser.close()
 
