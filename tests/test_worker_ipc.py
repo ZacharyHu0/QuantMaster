@@ -1,6 +1,8 @@
 """Runtime-worker local command channel contracts."""
 
+import os
 import threading
+import time
 
 import pytest
 
@@ -125,4 +127,93 @@ def test_maintenance_command_token_is_held_by_worker_handler(tmp_path):
     finally:
         if lease is not None:
             maintenance_barrier.exit(lease)
+        server.stop()
+
+
+def test_slow_handler_bounds_following_authentication_and_shutdown(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    def handler(*_args):
+        entered.set()
+        assert release.wait(5)
+        return {}
+
+    server = RuntimeCommandServer(handler, root=tmp_path / "runtime")
+    server.start()
+    try:
+        with pytest.raises(WorkerCommandUnavailable):
+            call_worker_command("slow", root=server.root, timeout=0.1)
+        assert entered.is_set()
+        for _ in range(5):
+            started = time.monotonic()
+            with pytest.raises(WorkerCommandUnavailable):
+                call_worker_command("next", root=server.root, timeout=0.1)
+            assert time.monotonic() - started < 0.5
+        started = time.monotonic()
+        server.stop()
+        assert time.monotonic() - started < 1.5
+        with pytest.raises(RuntimeError, match="still stopping"):
+            server.start()
+    finally:
+        release.set()
+        if server._thread is not None:
+            server._thread.join(2)
+        server.stop()
+
+
+def test_stalled_unauthenticated_peer_is_reaped(tmp_path):
+    from quantmaster.runtime.ipc_transport import DeadlineConnection
+
+    server = RuntimeCommandServer(lambda *_: {}, root=tmp_path / "runtime")
+    server.start()
+    connection = DeadlineConnection.connect(server.endpoint, time.monotonic() + 1)
+    try:
+        # The idle raw client never answers the server's challenge.
+        started = time.monotonic()
+        with pytest.raises(WorkerCommandUnavailable):
+            call_worker_command("next", root=server.root, timeout=0.1)
+        assert time.monotonic() - started < 0.5
+        assert call_worker_command("recovered", root=server.root, timeout=2) == {}
+    finally:
+        connection.close()
+        server.stop()
+
+
+def test_standard_authenticated_client_and_large_response_remain_compatible(tmp_path):
+    from multiprocessing.connection import Client
+
+    from quantmaster.runtime.identity import get_application_identity
+
+    value = "large" * 30000
+    server = RuntimeCommandServer(lambda *_: {"value": value}, root=tmp_path / "runtime")
+    server.start()
+    identity = get_application_identity()
+    try:
+        with Client(server.endpoint, family=server.family, authkey=server._authkey) as channel:
+            channel.send({"operation": "test", "payload": {}, "application_identity": {
+                "build_sha": identity.build_sha, "slot_id": identity.slot_id,
+                "runtime_generation": identity.runtime_generation,
+            }})
+            assert channel.poll(2)
+            assert channel.recv() == {"ok": True, "value": {"value": value}}
+        assert call_worker_command("test", root=server.root)["value"] == value
+    finally:
+        server.stop()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix byte-stream fragmentation contract")
+def test_partial_unix_frame_cannot_hold_server_forever(tmp_path):
+    import struct
+
+    from quantmaster.runtime.ipc_transport import DeadlineConnection
+
+    server = RuntimeCommandServer(lambda *_: {}, root=tmp_path / "runtime")
+    server.start()
+    channel = DeadlineConnection.connect(server.endpoint, time.monotonic() + 2)
+    try:
+        channel.authenticate(server._authkey)
+        channel.connection.sendall(struct.pack("!i", 100) + b"partial")
+        assert call_worker_command("recovered", root=server.root, timeout=2) == {}
+    finally:
+        channel.close()
         server.stop()

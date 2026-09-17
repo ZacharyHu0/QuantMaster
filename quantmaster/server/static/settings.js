@@ -1240,12 +1240,14 @@ const settingsFeature = (() => {
       ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
       : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
+    const count = task.total_known === false
+      ? '标的数量待核验' : `${task.next_index || 0}/${task.total || 0}`;
     root.querySelector('[data-refresh-phase]').textContent =
-      `${label} · ${task.next_index || 0}/${task.total || 0}${current}`;
+      `${task.planning ? '规划刷新中' : label} · ${count}${current}`;
     root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
     root.querySelector('[data-refresh-failures]').textContent = failed
       ? `${failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
-      : warning ? (task.detail || '同步未完整完成，请查看任务详情。')
+      : warning || task.planning ? (task.detail || '同步未完整完成，请查看任务详情。')
         : `${task.succeeded || 0} 个标的已成功同步`;
     const cancel = document.getElementById('data-refresh-cancel');
     cancel.hidden = !task.can_cancel;
@@ -1324,7 +1326,9 @@ const settingsFeature = (() => {
 
   document.getElementById('data-refresh-start-button').addEventListener('click', async event => {
     if (!state.dataRefreshPreview) return;
-    if (!window.confirm(`确认增量同步 ${state.dataRefreshPreview.total} 个标的？已有缓存只请求尾部重叠区间。`)) return;
+    const scope = state.dataRefreshPreview.total == null
+      ? '所选范围（标的数量将在后台核验）' : `${state.dataRefreshPreview.total} 个标的`;
+    if (!window.confirm(`确认增量同步${scope}？已有缓存只请求尾部重叠区间。`)) return;
     event.target.disabled = true;
     try {
       const task = await request('/api/v1/data/refresh', {

@@ -13,9 +13,11 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping
+from contextlib import closing
 from multiprocessing import AuthenticationError
-from multiprocessing.connection import Client, Listener
+from multiprocessing.connection import Listener
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ from quantmaster.runtime.identity import (
     get_application_identity,
     require_application_identity,
 )
+from quantmaster.runtime.ipc_transport import DeadlineConnection
 
 logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 0.5
@@ -92,13 +95,15 @@ class RuntimeCommandServer:
         with self._lock:
             if self.running:
                 return
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("runtime-worker IPC is still stopping")
             if self.family == "AF_UNIX":
                 Path(self.endpoint).unlink(missing_ok=True)
             self._stop.clear()
             self._listener = Listener(
                 self.endpoint,
                 family=self.family,
-                authkey=self._authkey,
+                authkey=None,
             )
             self._thread = threading.Thread(
                 target=self._serve,
@@ -113,21 +118,20 @@ class RuntimeCommandServer:
             if listener is None:
                 return
             try:
-                connection = listener.accept()
+                accepted = listener.accept()
             except (AuthenticationError, OSError, EOFError):
                 if not self._stop.is_set():
                     logger.debug("runtime-worker IPC accept 失败", exc_info=True)
                 continue
-            with connection:
+            with closing(DeadlineConnection.accepted(accepted, time.monotonic() + 1.0)) as connection:
                 try:
+                    if self._stop.is_set():
+                        return
+                    connection.authenticate(self._authkey, server=True)
                     raw = connection.recv()
                     if not isinstance(raw, dict):
                         raise WorkerCommandError("invalid_command", "本机命令格式无效")
                     operation = str(raw.get("operation") or "")
-                    if operation == "__shutdown__":
-                        connection.send({"ok": True, "value": {}})
-                        self._stop.set()
-                        continue
                     expected_raw = raw.get("application_identity")
                     expected = ApplicationIdentity(
                         str(expected_raw.get("build_sha") or ""),
@@ -147,11 +151,17 @@ class RuntimeCommandServer:
                     payload = raw.get("payload")
                     if not isinstance(payload, dict):
                         raise WorkerCommandError("invalid_command", "本机命令参数无效")
+                    if self._stop.is_set():
+                        return
                     value = dict(self._handler(operation, payload))
+                    connection.deadline = time.monotonic() + 1.0
                     connection.send({"ok": True, "value": value})
                 except WorkerCommandError as exc:
-                    connection.send({"ok": False, "code": exc.code, "message": str(exc)})
-                except (BrokenPipeError, EOFError, OSError):
+                    try:
+                        connection.send({"ok": False, "code": exc.code, "message": str(exc)})
+                    except (EOFError, OSError):
+                        pass
+                except (AuthenticationError, EOFError, OSError):
                     # A timed-out Web generation may disappear before the
                     # worker writes its answer.  The operation itself is
                     # still durable and can be observed through the ledger.
@@ -171,15 +181,12 @@ class RuntimeCommandServer:
         with self._lock:
             listener = self._listener
             thread = self._thread
-        # Wake an accept() call so shutdown never inherits the historical
-        # unbounded join failure.  The server sets the stop flag only after it
-        # has authenticated this client and acknowledged the shutdown request;
-        # setting it here first could make the accept loop exit before the
-        # authentication handshake completes.
+        self._stop.set()
+        # A raw connection wakes accept without waiting for a busy handler or
+        # authentication. It is closed here and the server reaps its EOF.
         try:
-            with Client(self.endpoint, family=self.family, authkey=self._authkey) as connection:
-                connection.send({"operation": "__shutdown__", "payload": {}})
-                connection.recv()
+            with closing(DeadlineConnection.connect(self.endpoint, time.monotonic() + 0.1)):
+                pass
         except (AuthenticationError, OSError, EOFError):
             self._stop.set()
         if listener is not None:
@@ -192,7 +199,7 @@ class RuntimeCommandServer:
         with self._lock:
             if self._listener is listener:
                 self._listener = None
-            if self._thread is thread:
+            if self._thread is thread and (thread is None or not thread.is_alive()):
                 self._thread = None
         if self.family == "AF_UNIX":
             Path(self.endpoint).unlink(missing_ok=True)
@@ -210,17 +217,17 @@ def call_worker_command(
 
     base = (Path(root) if root is not None else get_config().data_root).resolve()
     endpoint = worker_command_endpoint(base)
-    family = "AF_PIPE" if os.name == "nt" else "AF_UNIX"
-    deadline = max(0.05, float(timeout))
+    deadline = time.monotonic() + max(0.001, float(timeout))
     identity = application_identity or get_application_identity()
     try:
-        connection = Client(endpoint, family=family, authkey=_authkey(base))
+        connection = DeadlineConnection.connect(endpoint, deadline)
     except (AuthenticationError, OSError, EOFError) as exc:
         raise WorkerCommandUnavailable(
             "worker_unavailable", "后台 runtime-worker 未接受本机命令",
         ) from exc
-    with connection:
+    with closing(connection):
         try:
+            connection.authenticate(_authkey(base))
             connection.send({
                 "operation": str(operation),
                 "payload": dict(payload or {}),
@@ -230,10 +237,6 @@ def call_worker_command(
                     "runtime_generation": identity.runtime_generation,
                 },
             })
-            if not connection.poll(deadline):
-                raise WorkerCommandUnavailable(
-                    "worker_unavailable", "后台 runtime-worker 在命令期限内未响应",
-                )
             response = connection.recv()
         except WorkerCommandError:
             raise

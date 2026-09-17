@@ -35,6 +35,74 @@ class RootSwitcher:
         self.target = str(target)
 
 
+def test_refresh_slow_planning_is_durable_coalesced_and_cancellable(isolated_config, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.runtime.worker_ipc import RuntimeCommandServer, call_worker_command
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    started, release = threading.Event(), threading.Event()
+    discoveries, refreshed = [], []
+
+    def resolve(*_args):
+        discoveries.append(1)
+        started.set()
+        assert release.wait(10)
+        return ["A"]
+
+    def handler(operation, payload):
+        if operation == "create":
+            return manager.create("universe", "csi800")
+        if operation == "cancel":
+            return manager.cancel(payload["id"])
+        return {"accepted": True}
+
+    monkeypatch.setattr(manager, "_resolve_symbols", resolve)
+    monkeypatch.setattr(manager, "_refresh_one", lambda *args: refreshed.append(1))
+    server = RuntimeCommandServer(handler, root=isolated_config.data_root)
+    server.start()
+    try:
+        preview = manager.preview("universe", "csi800")
+        assert preview["total"] is None
+        assert discoveries == []
+        job = call_worker_command("create", root=server.root)
+        assert started.wait(3)
+        assert manager.get(job["id"])["phase"] == "规划刷新"
+        assert DataRefreshManager().get(job["id"])["status"] == "running"
+        assert call_worker_command("create", root=server.root)["id"] == job["id"]
+        assert call_worker_command("control", root=server.root) == {"accepted": True}
+        assert call_worker_command("cancel", {"id": job["id"]}, root=server.root)["status"] == "cancelling"
+        assert discoveries == [1]
+    finally:
+        release.set()
+        manager._ensure_runtime().wait(job["id"], timeout=5)
+        server.stop()
+        manager.shutdown()
+    assert manager.get(job["id"])["status"] == "cancelled"
+    assert refreshed == []
+
+
+def test_refresh_all_false_membership_fails_with_durable_evidence(isolated_config, monkeypatch):
+    from quantmaster.data import schema_access
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    monkeypatch.setattr(manager, "_start", lambda _: None)
+    monkeypatch.setattr(schema_access, "_factories", {})
+    schema_access.register_membership_loader(
+        lambda *_: pd.DataFrame({"A": [False], "B": [False]}),
+    )
+    job = manager.create("universe", "csi800")
+    manager._run(job["id"])
+    failed = DataRefreshManager().get(job["id"])
+    assert failed["status"] == "failed"
+    assert "REFRESH_MEMBERSHIP_EVIDENCE_MISSING" in failed["detail"]
+    assert failed["outcome"] != "completed"
+    assert failed["can_retry"]
+    manager.shutdown()
+
+
 def test_refresh_calls_registered_membership_loader_once(monkeypatch):
     from quantmaster.data import schema_access
     from quantmaster.data.maintenance import DataRefreshManager
