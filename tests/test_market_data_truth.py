@@ -263,6 +263,35 @@ def test_persisted_coverage_requires_proven_range_and_current_assessment(
     assert persisted["coverage_ratio"] == 0.98
 
 
+@pytest.mark.parametrize("extra_issue,expected_status", [
+    ("", "degraded"),
+    ("factor_contract_incomplete: 缺少完整因子链", "degraded"),
+    ("存在 1 行无法识别的开盘、最高、最低、收盘或成交量", "unavailable"),
+    ("unit_unknown", "unavailable"),
+    ("identity_unconfirmed", "unavailable"),
+    ("unrecognized_diagnostic", "unavailable"),
+])
+def test_narrow_slice_drops_only_proven_full_range_unavailability(extra_issue, expected_status):
+    from quantmaster.data.base import BarDataQuality
+
+    current = BarDataQuality(
+        status="degraded", requested_start="2026-08-01", requested_end="2026-09-17",
+        coverage_ratio=1.0,
+    )
+    persisted = {
+        "status": "unavailable", "requested_start": "2015-01-01", "requested_end": "2026-09-17",
+        "coverage_ratio": 0.9, "partial": True,
+        "issues": ["有证据交易日覆盖率仅 90.0%", *([extra_issue] if extra_issue else [])],
+    }
+    result = registry._merge_persisted_quality(current, [persisted])
+    assert result.coverage_ratio == 1.0
+    assert result.status == expected_status
+    assert "有证据交易日覆盖率仅 90.0%" not in result.issues
+    assert result.issues == ((extra_issue,) if extra_issue else ())
+    assert not result.formal_eligible
+    assert persisted["status"] == "unavailable"
+
+
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
     dates = pd.bdate_range("2026-03-23", periods=100)
     local = _bars(dates)
