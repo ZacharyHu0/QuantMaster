@@ -769,6 +769,13 @@ class ProviderHealthStore:
         summary = redact_sensitive_text(exc).replace("\n", " ")
         summary = re.sub(r"(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@", r"\1***@", summary)[:300]
         failure_class = classify_provider_failure(exc)
+        if lane.partition(":")[0].casefold() == "free-stockdb" and failure_class in {
+            "transient_network", "transient_upstream",
+        }:
+            from quantmaster.data.stockdb_state import stockdb_wait_reason
+
+            if stockdb_wait_reason(planned_only=True):
+                return  # Planned downtime is not evidence of provider ill health.
         permanent = failure_class in _PERMANENT_FAILURES
         status = _http_status(exc)
         diagnostic = failure_class
@@ -939,6 +946,15 @@ def _require_provider_enabled(lane: str, *, probe: bool) -> None:
     raise LocalOnlyDataAccessError(f"数据源 {provider} 已在设置中关闭")
 
 
+def _require_stockdb_available(lane: str, *, maintenance: bool) -> None:
+    if maintenance and lane.partition(":")[0].casefold() == "free-stockdb":
+        from quantmaster.data.stockdb_state import stockdb_wait_reason
+
+        reason = stockdb_wait_reason()
+        if reason:
+            raise LocalOnlyDataAccessError(reason)
+
+
 def provider_call[T](
     lane: str,
     key: str,
@@ -959,6 +975,8 @@ def provider_call[T](
     if not local_snapshot:
         _require_remote_io(lane)
     _require_provider_enabled(lane, probe=probe)
+    maintenance = _REQUEST_PRIORITY.get() == _PRIORITIES["maintenance"]
+    _require_stockdb_available(lane, maintenance=maintenance)
     PROVIDER_HEALTH.check_available(lane, probe=probe)
     # The scheduler owns daemon workers shared by the process.  Capture the
     # execution hook with this logical request so a call submitted by an
@@ -974,6 +992,7 @@ def provider_call[T](
             get_config().data.provider_retry_attempts if retry_attempts is None else retry_attempts
         ))
         for attempt in range(1, attempts + 1):
+            _require_stockdb_available(lane, maintenance=maintenance)
             try:
                 result = func()
                 if empty_opens and (result is None or getattr(result, "empty", False)):
