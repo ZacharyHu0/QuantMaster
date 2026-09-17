@@ -5468,6 +5468,103 @@ def test_settings_old_data_poll_cannot_overwrite_remounted_terminal_state(live_s
         browser.close()
 
 
+@pytest.mark.parametrize(("payload", "expected", "tone", "active"), [
+    pytest.param({
+        "state": "running", "phase": "completed", "update_result": "success",
+        "message": "数据已验证至 2026-09-17，本地服务已恢复；49 只缺口将交由后续混合数据源补齐",
+        "target_session": "2026-09-17", "actual_session": "2026-09-17",
+        "validated_session": "2026-09-17", "attempt": 1, "max_attempts": 3,
+        "validation": {"accepted": True, "complete": False, "symbol_ratio": 0.991141},
+    }, "49 只缺口", "success", False, id="observed-native-accepted"),
+    pytest.param({
+        "state": "updating", "phase": "validating", "update_result": "validating",
+        "message": "正在验证本地库是否已包含 2026-09-17",
+        "target_session": "2026-09-17", "actual_session": "",
+    }, "实际 待验收", "", True, id="observed-validating"),
+    pytest.param({"state": "queued"}, "等待更新", "", True, id="queued-no-message"),
+    pytest.param({"state": "running", "update_result": "retry_wait"},
+                 "等待重试", "", False, id="retry-wait"),
+    pytest.param({"state": "running", "update_result": "failed", "message": "目标日验收失败"},
+                 "目标日验收失败", "error", False, id="failure-service-running"),
+    pytest.param({"update_result": "manual_required"},
+                 "本地库更新未通过", "error", False, id="failure-no-message"),
+    pytest.param({}, "详细状态暂不可用", "", False, id="missing-fields"),
+    pytest.param({"status": "running", "managed_by": "runtime-worker"},
+                 "详细状态暂不可用", "", False, id="summary-is-not-success"),
+])
+def test_settings_stockdb_detail_survives_runtime_summary(live_server, payload, expected, tone, active):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/settings/free-stockdb", lambda route: route.fulfill(json=payload))
+        page.goto(f"{url}/#runtime/settings")
+        page.locator("#settings-config-path").wait_for(state="visible")
+        page.locator('[data-settings-section="local-data"]').click()
+        status = page.locator("#free-stockdb-sidecar-status")
+        playwright_sync.expect(status).to_contain_text(expected)
+        before = status.inner_text()
+        assert "undefined" not in before
+        assert status.get_attribute("class") == f"field-wide check-result {tone}"
+        assert page.locator("#free-stockdb-update-now").is_disabled() is active
+        assert page.locator("#free-stockdb-reset-retry").is_disabled() is active
+
+        # The real settings endpoint publishes only the worker summary, not owner detail.
+        page.evaluate("async () => (await import('/static/settings.js')).refresh()")
+        summary = page.evaluate(
+            "async () => (await import('/static/settings.js')).state.lastRuntime.free_stockdb"
+        )
+        assert "managed_by" in summary and "state" not in summary
+        assert status.inner_text() == before
+        assert status.get_attribute("class") == f"field-wide check-result {tone}"
+        assert page.locator("#free-stockdb-update-now").is_disabled() is active
+        browser.close()
+
+
+def test_settings_stockdb_pending_detail_has_no_false_success(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page()
+        pending = []
+        page.route("**/api/v1/settings/free-stockdb", lambda route: pending.append(route))
+        with page.expect_request("**/api/v1/settings/free-stockdb"):
+            page.goto(f"{url}/#runtime/settings")
+        page.locator('[data-settings-section="local-data"]').click()
+        status = page.locator("#free-stockdb-sidecar-status")
+        assert "状态尚未读取" in status.inner_text()
+        assert "undefined" not in status.inner_text()
+        assert "success" not in status.get_attribute("class")
+        pending[0].fulfill(json={"state": "error", "message": "本地库不可用"})
+        playwright_sync.expect(status).to_contain_text("本地库不可用")
+        assert "error" in status.get_attribute("class")
+        browser.close()
+
+
+def test_settings_stockdb_read_error_clears_prior_success(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page()
+        page.route("**/api/v1/settings/free-stockdb", lambda route: route.fulfill(
+            json={"state": "running", "message": "本地库验收通过"},
+        ))
+        page.goto(f"{url}/#runtime/settings")
+        status = page.locator("#free-stockdb-sidecar-status")
+        playwright_sync.expect(status).to_contain_text("本地库验收通过")
+        assert "success" in status.get_attribute("class")
+        page.route("**/api/v1/settings/free-stockdb", lambda route: route.fulfill(
+            status=503, json={"detail": "本地库状态服务不可用"},
+        ))
+        page.evaluate(
+            "async () => { const m = await import('/static/settings.js'); m.unmount(); await m.mount(); }"
+        )
+        playwright_sync.expect(status).to_contain_text("本地库状态服务不可用")
+        assert "error" in status.get_attribute("class")
+        assert "success" not in status.get_attribute("class")
+        browser.close()
+
+
 def test_settings_remount_resumes_stockdb_and_ignores_old_inflight_poll(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
