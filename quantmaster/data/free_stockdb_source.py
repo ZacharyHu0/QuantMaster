@@ -612,7 +612,9 @@ class FreeStockDBSource(DataSource):
             records = self._apply_qfq(records, factors, code)
         else:
             records = self._dictionary_rows(payload, contract="stock_sdk daily")
+            self._validate_sdk_rows(records, code, begin, finish, "1d", None)
         frame = self._frame(records, intraday=False).loc[start:end]
+        frame.attrs["instrument"] = symbol
         return self._bind_session_acceptance(frame, end)
 
     def capital_flow(self, symbol: str, session: str | None = None) -> dict[str, Any]:

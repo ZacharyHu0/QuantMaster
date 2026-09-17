@@ -2288,6 +2288,83 @@ def refresh_spot(
     return BarDataEnvelope(frame, quality, provenance)
 
 
+def _missing_closed_tail(symbol: str, cached: pd.DataFrame | None, end: str) -> bool:
+    if cached is None or cached.empty:
+        return False
+    latest = pd.Timestamp(cached.index.max()).normalize()
+    if latest >= pd.Timestamp(end):
+        return False
+    market, zone = guess_market(symbol), _market_timezone(symbol)
+    sessions, _, complete = _market_sessions(market, latest, pd.Timestamp(end))
+    if not complete or zone is None:
+        return False
+    now = market_now()
+    return any(
+        day > latest and (close := _daily_close(market, day.date(), zone)) is not None
+        and close <= now for day in sessions
+    )
+
+
+def _renew_tushare_cache(
+    symbol: str, start: str, end: str, cached: pd.DataFrame,
+    store: BarStore, priority: str, cancelled,
+) -> pd.DataFrame:
+    """Renew stale AUTO history without splicing incompatible provider generations."""
+    full_start, full_end, _, _ = _repair_history_ranges(cached, start, end)
+    factories = _request_factories(priority=priority, allow_online=False).get(guess_market(symbol), [])
+    for factory in factories:
+        if cancelled and cancelled():
+            raise InterruptedError("数据补齐已取消")
+        source = factory()
+        if source.name == "tushare":
+            # The existing repair owns endpoint-cache reuse, factor evidence,
+            # complete replacement when anchors differ, and atomic publication.
+            try:
+                return _repair_history_locked(symbol, start, end, store, priority, cancelled, renew=True)
+            except HistoryRepairError:
+                logger.debug("同源候选无法安全续更 %s", symbol, exc_info=True)
+                return cached.loc[start:end]
+        if source.name != "free-stockdb":
+            continue
+        try:
+            frame = source.daily(symbol, full_start, full_end)
+            quality = _assess_daily_frame(
+                frame, full_start, full_end, symbol=symbol, source=source.name,
+            )
+            sessions, _, complete = _market_sessions(
+                guess_market(symbol), pd.Timestamp(start), pd.Timestamp(end),
+            )
+            if (
+                frame.attrs.get("instrument") != symbol
+                or frame.attrs.get("adjustment") != "qfq"
+                or frame.attrs.get("provider_interface") != "stock_sdk:daily"
+                or frame.attrs.get("unit_status") != "verified_local_stockdb_schema_v1"
+                or not complete or sessions.empty or not sessions.difference(frame.index).empty
+                or not _is_complete_refresh(frame, cached, full_start, full_end, symbol=symbol)
+                or quality.status == "unavailable"
+                or any(unit == "unknown" for _, unit in quality.units)
+            ):
+                continue
+        except InterruptedError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.debug("本地完整候选无法安全续更 %s", symbol, exc_info=True)
+            continue
+        store.put(
+            symbol, frame, replace=True, replace_coverage=True,
+            request_start=full_start, request_end=full_end, source=source.name,
+            quality=quality.to_dict(), preserve_on_failure=True,
+            before_commit=lambda: _check_refresh_cancelled(cancelled),
+        )
+        return frame.loc[start:end]
+    return cached.loc[start:end]
+
+
+def _check_refresh_cancelled(cancelled) -> None:
+    if cancelled and cancelled():
+        raise InterruptedError("数据补齐已取消")
+
+
 def _load_history_locked(
     symbol: str,
     start: str,
@@ -2298,6 +2375,7 @@ def _load_history_locked(
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
     provider: str = "",
+    cancelled=None,
 ) -> pd.DataFrame:
     """已持有单标的锁时加载标准化日线。"""
     store = store or _default_bar_store()
@@ -2355,12 +2433,26 @@ def _load_history_locked(
     session_refresh_due = _session_refresh_due(
         symbol, requested_end, cached, float(meta.get("checked_at") or 0)
     )
-    if session_refresh_due:
+    failed_refresh = (
+        meta.get("last_status") in {"stale", "refresh_failed"} or bool(cached_quality.get("stale"))
+    )
+    missing_tail = _missing_closed_tail(symbol, cached, end)
+    if session_refresh_due or failed_refresh or missing_tail:
         ttl_fresh = False
     sliced = _cached_slice(cached, start, end)
     if sliced is not None and covers_start and covers_end:
-        if not near_current or (mode == RefreshMode.AUTO and ttl_fresh):
+        if not failed_refresh and not missing_tail and (
+            not near_current or (mode == RefreshMode.AUTO and ttl_fresh)
+        ):
             return sliced
+
+    if (
+        mode == RefreshMode.AUTO and not provider
+        and cached is not None and not cached.empty
+        and meta.get("last_source") == "tushare"
+        and (failed_refresh or missing_tail)
+    ):
+        return _renew_tushare_cache(symbol, start, end, cached, store, priority, cancelled)
 
     segments: list[tuple[str, str, str]] = []
     if cached is None or cached.empty:
@@ -2423,6 +2515,7 @@ def _load_history_frame(
     refresh: RefreshMode | str | None = None,
     priority: str = "normal",
     provider: str = "",
+    cancelled=None,
 ) -> pd.DataFrame:
     """Internal daily-bar loader; public callers must consume the envelope."""
     store = store or _default_bar_store()
@@ -2436,6 +2529,7 @@ def _load_history_frame(
             refresh=refresh,
             priority=priority,
             provider=provider,
+            cancelled=cancelled,
         )
 
 
@@ -2496,11 +2590,11 @@ def _compatible_repair_increment(
 
 def _repair_history_locked(
     symbol: str, start: str, end: str, store: BarStore, priority: str, cancelled,
+    *, renew: bool = False,
 ) -> pd.DataFrame:
     """Stage one explicitly selected Tushare repair; never splice conflicting evidence."""
     def check_cancelled() -> None:
-        if cancelled and cancelled():
-            raise InterruptedError("数据补齐已取消")
+        _check_refresh_cancelled(cancelled)
 
     check_cancelled()
     cached = store.get(symbol)
@@ -2542,6 +2636,12 @@ def _repair_history_locked(
     sessions, _, complete = _market_sessions(guess_market(symbol), pd.Timestamp(start), pd.Timestamp(end))
     if not complete or sessions.empty or not sessions.difference(candidate.index).empty:
         raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+    if renew:
+        # Reassess the whole retained generation instead of OR-ing a previous
+        # stale observation into today's successful read. Historical gaps and
+        # factor/PIT limitations are still assessed over the complete candidate.
+        quality = _repair_candidate_quality(symbol, candidate, full_start, full_end, source.name)
+        replace_coverage = True
     check_cancelled()
     store.put(
         symbol, candidate, replace=True, replace_coverage=replace_coverage,
@@ -2596,6 +2696,7 @@ def refresh_history(
             refresh=mode,
             priority=work_class,
             provider=source_name,
+            cancelled=cancelled,
         )
     return _bar_envelope(
         frame, symbol=symbol, start=start, end=end, store=resolved_store, frequency="1d",
