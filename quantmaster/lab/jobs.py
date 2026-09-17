@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import logging
 import os
 import sqlite3
 import threading
@@ -294,12 +295,22 @@ class LabJobManager:
         ) as exc:
             failure = classify_lab_error(exc)
             error_info = failure.to_dict()
+            diagnostic_id = f"{context.job_id}:{context.attempt}"
+            error_info["diagnostic_id"] = diagnostic_id
+            logging.getLogger(__name__).exception(
+                "Lab job failed diagnostic_id=%s kind=%s code=%s",
+                diagnostic_id, kind, failure.code,
+                extra={"diagnostic_id": diagnostic_id, "traceback_policy": "always"},
+            )
             artifact = self._artifact(
                 context, kind, "failed", {}, error_info=error_info,
             )
             context.emit(
                 "lab_diagnostic",
-                {"kind": kind, "diagnostic_code": failure.code, "error": failure.message},
+                {
+                    "kind": kind, "diagnostic_code": failure.code,
+                    "diagnostic_id": diagnostic_id, "error": failure.message,
+                },
             )
             return JobOutcome("failed", failure.message, str(artifact["id"]))
         finally:

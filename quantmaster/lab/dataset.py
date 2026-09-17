@@ -471,8 +471,9 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             and cached_bars == _bar_storage_identity(cached_value["symbols"], store)
         ):
             with _PANEL_CACHE_LOCK:
-                _INSPECTION_CACHE.move_to_end(cache_key)
-            return dict(cached_value)
+                if _INSPECTION_CACHE.get(cache_key) is cached:
+                    _INSPECTION_CACHE.move_to_end(cache_key)
+                    return dict(cached_value)
 
     end_label = pd.Timestamp(end).strftime("%Y-%m-%d")
     records = pd.DataFrame()

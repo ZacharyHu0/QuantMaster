@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -1232,26 +1233,27 @@ class LabService:
             item.code == "DATA_HISTORY_REBUILD_REQUIRED" for item in diagnostics.values()
         ):
             raise next(iter(diagnostics.values()))
-        clear_local_dataset_caches()
         stages["bars"] = {
             "status": "completed_with_warnings" if failures else "completed",
             "completed": len(persisted), "failed": len(failures), "total": len(targets),
         }
-        after = dataset_repair_plan(universe, start, end)
+        with self._prepare_postprocessing("inspection", stages, persisted, cancelled):
+            clear_local_dataset_caches()
+            after = dataset_repair_plan(universe, start, end)
         count_key = "repair_symbol_count" if include_warmup else "critical_repair_symbol_count"
         resolved = max(0, int(before[count_key]) - int(after[count_key]))
         snapshot: dict[str, Any] = {}
         if after["research_eligible"]:
-            require_space("dataset", [], 89)
-            stages["dataset"] = {"status": "running"}
-            _panel, _membership, value = load_local_dataset(
-                universe, start, end, policy=DataPolicy.PREFER_LOCAL.value,
-            )
-            stages["dataset"] = {"status": "completed"}
+            with self._prepare_postprocessing("dataset", stages, persisted, cancelled):
+                require_space("dataset", [], 89)
+                _panel, _membership, value = load_local_dataset(
+                    universe, start, end, policy=DataPolicy.PREFER_LOCAL.value,
+                )
             checkpoint(91, "dataset", "completed", "本地研究数据集已物化", persisted=1)
-            require_space("snapshot", [], 93)
-            snapshot = self.store.save_snapshot(value)
-            stages["snapshot"] = {"status": "completed", "partitions": 1}
+            with self._prepare_postprocessing("snapshot", stages, persisted, cancelled):
+                require_space("snapshot", [], 93)
+                snapshot = self.store.save_snapshot(value)
+            stages["snapshot"]["partitions"] = 1
             checkpoint(95, "snapshot", "completed", "冻结快照已登记", persisted=1)
         else:
             stages["dataset"] = {"status": "blocked", "remaining": after[count_key]}
@@ -1276,6 +1278,8 @@ class LabService:
                 "context": {"failed_partitions": sorted(failures)[:20]},
             }
         ] if failures else []
+        snapshot_payload = snapshot.get("payload") or {}
+        formal_eligible = bool(snapshot_payload.get("production_eligible"))
         return {
             "provider": selected,
             "requested_symbols": len(targets),
@@ -1297,11 +1301,55 @@ class LabService:
                 "snapshot" if snapshot else "dataset" if after["research_eligible"] else "bars"
             ),
             "analysis_ready_symbols": max(0, len(targets) - len(failures)),
-            "formal_eligible": bool(after.get("research_eligible")),
+            "formal_eligible": formal_eligible,
+            "formal": {
+                "status": "ready" if formal_eligible else "blocked",
+                "blockers": [] if formal_eligible else (
+                    snapshot_payload.get("warnings") or [{
+                        "code": "DATA_FORMAL_UNAVAILABLE",
+                        "message": "准备结果尚不具备正式研究所需的质量与成员证据",
+                    }]
+                ),
+            },
             "before": before,
             "after": after,
             "snapshot": snapshot,
         }
+
+    @staticmethod
+    @contextmanager
+    def _prepare_postprocessing(stage, stages, persisted, cancelled):
+        """Keep completed source partitions visible when a local stage fails."""
+        if cancelled and cancelled():
+            raise InterruptedError("数据准备已取消；已持久化分区保留")
+        stages[stage] = {"status": "running"}
+        try:
+            yield
+        except InterruptedError:
+            raise
+        except (
+            ArithmeticError, AttributeError, ImportError, LookupError, OSError,
+            RuntimeError, sqlite3.Error, TypeError, ValueError,
+        ) as exc:
+            failure = classify_lab_error(exc)
+            code = (
+                "DATA_PREPARATION_POSTPROCESSING_FAILED"
+                if failure.code == "INTERNAL_ERROR" else failure.code
+            )
+            stages[stage] = {"status": "failed", "diagnostic_code": code}
+            raise LabError(
+                code, f"数据准备后处理未完成（{stage}）；已持久化行情保留",
+                action="按原参数重试以复用本地分区；若再次失败，按诊断编号查看本机日志",
+                retryable=True,
+                context={
+                    "stage": stage, "safe_retry_point": stage,
+                    "persisted_items": sorted(persisted), "stages": stages,
+                    "cause_code": failure.code,
+                },
+                status_code=failure.status_code,
+            ) from exc
+        else:
+            stages[stage] = {"status": "completed"}
 
     @staticmethod
     def _ensure_news_history(spec: FactorSpec, start: str, end: str) -> None:
