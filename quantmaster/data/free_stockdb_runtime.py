@@ -1169,7 +1169,7 @@ class FreeStockDBRuntime:
                 )
                 excused_suspensions = missing_symbols & {
                     str(value).upper()
-                    for value in suspension_evidence.get("symbols") or ()
+                    for value in suspension_evidence.get("full_day_symbols") or ()
                 }
             except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 suspension_error = f"Tushare suspend_d 停牌证据不可用：{str(exc)[:240]}"

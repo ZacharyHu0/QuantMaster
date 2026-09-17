@@ -725,8 +725,9 @@ def test_engine_rejects_nonempty_cross_section_without_quality_evidence(tmp_path
     ) is None
 
 
+@pytest.mark.parametrize("full_day", [True, False, None])
 def test_official_suspension_evidence_reduces_daily_trading_denominator(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, full_day,
 ):
     trade_date = "2026-08-08"
 
@@ -742,6 +743,9 @@ def test_official_suspension_evidence_reduces_daily_trading_denominator(
 
     class Direct:
         source = object()
+
+        def fetch_date(self, dataset_id, value_date):
+            return Local().fetch_date(dataset_id, value_date)
 
     monkeypatch.setattr(
         "quantmaster.data.instrument_snapshots.load_instrument_catalog_snapshot",
@@ -760,6 +764,7 @@ def test_official_suspension_evidence_reduces_daily_trading_denominator(
             "acquired_at": "2026-08-08T07:00:00+00:00",
             "content_hash": "s" * 64,
             "symbols": ["600001.SH"],
+            **({"full_day_symbols": ["600001.SH"] if full_day else []} if full_day is not None else {}),
             "source": "tushare:suspend_d",
             "file_sha256": "f" * 64,
         },
@@ -767,6 +772,10 @@ def test_official_suspension_evidence_reduces_daily_trading_denominator(
     adapter = CompositeResearchAdapter(
         ResearchLake(tmp_path / "lake").catalog, local=Local(), direct=Direct(),
     )
+    if not full_day:
+        with pytest.raises(ResearchCrossSectionIncomplete):
+            adapter.fetch_date("stock_bars", trade_date)
+        return
     value = adapter.fetch_date("stock_bars", trade_date)
     quality = value.attrs["research_partition_quality"]
     assert quality["status"] == "verified_complete"

@@ -240,7 +240,7 @@ class AfterCloseService:
                 suspension_evidence = load_suspension_snapshot(as_of)
                 excused_suspensions = missing_symbols & {
                     str(value).upper()
-                    for value in suspension_evidence.get("symbols") or ()
+                    for value in suspension_evidence.get("full_day_symbols") or ()
                 }
             except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
                 suspension_error = f"本地停牌快照不可用：{str(exc)[:240]}"
