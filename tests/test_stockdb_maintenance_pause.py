@@ -262,3 +262,24 @@ def test_planned_failures_do_not_poison_or_reset_existing_circuits(owner):
     owner("completed", "success")
     health.failure("free-stockdb", ConnectionError("real new fault"), immediate=True)
     assert health.status()["free-stockdb"]["failures"] > before["failures"]
+
+
+def test_recovery_waits_out_existing_cooldown_without_reset(manager, owner, monkeypatch):
+    from quantmaster.data.resilience import PROVIDER_HEALTH
+
+    calls = []
+    monkeypatch.setattr(manager, "_refresh_one", lambda store, symbol, *args: calls.append(symbol))
+    PROVIDER_HEALTH.failure("free-stockdb", ConnectionError("earlier outage"), immediate=True)
+    before = PROVIDER_HEALTH.status("free-stockdb")["free-stockdb"]
+    owner("syncing")
+    job = manager._submit("watchlist", "", "2026-01-01", "2026-09-17", ["600000.SH"])
+    assert run_due(manager, job["id"])["waiting_on"] == "stockdb_update"
+    owner("completed", "success")
+    waiting = run_due(manager, job["id"])
+    assert "冷却" in waiting["detail"] and waiting["failed"] == 0
+    assert not calls
+    assert PROVIDER_HEALTH.status("free-stockdb")["free-stockdb"] == before
+    # Advance the clock past the actual recorded deadline, preserving the row.
+    monkeypatch.setattr("quantmaster.data.maintenance.time.time", lambda: before["open_until"] + 1)
+    assert run_due(manager, job["id"])["status"] == "completed"
+    assert calls == ["600000.SH"]

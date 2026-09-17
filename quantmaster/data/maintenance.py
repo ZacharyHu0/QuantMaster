@@ -56,7 +56,17 @@ class DataRefreshManager:
 
     @staticmethod
     def _stockdb_wait_reason() -> str:
-        return stockdb_wait_reason()
+        reason = stockdb_wait_reason()
+        if reason:
+            return reason
+        from quantmaster.data.resilience import PROVIDER_HEALTH
+
+        # A pre-upgrade outage may already have opened the circuit. Preserve
+        # that evidence and let its existing cooldown expire before resuming.
+        health = PROVIDER_HEALTH.status("free-stockdb").get("free-stockdb", {})
+        if health.get("state") != "closed" and float(health.get("open_until") or 0) > time.time():
+            return "StockDB 仍在已有故障冷却期，等待冷却结束后自动继续；未重置健康记录"
+        return ""
 
     @staticmethod
     def _uses_stockdb(symbol: str) -> bool:

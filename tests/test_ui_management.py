@@ -5312,7 +5312,7 @@ def test_settings_refresh_waits_for_stockdb_and_keeps_polling(live_server, termi
         page.goto(f"{url}/#runtime/settings")
         page.locator("#settings-config-path").wait_for(state="visible")
         page.locator('[data-settings-section="local-data"]').click()
-        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待 StockDB 更新完成")
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待 StockDB 恢复")
         playwright_sync.expect(page.locator("[data-refresh-failures]")).to_contain_text("恢复后自动继续")
         playwright_sync.expect(page.locator("[data-refresh-failures]")).to_contain_text("下次自动检查")
         playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_visible()

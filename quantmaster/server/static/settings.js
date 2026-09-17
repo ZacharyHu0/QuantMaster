@@ -1241,7 +1241,7 @@ const settingsFeature = (() => {
     const failed = Number(task.failed || failures.length);
     const incomplete = task.outcome === 'completed_with_warnings' || failed > 0;
     const warning = incomplete || (!waiting && ['failed', 'cancelled', 'interrupted'].includes(task.status));
-    const label = waiting ? '等待 StockDB 更新完成' : task.status === 'completed' && incomplete
+    const label = waiting ? '等待 StockDB 恢复' : task.status === 'completed' && incomplete
       ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
       : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
