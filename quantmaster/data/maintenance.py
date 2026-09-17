@@ -32,7 +32,7 @@ RefreshScope = Literal["market", "universe", "all_cached"]
 DATA_REFRESH_TASK_TYPE = "data.refresh"
 REFRESH_RESULT_KIND = "data.refresh.result"
 REFRESH_CHECKPOINT = "data.refresh.progress"
-REFRESH_SCHEMA = "2.0"
+REFRESH_SCHEMA = "3.0"
 logger = logging.getLogger(__name__)
 
 
@@ -113,9 +113,9 @@ class DataRefreshManager:
 
         return load_universe(universe)
 
-    def _plan(
+    def preview(
         self, scope: RefreshScope, universe: str = "", start: str = "",
-    ) -> tuple[dict[str, Any], list[str]]:
+    ) -> dict[str, Any]:
         end = market_date().isoformat()
         if scope == "market":
             start = str(market_date() - timedelta(days=365))
@@ -127,7 +127,16 @@ class DataRefreshManager:
             raise ValueError("刷新起始日期必须是 YYYY-MM-DD") from None
         if start_date > market_date():
             raise ValueError("刷新起始日期不能晚于今天")
-        symbols = self._resolve_symbols(scope, universe, start, end)
+        if scope == "universe" and not universe:
+            raise ValueError("指定候选刷新需要选择候选")
+        # Preview is a local estimate, never a supplier discovery request.
+        symbols: list[str] | None = None
+        if scope == "market":
+            symbols = market_symbols()
+        elif scope == "universe" and universe.lower() != "csi800":
+            from quantmaster.data.universe import load_universe
+
+            symbols = load_universe(universe)
         from quantmaster.data.resilience import PROVIDER_HEALTH
 
         health = PROVIDER_HEALTH.status()
@@ -141,26 +150,22 @@ class DataRefreshManager:
             "universe": universe,
             "start": start,
             "end": end,
-            "total": len(symbols),
+            "total": len(symbols) if symbols is not None else None,
+            "planning_required": symbols is None,
             "unhealthy_sources": unhealthy,
             "message": (
-                f"将增量同步 {len(symbols)} 个日线标的；"
-                "优先复用本地缓存，只补齐缺失或过期区间"
+                (f"将增量同步约 {len(symbols)} 个日线标的；" if symbols is not None
+                 else "提交后在后台核验成分证据并确定标的数量；")
+                + "优先复用本地缓存，只补齐缺失或过期区间"
             ),
-        }, symbols
-
-    def preview(
-        self, scope: RefreshScope, universe: str = "", start: str = "",
-    ) -> dict[str, Any]:
-        preview, _symbols = self._plan(scope, universe, start)
-        return preview
+        }
 
     def create(
         self, scope: RefreshScope, universe: str = "", start: str = "",
     ) -> dict[str, Any]:
-        preview, symbols = self._plan(scope, universe, start)
+        preview = self.preview(scope, universe, start)
         with self._lock:
-            return self._submit(scope, universe, str(preview["start"]), str(preview["end"]), symbols)
+            return self._submit(scope, universe, str(preview["start"]), str(preview["end"]))
 
     @staticmethod
     def _fingerprint(symbols: list[str]) -> str:
@@ -177,19 +182,43 @@ class DataRefreshManager:
             "stockdb": free_stockdb_runtime._data_fingerprint(get_config().free_stockdb_root),
             "bars": metadata,
             "source_config": asdict(cfg),
+            "membership": DataRefreshManager._membership_fingerprint(),
         }
         return hashlib.sha256(json.dumps(inputs, sort_keys=True, default=str).encode()).hexdigest()
 
+    @staticmethod
+    def _membership_fingerprint() -> list[tuple[str, int, int]]:
+        root = get_config().data_root
+        paths = [
+            *root.joinpath("universe").glob("*.json"),
+            *root.joinpath("research_lake", "raw", "stock", "1d", "csi800_membership").glob("**/*.parquet"),
+        ]
+        values = []
+        for path in sorted(paths):
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            values.append((str(path.relative_to(root)), info.st_size, info.st_mtime_ns))
+        return values
+
     def _submit(
-        self, scope: str, universe: str, start: str, end: str, symbols: list[str],
+        self, scope: str, universe: str, start: str, end: str, symbols: list[str] | None = None,
     ) -> dict[str, Any]:
         runtime = self._ensure_runtime()
-        spec = {
+        spec: dict[str, Any] = {
             "scope": scope, "universe": universe, "start": start, "end": end,
-            "symbols": sorted(set(symbols)), "refresh_schema": REFRESH_SCHEMA,
+            "refresh_schema": REFRESH_SCHEMA,
         }
-        fingerprint = self._fingerprint(symbols)
-        existing = self._reusable(runtime.store, spec, fingerprint)
+        if symbols is not None:
+            spec["symbols"] = sorted(set(symbols))
+        if scope == "universe" and universe.lower() != "csi800":
+            from quantmaster.data.universe import load_universe_snapshot
+
+            snapshot = load_universe_snapshot(universe)
+            spec["universe_revision"] = snapshot.content_hash
+            spec["symbols"] = sorted(snapshot.symbols)
+        existing = self._reusable(runtime.store, spec)
         if existing:
             value = self.get(str(existing["id"]))
             value.update(created=False, coalesced=True, reused=existing["status"] == "completed")
@@ -197,7 +226,6 @@ class DataRefreshManager:
         job, created = runtime.store.submit(
             DATA_REFRESH_TASK_TYPE,
             spec,
-            input_fingerprint=fingerprint,
             algorithm_version=REFRESH_SCHEMA,
             deadline_seconds=3600,
             max_attempts=8,
@@ -208,9 +236,8 @@ class DataRefreshManager:
         value.update(created=created, coalesced=not created)
         return value
 
-    @staticmethod
     def _reusable(
-        store: UnifiedJobStore, spec: dict[str, Any], fingerprint: str,
+        self, store: UnifiedJobStore, spec: dict[str, Any],
     ) -> dict[str, Any] | None:
         for job in store.list(200, job_type=DATA_REFRESH_TASK_TYPE):
             if job["spec"] != spec:
@@ -219,7 +246,8 @@ class DataRefreshManager:
                 return job
             if job["status"] == "completed":
                 artifact = store.latest_artifact(job["id"], REFRESH_RESULT_KIND)
-                if artifact and artifact["payload"].get("local_fingerprint") == fingerprint:
+                symbols = list(artifact["payload"].get("original_symbols") or ()) if artifact else []
+                if artifact and artifact["payload"].get("local_fingerprint") == self._fingerprint(symbols):
                     return job
         return None
 
@@ -242,8 +270,7 @@ class DataRefreshManager:
         except (OSError, RuntimeError, ValueError, TypeError):
             logger.warning("数据刷新后发布市场快照失败", exc_info=True)
 
-    @staticmethod
-    def _initial_state(context: JobContext, spec: dict[str, Any]) -> dict[str, Any]:
+    def _initial_state(self, context: JobContext, spec: dict[str, Any]) -> dict[str, Any]:
         if spec.get("refresh_schema") != REFRESH_SCHEMA:
             raise ValueError("REFRESH_SCHEMA_UNSUPPORTED: 请新建刷新任务，旧任务证据不支持续跑")
         checkpoint = context.load_checkpoint(REFRESH_CHECKPOINT, context.spec_hash)
@@ -261,7 +288,7 @@ class DataRefreshManager:
                 return {
                     "schema_version": REFRESH_SCHEMA,
                     "attempt": context.attempt,
-                    "original_symbols": list(payload.get("original_symbols") or spec["symbols"]),
+                    "original_symbols": list(payload["original_symbols"]),
                     "symbols": retry_symbols,
                     "next_index": 0,
                     "succeeded": 0,
@@ -273,11 +300,18 @@ class DataRefreshManager:
                 }
         if checkpoint:
             return dict(checkpoint)
+        context.progress(0, "规划刷新", "正在核验候选成分证据；可取消")
+        symbols = spec.get("symbols")
+        if symbols is None:
+            symbols = self._resolve_symbols(spec["scope"], spec["universe"], spec["start"], spec["end"])
+        context.ensure_active()
+        if not symbols:
+            raise ValueError("REFRESH_MEMBERSHIP_EVIDENCE_MISSING: 刷新范围没有有效标的证据")
         return {
             "schema_version": REFRESH_SCHEMA,
             "attempt": context.attempt,
-            "original_symbols": list(spec["symbols"]),
-            "symbols": list(spec["symbols"]),
+            "original_symbols": sorted(set(symbols)),
+            "symbols": sorted(set(symbols)),
             "next_index": 0,
             "succeeded": 0,
             "failures": [],
@@ -357,6 +391,7 @@ class DataRefreshManager:
 
     def _handle(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
         state = self._initial_state(context, spec)
+        context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
         symbols = [str(symbol) for symbol in state["symbols"]]
         self._execute(context, spec, state)
         failures = [*state["blocked_failures"], *state["failures"]]
@@ -369,7 +404,7 @@ class DataRefreshManager:
             "total": len(symbols) + len(state["blocked_failures"]),
             "next_index": len(symbols) + len(state["blocked_failures"]),
             "failed": len(failures),
-            "local_fingerprint": self._fingerprint(list(spec["symbols"])),
+            "local_fingerprint": self._fingerprint(list(state["original_symbols"])),
         }
         artifact = context.write_artifact(
             REFRESH_RESULT_KIND,
@@ -405,6 +440,8 @@ class DataRefreshManager:
             "end_date": spec.get("end"),
             "next_index": int(state.get("next_index") or 0),
             "total": int(state.get("total") or len(symbols)),
+            "total_known": bool(state or "symbols" in spec),
+            "planning": not state and "symbols" not in spec and job["status"] in {"queued", "running"},
             "succeeded": int(state.get("succeeded") or 0),
             "failed": int(state.get("failed") or len(failures)),
             "failures": failures[-200:],
