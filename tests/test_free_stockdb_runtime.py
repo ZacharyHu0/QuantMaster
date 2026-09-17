@@ -1503,8 +1503,9 @@ def test_full_market_validation_accepts_5493_of_5538_with_warning(
     assert any("45 只缺口" in warning for warning in validation["warnings"])
 
 
+@pytest.mark.parametrize("full_day", [True, False, None])
 def test_full_market_validation_accepts_only_explicit_suspension_evidence(
-    isolated_config, monkeypatch,
+    isolated_config, monkeypatch, full_day,
 ) -> None:
     from quantmaster.data import instrument_snapshots
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
@@ -1533,12 +1534,18 @@ def test_full_market_validation_accepts_only_explicit_suspension_evidence(
             "source": "tushare:suspend_d",
             "contract": "tushare-suspend_d-trade-date-v1",
             "symbols": ["000002.SZ"],
+            **({"full_day_symbols": ["000002.SZ"] if full_day else []} if full_day is not None else {}),
             "content_hash": "suspension-proof",
         },
     )
 
     validation = FreeStockDBRuntime()._validate_data("2026-08-07")
 
+    if not full_day:
+        assert validation["complete"] is False
+        assert validation["expected_trading_symbols"] == 2
+        assert validation["excused_suspended_symbols"] == []
+        return
     assert validation["accepted"] is True
     assert validation["complete"] is True
     assert validation["catalog_symbols"] == 2

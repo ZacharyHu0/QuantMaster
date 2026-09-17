@@ -169,6 +169,7 @@ def test_research_daily_separates_stable_signal_and_suspension_interval(monkeypa
             "trade_date": ["20240103"], "suspend_type": ["S"],
         }),
         "trade_cal": pd.DataFrame({
+            "exchange": ["SSE", "SSE", "SSE"],
             "cal_date": ["20240102", "20240103", "20240104"],
             "is_open": [1, 1, 1],
         }),

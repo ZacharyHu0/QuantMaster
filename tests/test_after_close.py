@@ -283,8 +283,9 @@ def test_gate_rejects_first_snapshot_with_stable_twenty_percent_symbol_gap(servi
         service._gate(service.source.frame, service.source.board_hierarchy(), expected_count=5)
 
 
+@pytest.mark.parametrize("full_day", [True, False, None])
 def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
-    service, isolated_config, monkeypatch,
+    service, isolated_config, monkeypatch, full_day,
 ) -> None:
     from quantmaster.data import instrument_snapshots
 
@@ -297,9 +298,16 @@ def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
             "source": "tushare:suspend_d",
             "contract": "tushare-suspend_d-trade-date-v1",
             "symbols": ["000002.SZ"],
+            **({"full_day_symbols": ["000002.SZ"] if full_day else []} if full_day is not None else {}),
             "content_hash": "suspension-proof",
         },
     )
+
+    if not full_day:
+        with pytest.raises(DataGateRejected):
+            service._gate(service.source.frame, service.source.board_hierarchy(),
+                          expected_count=len(symbols), expected_symbols=symbols)
+        return
 
     _as_of, coverage = service._gate(
         service.source.frame,

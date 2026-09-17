@@ -539,13 +539,14 @@ class CompositeResearchAdapter:
                 suspension = load_or_fetch_suspension_snapshot(
                     getattr(self.direct, "source", None), trade_date,
                 )
-                suspended = set(str(item).upper() for item in suspension["symbols"])
-                unexpected_suspensions = suspended - expected
+                reported = set(str(item).upper() for item in suspension["symbols"])
+                unexpected_suspensions = reported - expected
                 if unexpected_suspensions:
                     raise InstrumentCatalogEvidenceError(
                         "suspend_d 包含证券目录目标日宇宙之外的代码"
                     )
                 catalog_count = len(expected)
+                suspended = {str(item).upper() for item in suspension.get("full_day_symbols") or ()}
                 expected = expected - suspended
                 if not expected:
                     raise InstrumentCatalogEvidenceError("扣除停牌后 expected_trading 为空")
