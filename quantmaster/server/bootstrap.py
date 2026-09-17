@@ -348,12 +348,12 @@ class _DefaultWorkerPlan:
         self.ashare_fear_greed_refresher.stop()
         self.paper_automation_worker.stop()
         self.rotation_worker.stop()
-        self.repair_worker.shutdown()
-        self.data_refresh_manager.shutdown()
-        self.research_worker.shutdown()
-        self.backtest_jobs.shutdown()
+        self.repair_worker.pause()
+        self.data_refresh_manager.pause()
+        self.research_worker.pause()
+        self.backtest_jobs.pause()
         if self.lab_worker is not None:
-            self.lab_worker.stop()
+            self.lab_worker.drain()
         self.runtime.stop()
         self.stock_analysis_worker.pause()
         self.after_close_worker.pause()
@@ -386,7 +386,11 @@ class _DefaultWorkerPlan:
 
     def idle(self) -> bool:
         return bool(
-            not self.data_refresh_manager.active
+            self.data_refresh_manager.idle
+            and self.repair_worker.idle
+            and self.research_worker.idle
+            and self.runtime.service.jobs.idle
+            and (self.lab_worker is None or self.lab_worker.jobs.idle)
             and self.rotation_worker.idle
             and self.paper_automation_worker.idle
             and self.stock_analysis_worker.idle

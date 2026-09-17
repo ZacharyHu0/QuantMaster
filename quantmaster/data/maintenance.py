@@ -252,7 +252,10 @@ class DataRefreshManager:
         return None
 
     def _start(self, _job_id: str) -> None:
-        self._ensure_runtime().start()
+        with self._lock:
+            runtime = self._ensure_runtime()
+            if not runtime.stopping:
+                runtime.start()
 
     def _run(self, job_id: str) -> None:
         """Execute one queued fixture synchronously through the kernel."""
@@ -532,7 +535,7 @@ class DataRefreshManager:
         while not self._stop.is_set():
             try:
                 # Existing automatic-maintenance switch also bounds intake.
-                if get_config().data.repair_enabled:
+                if get_config().data.repair_enabled and not self._ensure_runtime().stopping:
                     for job in self.maintain_consumed():
                         if self._retry_due(job):
                             self.resume(str(job["id"]))
@@ -547,6 +550,17 @@ class DataRefreshManager:
         finished = datetime.fromisoformat(str(job["finished_at"]))
         delay = min(3600, 60 * 2 ** max(0, int(job.get("attempt") or 1) - 1))
         return (datetime.now(UTC) - finished).total_seconds() >= delay
+
+    @property
+    def idle(self) -> bool:
+        runtime = self._runtime
+        return runtime is None or runtime.idle
+
+    def pause(self) -> None:
+        with self._lock:
+            runtime = self._runtime
+            if runtime is not None:
+                runtime.pause()
 
     def shutdown(self, timeout: float = 10.0) -> None:
         self._stop.set()

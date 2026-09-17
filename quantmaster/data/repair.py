@@ -380,7 +380,7 @@ class DataRepairManager:
     def start(self) -> None:
         if self.read_only:
             return
-        self._ensure_runtime()
+        self._ensure_runtime().resume()
         with self._lock:
             if self._workers:
                 return
@@ -396,14 +396,31 @@ class DataRepairManager:
     def _loop(self) -> None:
         while not self._stop.is_set():
             runtime = self._ensure_runtime()
+            if runtime.stopping:
+                self._stop.wait(0.1)
+                continue
             job = self._next_due(runtime.store)
             if job is None:
                 self._wakeup.wait(0.75)
                 self._wakeup.clear()
                 continue
-            runtime.dispatch_job(str(job["id"]))
+            try:
+                runtime.dispatch_job(str(job["id"]))
+            except RuntimeError:
+                if not runtime.stopping:
+                    raise
             self._wakeup.wait(0.05)
             self._wakeup.clear()
+
+    @property
+    def idle(self) -> bool:
+        runtime = self._runtime
+        return runtime is None or runtime.idle
+
+    def pause(self) -> None:
+        runtime = self._runtime
+        if runtime is not None:
+            runtime.pause()
 
     def shutdown(self, timeout: float = 10.0) -> None:
         self._stop.set()

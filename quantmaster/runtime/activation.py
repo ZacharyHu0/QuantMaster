@@ -57,6 +57,13 @@ _ACTIVATION_FAILURES = (
 )
 
 
+def _remaining_budget(deadline: float, limit: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("activation deadline exceeded")
+    return min(remaining, limit)
+
+
 @dataclass(frozen=True)
 class Candidate:
     build_sha: str
@@ -508,8 +515,10 @@ class SubprocessGenerationController:
 
         from quantmaster.runtime.worker_ipc import call_worker_command
 
+        if timeout <= 0:
+            return False
         deadline = time.monotonic() + min(
-            max(0.05, float(timeout)), WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS,
+            float(timeout), WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS,
         )
         while True:
             status: Mapping[str, object] | None
@@ -517,7 +526,9 @@ class SubprocessGenerationController:
                 status = call_worker_command(
                     "maintenance.status",
                     {"token": ""},
-                    timeout=min(float(timeout), WORKER_DRAIN_STATUS_TIMEOUT_SECONDS),
+                    timeout=max(0.001, min(
+                        deadline - time.monotonic(), WORKER_DRAIN_STATUS_TIMEOUT_SECONDS,
+                    )),
                     root=worker_root,
                     application_identity=identity,
                 )
@@ -529,7 +540,7 @@ class SubprocessGenerationController:
                         "worker_maintenance_active", "当前 runtime-worker 正在非更新维护冻结",
                     )
                 self._drain_identity = identity
-                self._drain_token = ""
+                self._drain_token = str(status.get("token") or "")
                 self._drain_root = worker_root
                 return True
             if status is not None and not wait_for_activation_drain:
@@ -546,6 +557,7 @@ class SubprocessGenerationController:
         from quantmaster.runtime.identity import ApplicationIdentity
         from quantmaster.runtime.worker_ipc import call_worker_command
 
+        deadline = time.monotonic() + max(0.1, float(timeout))
         drain_timeout = min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS)
         identity = ApplicationIdentity(
             str(current.get("build_sha") or ""),
@@ -553,19 +565,22 @@ class SubprocessGenerationController:
             str(current.get("runtime_generation") or ""),
         )
         worker_root = self._current_worker_root()
+        self._drain_identity = identity
+        self._drain_root = worker_root
         if self._reuse_existing_activation_drain(identity, worker_root, timeout):
             return
         try:
             result = call_worker_command(
                 "maintenance.enter",
                 {"reason": "application activation", "timeout": drain_timeout},
-                timeout=timeout,
+                timeout=max(0.001, deadline - time.monotonic()),
                 root=worker_root,
                 application_identity=identity,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             if self._reuse_existing_activation_drain(
-                identity, worker_root, timeout, wait_for_activation_drain=True,
+                identity, worker_root, deadline - time.monotonic(),
+                wait_for_activation_drain=True,
             ):
                 return
             raise ActivationBlocked(
@@ -573,24 +588,41 @@ class SubprocessGenerationController:
                 "当前 runtime-worker 排空状态未确认",
                 phase="maintenance_status_reconcile",
             ) from exc
+        if result.get("state") != "frozen" or not result.get("token"):
+            raise ActivationBlocked("worker_drain_unconfirmed", "排空响应缺少冻结租约")
         self._drain_identity = identity
         self._drain_token = str(result.get("token") or "")
         self._drain_root = worker_root
 
     def resume_current(self, timeout: float) -> None:
         identity, token, worker_root = self._drain_identity, self._drain_token, self._drain_root
-        if identity is None or not token:
+        if identity is None:
             return
         from quantmaster.runtime.worker_ipc import call_worker_command
 
+        deadline = time.monotonic() + max(0.001, timeout)
         try:
-            call_worker_command(
-                "maintenance.exit",
-                {"token": token},
-                timeout=min(timeout, WORKER_DRAIN_TIMEOUT_SECONDS),
-                root=worker_root,
-                application_identity=identity,
+            status = call_worker_command(
+                "maintenance.status", {"token": token},
+                timeout=_remaining_budget(deadline, WORKER_DRAIN_STATUS_TIMEOUT_SECONDS),
+                root=worker_root, application_identity=identity,
             )
+            if status.get("state") == "frozen":
+                token = token or str(status.get("token") or "")
+                if status.get("reason") != "application activation" or not token:
+                    raise RuntimeError("activation maintenance lease unavailable")
+                call_worker_command(
+                    "maintenance.exit", {"token": token},
+                    timeout=_remaining_budget(deadline, WORKER_DRAIN_TIMEOUT_SECONDS),
+                    root=worker_root, application_identity=identity,
+                )
+                status = call_worker_command(
+                    "maintenance.status", {"token": ""},
+                    timeout=_remaining_budget(deadline, WORKER_DRAIN_STATUS_TIMEOUT_SECONDS),
+                    root=worker_root, application_identity=identity,
+                )
+            if status.get("state") != "open":
+                raise RuntimeError("worker maintenance recovery unconfirmed")
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             raise ActivationBlocked("worker_unavailable", "当前 runtime-worker 无法恢复") from exc
         self._drain_identity = None
@@ -645,6 +677,7 @@ class SubprocessGenerationController:
         value = cast(Mapping[str, object], runtime["worker"])
         return (
             value.get("available") is True
+            and value.get("commands_available") is True
             and value.get("build_sha") == identity.build_sha
             and value.get("slot_id") == identity.slot_id
             and value.get("runtime_generation") == identity.runtime_generation

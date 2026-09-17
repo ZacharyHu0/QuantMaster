@@ -87,17 +87,17 @@ class MaintenanceBarrier:
             self._reason = str(reason)[:300]
             participants = list(self._participants.values())
         drained: list[MaintenanceParticipant] = []
+        deadline = time.monotonic() + max(0.1, float(timeout))
         try:
             for participant in participants:
-                participant.drain()
                 drained.append(participant)
-            deadline = time.monotonic() + max(0.1, float(timeout))
+                participant.drain()
             while True:
                 busy = [participant.name for participant in drained if not participant.idle()]
-                if not busy:
-                    break
                 if time.monotonic() >= deadline:
                     raise TimeoutError("后台组件未在期限内排空: " + ", ".join(busy))
+                if not busy:
+                    break
                 time.sleep(0.05)
             with self._lock:
                 if self._token != token or self._state != "draining":
@@ -110,8 +110,7 @@ class MaintenanceBarrier:
                     self._state = "open"
                     self._token = ""
                     self._reason = ""
-            for participant in reversed(drained):
-                participant.resume()
+            self._resume_participants(drained)
             raise
 
     def exit(self, lease: MaintenanceLease) -> None:
@@ -122,6 +121,9 @@ class MaintenanceBarrier:
             self._state = "open"
             self._token = ""
             self._reason = ""
+        self._resume_participants(participants)
+
+    def _resume_participants(self, participants: list[MaintenanceParticipant]) -> None:
         failures = []
         for participant in reversed(participants):
             try:
@@ -132,6 +134,8 @@ class MaintenanceBarrier:
                 )
                 failures.append(f"{participant.name}: {type(exc).__name__}: {exc}")
         if failures:
+            with self._lock:
+                self._state = "recovery_failed"
             raise RuntimeError("维护结束后组件恢复失败: " + "; ".join(failures))
 
     def require_writable(self) -> None:

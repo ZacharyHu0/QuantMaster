@@ -168,8 +168,11 @@ class RuntimeWorker:
         if detail:
             value["schema_migration_detail"] = detail[:800]
         command_server = self._command_server
+        maintenance = maintenance_barrier.status()
+        value["maintenance"] = maintenance
         value["commands_available"] = bool(
-            command_server is not None and command_server.running,
+            command_server is not None and command_server.running
+            and maintenance.get("state") != "recovery_failed",
         )
         if self._command_error:
             value["commands_error"] = self._command_error
@@ -250,6 +253,12 @@ class RuntimeWorker:
                         self._maintenance_lease is not None
                         and self._maintenance_lease.token == token
                         and maintenance_barrier.frozen
+                    ),
+                    "token": (
+                        self._maintenance_lease.token
+                        if self._maintenance_lease is not None
+                        and self._maintenance_lease.reason == "application activation"
+                        and maintenance_barrier.frozen else ""
                     ),
                     "worker_id": self._worker_id,
                     "pid": os.getpid(),

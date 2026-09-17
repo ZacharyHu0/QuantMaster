@@ -63,14 +63,14 @@ class AutomationRuntime:
     def _activate_leader_locked(self) -> bool:
         """在已经取得租约后启动调度器；调用方必须持有 ``_lock``。"""
         self.leader = True
+        jobs = getattr(self.service, "jobs", None)
+        if jobs is not None:
+            jobs.start()
         if not self._start_scheduler_locked():
             self.service.store.release_lease("scheduler", self.owner)
             self.leader = False
             return False
         self.service.dispatcher.start()
-        jobs = getattr(self.service, "jobs", None)
-        if jobs is not None:
-            jobs.start()
         self.start_channels()
         return True
 

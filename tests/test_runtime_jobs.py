@@ -623,3 +623,47 @@ def test_compute_child_reports_sanitized_failure_detail(tmp_path):
     failed = _wait(store, job["id"], {"failed"}, timeout=15)
     assert failed["detail"].startswith(f"{detail}; child_frames=")
     runtime.stop()
+
+
+def test_manual_dispatch_runtime_can_resume_without_replacing_executor(tmp_path):
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "manual.sqlite"), dispatch=False)
+    executor = runtime._executor
+    runtime.pause()
+    assert runtime.stopping
+    runtime.resume()
+    assert not runtime.stopping
+    assert runtime._executor is executor
+    runtime.stop()
+    with pytest.raises(RuntimeError, match="永久停止"):
+        runtime.resume()
+
+
+def test_resume_waits_for_previous_generation_of_same_job_to_exit(tmp_path):
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "exclusive.sqlite"), max_workers=2)
+    first_started, release_first, second_started = (threading.Event() for _ in range(3))
+    attempts = []
+
+    def handler(context, spec):
+        attempts.append(context.attempt)
+        if len(attempts) == 1:
+            first_started.set()
+            assert release_first.wait(3)
+        else:
+            second_started.set()
+        return JobOutcome("completed", "resumed exclusively")
+
+    runtime.register("test.exclusive", handler)
+    job, _ = runtime.submit("test.exclusive", {})
+    try:
+        assert first_started.wait(2)
+        runtime.pause()
+        runtime.resume()
+        assert not second_started.wait(0.15)
+        assert not runtime.idle
+        release_first.set()
+        assert second_started.wait(2)
+        assert _wait(runtime.store, job["id"], {"completed"})["detail"] == "resumed exclusively"
+        assert len(attempts) == 2
+    finally:
+        release_first.set()
+        runtime.stop()

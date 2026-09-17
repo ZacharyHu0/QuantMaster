@@ -2066,6 +2066,14 @@ class UnifiedJobRuntime:
             if not self._accepting_generation(scheduled_generation):
                 return
             key = (job_id, scheduled_generation)
+            if any(
+                active_id == job_id and active_generation != scheduled_generation
+                for active_id, active_generation in self._active
+            ):
+                # A maintenance timeout may reopen admission before a fenced
+                # provider/atomic unit exits. Leave this durable job queued for
+                # the dispatcher; never run two attempts of it concurrently.
+                return
             if key in self._active:
                 if reschedule_after_active:
                     self._reschedule_after_active.add(key)
@@ -2399,6 +2407,13 @@ class UnifiedJobRuntime:
 
     def resume(self) -> None:
         """Resume interrupted jobs after a bounded maintenance window."""
+        with self._lock:
+            if self._stop.is_set():
+                raise RuntimeError("任务运行时已经永久停止")
+            if not self._dispatch_enabled:
+                self._paused.clear()
+                self._phase = "running"
+                return
         self.start()
 
     def stop(self, deadline_seconds: float = DEFAULT_RUNTIME_DRAIN_SECONDS) -> dict[str, Any]:

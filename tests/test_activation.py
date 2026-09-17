@@ -444,6 +444,7 @@ def test_packaged_worker_readiness_comes_from_candidate_http_projection(monkeypa
         return {
             "worker": {
                 "available": True,
+                "commands_available": True,
                 "pid": 42,
                 "build_sha": identity.build_sha,
                 "slot_id": identity.slot_id,
@@ -532,82 +533,43 @@ def test_packaged_controller_blocks_when_candidate_still_owns_port(monkeypatch):
 
 
 def test_packaged_controller_releases_the_drain_lease(monkeypatch, tmp_path):
-    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
     controller = SubprocessGenerationController()
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    monkeypatch.setattr(controller, "current_identity", lambda: identity.__dict__)
+    monkeypatch.setattr(controller, "_current_worker_root", lambda: tmp_path)
+    state = {"state": "open"}
     calls = []
-    worker_root = tmp_path / "active-data"
-
-    def current_json(path):
-        if path == "health":
-            return {
-                "build_sha": identity.build_sha,
-                "slot_id": identity.slot_id,
-                "runtime_generation": identity.runtime_generation,
-            }
-        assert path == "settings"
-        return {"data": {"root": str(worker_root)}}
-
-    monkeypatch.setattr(controller, "_json", current_json)
 
     def command(operation, payload, **kwargs):
-        calls.append((
-            operation, payload, kwargs["application_identity"], kwargs["timeout"], kwargs["root"],
-        ))
-        if operation == "maintenance.status":
-            return {"state": "running"}
-        return {"token": "lease"} if operation == "maintenance.enter" else {"released": True}
+        calls.append(operation)
+        assert kwargs["application_identity"] == identity
+        if operation == "maintenance.enter":
+            state.update(state="frozen", token="lease", reason="application activation")
+        elif operation == "maintenance.exit":
+            assert payload["token"] == "lease"
+            state.update(state="open", token="", reason="")
+        return dict(state)
 
     monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
-
     controller.drain_current(15.0)
     controller.resume_current(15.0)
-
-    assert calls == [
-        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
-        (
-            "maintenance.enter",
-            {"reason": "application activation", "timeout": 10.0},
-            identity,
-            15.0,
-            worker_root,
-        ),
-        ("maintenance.exit", {"token": "lease"}, identity, 10.0, worker_root),
-    ]
+    assert state["state"] == "open"
+    assert calls == ["maintenance.status", "maintenance.enter", "maintenance.status",
+                     "maintenance.exit", "maintenance.status"]
 
 
 def test_packaged_controller_reuses_a_confirmed_activation_drain(monkeypatch, tmp_path):
-    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
     controller = SubprocessGenerationController()
-    calls = []
-    worker_root = tmp_path / "active-data"
-
-    def current_json(path):
-        if path == "health":
-            return {
-                "build_sha": identity.build_sha,
-                "slot_id": identity.slot_id,
-                "runtime_generation": identity.runtime_generation,
-            }
-        assert path == "settings"
-        return {"data": {"root": str(worker_root)}}
-
-    monkeypatch.setattr(controller, "_json", current_json)
-
-    def command(operation, payload, **kwargs):
-        calls.append((
-            operation, payload, kwargs["application_identity"], kwargs["timeout"], kwargs["root"],
-        ))
-        assert operation == "maintenance.status"
-        return {"state": "frozen", "reason": "application activation"}
-
-    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
-
+    identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    monkeypatch.setattr(controller, "current_identity", lambda: identity.__dict__)
+    monkeypatch.setattr(controller, "_current_worker_root", lambda: tmp_path)
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", lambda *a, **k: {
+        "state": "frozen", "reason": "application activation",
+    })
     controller.drain_current(15.0)
-    controller.resume_current(15.0)
-
-    assert calls == [
-        ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
-    ]
+    # Old workers do not expose a recoverable token. Never claim rollback succeeded.
+    with pytest.raises(ActivationBlocked, match="无法恢复"):
+        controller.resume_current(15.0)
 
 
 def test_packaged_controller_retries_an_inherited_activation_drain(monkeypatch, tmp_path):
@@ -696,7 +658,7 @@ def test_packaged_controller_reconciles_an_activation_drain_after_lost_enter_rep
             "maintenance.enter",
             {"reason": "application activation", "timeout": 10.0},
             identity,
-            15.0,
+            pytest.approx(15.0, abs=0.1),
             worker_root,
         ),
         ("maintenance.status", {"token": ""}, identity, 0.5, worker_root),
@@ -810,3 +772,84 @@ def test_packaged_controller_inherits_drained_worker_root(monkeypatch, tmp_path)
     controller.start_generation(slot, identity)
 
     assert captured["environment"]["QM_DATA_ROOT"] == str(worker_root)
+
+
+def test_candidate_with_live_heartbeat_but_dead_ipc_is_not_ready(monkeypatch):
+    identity = ApplicationIdentity(SHA_B, SHA_B, "d" * 32)
+    controller = SubprocessGenerationController()
+    monkeypatch.setattr(controller, "_json", lambda path: {"worker": {
+        **identity.__dict__, "available": True, "commands_available": False,
+    }})
+    assert not controller._worker_ready(identity)
+
+
+def test_resume_uses_one_deadline_for_status_exit_and_confirmation(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    controller = SubprocessGenerationController()
+    controller._drain_identity = ApplicationIdentity(SHA_A, SHA_A, "d" * 32)
+    controller._drain_root = tmp_path
+    controller._drain_token = "lease"
+    now = [0.0]
+    calls = []
+    monkeypatch.setattr(activation, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def command(operation, payload, **kwargs):
+        calls.append((operation, kwargs["timeout"]))
+        now[0] += kwargs["timeout"]
+        return {"state": "frozen", "reason": "application activation", "token": "lease"}
+
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", command)
+    with pytest.raises(ActivationBlocked, match="无法恢复"):
+        controller.resume_current(0.1)
+    assert calls == [("maintenance.status", 0.1)]
+
+
+def test_interrupted_refresh_rows_are_not_physical_writers(tmp_path):
+    from quantmaster.data.maintenance import DATA_REFRESH_TASK_TYPE, DataRefreshManager
+    from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
+
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "idle.sqlite"), dispatch=False)
+    manager = DataRefreshManager(runtime=runtime)
+    job, _ = runtime.store.submit(DATA_REFRESH_TASK_TYPE, {"scope": "market"})
+    assert runtime.store.claim(job["id"], runtime.identity.value)
+    try:
+        manager.pause()
+        assert runtime.store.get(job["id"])["status"] == "interrupted"
+        assert manager.active  # Durable work remains resumable.
+        assert manager.idle  # No physical handler owns writes.
+    finally:
+        runtime.stop()
+
+
+def test_late_refresh_intake_cannot_resume_a_paused_executor(tmp_path):
+    import threading
+
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
+
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "intake.sqlite"), dispatch=True)
+    manager = DataRefreshManager(runtime=runtime)
+    ready, proceed = threading.Event(), threading.Event()
+
+    def intake():
+        ready.set()
+        assert proceed.wait(2)
+        manager._start("already-persisted-job")
+
+    thread = threading.Thread(target=intake)
+    thread.start()
+    try:
+        assert ready.wait(2)
+        manager.pause()
+        generation = runtime.generation
+        proceed.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert runtime.stopping
+        assert runtime.generation == generation
+        assert manager.idle
+    finally:
+        proceed.set()
+        thread.join(timeout=2)
+        runtime.stop()

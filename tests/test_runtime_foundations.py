@@ -362,3 +362,28 @@ def test_contract_model_rejects_extra_and_nested_nonfinite_values():
     assert nonfinite.value.errors()[0]["type"] == "value_error"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Payload.model_validate({"options": {}, "unknown": True})
+
+
+def test_failed_partial_drain_resumes_every_participant_and_stays_blocked():
+    barrier = MaintenanceBarrier()
+    events = []
+
+    def broken_resume():
+        events.append("resume:second")
+        raise RuntimeError("resume failed")
+
+    def partial_drain():
+        events.append("drain:second")
+        raise TimeoutError("partial drain")
+
+    barrier.register(MaintenanceParticipant(
+        "first", lambda: events.append("drain:first"),
+        lambda: events.append("resume:first"), lambda: True,
+    ))
+    barrier.register(MaintenanceParticipant("second", partial_drain, broken_resume, lambda: False))
+    with pytest.raises(RuntimeError, match="恢复失败"):
+        barrier.enter("test")
+    assert events == ["drain:first", "drain:second", "resume:second", "resume:first"]
+    assert barrier.status()["state"] == "recovery_failed"
+    with pytest.raises(MaintenanceActiveError):
+        barrier.require_writable()
