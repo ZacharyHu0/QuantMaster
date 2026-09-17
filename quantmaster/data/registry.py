@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,6 +33,7 @@ from quantmaster.data.base import (
     BarDataQuality,
     DataCapability,
     DataSource,
+    HistoryRepairError,
     Market,
     MarketDataUnavailable,
     validate_frequency,
@@ -49,7 +51,7 @@ from quantmaster.data.resilience import (
     local_only_data_access,
     remote_io_allowed,
 )
-from quantmaster.data.semantics import NumericSemantics, PriceType
+from quantmaster.data.semantics import NumericSemantics, PriceType, SemanticContractError
 from quantmaster.data.storage import BarStore, IntradayBarStore
 from quantmaster.market_capabilities import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
@@ -2374,6 +2376,120 @@ def _load_history_frame(
         )
 
 
+def _repair_candidate_quality(
+    symbol: str, frame: pd.DataFrame, start: str, end: str, source: str,
+) -> BarDataQuality:
+    quality = _assess_daily_frame(frame, start, end, symbol=symbol, source=source)
+    semantics = quality.semantics
+    if quality.status == "unavailable" or semantics is None:
+        raise HistoryRepairError(symbol, "响应数值或日期校验失败")
+    if (
+        frame.attrs.get("instrument") != symbol
+        or semantics.provider != source
+        or semantics.provider_interface != "tushare:daily+adj_factor"
+        or semantics.price_type != PriceType.FORWARD_ADJUSTED
+        or semantics.factor_coverage != "complete"
+        or not semantics.adjustment_anchor_date
+        or not semantics.adjustment_provider_definition
+        or not semantics.currency
+        or "unknown" in {semantics.price_unit, semantics.volume_unit, semantics.amount_unit}
+    ):
+        raise HistoryRepairError(symbol, "来源身份、单位或复权因子证据不足")
+    return quality
+
+
+def _repair_history_ranges(
+    cached: pd.DataFrame | None, start: str, end: str,
+) -> tuple[str, str, str, str]:
+    full_start, full_end = start, end
+    fetch_start, fetch_end = start, end
+    if cached is not None and not cached.empty:
+        full_start = min(start, str(cached.index.min().date()))
+        full_end = max(end, str(cached.index.max().date()))
+        if end > str(cached.index.max().date()):
+            fetch_start = min(start, str(cached.index[max(0, len(cached) - 5)].date()))
+        if start < str(cached.index.min().date()):
+            fetch_end = max(end, str(cached.index[min(4, len(cached) - 1)].date()))
+    return full_start, full_end, fetch_start, fetch_end
+
+
+def _compatible_repair_increment(
+    cached: pd.DataFrame | None, meta: dict[str, Any], frame: pd.DataFrame,
+    quality: BarDataQuality, source: str,
+) -> pd.DataFrame | None:
+    if cached is None or cached.empty:
+        return None
+    previous = json.loads(str(meta.get("quality_json") or "{}")).get("semantics")
+    if not previous or meta.get("last_source") != source or quality.semantics is None:
+        return None
+    try:
+        NumericSemantics.from_dict(previous).require_mergeable(quality.semantics)
+        candidate = _align_increment(cached, frame, "right")
+    except (SemanticContractError, AdjustmentMismatch):
+        return None
+    candidate.attrs = dict(frame.attrs)
+    return candidate
+
+
+def _repair_history_locked(
+    symbol: str, start: str, end: str, store: BarStore, priority: str, cancelled,
+) -> pd.DataFrame:
+    """Stage one explicitly selected Tushare repair; never splice conflicting evidence."""
+    def check_cancelled() -> None:
+        if cancelled and cancelled():
+            raise InterruptedError("数据补齐已取消")
+
+    check_cancelled()
+    cached = store.get(symbol)
+    meta = store.metadata(symbol) or {}
+    full_start, full_end, fetch_start, fetch_end = _repair_history_ranges(cached, start, end)
+    factories = _request_factories(
+        priority=priority, allow_online=True, provider="tushare",
+    ).get(guess_market(symbol), [])
+    if not factories:
+        raise HistoryRepairError(symbol, "所选来源不支持该标的")
+    source = factories[0]()
+
+    def fetch(left: str, right: str) -> tuple[pd.DataFrame, BarDataQuality]:
+        check_cancelled()
+        # Provider cache TTL and session floor remain authoritative. In
+        # particular, do not bypass a trusted historical endpoint response.
+        with data_priority(priority), bypass_endpoint_cache(False):
+            frame = source.daily(symbol, left, right)
+        check_cancelled()
+        return frame, _repair_candidate_quality(symbol, frame, left, right, source.name)
+
+    local = source.cached_daily(symbol, full_start, full_end)
+    if local is not None:
+        fetch_start, fetch_end = full_start, full_end
+        frame = local
+        quality = _repair_candidate_quality(symbol, frame, full_start, full_end, source.name)
+    else:
+        frame, quality = fetch(fetch_start, fetch_end)
+    candidate = _compatible_repair_increment(cached, meta, frame, quality, source.name)
+    replace_coverage = candidate is None
+    if candidate is None:
+        # The old range remains part of the replacement contract even when the
+        # user's gap starts years later. Nothing has been written yet.
+        if (full_start, full_end) != (fetch_start, fetch_end):
+            frame, quality = fetch(full_start, full_end)
+        candidate = frame
+    if not _is_complete_refresh(candidate, cached, full_start, full_end, symbol=symbol):
+        raise HistoryRepairError(symbol, "新响应缺失旧交易日或完整历史范围")
+    sessions, _, complete = _market_sessions(guess_market(symbol), pd.Timestamp(start), pd.Timestamp(end))
+    if not complete or sessions.empty or not sessions.difference(candidate.index).empty:
+        raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+    check_cancelled()
+    store.put(
+        symbol, candidate, replace=True, replace_coverage=replace_coverage,
+        request_start=full_start if replace_coverage else fetch_start,
+        request_end=full_end if replace_coverage else fetch_end,
+        source=source.name, quality=quality.to_dict(),
+        before_commit=check_cancelled, preserve_on_failure=True,
+    )
+    return candidate.loc[start:end]
+
+
 def refresh_history(
     symbol: str,
     start: str,
@@ -2385,6 +2501,8 @@ def refresh_history(
     work_class: str = "normal",
     source_name: str = "",
     purpose: CachePurpose | str = CachePurpose.CURRENT_ANALYSIS,
+    repair_incompatible: bool = False,
+    cancelled=None,
 ) -> BarDataEnvelope[pd.DataFrame]:
     """Refresh daily bars in a worker context and return their evidence.
 
@@ -2393,16 +2511,29 @@ def refresh_history(
     expose the old mixed read/refresh contract.
     """
     resolved_store = store or _default_bar_store()
-    frame = _load_history_frame(
-        symbol,
-        start,
-        end,
-        use_cache=use_cache,
-        store=resolved_store,
-        refresh=mode,
-        priority=work_class,
-        provider=source_name,
-    )
+    if repair_incompatible and source_name == "tushare":
+        with resolved_store.lock(symbol):
+            try:
+                frame = _repair_history_locked(
+                    symbol, start, end, resolved_store, work_class, cancelled,
+                )
+            except (InterruptedError, HistoryRepairError):
+                raise
+            except (OSError, sqlite3.Error, RuntimeError, TypeError, ValueError) as exc:
+                raise HistoryRepairError(
+                    symbol, "来源请求或原子写入失败；检查来源权限、网络及存储后重新预检",
+                ) from exc
+    else:
+        frame = _load_history_frame(
+            symbol,
+            start,
+            end,
+            use_cache=use_cache,
+            store=resolved_store,
+            refresh=mode,
+            priority=work_class,
+            provider=source_name,
+        )
     return _bar_envelope(
         frame, symbol=symbol, start=start, end=end, store=resolved_store, frequency="1d",
         purpose=purpose,

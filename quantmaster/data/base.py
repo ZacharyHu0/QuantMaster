@@ -46,6 +46,15 @@ class MarketDataUnavailable(RuntimeError):
         self.provenance = provenance
 
 
+class HistoryRepairError(RuntimeError):
+    """An explicit repair could not safely publish a replacement history."""
+
+    def __init__(self, symbol: str, reason: str):
+        super().__init__(f"{symbol} 历史重建未发布，原缓存保留：{reason}")
+        self.symbol = symbol
+        self.reason = reason
+
+
 class DataEvidenceNotReady(MarketDataUnavailable):
     """A formal action was requested before its local evidence was complete.
 
