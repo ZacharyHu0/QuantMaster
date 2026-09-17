@@ -85,3 +85,107 @@ def test_unified_jobs_exposes_repair_events_cancel_and_retry():
     assert [item["type"] for item in events] == [
         "job_queued", "data_repair_evidence", "job_cancel_requested", "job_retried",
     ]
+
+
+def test_refresh_routes_preserve_durable_planning_through_cancel_retry_and_completion(
+    isolated_config, monkeypatch,
+):
+    import threading
+
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    manager = DataRefreshManager()
+    manager.initialize()
+    reader = DataRefreshManager()
+    monkeypatch.setattr(manager, "_start", lambda _: None)
+    monkeypatch.setattr("quantmaster.server.jobs.data_refresh_manager", reader)
+    planning, resolve, syncing, finish = (threading.Event() for _ in range(4))
+
+    def resolve_symbols(*_args):
+        planning.set()
+        assert resolve.wait(10)
+        return ["600000.SH", "000001.SZ"]
+
+    def refresh_one(*_args):
+        syncing.set()
+        assert finish.wait(10)
+        return None
+
+    def worker_command(operation, payload, **_kwargs):
+        if operation == "data.refresh.create":
+            return manager.create(payload["scope"], payload["universe"], payload["start"])
+        if operation == "data.refresh.cancel":
+            return manager.cancel(payload["job_id"])
+        if operation == "data.refresh.retry":
+            return manager.resume(payload["job_id"])
+        raise AssertionError(operation)
+
+    monkeypatch.setattr(manager, "_resolve_symbols", resolve_symbols)
+    monkeypatch.setattr(manager, "_refresh_one", refresh_one)
+    monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
+    monkeypatch.setattr("quantmaster.runtime.worker_ipc.call_worker_command", worker_command)
+    monkeypatch.setattr(
+        "quantmaster.runtime.worker.runtime_worker_status",
+        lambda: {"available": True, "status": "running", "age_seconds": 0.0},
+    )
+    client = TestClient(app)
+    headers = {"X-CSRF-Token": client.get("/api/v1/session").json()["csrf_token"]}
+
+    def assert_state(value, status, known, is_planning, total):
+        assert value["status"] == status
+        assert value["total_known"] is known
+        assert value["planning"] is is_planning
+        assert value["total"] == total
+
+    def poll(status, known, is_planning, total):
+        detail = client.get(f"/api/v1/jobs/{job_id}")
+        assert detail.status_code == 200
+        listed = client.get("/api/v1/jobs", params={"domain": "data"})
+        assert listed.status_code == 200
+        item = next(item for item in listed.json()["items"] if item["id"] == job_id)
+        for value in (detail.json(), item, reader.get(job_id)):
+            assert_state(value, status, known, is_planning, total)
+
+    try:
+        created = client.post(
+            "/api/v1/data/refresh", json={"scope": "universe", "universe": "csi800"},
+            headers=headers,
+        )
+        assert created.status_code == 202
+        job_id = created.json()["id"]
+        assert_state(created.json(), "queued", False, True, 0)
+        poll("queued", False, True, 0)
+        runtime = manager._ensure_runtime()
+        runtime.dispatch_job(job_id)
+        assert planning.wait(3)
+        poll("running", False, True, 0)
+        cancelled = client.post(f"/api/v1/jobs/{job_id}/cancel", headers=headers)
+        assert cancelled.status_code == 200
+        assert_state(cancelled.json(), "cancelling", False, False, 0)
+        resolve.set()
+        runtime.wait(job_id, timeout=5)
+        poll("cancelled", False, False, 0)
+        assert not syncing.is_set()
+
+        planning.clear()
+        resolve.clear()
+        retried = client.post(f"/api/v1/jobs/{job_id}/retry", headers=headers)
+        assert retried.status_code == 202
+        assert_state(retried.json(), "queued", False, True, 0)
+        assert retried.json()["attempt"] == 2
+        assert planning.wait(3)
+        poll("running", False, True, 0)
+        resolve.set()
+        assert syncing.wait(3)
+        poll("running", True, False, 2)
+        finish.set()
+        runtime.wait(job_id, timeout=5)
+        poll("completed", True, False, 2)
+        completed = client.get(f"/api/v1/jobs/{job_id}").json()
+        assert completed["next_index"] == completed["succeeded"] == 2
+        assert completed["can_cancel"] is False
+        assert completed["can_retry"] is False
+    finally:
+        resolve.set()
+        finish.set()
+        manager.shutdown()

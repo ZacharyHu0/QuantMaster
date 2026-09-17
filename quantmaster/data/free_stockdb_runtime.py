@@ -263,10 +263,6 @@ class FreeStockDBRuntime:
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
-        # Automatic checks may run before the vendor publishes the next
-        # trading session.  Remember that target so we do not repeatedly stop
-        # a healthy local service for the same unavailable data.
-        self._deferred_target = ""
         self._status: dict[str, Any] = {"state": "stopped", "message": "尚未启动"}
 
     @staticmethod
@@ -755,13 +751,6 @@ class FreeStockDBRuntime:
                     phase="syncing", trigger=trigger, update_result="running",
                     target_session=target, validation=validation,
                 )
-        if accepted is None and not self._listening():
-            self._set_status(
-                "updating", "数据文件已提交，正在关闭更新器并恢复服务验收",
-                phase="closing", trigger=trigger, update_result="running",
-                target_session=target,
-            )
-            return validated, accepted, self._close_process_window(process)
         closed = accepted == current and self._close_process_window(process)
         return validated, accepted, closed
 
@@ -1271,7 +1260,6 @@ class FreeStockDBRuntime:
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
-        self._deferred_target = ""
         self._record_update(code, target, validation, attempt)
         self._set_status(
             "running", message,
@@ -1336,6 +1324,16 @@ class FreeStockDBRuntime:
         self._next_retry_at = 0.0
         self._retry_target = ""
         self._retry_attempt = 0
+        retry_at = ""
+        if automatic and not self._stop.is_set():
+            # Exhaustion ends this daily budget, not automatic maintenance.
+            # Preserve a visible deadline and keep reads available until then.
+            self._next_retry_at = self._scheduled_at(self._scheduler_now()).timestamp()
+            self._retry_target = target
+            self._retry_attempt = 1
+            retry_at = datetime.fromtimestamp(
+                self._next_retry_at, tz=FREE_STOCKDB_MARKET_TIMEZONE,
+            ).isoformat()
         result = "manual_required" if not allow_retry else "failed"
         state = "degraded" if result == "manual_required" else "running"
         self._set_status(
@@ -1344,7 +1342,7 @@ class FreeStockDBRuntime:
             actual_session=str(validation.get("actual_session") or ""),
             validated_session=self._last_update_date(), attempt=attempt,
             max_attempts=_AUTO_MAX_ATTEMPTS if automatic else 1,
-            next_retry_at="", validation=validation, managed=self._is_managed(),
+            next_retry_at=retry_at, validation=validation, managed=self._is_managed(),
         )
         if automatic:
             self._emit_update_event("update_failed", target or market_date().isoformat(), {
@@ -1395,31 +1393,8 @@ class FreeStockDBRuntime:
             return self._finish_success(
                 target=target, validation=preflight, code=0, attempt=attempt, trigger=trigger,
             )
-        # A scheduled check commonly runs before free-stockdb has published
-        # today's session (or while its provider circuit is open).  If an
-        # already accepted session exists, keep serving it and defer the
-        # updater instead of taking the local service offline for 30 minutes.
-        last_validated = self._last_update_date()
-        actual_session = str(preflight.get("actual_session") or "")
-        if (
-            trigger in {"schedule", "retry"}
-            and last_validated
-            and (not actual_session or actual_session <= last_validated)
-        ):
-            self._deferred_target = target
-            message = (
-                f"目标日 {target} 尚无新数据，继续使用已验收 {last_validated}"
-                if actual_session
-                else f"free-stockdb 暂不可用，继续使用已验收 {last_validated}"
-            )
-            self._set_status(
-                "running", message, phase="deferred", update_result="deferred",
-                trigger=trigger, target_session=target,
-                actual_session=actual_session, validated_session=last_validated,
-                attempt=attempt, max_attempts=_AUTO_MAX_ATTEMPTS,
-                next_retry_at="", validation=preflight, managed=self._is_managed(),
-            )
-            return True
+        # Local freshness is not evidence of vendor publication. A trusted
+        # calendar target permits a bounded sync attempt, not acceptance.
         if not updater.is_file():
             return self._finish_failure(
                 target=target, validation=preflight, code=-1, attempt=attempt,
@@ -1711,37 +1686,49 @@ class FreeStockDBRuntime:
             managed=True, **self._service_restart_status(),
         )
 
+    def _run_due_automatic_update(self, now: datetime, cfg: Any) -> bool:
+        scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
+        if (
+            cfg.free_stockdb_auto_update and scheduled_today
+            and self._next_retry_at and time.time() >= self._next_retry_at
+            and not self._update_lock.locked()
+        ):
+            target, attempt = self._retry_target, self._retry_attempt
+            self._next_retry_at = 0.0
+            if attempt == 1:
+                # A new daily budget must resolve the current trusted target.
+                self._last_target_check = 0.0
+            elif target and target > self._last_update_date():
+                self.update_now("retry", target_session=target, attempt=attempt)
+                return True
+        due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
+        if (
+            cfg.free_stockdb_auto_update and scheduled_today and due_for_check
+            and not self._update_lock.locked() and not self._next_retry_at
+        ):
+            force_notice = time.time() - self._last_vendor_force >= _AUTO_RETRY_SECONDS
+            self._last_target_check = time.time()
+            if force_notice:
+                self._last_vendor_force = time.time()
+            target, _source = self._target_session(force_notice=force_notice)
+            if (
+                target
+                and target > self._last_update_date()
+            ):
+                self.update_now("schedule", target_session=target, attempt=1)
+                return True
+        return False
+
     def _scheduler(self) -> None:
         while not self._stop.is_set():
             try:
                 if self._process_command():
                     continue
                 now = self._scheduler_now()
-                if self._next_retry_at and time.time() >= self._next_retry_at:
-                    target, attempt = self._retry_target, self._retry_attempt
-                    self._next_retry_at = 0.0
-                    self.update_now("retry", target_session=target, attempt=attempt)
-                    continue
                 cfg = get_config().data
                 self._supervise_service(cfg)
-                scheduled_today = now.strftime("%H:%M") >= cfg.free_stockdb_update_time
-                due_for_check = time.time() - self._last_target_check >= _TARGET_CHECK_SECONDS
-                if (
-                    cfg.free_stockdb_auto_update and scheduled_today and due_for_check
-                    and not self._update_lock.locked() and not self._next_retry_at
-                ):
-                    force_notice = time.time() - self._last_vendor_force >= _AUTO_RETRY_SECONDS
-                    self._last_target_check = time.time()
-                    if force_notice:
-                        self._last_vendor_force = time.time()
-                    target, _source = self._target_session(force_notice=force_notice)
-                    if (
-                        target
-                        and target > self._last_update_date()
-                        and target != self._deferred_target
-                    ):
-                        self.update_now("schedule", target_session=target, attempt=1)
-                        continue
+                if self._run_due_automatic_update(now, cfg):
+                    continue
                 with self._lock:
                     heartbeat = dict(self._status)
                 heartbeat.update({"owner_pid": os.getpid(), "supervised": False})
@@ -1771,7 +1758,10 @@ class FreeStockDBRuntime:
         else:
             ready = False
             self._set_status("disabled", "托管已关闭", managed=False)
-        if shared.get("update_result") == "retry_wait" and shared.get("next_retry_at"):
+        if (
+            shared.get("update_result") in {"retry_wait", "failed", "manual_required"}
+            and shared.get("next_retry_at")
+        ):
             try:
                 retry_at = datetime.fromisoformat(str(shared["next_retry_at"])).timestamp()
             except ValueError:
@@ -1779,12 +1769,15 @@ class FreeStockDBRuntime:
             if retry_at:
                 self._next_retry_at = max(time.time(), retry_at)
                 self._retry_target = str(shared.get("target_session") or "")
-                self._retry_attempt = int(shared.get("attempt") or 0) + 1
+                self._retry_attempt = (
+                    int(shared.get("attempt") or 0) + 1
+                    if shared.get("update_result") == "retry_wait" else 1
+                )
                 self._set_status(
                     "running" if ready else "disabled",
                     str(shared.get("message") or "等待下一次自动更新重试"),
                     managed=bool(ready),
-                    update_result="retry_wait",
+                    update_result=shared["update_result"],
                     target_session=self._retry_target,
                     actual_session=shared.get("actual_session"),
                     validated_session=shared.get("validated_session"),
