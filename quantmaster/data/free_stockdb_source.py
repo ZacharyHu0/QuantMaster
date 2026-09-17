@@ -199,6 +199,7 @@ class FreeStockDBSource(DataSource):
             )
         self._trust_env = not loopback
         self._sdk_checked = False
+        self._sdk_read_lock = threading.RLock()
         self._client: Any | None = None
         self._sdk_error: BaseException | None = None
 
@@ -249,6 +250,10 @@ class FreeStockDBSource(DataSource):
         self._sdk_error = None
 
     def _sdk_client(self):
+        with _SDK_CACHE_LOCK:
+            return self._cached_sdk_client()
+
+    def _cached_sdk_client(self):
         if self._sdk_checked:
             return self._client
         self._sdk_checked = True
@@ -264,16 +269,17 @@ class FreeStockDBSource(DataSource):
                 clients = {}
                 _SDK_THREAD_CLIENTS.clients = clients
             key = (generation, module.__name__, host, port, client_class)
-            client = clients.get(key)
-            if client is None:
+            cached = clients.get(key)
+            if cached is None:
                 client = client_class(host=host, port=port, password="")
                 if not callable(getattr(client, "get_data", None)):
                     raise AttributeError("StockDBClient 缺少 get_data 方法")
                 for cached_key in tuple(clients):
                     if cached_key[0] != generation:
                         clients.pop(cached_key, None)
-                clients[key] = client
-            self._client = client
+                cached = (client, threading.RLock())
+                clients[key] = cached
+            self._client, self._sdk_read_lock = cached
         except (ImportError, OSError, AttributeError, RuntimeError, TypeError, ValueError) as exc:
             # SDK 是用户安装的可选能力；加载失败时仍允许兼容 HTTP 服务或其他源。
             self._sdk_error = exc
@@ -281,7 +287,7 @@ class FreeStockDBSource(DataSource):
         return self._client
 
     def native_batch_available(self) -> bool:
-        """Whether the native SDK can serve a true multi-symbol request."""
+        """Whether the native SDK can serve the multi-symbol read contract."""
         return self._sdk_client() is not None
 
     def _sdk_data(
@@ -294,10 +300,32 @@ class FreeStockDBSource(DataSource):
         fq: str | None,
         fields: str | None = None,
         probe: bool = False,
+        batch_member: bool = False,
     ):
         client = self._sdk_client()
         if client is None:
             return None
+        if isinstance(code, list):
+            # The installed SDK's multi-code pipeline loses rows, including
+            # non-empty ones. Never infer absence from that path. Each unique
+            # code gets one scheduled single-code read (with bounded provider
+            # retries); an exception prevents publishing any partial batch.
+            projected = f"{fields},code" if fields and "code" not in fields.split(",") else fields
+            result = {}
+            for symbol in dict.fromkeys(code):
+                payload = self._sdk_data(
+                    symbol, start, end, frequency, fq=fq, fields=projected, probe=probe,
+                    batch_member=True,
+                )
+                rows = (
+                    self._projected_rows(payload, projected)
+                    if projected else self._dictionary_rows(payload, contract="stock_sdk single")
+                )
+                result[symbol] = (
+                    [[row[name] for name in fields.split(",")] for row in rows]
+                    if fields else rows
+                )
+            return result
         key = json.dumps(
             {
                 "sdk": True,
@@ -307,6 +335,7 @@ class FreeStockDBSource(DataSource):
                 "frequency": frequency,
                 "fq": fq,
                 "fields": fields,
+                "batch_member": batch_member,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -322,11 +351,25 @@ class FreeStockDBSource(DataSource):
         }
         if fields is not None:
             arguments["fields"] = fields
+
+        def fetch():
+            # Source instances can share this cached connection; its native
+            # query state must not be used simultaneously by scheduler workers.
+            with self._sdk_read_lock:
+                payload = client.get_data(**arguments)
+            if batch_member:
+                rows = (
+                    self._projected_rows(payload, fields)
+                    if fields else self._dictionary_rows(payload, contract="stock_sdk single")
+                )
+                self._validate_sdk_rows(rows, code, start, end, frequency, fields)
+            return payload
+
         try:
             return provider_call(
                 self.name,
                 key,
-                lambda: client.get_data(**arguments),
+                fetch,
                 probe=probe,
                 local_snapshot=self.name == "free-stockdb" and not self._trust_env,
             )
@@ -334,6 +377,29 @@ class FreeStockDBSource(DataSource):
             raise FreeStockDBProviderError(
                 str(exc).strip() or "free-stockdb 原生 SDK 调用失败",
             ) from exc
+
+    @staticmethod
+    def _validate_sdk_rows(rows, symbol, start, end, frequency, fields) -> None:
+        width = 14 if frequency.endswith("m") else 8
+        date_format = "%Y%m%d%H%M%S" if width == 14 else "%Y%m%d"
+        seen = set()
+        for row in rows:
+            if str(row.get("code", "")) != symbol:
+                raise FreeStockDBProviderError("stock_sdk single 合同错误：证券身份缺失或不匹配")
+            stamp = str(row.get("date", ""))
+            try:
+                if len(stamp) != width:
+                    raise ValueError("date width")
+                datetime.strptime(stamp, date_format)
+            except ValueError as exc:
+                raise FreeStockDBProviderError("stock_sdk single 合同错误：日期无效") from exc
+            if (start and stamp < start) or (end and stamp > end):
+                raise FreeStockDBProviderError("stock_sdk single 合同错误：日期超出请求范围")
+            if stamp in seen:
+                raise FreeStockDBProviderError("stock_sdk single 合同错误：日期重复")
+            seen.add(stamp)
+            if not fields and not set(OHLCV_COLUMNS).issubset(row):
+                raise FreeStockDBProviderError("stock_sdk single 合同错误：缺少 OHLCV 字段")
 
     @staticmethod
     def _sdk_provider_errors(client: Any) -> tuple[type[Exception], ...]:
@@ -613,7 +679,7 @@ class FreeStockDBSource(DataSource):
         start: str,
         end: str,
     ) -> dict[str, pd.DataFrame]:
-        """Fetch many A-share histories in one native SDK request."""
+        """Fetch histories through verified single-code native SDK reads."""
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
         if not ordered:
             return {}
