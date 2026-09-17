@@ -33,6 +33,7 @@ PACKAGED_INPUT_PATHS = (
     "quantmaster",
     "packaging",
     "scripts/release/check_desktop_artifact.py",
+    "scripts/release/smoke_frozen_runtime.py",
 )
 
 
