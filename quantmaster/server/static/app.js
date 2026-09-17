@@ -2386,9 +2386,11 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
       `${esc(item.name)} <span class="badge">${esc(item.symbol)}</span>`;
     entry.element.querySelector('.mkt-window').textContent = unavailable ? '暂无' : hasHistory ? `${changeSeries.length}D` : '按需';
     entry.element.querySelector('.px').className = `px ${unavailable ? 'unavailable' : cls(item.change_pct)}`;
+    const dailyChange = item.change_pct == null ? '—' : `${item.change_pct > 0 ? '+' : ''}${item.change_pct}%`;
+    const quote = `${item.last}${item.symbol === 'US10Y.RATE' ? '%' : ''}`;
     entry.element.querySelector('.px').innerHTML = unavailable
       ? '暂无行情'
-      : `${item.last} <small>${item.change_pct > 0 ? '+' : ''}${item.change_pct}%</small>`;
+      : `${quote} <small>${dailyChange}</small>`;
     const memberships = (item.memberships || []).map(value => assetMembershipLabels[value]).filter(Boolean);
     const membership = entry.element.querySelector('.mkt-memberships');
     membership.textContent = memberships.join(' · ');
@@ -2419,7 +2421,7 @@ function createMarketStreamRenderer(root, pinnedGroups = {}) {
     period.textContent = `区间 ${periodReturn}`;
     entry.element.setAttribute('aria-label', unavailable
       ? `${item.name} ${item.symbol}，当前行情暂不可用${item.message ? `：${item.message}` : ''}`
-      : `${item.name} ${item.symbol}，现价 ${item.last}，日涨跌 ${item.change_pct > 0 ? '+' : ''}${item.change_pct}%，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看 K 线`);
+      : `${item.name} ${item.symbol}，${quote}，日涨跌 ${dailyChange}，日线 RSI ${fixed(item.rsi_14,1)}，区间涨跌 ${periodReturn}，点击查看走势`);
     entry.element.onclick = unavailable ? null : () => showKline(item.symbol, item.name);
     if (unavailable) return;
     entry.element.querySelector('.mkt-spark-shell').hidden = !hasHistory;
@@ -2776,6 +2778,15 @@ function rollingMean(values, windowSize) {
 
 function renderKlineSeries(chart, data) {
   chart.__quantmasterKlineData = data;
+  if (data.series_type === 'yield') {
+    chart.setOption(baseOpt({
+      tooltip:{trigger:'axis',valueFormatter:value => `${value}%`},
+      xAxis:{type:'category',data:data.kline.map(k => k[0])},
+      yAxis:valAxis(value => `${value}%`),
+      series:[{name:'收益率 (%)',type:'line',data:data.kline.map(k => k[2]),showSymbol:false}],
+    }), {notMerge:true});
+    return;
+  }
   const compact = chart.getDom().clientWidth < 520;
   const closes = data.kline.map(k => k[2]);
   const categories = data.kline.map(k => k[0]);

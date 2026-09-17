@@ -38,6 +38,11 @@ operator 提供的既有脱敏证据中，最近五个 market 任务每次 attem
 源失败无股票 fallback、旧缓存拒绝、增量不缩放、纽约请求上界和面板复用。
 所有 provider 返回均为隔离测试数据，不能替代生产数据真实性验收。
 
+history API 对 US10Y 返回 `series_type=yield`，OHLC/成交量槽为 null，
+默认结束日期不读取 A 股日历。卡片前值为零时涨跌幅为 null，收益率负值合法。
+既有 Playwright live_server 验证实际本地 API → 百分数折线、纵轴/tooltip 单位，
+并验证普通行情仍绘制蜡烛图与成交量；这不是 installed 生产验收。
+
 ## 生产验收要求
 
 由唯一 operator 安装最终合并 SHA 并统一操作；本任务不读写生产，不调用实际行情 API。

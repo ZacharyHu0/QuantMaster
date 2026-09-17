@@ -183,3 +183,28 @@ def test_us10y_instrument_is_nontradable_reference(tmp_path, monkeypatch):
     assert instrument.timezone == "America/New_York"
     monkeypatch.setattr("quantmaster.data.instruments.InstrumentStore", lambda: store)
     assert validate_bar_capability("US10Y.RATE") == instrument
+
+
+def test_us10y_zero_yield_card_and_history_are_json_safe(tmp_path, monkeypatch):
+    import json
+
+    from quantmaster.market.overview import _market_item
+    from quantmaster.server.capabilities import market_history
+
+    raw = pd.DataFrame({
+        "日期": ["2026-07-22", "2026-07-23", "2026-07-24"],
+        "美国国债收益率10年": [-0.5, 0.0, 4.25],
+    })
+    monkeypatch.setattr("quantmaster.data.reference_market._akshare_route",
+                        lambda *_: ("akshare:us-treasury", lambda: raw))
+    store = BarStore(root=tmp_path / "bars")
+    envelope = registry.refresh_history("US10Y.RATE", "2026-07-22", "2026-07-24", store=store)
+    card = _market_item("US10Y.RATE", "美债10年收益率", envelope.data, store.metadata("US10Y.RATE"))
+    assert card is not None and card["change_pct"] is None and card["last"] == 4.25
+    monkeypatch.setattr("quantmaster.data.read_bars", lambda *_args, **_kwargs: envelope)
+    history = market_history("US10Y.RATE", "2026-07-23", "2026-07-24")
+    assert history["series_type"] == "yield"
+    assert history["kline"][0][2] == -0.5
+    assert history["kline"][-1] == ["2026-07-24", None, 4.25, None, None, None]
+    assert not history["data_quality"]["formal_eligible"]
+    json.dumps({"card": card, "history": history}, allow_nan=False)

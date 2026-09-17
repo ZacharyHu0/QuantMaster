@@ -156,7 +156,10 @@ def _market_item(symbol: str, name: str, frame: pd.DataFrame, meta: dict | None)
         "symbol": symbol,
         "name": name,
         "last": round(float(close.iloc[-1]), 3),
-        "change_pct": round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2) if len(close) > 1 else 0.0,
+        "change_pct": (
+            None if symbol == "US10Y.RATE" and len(close) > 1 and close.iloc[-2] == 0
+            else round(float(close.iloc[-1] / close.iloc[-2] - 1) * 100, 2) if len(close) > 1 else 0.0
+        ),
         "as_of": str(close.index[-1].date()),
         "checked_at": (pd.Timestamp.fromtimestamp(float(checked_at)).isoformat() if checked_at else ""),
         "cache_status": str((meta or {}).get("last_status") or "ready"),
