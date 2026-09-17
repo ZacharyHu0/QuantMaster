@@ -49,10 +49,16 @@ class MarketDataUnavailable(RuntimeError):
 class HistoryRepairError(RuntimeError):
     """An explicit repair could not safely publish a replacement history."""
 
-    def __init__(self, symbol: str, reason: str):
+    def __init__(
+        self, symbol: str, reason: str, *, missing_tail_dates: tuple[str, ...] = (),
+        last_price_date: str = "", calendar_source: str = "",
+    ):
         super().__init__(f"{symbol} 历史重建未发布，原缓存保留：{reason}")
         self.symbol = symbol
         self.reason = reason
+        self.missing_tail_dates = missing_tail_dates
+        self.last_price_date = last_price_date
+        self.calendar_source = calendar_source
 
 
 class DataEvidenceNotReady(MarketDataUnavailable):

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from quantmaster.config import get_config
-from quantmaster.data.base import BarDataEnvelope, MarketDataUnavailable
+from quantmaster.data.base import BarDataEnvelope, HistoryRepairError, MarketDataUnavailable
 from quantmaster.data.registry import RefreshMode, refresh_history
 from quantmaster.data.stockdb_state import stockdb_wait_reason
 from quantmaster.data.storage import BarStore
@@ -34,7 +34,9 @@ RefreshScope = Literal["market", "universe", "all_cached"]
 DATA_REFRESH_TASK_TYPE = "data.refresh"
 REFRESH_RESULT_KIND = "data.refresh.result"
 REFRESH_CHECKPOINT = "data.refresh.progress"
-REFRESH_SCHEMA = "3.0"
+# Safe retained-range renewal and repaired packaged providers must not reuse
+# completed failures or checkpoints from the previous refresh algorithm.
+REFRESH_SCHEMA = "3.1"
 logger = logging.getLogger(__name__)
 
 
@@ -430,12 +432,54 @@ class DataRefreshManager:
         return error
 
     @staticmethod
+    def _confirmed_suspension(exc: HistoryRepairError) -> dict[str, Any] | None:
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_suspension_snapshot,
+        )
+
+        if not exc.missing_tail_dates:
+            return None
+        evidence = []
+        for day in exc.missing_tail_dates:
+            try:
+                snapshot = load_suspension_snapshot(day)
+            except (InstrumentCatalogEvidenceError, OSError, ValueError):
+                return None
+            if exc.symbol not in snapshot["full_day_symbols"]:
+                return None
+            evidence.append({key: snapshot[key] for key in (
+                "trade_date", "source", "content_hash", "request_identity_sha256",
+            )})
+        return {
+            "warning": f"已核验缺失交易日均为全天停牌；最近成交日仍为 {exc.last_price_date}",
+            "code": "confirmed_suspension", "formal_eligible": False, "retryable": False,
+            "last_price_date": exc.last_price_date, "calendar_source": exc.calendar_source,
+            "suspension_evidence": evidence,
+        }
+
+    @staticmethod
     def _failure(exc: Exception) -> dict[str, Any]:
         from quantmaster.data.resilience import classify_provider_failure
         from quantmaster.logging_config import redact_sensitive_text
 
+        if isinstance(exc, HistoryRepairError):
+            suspension = DataRefreshManager._confirmed_suspension(exc)
+            if suspension is not None:
+                return suspension
+            return {
+                "error": redact_sensitive_text(exc)[:300],
+                "code": "history_repair_rejected", "retryable": False,
+            }
         if isinstance(exc, MarketDataUnavailable):
             quality = exc.quality
+            if not quality.stale and any(item.startswith("响应起点 ") for item in quality.issues):
+                return {
+                    "error": redact_sensitive_text(exc)[:300],
+                    "code": "historical_start_incomplete", "retryable": False,
+                    "observed_start": quality.observed_start,
+                    "observed_end": quality.observed_end,
+                }
             if (
                 not quality.stale and quality.observed_end == quality.requested_end
                 and quality.coverage_ratio is not None and quality.coverage_ratio < 1.0

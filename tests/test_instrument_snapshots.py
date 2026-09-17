@@ -797,3 +797,51 @@ def test_conflicting_same_day_suspension_rows_do_not_poison_unique_artifact(
         (isolated_config.data_root / "suspension_snapshots" / "objects").glob("*.json")
     )
     assert len(objects) == 1
+
+
+@pytest.mark.parametrize('fault', ['', 'missing', 'tamper', 'other_symbol', 'partial', 'resumed', 'numeric'])
+def test_refresh_suspension_warning_requires_every_full_day_snapshot(isolated_config, monkeypatch, fault):
+    from quantmaster.data.base import HistoryRepairError
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    days = ('2024-01-15', '2024-01-16')
+    symbol = '601238.SH'
+    for day in days:
+        if fault == 'missing' and day == days[-1]:
+            continue
+        row = {'ts_code': symbol, 'trade_date': day.replace('-', ''),
+               'suspend_type': 'S', 'suspend_timing': ''}
+        if day == days[-1]:
+            if fault == 'other_symbol':
+                row['ts_code'] = '600000.SH'
+            elif fault == 'partial':
+                row['suspend_timing'] = '09:30-10:30'
+            elif fault == 'resumed':
+                row['suspend_type'] = 'R'
+        receipt = freeze_suspension_snapshot(_suspension_payload(day, day + 'T16:00:00+08:00', [row]))
+        if fault == 'tamper' and day == days[-1]:
+            path = isolated_config.data_root / receipt['relative_path']
+            path.write_bytes(path.read_bytes() + b' ')
+    error = HistoryRepairError(symbol, 'missing tail', missing_tail_dates=days if fault != 'numeric' else (),
+                               last_price_date='2024-01-12', calendar_source='tushare:trade_cal')
+    outcome = DataRefreshManager._failure(error)
+    if fault:
+        assert outcome['code'] == 'history_repair_rejected' and 'warning' not in outcome
+        return
+    assert outcome['code'] == 'confirmed_suspension' and not outcome['formal_eligible']
+    assert outcome['last_price_date'] == '2024-01-12'
+    assert [item['trade_date'] for item in outcome['suspension_evidence']] == list(days)
+    manager = DataRefreshManager()
+    monkeypatch.setattr(manager, '_start', lambda _: None)
+    monkeypatch.setattr(manager, '_stockdb_wait_reason', lambda: '')
+    monkeypatch.setattr(manager, '_uses_stockdb', lambda _: False)
+    monkeypatch.setattr(manager, '_publish_market_snapshot', lambda: None)
+    monkeypatch.setattr(manager, '_refresh_one', lambda *args: DataRefreshManager._failure(error))
+    try:
+        job = manager._submit('all_cached', '', days[0], days[-1], [symbol])
+        manager._run(job['id'])
+        result = manager.get(job['id'])
+        assert result['succeeded'] == 1 and result['failed'] == 0 and len(result['warnings']) == 1
+        assert manager._submit('all_cached', '', days[0], days[-1], [symbol])['reused']
+    finally:
+        manager.shutdown()

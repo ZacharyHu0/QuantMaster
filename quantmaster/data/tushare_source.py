@@ -545,12 +545,19 @@ class TushareSource(DataSource):
             "trade_cal", ttl, exchange=exchange, start_date=start.replace("-", ""),
             end_date=end.replace("-", ""), fields="exchange,cal_date,is_open,pretrade_date",
         )
-        if frame.empty or "cal_date" not in frame:
-            raise RuntimeError("交易日历为空")
-        enabled = frame.loc[pd.to_numeric(frame.get("is_open"), errors="coerce") == 1]
-        return pd.DatetimeIndex(
-            _parse_tushare_dates(enabled["cal_date"], field="cal_date")
-        ).normalize().sort_values()
+        _validate_tushare_frame(
+            "trade_cal", {"exchange": exchange}, frame, required_nonempty=True,
+            required_columns=("exchange", "cal_date", "is_open"),
+        )
+        dates = pd.DatetimeIndex(_parse_tushare_dates(frame["cal_date"], field="cal_date"))
+        opened = pd.to_numeric(frame["is_open"], errors="coerce")
+        if (
+            dates.has_duplicates or frame["exchange"].isna().any()
+            or not opened.isin([0, 1]).all()
+            or not dates.sort_values().equals(pd.date_range(start, end))
+        ):
+            raise ProviderContractChanged("Tushare 交易日历身份、开闭市标记或请求日期覆盖不完整")
+        return dates[opened.eq(1)].sort_values()
 
     def suspension_snapshot(self, trade_date: str) -> dict[str, object]:
         """Return an official full-day suspension set for one exact session."""

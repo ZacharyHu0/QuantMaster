@@ -141,3 +141,39 @@ def test_real_input_changes_still_invalidate(isolated_config, monkeypatch, chang
     else:
         store.mark_checked("A", "2015-01-01", str(today), quality={"formal_eligible": True})
     assert maintenance.DataRefreshManager._fingerprint(["A"]) != original
+
+
+def test_refresh_algorithm_change_rejects_old_failures_and_checkpoints(isolated_config, monkeypatch):
+    manager = maintenance.DataRefreshManager()
+    current = maintenance.REFRESH_SCHEMA
+    assert current != '3.0'
+    monkeypatch.setattr(manager, '_start', lambda _: None)
+    monkeypatch.setattr(manager, '_stockdb_wait_reason', lambda: '')
+    monkeypatch.setattr(manager, '_uses_stockdb', lambda _: False)
+    monkeypatch.setattr(manager, '_publish_market_snapshot', lambda: None)
+    monkeypatch.setattr(manager, '_fingerprint', lambda _: 'unchanged-inputs-same-hour')
+    calls = []
+
+    def refresh(*args):
+        calls.append(maintenance.REFRESH_SCHEMA)
+        return {'error': 'provider resources unavailable', 'code': 'evidence_missing', 'retryable': False}
+
+    monkeypatch.setattr(manager, '_refresh_one', refresh)
+    try:
+        monkeypatch.setattr(maintenance, 'REFRESH_SCHEMA', '3.0')
+        old = manager._submit('market', '', '2026-09-01', '2026-09-17', ['TEST.US'])
+        manager._run(old['id'])
+        monkeypatch.setattr(maintenance, 'REFRESH_SCHEMA', current)
+        new = manager._submit('market', '', '2026-09-01', '2026-09-17', ['TEST.US'])
+        assert new['id'] != old['id'] and new['created']
+        manager._run(new['id'])
+        repeated = manager._submit('market', '', '2026-09-01', '2026-09-17', ['TEST.US'])
+        assert repeated['id'] == new['id'] and repeated['reused']
+        assert calls == ['3.0', current]
+        context = SimpleNamespace(spec_hash='same', load_checkpoint=lambda *args: {'schema_version': '3.0'})
+        with pytest.raises(ValueError, match='REFRESH_SCHEMA_UNSUPPORTED'):
+            manager._initial_state(context, {'refresh_schema': current})
+        with pytest.raises(ValueError, match='REFRESH_SCHEMA_UNSUPPORTED'):
+            manager._initial_state(context, {'refresh_schema': '3.0'})
+    finally:
+        manager.shutdown()

@@ -2383,11 +2383,7 @@ def _renew_tushare_cache(
         if source.name == "tushare":
             # The existing repair owns endpoint-cache reuse, factor evidence,
             # complete replacement when anchors differ, and atomic publication.
-            try:
-                return _repair_history_locked(symbol, start, end, store, priority, cancelled, renew=True)
-            except HistoryRepairError:
-                logger.debug("同源候选无法安全续更 %s", symbol, exc_info=True)
-                return cached.loc[start:end]
+            return _repair_history_locked(symbol, start, end, store, priority, cancelled, renew=True)
         if source.name != "free-stockdb":
             continue
         try:
@@ -2504,6 +2500,12 @@ def _load_history_locked(
     if session_refresh_due or failed_refresh or missing_tail:
         ttl_fresh = False
     sliced = _cached_slice(cached, start, end)
+    if (
+        mode == RefreshMode.AUTO and not provider and not covers_start and ttl_fresh
+        and not failed_refresh and not missing_tail and sliced is not None
+        and _renewed_cache_answers(symbol, cached, meta, end)
+    ):
+        return sliced
     if sliced is not None and covers_start and covers_end:
         if not failed_refresh and not missing_tail and (
             not near_current or (mode == RefreshMode.AUTO and ttl_fresh)
@@ -2603,7 +2605,10 @@ def _repair_candidate_quality(
     quality = _assess_daily_frame(frame, start, end, symbol=symbol, source=source)
     semantics = quality.semantics
     if quality.status == "unavailable" or semantics is None:
-        raise HistoryRepairError(symbol, "响应数值或日期校验失败")
+        raise HistoryRepairError(symbol, "响应质量校验失败：" + "；".join(quality.issues))
+    amount = pd.to_numeric(frame.get("amount", pd.Series(dtype=float)), errors="coerce")
+    if len(amount) != len(frame) or not (amount.map(math.isfinite) & amount.ge(0)).all():
+        raise HistoryRepairError(symbol, "成交额缺失、非有限或为负")
     if (
         frame.attrs.get("instrument") != symbol
         or semantics.provider != source
@@ -2617,6 +2622,22 @@ def _repair_candidate_quality(
     ):
         raise HistoryRepairError(symbol, "来源身份、单位或复权因子证据不足")
     return quality
+
+
+def _renewed_cache_answers(
+    symbol: str, cached: pd.DataFrame | None, meta: dict[str, Any], end: str,
+) -> bool:
+    if (
+        cached is None or cached.empty or meta.get("last_source") != "tushare"
+        or cached.attrs.get("renewed_session_end") != end
+        or cached.attrs.get("renewed_price_date") != str(cached.index.max().date())
+    ):
+        return False
+    try:
+        _repair_candidate_quality(symbol, cached, str(cached.index.min().date()), end, "tushare")
+    except HistoryRepairError:
+        return False
+    return True
 
 
 def _repair_history_ranges(
@@ -2664,6 +2685,7 @@ def _repair_history_locked(
     cached = store.get(symbol)
     meta = store.metadata(symbol) or {}
     full_start, full_end, fetch_start, fetch_end = _repair_history_ranges(cached, start, end)
+    owned_start = str(cached.index.min().date()) if renew and cached is not None else full_start
     factories = _request_factories(
         priority=priority, allow_online=True, provider="tushare",
     ).get(guess_market(symbol), [])
@@ -2678,13 +2700,13 @@ def _repair_history_locked(
         with data_priority(priority), bypass_endpoint_cache(False):
             frame = source.daily(symbol, left, right)
         check_cancelled()
-        return frame, _repair_candidate_quality(symbol, frame, left, right, source.name)
+        return frame, _repair_candidate_quality(symbol, frame, max(left, owned_start), right, source.name)
 
     local = source.cached_daily(symbol, full_start, full_end)
     if local is not None:
         fetch_start, fetch_end = full_start, full_end
         frame = local
-        quality = _repair_candidate_quality(symbol, frame, full_start, full_end, source.name)
+        quality = _repair_candidate_quality(symbol, frame, owned_start, full_end, source.name)
     else:
         frame, quality = fetch(fetch_start, fetch_end)
     candidate = _compatible_repair_increment(cached, meta, frame, quality, source.name)
@@ -2695,16 +2717,19 @@ def _repair_history_locked(
         if (full_start, full_end) != (fetch_start, fetch_end):
             frame, quality = fetch(full_start, full_end)
         candidate = frame
-    if not _is_complete_refresh(candidate, cached, full_start, full_end, symbol=symbol):
+    if renew:
+        candidate = candidate.loc[owned_start:].copy()
+    if not _is_complete_refresh(candidate, cached, owned_start, full_end, symbol=symbol):
         raise HistoryRepairError(symbol, "新响应缺失旧交易日或完整历史范围")
-    sessions, _, complete = _market_sessions(guess_market(symbol), pd.Timestamp(start), pd.Timestamp(end))
-    if not complete or sessions.empty or not sessions.difference(candidate.index).empty:
-        raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+    _require_repair_coverage(symbol, candidate, cached, start, end, source, renew=renew)
     if renew:
         # Reassess the whole retained generation instead of OR-ing a previous
         # stale observation into today's successful read. Historical gaps and
         # factor/PIT limitations are still assessed over the complete candidate.
-        quality = _repair_candidate_quality(symbol, candidate, full_start, full_end, source.name)
+        quality = _repair_candidate_quality(symbol, candidate, owned_start, full_end, source.name)
+        candidate.attrs["renewed_session_end"] = full_end
+        candidate.attrs["renewed_price_date"] = str(candidate.index.max().date())
+        full_start = max(full_start, str(meta.get("coverage_start") or owned_start))
         replace_coverage = True
     check_cancelled()
     store.put(
@@ -2715,6 +2740,54 @@ def _repair_history_locked(
         before_commit=check_cancelled, preserve_on_failure=True,
     )
     return candidate.loc[start:end]
+
+
+def _require_repair_coverage(
+    symbol: str, candidate: pd.DataFrame, cached: pd.DataFrame | None,
+    start: str, end: str, source: Any, *, renew: bool,
+) -> None:
+    effective_start, effective_end = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
+    sessions, _, complete = _market_sessions(guess_market(symbol), effective_start, effective_end)
+    if renew and cached is not None and not cached.empty:
+        # AUTO may retain pre-existing internal gaps, never lose old dates or
+        # introduce gaps in a newly requested head/tail. Research quality still
+        # assesses the entire retained generation below. Resolve each extension
+        # separately: a sparse historical calendar cannot prove a current tail.
+        _require_repair_extensions(
+            symbol, candidate, cached, cached.index.min(), effective_end, source,
+            request_start=start, request_end=end,
+        )
+    elif not complete or sessions.empty or not sessions.difference(candidate.index).empty:
+        raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+
+
+def _require_repair_extensions(
+    symbol: str, candidate: pd.DataFrame, cached: pd.DataFrame,
+    start: pd.Timestamp, end: pd.Timestamp, source: Any,
+    *, request_start: str, request_end: str,
+) -> None:
+    official = None
+    for left, right in (
+        (start, cached.index.min() - pd.Timedelta(days=1)),
+        (cached.index.max() + pd.Timedelta(days=1), end),
+    ):
+        if left > right:
+            continue
+        # Ingest/research calendars can contain only a sparse subset. Only the
+        # provider's full natural-day response (including closed days) proves
+        # this extension. Its existing endpoint cache remains the first read.
+        if official is None:
+            official = source.trade_calendar(request_start, request_end)
+        sessions = official[(official >= left) & (official <= right)]
+        missing = sessions.difference(candidate.index)
+        if not missing.empty:
+            dates = ", ".join(missing[:5].strftime("%Y-%m-%d"))
+            no_new_prices = left > cached.index.max() and candidate.index.max() == cached.index.max()
+            raise HistoryRepairError(
+                symbol, f"新增区间 {left.date()} 至 {right.date()} 缺少交易日：{dates}",
+                missing_tail_dates=tuple(missing.strftime("%Y-%m-%d")) if no_new_prices else (),
+                last_price_date=str(cached.index.max().date()), calendar_source="tushare:trade_cal",
+            )
 
 
 def refresh_history(

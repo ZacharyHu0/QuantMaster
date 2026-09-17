@@ -56,6 +56,13 @@ def repair_setup(tmp_path, isolated_config, monkeypatch):
     state = {"fault": "", "cancelled": False, "request_factories": registry._request_factories}
 
     class FakePro:
+        def trade_cal(self, **params):
+            dates = pd.date_range(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "exchange": "SSE", "cal_date": dates.strftime("%Y%m%d"),
+                "is_open": dates.isin(days).astype(int), "pretrade_date": "",
+            })
+
         def daily(self, **params):
             return self.response("daily", raw, params)
 
@@ -68,14 +75,14 @@ def repair_setup(tmp_path, isolated_config, monkeypatch):
             if full and state["fault"] == "network":
                 raise OSError("offline")
             value = data.loc[data.trade_date.between(params["start_date"], params["end_date"])].copy()
-            if full and state["fault"] == "missing_old":
+            if full and (state["fault"] == "missing_old" or (
+                state["fault"] == "factor" and endpoint == "adj_factor"
+            )):
                 value = value.iloc[1:]
             if full and state["fault"] == "missing_gap":
                 value = value[value.trade_date != "20240118"]
             if full and state["fault"] == "identity":
                 value["ts_code"] = "002558.SZ"
-            if full and state["fault"] == "factor" and endpoint == "adj_factor":
-                value = value.iloc[1:]
             if full and state["fault"] == "cancel":
                 state["cancelled"] = True
             return value
@@ -479,8 +486,8 @@ def test_auto_failed_repair_preserves_entire_old_generation(repair_setup, monkey
             registry.refresh_history(SYMBOL, START, END, store=store, mode="auto",
                                      cancelled=lambda: state["cancelled"])
     else:
-        result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
-        assert result.quality.stale
+        with pytest.raises(HistoryRepairError):
+            registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
     assert store._path(SYMBOL).read_bytes() == original
     assert store.metadata(SYMBOL) == metadata
 
@@ -522,7 +529,7 @@ def test_auto_respects_disabled_tushare(repair_setup, monkeypatch):
     assert store.metadata(SYMBOL) == meta
 
 
-def test_auto_missing_tail_stays_retryable_without_rewriting_cache(repair_setup, monkeypatch):
+def test_auto_missing_tail_reports_rejection_without_rewriting_cache(repair_setup, monkeypatch):
     from quantmaster.data.maintenance import DataRefreshManager
 
     store, source, _, _, old = repair_setup
@@ -535,6 +542,108 @@ def test_auto_missing_tail_stays_retryable_without_rewriting_cache(repair_setup,
     monkeypatch.setattr(source, "daily", lambda *args: daily(*args).loc[:OLD_END])
     before, original = store.metadata(SYMBOL), store._path(SYMBOL).read_bytes()
     outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, END)
-    assert outcome["code"] == "data_incomplete" and outcome["retryable"] is True
+    assert outcome["code"] == "history_repair_rejected"
+    assert "响应质量校验失败" in outcome["error"]
     assert store.metadata(SYMBOL) == before
     assert store._path(SYMBOL).read_bytes() == original
+
+
+def _damage_repair_candidate(frame, days, fault):
+    if fault == 'old_date':
+        frame = frame.drop(days[35])
+    elif fault == 'head':
+        frame = frame.drop(days[2])
+    elif fault in {'tail', 'calendar_sparse', 'ingest_sparse'}:
+        frame = frame.drop(days[70])
+    elif fault == 'numeric':
+        frame.loc[days[70], 'close'] = -1
+    elif fault == 'amount':
+        frame.loc[days[70], 'amount'] = -1
+    elif fault == 'identity':
+        frame.attrs['instrument'] = '600000.SH'
+    elif fault == 'factor':
+        frame.attrs['factor_coverage'] = 'unconfirmed'
+    return frame
+
+@pytest.mark.parametrize('fault', [
+    '', 'old_date', 'head', 'tail', 'numeric', 'amount', 'identity', 'factor', 'cancel',
+    'calendar', 'calendar_sparse', 'ingest_sparse', 'weekend',
+])
+def test_auto_existing_gap_only_allows_safe_extensions(repair_setup, monkeypatch, fault):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    store, source, _, _, _ = repair_setup
+    days = pd.bdate_range('2024-01-02', periods=79)
+    frame = source.daily(SYMBOL, START, END).reindex(days).ffill()
+    frame.attrs['adjustment_anchor_date'] = str(days[-1].date())
+    frame = frame.drop(days[40])
+    old = frame.loc[days[25]:days[65]].copy()
+    old.attrs['adjustment_anchor_date'] = str(days[65].date())
+    end = str((days[-1] + pd.Timedelta(days=2 if fault == 'weekend' else 0)).date())
+    quality = registry._assess_daily_frame(old, str(days[25].date()), str(days[65].date()),
+                                         symbol=SYMBOL, source='tushare')
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source='tushare',
+              request_start=START, request_end=end, quality=quality.to_dict())
+    store.mark_status(SYMBOL, 'stale')
+    frame = _damage_repair_candidate(frame, days, fault)
+    monkeypatch.setattr(source, 'cached_daily', lambda *args: frame.copy())
+    monkeypatch.setattr(source, 'daily', lambda *args: pytest.fail('unexpected provider fetch'))
+    def unavailable_calendar(*args):
+        if fault == 'calendar':
+            raise HistoryRepairError(SYMBOL, '独立日历证据不足')
+        return days
+    monkeypatch.setattr(source, 'trade_calendar', unavailable_calendar)
+    monkeypatch.setattr(registry, 'market_date', lambda: days[-1].date())
+    monkeypatch.setattr(registry, '_local_sessions', lambda left, right: (
+        pd.DatetimeIndex([]) if fault == 'calendar' and left > days[65]
+        else days[(days >= left) & (days <= right)], 'test-calendar'))
+    if fault in {'calendar_sparse', 'ingest_sparse'}:
+        monkeypatch.setattr(registry, '_local_sessions', lambda left, right: (
+            days[(days >= left) & (days <= right) & (days != days[70])],
+            'research_lake' if fault == 'calendar_sparse' else 'stockdb-ingest:tushare:trade_cal'))
+    original, metadata = store._path(SYMBOL).read_bytes(), store.metadata(SYMBOL)
+    if fault == 'head':
+        with pytest.raises(HistoryRepairError):
+            registry.refresh_history(SYMBOL, START, end, store=store, source_name='tushare',
+                                     repair_incompatible=True)
+        assert store._path(SYMBOL).read_bytes() == original
+        assert store.metadata(SYMBOL) == metadata
+    if fault not in {'', 'head', 'weekend'}:
+        with pytest.raises(InterruptedError if fault == 'cancel' else HistoryRepairError):
+            registry.refresh_history(SYMBOL, START, end, store=store, mode='auto',
+                                     cancelled=lambda: fault == 'cancel')
+        assert store._path(SYMBOL).read_bytes() == original
+        assert store.metadata(SYMBOL) == metadata
+    else:
+        result = registry.refresh_history(SYMBOL, START, end, store=store, mode='auto')
+        assert old.index.difference(result.data.index).empty
+        assert days[40] not in result.data.index
+        assert result.quality.partial and result.quality.coverage_ratio < 1
+        assert not result.quality.stale and not result.quality.formal_eligible
+        assert store.get(SYMBOL).index.min() == old.index.min()
+        monkeypatch.setattr(registry, '_request_factories', lambda **kw: pytest.fail('repeat source'))
+        outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, end)
+        assert outcome['code'] == 'historical_start_incomplete'
+
+@pytest.mark.parametrize('fault', ['', 'missing_day', 'duplicate', 'exchange', 'flag'])
+def test_repair_calendar_proves_closed_days_and_rejects_partial_evidence(repair_setup, monkeypatch, fault):
+    from quantmaster.data.resilience import ProviderContractChanged
+
+    _, source, _, _, _ = repair_setup
+    frame = pd.DataFrame({
+        'exchange': ['SSE', 'SSE'], 'cal_date': ['20240106', '20240107'], 'is_open': [0, 0],
+    })
+    if fault == 'missing_day':
+        frame = frame.iloc[:1]
+    elif fault == 'duplicate':
+        frame.loc[1, 'cal_date'] = '20240106'
+    elif fault == 'exchange':
+        frame.loc[1, 'exchange'] = 'SZSE'
+    elif fault == 'flag':
+        frame.loc[1, 'is_open'] = 2
+    monkeypatch.setattr(source, '_call', lambda *args, **kw: frame)
+    if fault:
+        with pytest.raises(ProviderContractChanged):
+            source.trade_calendar('2024-01-06', '2024-01-07')
+    else:
+        assert source.trade_calendar('2024-01-06', '2024-01-07').empty
