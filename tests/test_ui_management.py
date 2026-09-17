@@ -5283,6 +5283,47 @@ def test_settings_refresh_tracks_queue_and_honest_terminal_result(
         browser.close()
 
 
+@pytest.mark.parametrize(("status", "failed", "waiting_on", "label"), [
+    ("completed", 0, "", "日常数据已更新，正式证据待补"),
+    ("completed", 1, "", "同步部分完成"),
+    ("running", 0, "", "增量同步中"),
+    ("interrupted", 0, "stockdb_update", "等待 StockDB 恢复"),
+    ("failed", 1, "", "同步失败"),
+])
+def test_settings_refresh_preserves_formal_evidence_warnings(live_server, status, failed, waiting_on, label):
+    url, _ = live_server
+    job = {
+        "id": "refresh-warning", "status": status, "outcome": "completed_with_warnings",
+        "succeeded": 202, "failed": failed, "next_index": 203, "total": 203, "progress": 100,
+        "waiting_on": waiting_on, "can_cancel": bool(waiting_on), "can_retry": bool(failed),
+        "failures": [{"symbol": "600002.SH", "error": "缺少实际当前行情"}] if failed else [],
+        # Full checkpoint count can exceed the recent warning projection.
+        "warning_count": 201,
+        "warnings": [{
+            "symbol": "600000.SH", "warning": "factor_contract_incomplete: 缺少完整因子链",
+            "formal_eligible": False, "code": "formal_evidence_missing",
+        }],
+    }
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page()
+        page.route("**/api/v1/jobs?domain=data&limit=1", lambda route: route.fulfill(json={"items": [job]}))
+        page.route("**/api/v1/jobs/refresh-warning", lambda route: route.fulfill(json=job))
+        page.goto(f"{url}/#runtime/settings")
+        page.locator('[data-settings-section="local-data"]').click()
+        playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text(label)
+        details = page.locator("[data-refresh-failures]").inner_text()
+        assert "已更新 202，201 个正式证据待补" in details
+        assert "600000.SH factor_contract_incomplete: 缺少完整因子链" in details
+        assert "undefined" not in details
+        assert "已成功同步" not in details
+        if failed:
+            assert "1 个失败" in details and "600002.SH 缺少实际当前行情" in details
+        if waiting_on:
+            assert "恢复后自动继续" in details
+        browser.close()
+
+
 @pytest.mark.parametrize("terminal", ["completed", "cancelled"])
 def test_settings_refresh_waits_for_stockdb_and_keeps_polling(live_server, terminal):
     url, _ = live_server

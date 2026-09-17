@@ -1252,10 +1252,16 @@ const settingsFeature = (() => {
     const waiting = dataRefreshWaiting(task);
     const failures = task.failures || [];
     const failed = Number(task.failed || failures.length);
-    const incomplete = task.outcome === 'completed_with_warnings' || failed > 0;
+    const warnings = task.warnings || [];
+    const warningCount = Number(task.warning_count ?? warnings.length);
+    const evidenceDetail = warningCount > 0
+      ? `已更新 ${task.succeeded || 0}，${warningCount} 个正式证据待补${warnings.length
+        ? `：${warnings.slice(-3).map(item => `${item.symbol} ${item.warning}`).join('；')}` : ''}` : '';
+    const incomplete = task.outcome === 'completed_with_warnings' || failed > 0 || warningCount > 0;
     const warning = incomplete || (!waiting && ['failed', 'cancelled', 'interrupted'].includes(task.status));
     const label = waiting ? '等待 StockDB 恢复' : task.status === 'completed' && incomplete
-      ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
+      ? (failed === 0 && warningCount > 0 ? '日常数据已更新，正式证据待补'
+        : Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
       : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
     const count = task.total_known === false
@@ -1264,12 +1270,14 @@ const settingsFeature = (() => {
       `${task.planning && !waiting ? '规划刷新中' : label} · ${count}${current}`;
     root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
     const retryAt = task.next_retry_at ? new Date(task.next_retry_at * 1000).toLocaleTimeString() : '';
-    root.querySelector('[data-refresh-failures]').textContent = waiting
+    const resultDetail = waiting
       ? `${task.detail || label}；${retryAt ? `下次自动检查 ${retryAt}，` : ''}恢复后自动继续。`
       : failed
       ? `${failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
       : warning || task.planning ? (task.detail || '同步未完整完成，请查看任务详情。')
         : `${task.succeeded || 0} 个标的已成功同步`;
+    root.querySelector('[data-refresh-failures]').textContent =
+      [evidenceDetail, task.status === 'completed' && !failed && evidenceDetail ? '' : resultDetail].filter(Boolean).join('；');
     const cancel = document.getElementById('data-refresh-cancel');
     cancel.hidden = !task.can_cancel;
     cancel.disabled = task.status === 'cancelling';
@@ -1288,10 +1296,10 @@ const settingsFeature = (() => {
       });
     } else if (warning) {
       window.QuantMasterRunInfo.add('warning', '数据刷新', '最近的数据刷新未完整完成', {
-        detail:failed ? `${failed} 个标的失败。` : (task.detail || label),
+        detail:[evidenceDetail, failed ? resultDetail : task.detail || ''].filter(Boolean).join('；') || label,
         action:task.can_retry ? '查看失败原因后重试未完成项。' : '查看任务详情与失败原因。',
         key:runtimeKey, scope:'health', persistent:true,
-        revision:`${task.status}:${task.failed || failures.length}`,
+        revision:`${task.status}:${failed}:${warningCount}:${evidenceDetail}`,
       });
     } else {
       window.QuantMasterRunInfo.resolve(runtimeKey);
