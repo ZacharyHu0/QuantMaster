@@ -31,6 +31,8 @@ def test_provider_probe_runs_real_adapter_to_replaced_network_boundary(monkeypat
     from scripts.release import smoke_frozen_runtime as packaging
 
     pytest.importorskip("akshare")
+    pytest.importorskip("tushare")
+    pytest.importorskip("yfinance")
     isolated_config.data.akshare_enabled = True
     isolated_config.data.akshare_retries = 1
     monkeypatch.setattr(packaging.sys, "frozen", True, raising=False)
@@ -77,6 +79,8 @@ def test_provider_probe_blocks_unexpected_socket_access(monkeypatch, isolated_co
     import socket
 
     akshare = pytest.importorskip("akshare")
+    pytest.importorskip("tushare")
+    pytest.importorskip("yfinance")
     from scripts.release import smoke_frozen_runtime as packaging
 
     isolated_config.data.akshare_enabled = True

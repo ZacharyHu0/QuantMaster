@@ -62,6 +62,7 @@ def test_packaged_build_identity_allows_untracked_docs(tmp_path: Path, monkeypat
         "quantmaster",
         "packaging",
         "scripts/release/check_desktop_artifact.py",
+        "scripts/release/smoke_frozen_runtime.py",
     )
     assert calls[0] == [
         "git", "diff-index", "--quiet", "HEAD", "--",
@@ -80,6 +81,7 @@ def test_packaged_build_identity_allows_untracked_docs(tmp_path: Path, monkeypat
         "quantmaster/server/static/experimental.js",
         "packaging/entry.py",
         "packaging/quantmaster-splash.png",
+        "scripts/release/smoke_frozen_runtime.py",
     ],
 )
 def test_packaged_build_identity_rejects_untracked_inputs(
@@ -95,15 +97,20 @@ def test_packaged_build_identity_rejects_untracked_inputs(
         packaged_build_sha(tmp_path / "repository")
 
 
+@pytest.mark.parametrize("script", [
+    "scripts/release/check_desktop_artifact.py",
+    "scripts/release/smoke_frozen_runtime.py",
+])
 def test_packaged_build_identity_rejects_dirty_artifact_policy_script(
     tmp_path: Path,
     monkeypatch,
+    script: str,
 ) -> None:
     from scripts.release.check_desktop_artifact import packaged_build_sha
 
     _fake_clean_git(
         monkeypatch,
-        tracked_change="scripts/release/check_desktop_artifact.py",
+        tracked_change=script,
     )
 
     with pytest.raises(RuntimeError, match="tracked Git tree"):
