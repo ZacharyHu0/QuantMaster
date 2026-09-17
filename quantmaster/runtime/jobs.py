@@ -2066,6 +2066,14 @@ class UnifiedJobRuntime:
             if not self._accepting_generation(scheduled_generation):
                 return
             key = (job_id, scheduled_generation)
+            if any(
+                active_id == job_id and active_generation != scheduled_generation
+                for active_id, active_generation in self._active
+            ):
+                # A maintenance timeout may reopen admission before a fenced
+                # provider/atomic unit exits. Leave this durable job queued for
+                # the dispatcher; never run two attempts of it concurrently.
+                return
             if key in self._active:
                 if reschedule_after_active:
                     self._reschedule_after_active.add(key)
