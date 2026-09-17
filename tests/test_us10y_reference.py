@@ -208,3 +208,33 @@ def test_us10y_zero_yield_card_and_history_are_json_safe(tmp_path, monkeypatch):
     assert history["kline"][-1] == ["2026-07-24", None, 4.25, None, None, None]
     assert not history["data_quality"]["formal_eligible"]
     json.dumps({"card": card, "history": history}, allow_nan=False)
+
+
+def test_us10y_reopen_replaces_legacy_builtin_identity_and_alias(tmp_path):
+    from quantmaster.data.instruments import InstrumentStore
+
+    path = tmp_path / "master.sqlite"
+    old = InstrumentStore(path=path)
+    other = old.get("SPX.INDEX")
+    with old._connection() as connection:
+        connection.execute(
+            "UPDATE instruments SET asset_type='index',currency='USD',provider_symbol='^TNX',"
+            "timezone='',tradable=1,bars_verified_at=123 WHERE symbol='US10Y.RATE'",
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO provider_aliases(instrument_id,provider,provider_symbol,"
+            "provider_asset_type,provider_currency,verification_status,evidence_source) "
+            "SELECT instrument_id,'yahoo','^TNX','index','USD','confirmed',"
+            "'bundled:official-provider-cross-check' FROM instruments WHERE symbol='US10Y.RATE'",
+        )
+    for _ in range(2):
+        upgraded = InstrumentStore(path=path)
+        rate = upgraded.get("US10Y.RATE")
+        assert rate is not None and rate.currency == ""
+        assert rate.asset_type == "yield" and not rate.tradable and rate.bars_verified_at == 0
+        with pytest.raises(ValueError, match="alias"):
+            upgraded.provider_alias("US10Y.RATE", "yahoo")
+        alias = upgraded.provider_alias("US10Y.RATE", "akshare:us-treasury")
+        assert alias.provider_symbol == "EMG00001310" and alias.provider_currency == ""
+        assert upgraded.get("SPX.INDEX").currency == other.currency
+        assert upgraded.provider_alias("SPX.INDEX", "yahoo").provider_symbol == "^GSPC"

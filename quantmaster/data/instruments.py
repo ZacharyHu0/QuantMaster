@@ -449,7 +449,9 @@ class InstrumentStore:
                     "WHERE symbol=? AND instrument_id IS NULL", (value["symbol"],),
                 )
                 self._replace_generated_aliases(connection, value)
-                if (
+                if value["symbol"] == "US10Y.RATE" and value["source"] == "built_in":
+                    self._replace_us10y_builtin_contract(connection)
+                elif (
                     value["source"] == "built_in" and value["provider_symbol"]
                     and value["provider_symbol"] != value["symbol"]
                 ):
@@ -486,6 +488,28 @@ class InstrumentStore:
                         ),
                     )
         return len(values)
+
+    @staticmethod
+    def _replace_us10y_builtin_contract(connection: sqlite3.Connection) -> None:
+        """Replace the former price/Yahoo declaration without inheriting its proof."""
+        connection.execute(
+            "UPDATE instruments SET currency='',bars_verified_at=0 "
+            "WHERE symbol='US10Y.RATE' AND source='built_in'",
+        )
+        connection.execute(
+            "UPDATE provider_aliases SET verification_status='rejected',"
+            "diagnostic_code='us10y_yield_contract_replaced' "
+            "WHERE instrument_id=(SELECT instrument_id FROM instruments WHERE symbol='US10Y.RATE') "
+            "AND provider='yahoo' AND evidence_source='bundled:official-provider-cross-check'",
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO provider_aliases("
+            "instrument_id,provider,provider_symbol,provider_exchange,provider_asset_type,"
+            "provider_currency,provider_timezone,provider_name,verification_status,evidence_source) "
+            "SELECT instrument_id,'akshare:us-treasury','EMG00001310',exchange,'yield','',"
+            "timezone,name,'confirmed','built_in:bond_zh_us_rate:EMG00001310' "
+            "FROM instruments WHERE symbol='US10Y.RATE' AND source='built_in' AND asset_type='yield'",
+        )
 
     def add_provider_alias(self, alias: ProviderAlias) -> None:
         """Persist a verified alias; conflicting provider metadata is rejected."""

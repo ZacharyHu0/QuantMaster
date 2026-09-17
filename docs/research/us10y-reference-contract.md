@@ -34,6 +34,11 @@ operator 提供的既有脱敏证据中，最近五个 market 任务每次 attem
 旧 OHLCV/缺契约缓存显式不可用，增量只合并同契约观测，不套用股票复权缩放。
 身份缺失为不可重试 `identity_missing`；provider 不可用保留受控失败及已有缓存。
 
+旧 built_in 主数据在既有 upsert 事务内显式清除 USD 与旧 bars_verified_at；
+旧通用生成的 Yahoo 别名标记 rejected 保留审计，创建 `akshare:us-treasury/EMG00001310`
+字段契约别名，不再把东方财富字段声明为 Yahoo 符号。仅替换 US10Y，
+旧 index/USD/^TNX 库连续重开两次的隔离回归确认幂等，其他参考别名不变。
+
 `tests/test_us10y_reference.py` 离线覆盖实际失败红→绿、字段身份/百分数、fresh cache 零远端、
 源失败无股票 fallback、旧缓存拒绝、增量不缩放、纽约请求上界和面板复用。
 所有 provider 返回均为隔离测试数据，不能替代生产数据真实性验收。
