@@ -484,6 +484,58 @@ def live_server(module_config):
         _assert_no_ui_process_owners()
 
 
+def test_us10y_history_api_renders_percent_line_without_candles(live_server, monkeypatch):
+    import pandas as pd
+
+    from quantmaster.data.base import BarDataEnvelope
+    from quantmaster.data.reference_market import _normalize_yield
+    from quantmaster.data.registry import _assess_daily_frame
+
+    frame = _normalize_yield(pd.DataFrame({
+        "日期": ["2026-07-22", "2026-07-23", "2026-07-24"],
+        "美国国债收益率10年": [-0.5, 0.0, 4.25],
+    }), "2026-07-22", "2026-07-24")
+    quality = _assess_daily_frame(
+        frame, "2026-07-22", "2026-07-24", symbol="US10Y.RATE", source="akshare:us-treasury",
+    )
+    envelope = BarDataEnvelope(frame, quality)
+    monkeypatch.setattr("quantmaster.data.read_bars", lambda *_args, **_kwargs: envelope)
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _install_market_workbench_routes(page)
+        page.unroute("**/api/v1/market/history/*")
+        page.goto(f"{url}/#today/quotes")
+        page.wait_for_function("typeof showKline === 'function'")
+        response = page.request.get(f"{url}/api/v1/market/history/US10Y.RATE")
+        assert response.status == 200
+        history = response.json()
+        assert history["series_type"] == "yield"
+        assert history["kline"] == [
+            ["2026-07-22", None, -0.5, None, None, None],
+            ["2026-07-23", None, 0.0, None, None, None],
+            ["2026-07-24", None, 4.25, None, None, None],
+        ]
+        page.evaluate("showKline('US10Y.RATE', '美债10年收益率')")
+        page.locator("#kline canvas").wait_for()
+        rendered = page.evaluate("""() => {
+          const option = charts.kline.getOption();
+          return {types:option.series.map(s => s.type), values:option.series[0].data,
+            axis:option.yAxis[0].axisLabel.formatter(-0.5),
+            tooltip:option.tooltip[0].valueFormatter(4.25)};
+        }""")
+        assert rendered == {"types": ["line"], "values": [-0.5, 0, 4.25],
+                            "axis": "-0.5%", "tooltip": "4.25%"}
+        page.evaluate("""() => renderKlineSeries(charts.kline, {
+          series_type:'ohlcv',kline:[['2026-07-24',1,2,0.5,2.5,100]]
+        })""")
+        assert page.evaluate("charts.kline.getOption().series.map(s => s.type)") == [
+            "candlestick", "line", "line", "bar",
+        ]
+        browser.close()
+
+
 def _install_market_workbench_routes(page, *, list_status: int = 200):
     methods = {
         name: {

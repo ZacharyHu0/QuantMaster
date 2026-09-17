@@ -517,6 +517,11 @@ def market_history(
     from quantmaster import data as data_api
     from quantmaster.data.base import validate_frequency, validate_symbol
 
+    if end is None and symbol == "US10Y.RATE":
+        from quantmaster.data.reference_market import yield_request_end
+        from quantmaster.trading_sessions import market_now
+
+        end = yield_request_end(market_date().isoformat(), market_now())
     end = end or (
         default_close_data_end() if frequency == "1d" else market_date().isoformat()
     )
@@ -545,14 +550,15 @@ def market_history(
     loaded = time.perf_counter()
     positions = {column: offset + 1 for offset, column in enumerate(df.columns)}
     volume_position = positions.get("volume")
+    is_yield = symbol == "US10Y.RATE"
     kline = [
         [
             str(values[0].date()) if frequency == "1d" else str(values[0]),
-            round(values[positions["open"]], 3),
+            None if is_yield else round(values[positions["open"]], 3),
             round(values[positions["close"]], 3),
-            round(values[positions["low"]], 3),
-            round(values[positions["high"]], 3),
-            round(values[volume_position], 0) if volume_position is not None else 0.0,
+            None if is_yield else round(values[positions["low"]], 3),
+            None if is_yield else round(values[positions["high"]], 3),
+            None if is_yield else round(values[volume_position], 0) if volume_position is not None else 0.0,
         ]
         for values in df.itertuples(index=True, name=None)
     ]
@@ -572,6 +578,7 @@ def market_history(
         "symbol": symbol,
         "frequency": frequency,
         "kline": kline,
+        "series_type": "yield" if is_yield else "ohlcv",
         "data_quality": market_envelope.quality.to_dict(),
         "provenance": list(market_envelope.provenance),
     }
