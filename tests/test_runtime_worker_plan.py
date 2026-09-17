@@ -126,6 +126,21 @@ def test_runtime_worker_preserves_plan_command_error_code(isolated_config, monke
     worker.stop()
 
 
+def test_worker_heartbeat_follows_confirmed_plan_settings(isolated_config, monkeypatch):
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    plan = _Plan()
+    worker = _worker(monkeypatch, plan)
+    worker.start(bootstrap_rotation=False)
+    worker._write_heartbeat()
+    assert runtime_worker_status()["effective_revision"] == 4
+    monkeypatch.setattr(plan, "settings_projection", lambda: (5, 8))
+    worker._write_heartbeat()
+    assert runtime_worker_status()["effective_revision"] == 5
+    assert runtime_worker_status()["config_generation"] == 8
+    worker.stop()
+
+
 def test_runtime_worker_cleans_plan_after_partial_start_failure(
     isolated_config, monkeypatch,
 ):

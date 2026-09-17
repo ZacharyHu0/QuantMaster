@@ -912,8 +912,6 @@ def test_candidate_api_metadata_preview_and_reference_safe_changes(tmp_path, mon
     manager = ConfigManager(config_path, tmp_path / "backups", FakeCredentials())
     monkeypatch.setattr(management, "settings_manager", manager)
     monkeypatch.setattr(
-        management, "_apply_runtime", lambda result: {**result, "runtime": {}})
-    monkeypatch.setattr(
         "quantmaster.lab.dataset.load_csi800_members_as_of",
         lambda as_of: {
             "as_of": as_of,

@@ -142,6 +142,8 @@ class RuntimeWorker:
         self._config_generation = 0
 
     def _write_heartbeat(self) -> None:
+        if self._plan is not None:
+            self._config_revision, self._config_generation = self._plan.settings_projection()
         path = _heartbeat_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         identity = get_application_identity()

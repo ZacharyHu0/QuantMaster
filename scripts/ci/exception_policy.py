@@ -66,11 +66,13 @@ BASELINE = {
     "quantmaster/server/automation.py": 10,
     "quantmaster/server/diagnostics.py": 1,
     "quantmaster/server/lab.py": 12,
-    "quantmaster/server/management.py": 6,
+    "quantmaster/server/management.py": 3,
     "quantmaster/server/news.py": 8,
     "quantmaster/server/trading.py": 11,
     "quantmaster/server/settings_checks.py": 4,
     "quantmaster/server/settings_jobs.py": 1,
+    # Existing component-application boundaries moved out of the HTTP router.
+    "quantmaster/server/settings_apply.py": 3,
 }
 
 STRICT_PREFIXES = (

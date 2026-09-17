@@ -264,6 +264,11 @@ def test_study_ledger_persists_protocol_and_resume_state(tmp_path):
 
 
 def test_study_rest_api_and_cli_expose_the_same_research_controls(tmp_path, monkeypatch):
+    from quantmaster.lab.jobs import LabJobManager
+
+    # This is an admission/projection contract, not an optimization execution
+    # test. Keep its durable job queued as in the real Web process.
+    monkeypatch.setattr(LabJobManager, "_owns_runtime", staticmethod(lambda: False))
     cfg = Config()
     cfg.data.root = str(tmp_path)
     cfg.lab.enabled = False
