@@ -1312,13 +1312,17 @@ class RotationService:
         theme_pending = self.store.has_pending_theme_sync((
             "eastmoney-concept", "tushare:dc-concept", "ths:concept",
         ))
+        etf_fresh = self.store.etf_path.is_file() and any(
+            str(row.get("coverage_end") or "")[:10] >= expected_as_of
+            for row in self.store.source_generations("rotation.etf_observations")
+        )
         return {
             "market": need_market and (market_missing or market_stale),
             "industries": scope in {"all", "close", "industries"}
             and (not bool(self.store.taxonomy_nodes()) or industry_pending),
             "themes": scope in {"all", "close", "themes"}
             and (not themes_fresh or theme_pending),
-            "etf": scope in {"all", "etf"} and not self.store.etf_path.is_file(),
+            "etf": scope in {"all", "close", "market", "etf"} and not etf_fresh,
         }
 
     def _envelope(
@@ -1396,7 +1400,7 @@ class RotationService:
             (str((header.get("meta") or {}).get("as_of") or "") for header in headers),
             default="",
         )
-        expected_as_of = self._expected_for_spec(spec) if need_market else ""
+        expected_as_of = self._expected_for_spec(spec)
         unique_warnings = list(dict.fromkeys(warnings or []))
         return {
             "snapshot_id": _snapshot_id(
@@ -1944,7 +1948,10 @@ class _RotationBuildRun:
             or self.service._expected_for_spec(state.spec)
             or ""
         )
-        if source_name and quality_status not in unavailable:
+        # ETF coverage belongs to the observations written by the provider.
+        # A successful request (including an empty response) is not evidence
+        # that shares exist on the requested market date.
+        if source_name and key != "etf" and quality_status not in unavailable:
             self.service.store.mark_source_coverage(source_name, observed_as_of)
 
     def _run_provider_operation(
@@ -2109,7 +2116,7 @@ class _RotationBuildRun:
         state.expected_as_of = str(
             state.provider_results.get("market", {}).get("expected_as_of")
             or self.service._expected_for_spec(state.spec)
-        ) if state.need_market else ""
+        )
         state.snapshot_id = _snapshot_id(
             state.as_of, list(state.close.columns), state.scope,
         )

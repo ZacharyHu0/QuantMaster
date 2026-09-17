@@ -8,6 +8,19 @@ from quantmaster.data.repair import get_data_repair_manager
 from quantmaster.server.app import app
 
 
+def test_rotation_refresh_job_exposes_partial_result(monkeypatch):
+    from quantmaster.server import jobs
+
+    result = {"outcome": "partial", "as_of": "2026-08-20", "warnings": ["份额尚未推进"]}
+    monkeypatch.setattr(jobs, "_artifact_payload", lambda _: result)
+    public = jobs._public_job("rotation", {
+        "id": "rotation-partial", "type": "rotation.refresh", "status": "completed",
+        "result_artifact_id": "result-partial",
+    })
+    assert public["result"] == result
+    assert public["outcome"] == "partial"
+
+
 def _spec(name: str = "统一任务") -> BacktestSpec:
     return BacktestSpec.model_validate({
         "name": name,

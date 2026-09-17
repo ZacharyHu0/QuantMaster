@@ -207,10 +207,12 @@ def _apply_artifact_projection(
                 "formal_eligible": bool(payload.get("formal_eligible")),
                 "artifact_id": str(value.get("result_artifact_id") or ""),
             }
-    if domain in {"news", "settings"}:
+    if domain in {"news", "settings"} or job_type == "rotation.refresh":
         payload = _artifact_payload(value)
         if payload is not None:
             public["result"] = dict(payload)
+            if job_type == "rotation.refresh":
+                public["outcome"] = str(payload.get("outcome") or "")
     if domain == "lab" and job_type in _UNIFIED_DOMAIN_TYPES["lab"]:
         payload = _artifact_payload(value)
         if payload is not None:
