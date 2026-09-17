@@ -422,6 +422,26 @@ class DataRefreshManager:
         from quantmaster.data.resilience import classify_provider_failure
         from quantmaster.logging_config import redact_sensitive_text
 
+        if isinstance(exc, MarketDataUnavailable):
+            quality = exc.quality
+            if (
+                not quality.stale and quality.observed_end == quality.requested_end
+                and quality.coverage_ratio is not None and quality.coverage_ratio < 1.0
+            ):
+                return {
+                    "error": redact_sensitive_text(
+                        f"请求区间 {quality.requested_start} 至 {quality.requested_end} "
+                        f"日线覆盖不完整（{quality.coverage_ratio:.4%}，"
+                        f"日期证据来源 {quality.calendar_source}）；需核验缺失日期的行情或停牌证据；{exc}"
+                    )[:300],
+                    "code": "daily_coverage_incomplete", "retryable": False,
+                    "requested_start": quality.requested_start,
+                    "requested_end": quality.requested_end,
+                    "observed_start": quality.observed_start,
+                    "observed_end": quality.observed_end,
+                    "coverage_ratio": quality.coverage_ratio,
+                    "calendar_source": quality.calendar_source,
+                }
         code = classify_provider_failure(exc)
         if isinstance(exc, MarketDataUnavailable) and code == "transient_upstream":
             code = "data_incomplete" if exc.quality.stale else "evidence_missing"

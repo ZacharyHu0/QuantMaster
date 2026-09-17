@@ -1040,9 +1040,10 @@ class BarStore:
     def mark_status(self, symbol: str, status: str, source: str = "") -> None:
         if self.read_only:
             raise RuntimeError("页面本地读取上下文禁止更新行情状态")
-        with self._conn() as conn:
+        with self.lock(symbol), self._conn() as conn:
             row = conn.execute(
-                "SELECT quality_json,last_source,source_chain_json FROM bar_meta WHERE symbol=?",
+                "SELECT quality_json,last_source,source_chain_json,last_status "
+                "FROM bar_meta WHERE symbol=?",
                 (symbol,),
             ).fetchone()
             try:
@@ -1059,6 +1060,11 @@ class BarStore:
                     issues.append(message)
                 quality["issues"] = issues
             effective_source = source or (str(row[1] or "") if row else "")
+            quality_json = json.dumps(quality, ensure_ascii=False, sort_keys=True)
+            # Rechecking the same failed range is not new evidence. Appending a
+            # timestamp-only event invalidates completed overlapping refreshes.
+            if row and (row[3], row[1], row[0]) == (status, effective_source, quality_json):
+                return
             try:
                 chain = json.loads(str(row[2] or "[]")) if row else []
                 if not isinstance(chain, list):
@@ -1084,7 +1090,7 @@ class BarStore:
                 (
                     status,
                     effective_source,
-                    json.dumps(quality, ensure_ascii=False, sort_keys=True),
+                    quality_json,
                     json.dumps(chain, ensure_ascii=False, sort_keys=True),
                     symbol,
                 ),
