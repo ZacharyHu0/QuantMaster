@@ -509,9 +509,7 @@ def _assess_daily_frame(
     semantics, semantic_issues = _numeric_semantics(symbol, source, df, units)
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
-    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") not in {
-        "verified", "stockdb_accepted",
-    }:
+    if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
         adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
     boundary_tolerance = pd.Timedelta(days=14)

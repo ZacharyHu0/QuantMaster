@@ -204,6 +204,17 @@ def test_accepted_stockdb_session_does_not_fabricate_formal_factor_or_pit_eviden
     for name in ("provider_published_at", "adjustment_company_actions",
                  "adjustment_provider_definition", "adjustment_anchor_date", "formal_evidence"):
         assert name not in bound.attrs
+    # Previously persisted market-acceptance attrs are not independent factor
+    # evidence either, even when the old writer labelled their chain complete.
+    bound.attrs.update({
+        "adjustment_status": "stockdb_accepted", "factor_coverage": "complete",
+        "adjustment_provider_definition": "free-stockdb:native-qfq",
+        "adjustment_company_actions": "stockdb-through:2026-08-07",
+    })
+    legacy = registry._assess_daily_frame(
+        bound, "2026-07-01", "2026-08-07", symbol="600000.SH", source="free-stockdb",
+    )
+    assert legacy.status == "degraded" and not legacy.formal_eligible
 
 
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
