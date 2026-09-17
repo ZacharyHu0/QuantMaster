@@ -27,7 +27,7 @@ def _target(data_root: Path) -> Path:
         raise StorageBoundaryError("LAB_ACL_TARGET_INVALID")
     target = data_root / "lab_evidence"
     for path in (target, *target.parents):
-        if path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        if getattr(path.lstat(), "st_file_attributes", stat.FILE_ATTRIBUTE_REPARSE_POINT) & 1024:
             raise StorageBoundaryError("LAB_ACL_REPARSE_REJECTED")
     if data_root.name.lower() in {".artifacts", ".worktrees"} or not target.is_dir():
         raise StorageBoundaryError("LAB_ACL_TARGET_INVALID")
@@ -40,7 +40,7 @@ def _inventory(target: Path) -> list[dict[str, Any]]:
     while pending:
         path = pending.pop(0)
         info = path.lstat()
-        if info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        if getattr(info, "st_file_attributes", stat.FILE_ATTRIBUTE_REPARSE_POINT) & 1024:
             raise StorageBoundaryError("LAB_ACL_REPARSE_REJECTED")
         if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
             raise StorageBoundaryError("LAB_ACL_OBJECT_REJECTED")
@@ -68,7 +68,10 @@ def _deny_writers(paths: list[Path]):
     """Real Windows share-mode barrier: reject writers and prevent rename/delete."""
     from ctypes import wintypes
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        raise StorageBoundaryError("LAB_ACL_WINDOWS_REQUIRED")
+    kernel = loader("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
         wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
@@ -154,6 +157,7 @@ def _validate_acls(acls: list[dict[str, Any]]) -> None:
     if any(item["protected"] for item in children):
         raise StorageBoundaryError("LAB_ACL_PROTECTED_DESCENDANT")
     if not root["protected"]:
+        _verify_grants(acls, acls)
         return
     rules = root["rules"]
     if len(rules) != 3 or {rule["sid"] for rule in rules} != {
@@ -221,7 +225,7 @@ def _validate_receipt(receipt: Path, target: Path) -> None:
     if receipt != Path(os.path.abspath(receipt)):
         raise StorageBoundaryError("LAB_ACL_RECEIPT_INVALID")
     for path in (receipt.parent, *receipt.parent.parents):
-        if path.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        if getattr(path.lstat(), "st_file_attributes", stat.FILE_ATTRIBUTE_REPARSE_POINT) & 1024:
             raise StorageBoundaryError("LAB_ACL_RECEIPT_INVALID")
     if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
         raise StorageBoundaryError("LAB_ACL_RECEIPT_INVALID")
@@ -236,6 +240,9 @@ def _restore_baseline(receipt: Path, target: Path, inventory, before):
     if saved["acls"][0] != before[0]:
         raise StorageBoundaryError("LAB_ACL_PARENT_CHANGED")
     expected = saved["acls"]
+    _validate_acls(expected)
+    if not expected[1]["protected"]:
+        raise StorageBoundaryError("LAB_ACL_RECEIPT_INVALID")
     if not _same_grants(before, expected):
         _verify_grants(expected, before)
     return expected

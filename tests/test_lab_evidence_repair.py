@@ -104,6 +104,11 @@ def test_new_extract_and_same_volume_publish_keep_cleanup_grants(tmp_path):
         Path(temporary, "nested").replace(root / "private-published")
     with pytest.raises(AssertionError, match="cleanup identity grant was lost"):
         _cleanup_identity_acl(root / "private-published", grant=False)
+    # An unprotected flag alone also cannot certify destination grants.
+    grantless = repair._acls([root, root / "private-published"])
+    grantless[1]["protected"] = False
+    with pytest.raises(ValueError, match="GRANT_VERIFICATION_FAILED"):
+        repair._validate_acls(grantless)
 
 
 def test_requires_live_frozen_worker_and_rejects_real_writer(evidence):
