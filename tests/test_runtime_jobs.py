@@ -623,3 +623,16 @@ def test_compute_child_reports_sanitized_failure_detail(tmp_path):
     failed = _wait(store, job["id"], {"failed"}, timeout=15)
     assert failed["detail"].startswith(f"{detail}; child_frames=")
     runtime.stop()
+
+
+def test_manual_dispatch_runtime_can_resume_without_replacing_executor(tmp_path):
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "manual.sqlite"), dispatch=False)
+    executor = runtime._executor
+    runtime.pause()
+    assert runtime.stopping
+    runtime.resume()
+    assert not runtime.stopping
+    assert runtime._executor is executor
+    runtime.stop()
+    with pytest.raises(RuntimeError, match="永久停止"):
+        runtime.resume()

@@ -151,3 +151,123 @@ def test_runtime_worker_preserves_startup_error_when_partial_cleanup_also_fails(
 
     assert plan.events == [("start", True), "stop"]
     assert worker._plan is None
+
+
+@pytest.mark.parametrize("release_before_deadline", [True, False])
+def test_default_plan_maintenance_preserves_executor_and_recovers_busy_work(
+    isolated_config, tmp_path, monkeypatch, release_before_deadline,
+):
+    import threading
+    import time
+    from types import SimpleNamespace
+
+    from quantmaster.backtest.jobs import BacktestJobManager
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.data.repair import DataRepairManager
+    from quantmaster.research.jobs import ResearchJobManager
+    from quantmaster.runtime.jobs import JobOutcome, UnifiedJobRuntime, UnifiedJobStore
+    from quantmaster.runtime.maintenance import MaintenanceBarrier, MaintenanceParticipant
+    from quantmaster.server.bootstrap import _DefaultWorkerPlan
+
+    monkeypatch.delenv("QM_WEB_PROCESS", raising=False)
+    monkeypatch.delenv("QM_WORKER_SUPERVISOR", raising=False)
+    runtime = UnifiedJobRuntime(UnifiedJobStore(tmp_path / "jobs.sqlite"), max_workers=1)
+    entered, release = threading.Event(), threading.Event()
+    attempts = []
+
+    def handler(context, spec):
+        attempts.append(context.attempt)
+        entered.set()
+        assert release.wait(3)
+        return JobOutcome("completed", "resumed")
+
+    runtime.register("test.drain", handler)
+    plan = _DefaultWorkerPlan.__new__(_DefaultWorkerPlan)
+    def noop(*a, **k):
+        return None
+    other = SimpleNamespace(idle=True, start=noop, stop=noop, pause=noop, resume=noop)
+    for name in ("cnn_fear_greed_refresher", "ashare_fear_greed_refresher",
+                 "paper_automation_worker", "rotation_worker", "stock_analysis_worker",
+                 "after_close_worker", "etf_research_worker", "news_worker", "settings_worker"):
+        setattr(plan, name, other)
+    plan.runtime = SimpleNamespace(start=noop, stop=noop, service=SimpleNamespace(jobs=other))
+    plan.lab_llm_worker = SimpleNamespace(runtime=other)
+    plan.lab_worker = None
+    plan.research_worker = ResearchJobManager(runtime=runtime)
+    plan.data_refresh_manager = DataRefreshManager(runtime=runtime)
+    plan.repair_worker = DataRepairManager(runtime=runtime, read_only=True)
+    plan.backtest_jobs = BacktestJobManager(runtime=runtime)
+    plan._publish_async = noop
+    plan._publish_market_overview = noop
+    barrier = MaintenanceBarrier()
+    def drain():
+        plan.drain()
+        if release_before_deadline:
+            release.set()
+
+    barrier.register(MaintenanceParticipant("plan", drain, plan.resume, plan.idle))
+    job, _ = runtime.submit("test.drain", {})
+    assert entered.wait(2)
+    executor = runtime._executor
+    try:
+        if release_before_deadline:
+            lease = barrier.enter("application activation", timeout=1)
+            assert plan.idle()
+            assert runtime.store.get(job["id"])["status"] == "interrupted"
+            barrier.exit(lease)
+        else:
+            with pytest.raises(TimeoutError):
+                barrier.enter("application activation", timeout=0.1)
+            assert not barrier.active
+            release.set()
+        deadline = time.monotonic() + 3
+        while not runtime.idle and time.monotonic() < deadline:
+            time.sleep(0.01)
+        next_job, _ = runtime.submit("test.drain", {"next": True})
+        assert runtime.wait(next_job["id"], timeout=2)["status"] == "completed"
+        assert runtime._executor is executor
+        assert not runtime.stopping
+    finally:
+        release.set()
+        runtime.stop()
+
+
+
+def test_recovery_failure_is_visible_in_heartbeat(isolated_config, monkeypatch):
+    import json
+
+    from quantmaster.runtime import worker as worker_module
+    from quantmaster.runtime.maintenance import MaintenanceBarrier, MaintenanceParticipant
+
+    barrier = MaintenanceBarrier()
+
+    def fail_resume():
+        raise RuntimeError("partial recovery failed")
+
+    barrier.register(MaintenanceParticipant("broken", lambda: None, fail_resume, lambda: True))
+    lease = barrier.enter("application activation")
+    with pytest.raises(RuntimeError):
+        barrier.exit(lease)
+    monkeypatch.setattr(worker_module, "maintenance_barrier", barrier)
+    worker = _worker(monkeypatch, _Plan())
+    worker._command_server = _CommandServer(worker._handle_command)
+    worker._command_server.start()
+    worker._write_heartbeat()
+    value = json.loads(worker_module._heartbeat_path().read_text(encoding="utf-8"))
+    assert value["commands_available"] is False
+    assert value["maintenance"]["state"] == "recovery_failed"
+
+
+def test_worker_activation_token_can_be_recovered_after_reply_loss(isolated_config, monkeypatch):
+    worker = _worker(monkeypatch, _Plan())
+    worker.start(bootstrap_rotation=False)
+    try:
+        worker._handle_command("maintenance.enter", {"reason": "application activation"})
+        status = worker._handle_command("maintenance.status", {"token": ""})
+        assert status["state"] == "frozen"
+        assert status["token"]
+        worker._handle_command("maintenance.exit", {"token": status["token"]})
+        assert worker._handle_command("maintenance.status", {})["state"] == "open"
+    finally:
+        worker.stop()
+

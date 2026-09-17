@@ -404,6 +404,11 @@ class LabJobManager:
         if self._owns_runtime():
             self._ensure_runtime().start()
 
+    @property
+    def idle(self) -> bool:
+        runtime = self._runtime
+        return runtime is None or runtime.idle
+
     def pause(self) -> None:
         runtime = self._runtime
         if runtime is not None:

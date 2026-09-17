@@ -217,3 +217,54 @@ def test_partial_unix_frame_cannot_hold_server_forever(tmp_path):
     finally:
         channel.close()
         server.stop()
+
+
+def test_disconnected_error_reply_keeps_command_server_available(tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    def handler(operation, payload):
+        if operation == "slow-error":
+            entered.set()
+            assert release.wait(2)
+            raise WorkerCommandError("drain_failed", "drain failed")
+        return {"state": "open"}
+
+    server = RuntimeCommandServer(handler, root=tmp_path)
+    server.start()
+    try:
+        with pytest.raises(WorkerCommandUnavailable):
+            call_worker_command("slow-error", timeout=0.05, root=tmp_path)
+        assert entered.is_set()
+        release.set()
+        assert call_worker_command("maintenance.status", timeout=2, root=tmp_path) == {"state": "open"}
+        assert server.running
+    finally:
+        release.set()
+        server.stop()
+
+
+def test_deadline_client_can_read_old_standard_listener_protocol(tmp_path):
+    from multiprocessing.connection import Listener
+
+    from quantmaster.runtime import worker_ipc
+    from quantmaster.runtime.identity import get_application_identity
+
+    endpoint = worker_command_endpoint(tmp_path)
+    listener = Listener(endpoint, family="AF_PIPE" if os.name == "nt" else "AF_UNIX",
+                        authkey=worker_ipc._authkey(tmp_path))
+    received = []
+
+    def legacy_server():
+        with listener.accept() as channel:
+            received.append(channel.recv())
+            channel.send({"ok": True, "value": {"state": "open"}})
+
+    thread = threading.Thread(target=legacy_server, daemon=True)
+    thread.start()
+    try:
+        assert call_worker_command("maintenance.status", root=tmp_path, timeout=2) == {"state": "open"}
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert received[0]["application_identity"] == get_application_identity().__dict__
+    finally:
+        listener.close()
