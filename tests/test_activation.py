@@ -144,7 +144,8 @@ def test_activation_commits_a_new_generation_and_preserves_previous(tmp_path):
     ]
 
 
-def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path):
+@pytest.mark.parametrize("budget, expected", [(None, 30.0), (0, 0.1), (0.25, 0.25), (60, 30.0)])
+def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path, budget, expected):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
     _write_state(tmp_path, active=SHA_A)
@@ -162,13 +163,23 @@ def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path):
             return super().wait_ready(generation, identity, timeout)
 
     controller = TimeoutController(SHA_A)
+    from quantmaster.server.cli import build_parser
+
+    argv = ["activate", SHA_B]
+    if budget is not None:
+        argv += ["--ready-timeout", str(budget)]
+    args = build_parser().parse_args(argv)
+    if budget is None:
+        assert args.ready_timeout == activation.READY_TIMEOUT_SECONDS
+    else:
+        assert args.ready_timeout == budget
     coordinator = ActivationCoordinator(
-        SlotRegistry(tmp_path), controller, ready_timeout=60.0,
+        SlotRegistry(tmp_path), controller, ready_timeout=args.ready_timeout,
     )
 
     assert coordinator.activate(SHA_B)["status"] == "activated"
     assert activation.READY_TIMEOUT_SECONDS == 30.0
-    assert controller.ready_timeout == 30.0
+    assert controller.ready_timeout == expected
 
 
 def test_candidate_failure_rolls_back_previous_slot(tmp_path):
@@ -853,3 +864,22 @@ def test_late_refresh_intake_cannot_resume_a_paused_executor(tmp_path):
         proceed.set()
         thread.join(timeout=2)
         runtime.stop()
+
+
+def test_activation_cli_help_explains_shared_readiness_budget(capsys):
+    from quantmaster.server.cli import build_parser
+
+    with pytest.raises(SystemExit) as result:
+        build_parser().parse_args(["activate", "--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr().out
+    assert "--ready-timeout" in output
+    assert f"默认及上限 {activation.READY_TIMEOUT_SECONDS:g} 秒" in output
+
+
+def test_activation_cli_rejects_non_numeric_readiness_budget():
+    from quantmaster.server.cli import build_parser
+
+    with pytest.raises(SystemExit) as result:
+        build_parser().parse_args(["activate", SHA_B, "--ready-timeout", "invalid"])
+    assert result.value.code == 2
