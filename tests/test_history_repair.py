@@ -53,7 +53,7 @@ def repair_setup(tmp_path, isolated_config, monkeypatch):
     factors = raw[["ts_code", "trade_date"]].assign(adj_factor=2.0)
     factors.loc[:4, "adj_factor"] = 1.0
     calls = []
-    state = {"fault": "", "cancelled": False}
+    state = {"fault": "", "cancelled": False, "request_factories": registry._request_factories}
 
     class FakePro:
         def daily(self, **params):
@@ -394,3 +394,147 @@ def test_committed_repair_is_not_reported_failed_for_backup_cleanup(repair_setup
     assert result.data.index.max() == pd.Timestamp(END)
     assert store.metadata(SYMBOL)["last_source"] == "tushare"
     assert store.get(SYMBOL).loc[START, "close"] == 5.0
+
+
+@pytest.mark.parametrize("status", ["stale", "refresh_failed", "degraded"])
+def test_auto_does_not_reuse_checked_but_missing_tail(repair_setup, monkeypatch, status):
+    store, _, calls, _, old = repair_setup
+    # Reproduce the installed cache: requested coverage includes the absent tail,
+    # checked_at is recent, old bytes have no trustworthy qfq contract.
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=END)
+    store.mark_status(SYMBOL, status)
+    monkeypatch.setattr(registry, "market_date", lambda: pd.Timestamp(END).date())
+    result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert calls
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert old.index.difference(result.data.index).empty
+    assert not result.quality.stale
+    assert not result.quality.formal_eligible
+    assert result.data.attrs["factor_coverage"] == "complete"
+    calls.clear()
+    before = store.metadata(SYMBOL)
+    registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert calls == []
+    assert store.metadata(SYMBOL) == before
+
+
+def _auto_sources(monkeypatch, source, native):
+    class Local:
+        name = "free-stockdb"
+
+        def daily(self, symbol, start, end):
+            return native.loc[start:end].copy()
+
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: {
+        registry.Market.CN: [lambda: source] if kw.get("provider") == "tushare"
+        else [Local, lambda: source],
+    })
+
+
+@pytest.mark.parametrize("fault", ["", "old_date", "tail", "raw", "identity", "unit"])
+def test_auto_tries_complete_local_before_same_source_repair(repair_setup, monkeypatch, fault):
+    store, source, calls, _, old = repair_setup
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=END)
+    store.mark_status(SYMBOL, "stale")
+    native = old.reindex(pd.bdate_range(START, END)).ffill()
+    native.index.name = "date"
+    native.attrs = {
+        "instrument": SYMBOL, "adjustment": "qfq", "provider_interface": "stock_sdk:daily",
+        "unit_status": "verified_local_stockdb_schema_v1",
+        "units": dict(registry._unit_contract(SYMBOL)[0]), "factor_coverage": "unconfirmed",
+    }
+    if fault == "old_date":
+        native = native.iloc[1:]
+    elif fault == "tail":
+        native = native.iloc[:-1]
+    elif fault == "raw":
+        native.attrs["adjustment"] = "raw"
+    elif fault == "identity":
+        native.attrs["instrument"] = "600000.SH"
+    elif fault == "unit":
+        native.attrs["unit_status"] = "unknown"
+    _auto_sources(monkeypatch, source, native)
+    result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert old.index.difference(result.data.index).empty
+    assert not result.quality.stale and not result.quality.formal_eligible
+    assert bool(calls) == bool(fault)
+    assert store.metadata(SYMBOL)["last_source"] == ("tushare" if fault else "free-stockdb")
+
+
+@pytest.mark.parametrize("fault", ["missing_old", "missing_gap", "network", "factor", "cancel"])
+def test_auto_failed_repair_preserves_entire_old_generation(repair_setup, monkeypatch, fault):
+    store, source, _, state, old = repair_setup
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=END)
+    store.mark_status(SYMBOL, "stale")
+    _auto_sources(monkeypatch, source, old)
+    original = store._path(SYMBOL).read_bytes()
+    metadata = store.metadata(SYMBOL)
+    state["fault"] = fault
+    if fault in {"network", "cancel", "factor"}:
+        with pytest.raises(InterruptedError if fault == "cancel" else RuntimeError):
+            registry.refresh_history(SYMBOL, START, END, store=store, mode="auto",
+                                     cancelled=lambda: state["cancelled"])
+    else:
+        result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+        assert result.quality.stale
+    assert store._path(SYMBOL).read_bytes() == original
+    assert store.metadata(SYMBOL) == metadata
+
+
+@pytest.mark.parametrize("end,now,last", [
+    ("2024-01-21", "2024-01-21T20:00:00+08:00", END),
+    (END, "2024-01-19T10:00:00+08:00", "2024-01-18"),
+])
+def test_auto_keeps_weekend_and_unclosed_session_cache(repair_setup, monkeypatch, end, now, last):
+    store, source, calls, _, _ = repair_setup
+    frame = source.daily(SYMBOL, START, END).loc[:last]
+    quality = registry._assess_daily_frame(frame, START, last, symbol=SYMBOL, source="tushare")
+    store.put(SYMBOL, frame, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=end, quality=quality.to_dict())
+    monkeypatch.setattr(registry, "market_now", lambda: pd.Timestamp(now).to_pydatetime())
+    monkeypatch.setattr(registry, "market_date", lambda: pd.Timestamp(now).date())
+    calls.clear()
+    before = store.metadata(SYMBOL)
+    registry.refresh_history(SYMBOL, START, end, store=store, mode="auto")
+    assert not calls
+    assert store.metadata(SYMBOL) == before
+
+
+def test_auto_respects_disabled_tushare(repair_setup, monkeypatch):
+    store, _, calls, state, old = repair_setup
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare")
+    store.mark_status(SYMBOL, "stale")
+    # Undo the fixture's factory stub: exercise the real configured switches.
+    monkeypatch.setattr(registry, "_request_factories", state["request_factories"])
+    registry.get_config().data.tushare_enabled = False
+    monkeypatch.setattr("quantmaster.data.free_stockdb_source.FreeStockDBSource.daily", lambda *a: old)
+    assert all(factory.name != "tushare" for factory in registry._request_factories(
+        priority="maintenance", allow_online=False,
+    )[registry.Market.CN])
+    original, meta = store._path(SYMBOL).read_bytes(), store.metadata(SYMBOL)
+    registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert not calls
+    assert store._path(SYMBOL).read_bytes() == original
+    assert store.metadata(SYMBOL) == meta
+
+
+def test_auto_missing_tail_stays_retryable_without_rewriting_cache(repair_setup, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    store, source, _, _, old = repair_setup
+    old.attrs = {}
+    quality = registry._assess_daily_frame(old, START, OLD_END, symbol=SYMBOL, source="tushare")
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=END, quality=quality.to_dict())
+    store.mark_status(SYMBOL, "stale")
+    daily = source.daily
+    monkeypatch.setattr(source, "daily", lambda *args: daily(*args).loc[:OLD_END])
+    before, original = store.metadata(SYMBOL), store._path(SYMBOL).read_bytes()
+    outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, END)
+    assert outcome["code"] == "data_incomplete" and outcome["retryable"] is True
+    assert store.metadata(SYMBOL) == before
+    assert store._path(SYMBOL).read_bytes() == original
