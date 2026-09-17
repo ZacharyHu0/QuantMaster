@@ -1933,3 +1933,188 @@ def test_python_mining_api_is_opt_in_and_exposes_preview(tmp_path, monkeypatch):
         assert queued.status_code == 202
         runs = client.get("/api/v1/lab/mining/runs").json()["items"]
         assert runs and runs[0]["job_id"] == queued.json()["id"]
+
+def test_inspection_cache_clear_during_identity_check_is_a_cache_miss(tmp_path, monkeypatch):
+    _config(tmp_path)
+    import quantmaster.lab.dataset as dataset
+
+    monkeypatch.setattr('quantmaster.data.universe.load_universe', lambda *_a, **_k: ['A.SH'])
+    dataset.clear_local_dataset_caches()
+    expected = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
+    original = dataset._bar_storage_identity
+    calls = 0
+
+    def invalidate(symbols, store):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            dataset.clear_local_dataset_caches()
+        return original(symbols, store)
+
+    monkeypatch.setattr(dataset, '_bar_storage_identity', invalidate)
+    actual = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
+    assert actual['manifest_hash'] == expected['manifest_hash']
+    assert calls >= 2
+
+@pytest.fixture
+def prepared_partitions(tmp_path, monkeypatch):
+    _config(tmp_path)
+    import quantmaster.lab.dataset as dataset
+    from quantmaster.data.storage import BarStore
+
+    dataset.clear_local_dataset_caches()
+    symbols = ['000938.SZ', '002558.SZ', '002602.SZ', '002625.SZ']
+    monkeypatch.setattr('quantmaster.data.universe.load_universe', lambda *_a, **_k: symbols)
+    calls = []
+    quality = {'status': 'degraded', 'stale': False, 'partial': False,
+               'issues': ['corporate actions unavailable'], 'sources': ['tushare']}
+
+    def refresh(symbol, *_args, **_kwargs):
+        calls.append(symbol)
+        frame = pd.DataFrame(
+            {'open': 10., 'high': 11., 'low': 9., 'close': 10.,
+             'volume': 1000., 'amount': 10000.},
+            index=pd.bdate_range('2023-01-02', '2024-01-31'),
+        )
+        BarStore().put(symbol, frame, source='tushare', quality=quality)
+        return SimpleNamespace(
+            require_data=lambda: frame,
+            quality=SimpleNamespace(to_dict=lambda: dict(quality)),
+        )
+
+    monkeypatch.setattr('quantmaster.data.refresh_history', refresh)
+    service = LabService(LabStore(tmp_path / 'lab.sqlite'))
+    params = dict(universe='demo', start='2024-01-01', end='2024-01-31',
+                  provider='tushare', include_warmup=False)
+    return service, params, calls, symbols
+
+
+@pytest.mark.parametrize('stage', ['inspection', 'dataset', 'snapshot'])
+def test_prepare_postprocessing_retry_reuses_all_persisted_bars(
+    prepared_partitions, monkeypatch, stage,
+):
+    service, params, calls, symbols = prepared_partitions
+    import quantmaster.lab.service as service_module
+
+    original_plan = service_module.dataset_repair_plan
+    plans = 0
+
+    def plan(*args):
+        nonlocal plans
+        plans += 1
+        if plans == 2:
+            raise ValueError('private failure detail')
+        return original_plan(*args)
+
+    def fail(*_args, **_kwargs):
+        raise ValueError('private failure detail')
+
+    with monkeypatch.context() as patch:
+        if stage == 'inspection':
+            patch.setattr(service_module, 'dataset_repair_plan', plan)
+        elif stage == 'dataset':
+            patch.setattr(service_module, 'load_local_dataset', fail)
+        else:
+            patch.setattr('quantmaster.lab.dataset.verify_snapshot_evidence', fail)
+        with pytest.raises(LabError) as caught:
+            service.prepare_data(**params)
+    assert caught.value.code == 'DATA_PREPARATION_POSTPROCESSING_FAILED'
+    assert caught.value.context['stage'] == stage
+    assert caught.value.context['persisted_items'] == sorted(symbols)
+    assert caught.value.__cause__.args == ('private failure detail',)
+    assert 'private failure detail' not in str(caught.value.to_dict())
+    assert service.store.latest_snapshot() is None
+    result = service.prepare_data(**params)
+    assert sorted(calls) == sorted(symbols)
+    assert result['requested_symbols'] == 0
+    assert result['remaining_critical_symbols'] == 0
+    assert result['formal_eligible'] is False
+    assert result['formal']['status'] == 'blocked'
+    assert result['formal']['blockers'][0]['code'] == 'DATA_QUALITY_UNVERIFIED'
+    assert result['snapshot']['payload']['research_quality'] == 'sandbox'
+    assert all(row['quality']['status'] == 'degraded'
+               for row in result['snapshot']['payload']['manifest']['bar_quality'])
+
+
+def test_prepare_cancel_before_publication_retries_from_local_partitions(prepared_partitions):
+    service, params, calls, symbols = prepared_partitions
+    cancelled = False
+
+    def progress(value, *_args, **_kwargs):
+        nonlocal cancelled
+        if value == 91:
+            cancelled = True
+
+    with pytest.raises(InterruptedError):
+        service.prepare_data(**params, progress=progress, cancelled=lambda: cancelled)
+    assert service.store.latest_snapshot() is None
+    result = service.prepare_data(**params)
+    assert sorted(calls) == sorted(symbols)
+    assert result['snapshot']
+
+def test_lab_worker_failure_writes_private_cause_with_public_diagnostic_id(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = tmp_path / 'worker_failure.py'
+    script.write_text('''
+import json, logging, sys, time
+from pathlib import Path
+from quantmaster.config import Config, set_config
+from quantmaster.logging_config import configure_logging
+from quantmaster.lab.service import LabService
+from quantmaster.lab.store import LabStore
+from quantmaster.lab.worker import LabWorker
+root = Path(sys.argv[1])
+cfg = Config(); cfg.data.root = str(root); cfg.lab.enabled = True
+set_config(cfg)
+state = configure_logging(data_root=root)
+service = LabService(LabStore())
+service.preflight = lambda *_: {"runnable": True, "resource_class": "io"}
+def fail(*args, **kwargs):
+    try:
+        raise ValueError("private-original-cause at " + str(root / "secret.parquet"))
+    except ValueError as cause:
+        raise RuntimeError("private-wrapper api_key=must-not-leak") from cause
+service.run_job = fail
+worker = LabWorker(service=service)
+worker._start_scheduler_locked = lambda: None
+job = worker.jobs.submit("prepare_data", {"universe": "demo"}, preflight=service.preflight())
+try:
+    worker.start()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        result = worker.jobs.get(job["id"])
+        if result["status"] == "failed":
+            break
+        time.sleep(.02)
+    else:
+        raise AssertionError("job did not fail")
+finally:
+    worker.stop()
+logging.shutdown()
+print(json.dumps({"job": result, "log": str(state.log_path),
+                  "web_imported": "quantmaster.server.app" in sys.modules}))
+''', encoding='utf-8')
+    repo = Path(__file__).resolve().parents[1]
+    env = {**os.environ, 'PYTHONPATH': str(repo), 'PYTHONIOENCODING': 'utf-8'}
+    env.pop('QM_WEB_PROCESS', None)
+    completed = subprocess.run(
+        [sys.executable, str(script), str(tmp_path)], cwd=repo, env=env,
+        capture_output=True, text=True, encoding='utf-8', timeout=300,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result['web_imported'] is False
+    public = json.dumps(result['job'])
+    assert 'private-original-cause' not in public
+    assert 'must-not-leak' not in public
+    assert str(tmp_path) not in public
+    diagnostic = result['job']['error_info']['diagnostic_id']
+    text = Path(result['log']).read_text(encoding='utf-8')
+    assert diagnostic in text
+    assert 'private-original-cause' in text
+    assert 'private-wrapper' in text
+    assert 'must-not-leak' not in text
