@@ -22,6 +22,8 @@ class Market(enum.StrEnum):
 
 def guess_market(symbol: str) -> Market:
     """Classify a fully-qualified local symbol; never guess a bare code."""
+    if symbol.upper() == "US10Y.RATE":
+        return Market.US
     suffix = symbol.rsplit(".", 1)[-1].upper() if "." in symbol else ""
     market = {
         "CSI": Market.INDEX, "INDEX": Market.INDEX,
@@ -99,7 +101,7 @@ MARKET_CAPABILITY_MATRIX: dict[Market, MarketCapabilityProfile] = {
     Market.US: MarketCapabilityProfile(
         Market.US,
         "America/New_York",
-        frozenset({"stock", "etf"}),
+        frozenset({"stock", "etf", "yield"}),
         _REFERENCE,
     ),
     Market.FUTURES: MarketCapabilityProfile(

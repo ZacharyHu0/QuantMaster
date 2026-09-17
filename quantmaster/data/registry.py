@@ -411,6 +411,9 @@ def _assess_daily_frame(
     stale: bool = False,
     extra_issues: tuple[str, ...] = (),
 ) -> BarDataQuality:
+    from quantmaster.data.reference_market import yield_contract, yield_request_end
+
+    is_yield = symbol == "US10Y.RATE"
     try:
         market = guess_market(symbol) if symbol else Market.CN
     except ValueError:
@@ -420,11 +423,19 @@ def _assess_daily_frame(
     market_today = current.astimezone(zone).date() if zone is not None else market_date()
     requested_start = pd.Timestamp(start).normalize()
     requested_end = min(pd.Timestamp(end).normalize(), pd.Timestamp(market_today))
+    if is_yield:
+        requested_end = pd.Timestamp(yield_request_end(end, current))
     effective_start, effective_end = _instrument_range(
         symbol, requested_start, requested_end,
     )
     issues = list(extra_issues)
     units, unit_issue = _unit_contract(symbol)
+    valid_yield = is_yield and df is not None and yield_contract(df)
+    if valid_yield:
+        units, unit_issue = (("close", "percent_points"),), ""
+        issues.append("REFERENCE_ONLY: 收益率参考序列，发布时间及完整发布日历未证实")
+    elif is_yield:
+        issues.append("US10Y_UNIT_CONTRACT_MISSING: 缺少收益率来源/单位/身份契约")
     stockdb_units = df.attrs.get("units") if df is not None else None
     if (
         source.startswith("free-stockdb")
@@ -470,12 +481,18 @@ def _assess_daily_frame(
         sparse_cadence = median_gap_days > 2
         if sparse_cadence:
             issues.append(f"日频观测间隔中位数异常：{median_gap_days:.1f} 天")
-    missing_columns = [column for column in OHLCV_COLUMNS if column not in df]
+    required_columns = ["close"] if is_yield else OHLCV_COLUMNS
+    missing_columns = [column for column in required_columns if column not in df]
     if missing_columns:
         issues.append("缺少必需列：" + "、".join(missing_columns))
     invalid_numeric = 0
     invalid_semantics = 0
-    if not missing_columns:
+    if is_yield and not missing_columns:
+        numeric_yield = pd.to_numeric(df["close"], errors="coerce")
+        invalid_numeric = int((~numeric_yield.map(math.isfinite)).sum())
+        if invalid_numeric:
+            issues.append("收益率存在非有限数值")
+    elif not missing_columns:
         numeric = df[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
         finite = numeric.map(math.isfinite).all(axis=1)
         invalid_numeric = int((~finite).sum())
@@ -507,6 +524,13 @@ def _assess_daily_frame(
     }:
         issues.append("本地 StockDB 未附带可核验的单位说明，当前按每股价格和人民币金额使用")
     semantics, semantic_issues = _numeric_semantics(symbol, source, df, units)
+    if valid_yield:
+        semantics = replace(
+            semantics, observation_time="provider_observation_date",
+            currency="", price_unit="percent_points", volume_unit="not_applicable",
+            amount_unit="not_applicable", exchange="US TREASURY",
+            quote_unit="percent_points", intended_use="display",
+        )
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
@@ -545,7 +569,10 @@ def _assess_daily_frame(
     if not calendar_complete and market in {Market.HK, Market.US}:
         partial = True
         issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
-    if zone is not None and not pd.isna(observed_end) and observed_end.date() == market_today:
+    if (
+        not is_yield and zone is not None and not pd.isna(observed_end)
+        and observed_end.date() == market_today
+    ):
         close = _daily_close(market, market_today, zone)
         now_utc = current.astimezone(UTC)
         published = _exact_attr_instant(df, "provider_published_at")
@@ -566,7 +593,8 @@ def _assess_daily_frame(
                 "等待 cutoff 前的本地摄取与完整覆盖证据"
             )
     blocking = bool(
-        duplicate_rows or future_rows or sparse_cadence or missing_columns
+        (is_yield and not valid_yield)
+        or duplicate_rows or future_rows or sparse_cadence or missing_columns
         or invalid_numeric or invalid_semantics
         or any("响应起点" in item or "响应终点" in item or "覆盖率仅" in item for item in issues)
     )
@@ -1110,6 +1138,17 @@ def _with_daily_freshness(
     metadata: dict[str, Any],
     purpose: CachePurpose | str,
 ) -> BarDataQuality:
+    if symbol == "US10Y.RATE":
+        freshness = assess_daily_freshness(
+            symbol=symbol, frame=frame, requested_end=end,
+            checked_at=float(metadata.get("checked_at") or 0), purpose=purpose,
+            display_ttl_seconds=get_config().data.cache_days * 86400,
+        )
+        return replace(
+            quality, freshness_state=freshness.state, age_seconds=freshness.age_seconds,
+            stale=quality.stale or freshness.state in {"stale", "unchecked", "incomplete"},
+            refresh_reason=freshness.refresh_reason, expected_session="",
+        )
     expected = SessionExpectation()
     historical = str(purpose) in {
         CachePurpose.HISTORICAL.value,
@@ -1600,6 +1639,16 @@ def _full_refresh(
     priority: str,
     provider: str = "",
 ) -> pd.DataFrame:
+    if symbol == "US10Y.RATE":
+        fresh, reference_errors, succeeded = _fetch_segment(
+            symbol, start, end, "initial", None, store, priority, provider=provider,
+        )
+        if succeeded and fresh is not None:
+            return fresh.loc[start:end]
+        if cached is not None and not cached.empty:
+            store.mark_status(symbol, "refresh_failed")
+            return cached.loc[start:end]
+        raise _unavailable_error((symbol,), start, end, reference_errors)
     market = guess_market(symbol)
     errors: list[str] = []
     degraded_candidate: tuple[pd.DataFrame, BarDataQuality, str] | None = None
@@ -1762,9 +1811,18 @@ def _fetch_segment(
             if not _covers_requested_range(frame, start, end, symbol=symbol):
                 errors.append("reference-market: 响应内部过于稀疏")
             else:
-                merged = frame if cached is None or cached.empty else _align_increment(
-                    cached, frame, direction,
-                )
+                if symbol == "US10Y.RATE" and cached is not None and not cached.empty:
+                    from quantmaster.data.reference_market import yield_contract
+
+                    if not yield_contract(cached):
+                        raise ValueError("US10Y 旧缓存缺少单位契约，需显式完整重建")
+                    merged = pd.concat([cached, frame])
+                    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                    merged.attrs = frame.attrs.copy()
+                else:
+                    merged = frame if cached is None or cached.empty else _align_increment(
+                        cached, frame, direction,
+                    )
                 fresh_latest = pd.Timestamp(frame.index.max()).normalize()
                 evaluated = (
                     frame,
@@ -1773,7 +1831,10 @@ def _fetch_segment(
                     ),
                     reference.source,
                 )
-                if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
+                if (
+                    symbol != "US10Y.RATE" and prefer_extension
+                    and cached_latest is not None and fresh_latest <= cached_latest
+                ):
                     errors.append(
                         f"reference-market: 未返回 {cached_latest.date()} 之后的新行情"
                     )
@@ -1786,6 +1847,9 @@ def _fetch_segment(
             )
         except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"reference-market: {exc}")
+
+        if symbol == "US10Y.RATE":
+            return cached, errors or ["US10Y 参考来源不可用"], False
 
     for factory in _request_factories(
         priority=priority, allow_online=True, provider=provider,
@@ -2574,6 +2638,10 @@ def refresh_history(
     expose the old mixed read/refresh contract.
     """
     resolved_store = store or _default_bar_store()
+    if symbol == "US10Y.RATE":
+        from quantmaster.data.reference_market import yield_request_end
+
+        end = yield_request_end(end, market_now())
     if repair_incompatible and source_name == "tushare":
         with resolved_store.lock(symbol):
             try:

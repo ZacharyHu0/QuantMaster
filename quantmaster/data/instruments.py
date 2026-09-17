@@ -37,7 +37,7 @@ DOMESTIC_SUFFIXES = {"SH", "SZ", "BJ", "CSI"}
 FOREIGN_SUFFIXES = {"HK", "US", "JP", "KR"}
 SUPPORTED_ASSET_TYPES = {
     "stock", "etf", "fund", "index", "otc", "forex",
-    "future_contract", "future_continuous",
+    "future_contract", "future_continuous", "yield",
 }
 
 
@@ -131,7 +131,7 @@ def _seed_records() -> list[dict[str, Any]]:
             "symbol": symbol, "provider_symbol": provider, "code": code,
             "name": name, **identity, "source": "built_in",
             "usage": "observation/research",
-            "tradable": identity["asset_type"] != "future_continuous",
+            "tradable": identity["asset_type"] not in {"future_continuous", "yield"},
         })
     rows.extend([
         {"symbol": "589160.SH", "code": "589160", "name": "广发上证科创板芯片ETF",
@@ -164,7 +164,7 @@ def _reference_records() -> list[dict[str, Any]]:
             "code": symbol.rsplit(".", 1)[0], "name": name, **identity,
             "source": "built_in", "source_priority": 100,
             "usage": "observation/research",
-            "tradable": identity["asset_type"] != "future_continuous",
+            "tradable": identity["asset_type"] not in {"future_continuous", "yield"},
         })
     return records
 
@@ -1252,7 +1252,7 @@ def validate_bar_capability(symbol: str, *, verify_foreign: bool = True) -> Inst
     if instrument.asset_type not in SUPPORTED_ASSET_TYPES:
         raise ValueError(f"{symbol} 的品种类型 {instrument.asset_type} 暂不支持日线")
     if suffix in DOMESTIC_SUFFIXES or instrument.asset_type in {
-        "future_contract", "future_continuous", "forex",
+        "future_contract", "future_continuous", "forex", "yield",
     }:
         return instrument
     if suffix not in FOREIGN_SUFFIXES:

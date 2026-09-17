@@ -95,6 +95,8 @@ def classify_provider_failure(exc: BaseException) -> str:
     """Classify provider errors without persisting volatile exception types."""
     name = type(exc).__name__.lower()
     text = str(exc).lower()
+    if "标的缺少已确认市场身份" in text:
+        return "identity_missing"
     if isinstance(exc, EmptyProviderResponse):
         return "empty_response"
     if isinstance(exc, ProviderContractChanged):

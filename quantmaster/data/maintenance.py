@@ -393,6 +393,18 @@ class DataRefreshManager:
                 mode=RefreshMode.AUTO, work_class="maintenance",
             )
             envelope.require_data()
+            if (
+                symbol == "US10Y.RATE" and not envelope.quality.stale
+                and envelope.quality.status == "degraded"
+                and dict(envelope.quality.units) == {"close": "percent_points"}
+                and not any(item.get("diagnostic_code") in {
+                    "provenance_missing", "provenance_incomplete",
+                } for item in envelope.provenance)
+            ):
+                return {
+                    "warning": "收益率参考已检查；发布时间与完整发布日历未证实，不能证明已最新",
+                    "code": "reference_only", "formal_eligible": False,
+                }
             if envelope.quality.status != "verified":
                 # Daily preparation is not admission to formal research. Require
                 # a renewed local read and actual symbol coverage; a market-wide

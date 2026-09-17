@@ -50,5 +50,9 @@ REFERENCE_IDENTITIES = {
         "market": "FX", "exchange": "OTC", "asset_type": "forex", "currency": "CNY",
         "base_currency": "USD", "quote_currency": "CNY", "timezone": "UTC",
     },
-    "US10Y.RATE": {"market": "US", "exchange": "US TREASURY", "asset_type": "index", "currency": "USD"},
+    "US10Y.RATE": {
+        "market": "US", "exchange": "US TREASURY", "asset_type": "yield", "currency": "",
+        "quote_unit": "percent_points", "timezone": "America/New_York",
+        "provider_symbol": "EMG00001310",
+    },
 }
