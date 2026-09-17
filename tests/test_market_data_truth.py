@@ -215,6 +215,20 @@ def test_accepted_stockdb_session_does_not_fabricate_formal_factor_or_pit_eviden
         bound, "2026-07-01", "2026-08-07", symbol="600000.SH", source="free-stockdb",
     )
     assert legacy.status == "degraded" and not legacy.formal_eligible
+    bound.attrs.pop("stockdb_accepted_session")
+    bound.attrs.pop("stockdb_accepted_at")
+    store = BarStore()
+    store.put(
+        "600000.SH", bound, replace=True, replace_coverage=True,
+        request_start="2026-07-01", request_end="2026-08-07", source="free-stockdb",
+        quality={**legacy.to_dict(), "status": "verified", "issues": []},
+    )
+    (root / ".quantmaster-update.json").unlink()
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("historical local read"))
+    historical = registry.read_history("600000.SH", "2026-07-01", "2026-08-07", store)
+    pd.testing.assert_frame_equal(historical.require_data(), bound, check_freq=False)
+    assert historical.quality.adjustment == "forward_adjusted_unverified"
+    assert not historical.quality.formal_eligible
 
 
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
