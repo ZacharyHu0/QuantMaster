@@ -1333,6 +1333,26 @@ def _with_legacy_lineage_warning(
     )
 
 
+def _persisted_coverage_ratio(
+    quality: BarDataQuality, persisted: dict[str, Any],
+) -> Any:
+    ratio = persisted.get("coverage_ratio")
+    if quality.coverage_ratio is None:
+        return ratio
+    try:
+        old_start = pd.Timestamp(persisted["requested_start"])
+        old_end = pd.Timestamp(persisted["requested_end"])
+        start, end = pd.Timestamp(quality.requested_start), pd.Timestamp(quality.requested_end)
+        if old_start <= start <= end <= old_end and (old_start < start or end < old_end):
+            # A whole-history fraction cannot locate gaps inside this slice.
+            # Use its freshly assessed coverage; retain every other persisted
+            # restriction, and leave the stored full-range contract untouched.
+            return None
+    except (KeyError, TypeError, ValueError):
+        pass  # Unknown ranges cannot prove that the old fraction is out of scope.
+    return ratio
+
+
 def _merge_persisted_quality(
     quality: BarDataQuality,
     persisted_contracts: list[dict[str, Any]],
@@ -1345,7 +1365,9 @@ def _merge_persisted_quality(
         persisted_status = cast(QualityStatus, persisted_status_raw)
         status = max((quality.status, persisted_status), key=lambda value: rank[value])
         ratios = [
-            float(value) for value in (quality.coverage_ratio, persisted.get("coverage_ratio"))
+            float(value) for value in (
+                quality.coverage_ratio, _persisted_coverage_ratio(quality, persisted),
+            )
             if value is not None
         ]
         persisted_sources = tuple(str(value) for value in persisted.get("sources") or () if value)

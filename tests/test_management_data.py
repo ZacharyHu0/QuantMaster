@@ -748,6 +748,83 @@ def test_refresh_failure_classification_preserves_quality_gate():
     assert DataRefreshManager._failure(PermissionError("permission denied"))["retryable"] is False
 
 
+def test_refresh_reports_in_range_coverage_gap_before_formal_evidence():
+    from quantmaster.data.base import MarketDataUnavailable
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    quality = BarDataQuality(
+        status="degraded", requested_start="2015-01-01", requested_end="2026-09-17",
+        observed_start="2015-01-05", observed_end="2026-09-17",
+        coverage_ratio=0.998829, calendar_source="research_lake",
+        issues=("factor_contract_incomplete", "CURRENT_SESSION_CLOSED_WAITING_PROVIDER"),
+    )
+    failure = DataRefreshManager._failure(MarketDataUnavailable(quality))
+    assert failure["code"] == "daily_coverage_incomplete"
+    assert failure["retryable"] is False
+    assert failure["coverage_ratio"] == 0.998829
+    assert failure["requested_start"] == "2015-01-01"
+    assert failure["requested_end"] == "2026-09-17"
+    assert failure["calendar_source"] == "research_lake"
+    assert "覆盖" in failure["error"]
+    assert "factor_contract_incomplete" in failure["error"]
+
+
+def test_refresh_scopes_cached_coverage_to_requested_window(isolated_config, monkeypatch):
+    import json
+    from datetime import datetime
+
+    from quantmaster.data import registry
+    from quantmaster.data.maintenance import DataRefreshManager
+    from quantmaster.data.storage import BarStore
+
+    dates = pd.bdate_range("2026-01-01", "2026-09-17")
+    end = "2026-09-17"
+    frame = pd.DataFrame(
+        {"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.0,
+         "volume": 100.0, "amount": 1000.0}, index=dates.delete(10),
+    )
+    accepted_at = "2026-09-17T17:15:08+08:00"
+    frame.attrs.update(
+        unit_status="verified_local_stockdb_schema_v1", adjustment="qfq",
+        adjustment_status="requested_unverified", factor_coverage="unconfirmed",
+        provider_interface="stock_sdk:daily", stockdb_accepted_session=end,
+        stockdb_accepted_at=accepted_at,
+        units={**dict.fromkeys(["open", "high", "low", "close"], "CNY/share"),
+               "volume": "share", "amount": "CNY"},
+    )
+    root = isolated_config.data_root / "stockdb"
+    root.mkdir()
+    isolated_config.data.free_stockdb_root = str(root)
+    (root / ".quantmaster-update.json").write_text(json.dumps({
+        "schema_version": 2, "validated_session": end, "target_session": end,
+        "updated_at": accepted_at, "validation": {
+            "accepted": True, "complete": False, "target_session": end, "actual_session": end,
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(registry, "market_now", lambda: datetime.fromisoformat("2026-09-17T18:40:00+08:00"))
+    monkeypatch.setattr(registry, "_local_sessions", lambda a, b: (
+        dates[(dates >= a) & (dates <= b)], "research_lake",
+    ))
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("fresh local cache"))
+    store = BarStore()
+    quality = registry._assess_daily_frame(
+        frame, "2026-01-01", end, symbol="600000.SH", source="free-stockdb",
+    )
+    assert 0.95 < quality.coverage_ratio < 1.0
+    store.put("600000.SH", frame, replace=True, request_start="2026-01-01",
+              request_end=end, source="free-stockdb", quality=quality.to_dict())
+    for _ in range(2):
+        short = DataRefreshManager._refresh_one(store, "600000.SH", "2026-08-01", end)
+        assert short["code"] == "formal_evidence_missing"
+        assert short["formal_eligible"] is False
+        full = DataRefreshManager._refresh_one(store, "600000.SH", "2026-01-01", end)
+        assert full["code"] == "daily_coverage_incomplete"
+        assert "error" in full and not full["retryable"]
+    saved = json.loads(store.metadata("600000.SH")["quality_json"])
+    assert saved["coverage_ratio"] == quality.coverage_ratio
+    assert not saved["formal_eligible"]
+
+
 def test_refresh_worker_intake_tracks_consumed_scopes(isolated_config, monkeypatch):
     from quantmaster.data.maintenance import DataRefreshManager
 

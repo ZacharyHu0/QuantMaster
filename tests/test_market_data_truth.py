@@ -231,6 +231,38 @@ def test_accepted_stockdb_session_does_not_fabricate_formal_factor_or_pit_eviden
     assert not historical.quality.formal_eligible
 
 
+@pytest.mark.parametrize("old_range,current_ratio,expected", [
+    (("2026-01-01", "2026-09-17"), 1.0, 1.0),
+    (("2026-08-01", "2026-09-17"), 1.0, 0.98),
+    (("2026-09-01", "2026-09-17"), 1.0, 0.98),
+    (("", ""), 1.0, 0.98),
+    (("invalid", "invalid"), 1.0, 0.98),
+    (("2026-01-01", "2026-09-17"), None, 0.98),
+    (("2026-01-01", "2026-09-17"), 0.97, 0.97),
+])
+def test_persisted_coverage_requires_proven_range_and_current_assessment(
+    old_range, current_ratio, expected,
+):
+    from quantmaster.data.base import BarDataQuality
+
+    current = BarDataQuality(
+        status="degraded", requested_start="2026-08-01", requested_end="2026-09-17",
+        coverage_ratio=current_ratio, sources=("free-stockdb",),
+    )
+    persisted = {
+        "status": "degraded", "requested_start": old_range[0], "requested_end": old_range[1],
+        "coverage_ratio": 0.98, "partial": True, "adjustment": "forward_adjusted_unverified",
+        "issues": ["factor_contract_incomplete", "unit_unknown", "identity_unconfirmed"],
+    }
+    result = registry._merge_persisted_quality(current, [persisted])
+    assert result.coverage_ratio == expected
+    assert result.status == "degraded" and result.partial
+    assert result.issues == tuple(persisted["issues"])
+    assert not result.formal_eligible
+    assert result.adjustment == "forward_adjusted_unverified"
+    assert persisted["coverage_ratio"] == 0.98
+
+
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):
     dates = pd.bdate_range("2026-03-23", periods=100)
     local = _bars(dates)
