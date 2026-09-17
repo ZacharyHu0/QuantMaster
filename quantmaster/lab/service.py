@@ -1099,7 +1099,7 @@ class LabService:
 
     def _repair_data_targets(
         self, targets: list[dict[str, Any]], selected: str, cancelled, progress,
-        checkpoint, require_space,
+        checkpoint, require_space, diagnostics=None,
     ) -> tuple[dict[str, str], dict[str, dict[str, Any]], list[str]]:
         from quantmaster import data as data_api
         from quantmaster.data.registry import RefreshMode
@@ -1114,6 +1114,7 @@ class LabService:
             envelope = data_api.refresh_history(
                 str(item["symbol"]), str(item["repair_start"]), str(item["repair_end"]),
                 mode=RefreshMode.INCREMENTAL, work_class="interactive", source_name=selected,
+                repair_incompatible=True, cancelled=cancelled,
             )
             envelope.require_data()
             return str(item["symbol"]), envelope.quality.to_dict()
@@ -1139,6 +1140,8 @@ class LabService:
                 raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 failure = classify_lab_error(exc)
+                if diagnostics is not None:
+                    diagnostics[str(item["symbol"])] = failure
                 failures[str(item["symbol"])] = str(exc)[:300]
                 checkpoint(
                     5 + int(82 * (completed + 1) / max(1, len(targets))),
@@ -1221,9 +1224,14 @@ class LabService:
                 stage, remaining, value, persisted, stages, checkpoint,
             )
 
+        diagnostics: dict[str, LabError] = {}
         failures, degraded, persisted = self._repair_data_targets(
-            targets, selected, cancelled, progress, checkpoint, require_space,
+            targets, selected, cancelled, progress, checkpoint, require_space, diagnostics,
         )
+        if failures and not persisted and diagnostics and all(
+            item.code == "DATA_HISTORY_REBUILD_REQUIRED" for item in diagnostics.values()
+        ):
+            raise next(iter(diagnostics.values()))
         clear_local_dataset_caches()
         stages["bars"] = {
             "status": "completed_with_warnings" if failures else "completed",
