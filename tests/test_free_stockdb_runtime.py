@@ -715,7 +715,7 @@ def test_failed_live_validation_waits_for_a_new_stable_data_change(
     assert events == ["validate", "validate", "close"]
 
 
-def test_running_updater_closes_committed_data_when_service_is_offline(
+def test_running_updater_does_not_close_unaccepted_changes_when_service_is_offline(
     tmp_path, monkeypatch,
 ) -> None:
     runtime = FreeStockDBRuntime()
@@ -727,7 +727,10 @@ def test_running_updater_closes_committed_data_when_service_is_offline(
         (("data1/after.ldb.part", 2, 2),),
         (("data1/after.ldb", 2, 3),),
         (("data1/after.ldb", 2, 3),),
+        (("data1/complete.ldb", 3, 4),),
+        (("data1/complete.ldb", 3, 4),),
     ))
+    validations = iter(({"accepted": False}, {"accepted": True}))
     events: list[str] = []
 
     monkeypatch.setattr(
@@ -742,7 +745,7 @@ def test_running_updater_closes_committed_data_when_service_is_offline(
     monkeypatch.setattr(
         runtime,
         "_validate_data",
-        lambda _target: events.append("validate") or {"accepted": False},
+        lambda _target: events.append("validate") or next(validations),
     )
 
     def close(candidate, **_kwargs):
@@ -756,7 +759,7 @@ def test_running_updater_closes_committed_data_when_service_is_offline(
         tmp_path / "数据更新.exe", tmp_path,
         trigger="manual", target="2026-09-15",
     ) == 0
-    assert events == ["validate", "close:42"]
+    assert events == ["validate", "validate", "close:42"]
 
 
 def test_normal_window_close_targets_only_the_tracked_process(monkeypatch) -> None:
@@ -922,29 +925,64 @@ def test_zero_exit_with_stale_data_schedules_bounded_retry(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("actual_session", ["2026-08-06", ""])
-def test_scheduled_update_defers_without_taking_healthy_service_offline(
-    tmp_path, monkeypatch, actual_session,
-) -> None:
+@pytest.mark.parametrize("recovers", [True, False])
+def test_scheduler_retries_stale_local_data_until_same_target_is_accepted(
+    isolated_config, tmp_path, monkeypatch, actual_session, recovers,
+):
     runtime = FreeStockDBRuntime()
-    runtime._owner = True
-    marker = tmp_path / ".quantmaster-update.json"
-    marker.write_text(json.dumps({"validated_session": "2026-08-06"}), encoding="utf-8")
+    cfg = isolated_config.data
+    cfg.free_stockdb_auto_update = True
+    cfg.free_stockdb_update_time = "16:00"
+    clock = SimpleNamespace(now=datetime(2026, 8, 7, 16, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    initial = clock.now
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"fixture")
+    marker = tmp_path / "marker.json"
+    marker.write_text(json.dumps({"validated_session": "2026-08-06"}))
+    runs = []
+    statuses = []
+    monkeypatch.setattr(runtime, "_paths", lambda: (tmp_path, tmp_path / "service.exe", updater))
     monkeypatch.setattr(runtime, "_marker_path", lambda: marker)
-    monkeypatch.setattr(runtime, "_validate_data", lambda _target: {
-        "target_session": "2026-08-07", "actual_session": actual_session,
-        "accepted": False, "complete": False, "warnings": [],
-        "issues": ["provider unavailable"],
+    monkeypatch.setattr(runtime, "_is_managed", lambda: True)
+    monkeypatch.setattr(runtime, "_listening", lambda: True)
+    monkeypatch.setattr(runtime, "_process_command", lambda: False)
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(runtime, "_emit_update_event", lambda *args: None)
+    monkeypatch.setattr(runtime, "_target_session", lambda **kwargs: ("2026-08-07", "calendar"))
+    monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: clock.now)
+    monkeypatch.setattr(
+        runtime, "_scheduler_now",
+        lambda: datetime.fromtimestamp(clock.now, ZoneInfo("Asia/Shanghai")),
+    )
+    monkeypatch.setattr(runtime, "_stop_service", lambda: True)
+    monkeypatch.setattr(runtime, "_start_service", lambda: True)
+    monkeypatch.setattr(runtime, "_wait_for_data_quiescent", lambda root: True)
+    monkeypatch.setattr(runtime, "_data_fingerprint", lambda root: ())
+    monkeypatch.setattr(runtime, "_run_updater", lambda *args, **kwargs: runs.append(clock.now) or 0)
+    monkeypatch.setattr(runtime, "_validate_data", lambda target: {
+        "actual_session": target if (recovers and len(runs) >= 2) else actual_session,
+        "accepted": recovers and len(runs) >= 2, "complete": recovers and len(runs) >= 2,
+        "issues": ["stale"],
     })
-    monkeypatch.setattr(runtime, "_stop_service", lambda: pytest.fail("service stopped"))
-    monkeypatch.setattr(runtime, "_run_updater", lambda *_args, **_kwargs: pytest.fail("updater started"))
 
-    assert runtime.update_now("schedule", target_session="2026-08-07") is True
+    def wait(seconds):
+        statuses.append(dict(runtime._status))
+        clock.now += 5
+        if clock.now > initial + 3600:
+            runtime._stop.set()
+        return False
 
-    status = runtime.status()
-    assert status["state"] == "running"
-    assert status["update_result"] == "deferred"
-    assert status["validated_session"] == "2026-08-06"
-    assert runtime._deferred_target == "2026-08-07"
+    monkeypatch.setattr(runtime._stop, "wait", wait)
+    runtime._scheduler()
+
+    assert runs == [initial, initial + 900] + ([] if recovers else [initial + 1800])
+    assert any(s.get("next_retry_at") and s.get("update_result") == "retry_wait" for s in statuses)
+    assert runtime._last_update_date() == ("2026-08-07" if recovers else "2026-08-06")
+    assert runtime._status["update_result"] == ("success" if recovers else "failed")
+    if not recovers:
+        assert runtime._next_retry_at == initial + 86400
+        assert runtime._retry_attempt == 1
+        assert runtime._status["next_retry_at"] == "2026-08-08T16:00:00+08:00"
 
 
 def test_final_validation_failure_emits_one_durable_event(tmp_path, monkeypatch) -> None:
@@ -1516,3 +1554,90 @@ def test_full_market_validation_rejects_nonfinite_and_impossible_ohlcv(
     assert validation["complete"] is False
     assert validation["required_ohlcv_ratio"] == 0.0
     assert validation["invalid_ohlcv"]["nonfinite_rows"] == 1
+
+
+@pytest.mark.parametrize("guard", ["disabled", "before_time", "locked", "accepted", "stopped"])
+def test_due_automatic_retry_respects_scheduler_guards(isolated_config, monkeypatch, guard):
+    runtime = FreeStockDBRuntime()
+    cfg = isolated_config.data
+    cfg.free_stockdb_auto_update = guard != "disabled"
+    cfg.free_stockdb_update_time = "16:00"
+    now = datetime(2026, 8, 7, 15 if guard == "before_time" else 17, tzinfo=ZoneInfo("Asia/Shanghai"))
+    runtime._next_retry_at = now.timestamp() - 1
+    runtime._retry_target = "2026-08-07"
+    runtime._retry_attempt = 2
+    if guard == "locked":
+        runtime._update_lock.acquire()
+    if guard == "stopped":
+        runtime._stop.set()
+    monkeypatch.setattr(runtime, "_scheduler_now", lambda: now)
+    monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: now.timestamp())
+    monkeypatch.setattr(
+        runtime, "_last_update_date", lambda: "2026-08-07" if guard == "accepted" else "2026-08-06",
+    )
+    monkeypatch.setattr(runtime, "_target_session", lambda **kw: ("2026-08-07", "calendar"))
+    monkeypatch.setattr(runtime, "_process_command", lambda: False)
+    monkeypatch.setattr(runtime, "_supervise_service", lambda cfg: None)
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(runtime, "update_now", lambda *a, **kw: pytest.fail("unexpected retry"))
+    monkeypatch.setattr(runtime._stop, "wait", lambda seconds: runtime._stop.set())
+    runtime._scheduler()
+    if guard in {"disabled", "before_time", "locked", "stopped"}:
+        assert runtime._next_retry_at == now.timestamp() - 1
+
+
+@pytest.mark.parametrize("trigger", ["manual", "schedule", "retry"])
+def test_cancelled_update_does_not_retry_or_publish_acceptance(monkeypatch, trigger):
+    runtime = FreeStockDBRuntime()
+    runtime._stop.set()
+    monkeypatch.setattr(runtime, "_target_session", lambda **kw: pytest.fail("cancelled target read"))
+    assert runtime.update_now(trigger) is False
+    assert runtime._next_retry_at == 0
+    assert not runtime._update_lock.locked()
+
+@pytest.mark.parametrize("result,attempt,next_attempt", [("retry_wait", 1, 2), ("failed", 3, 1)])
+def test_restart_preserves_automatic_retry_deadline(
+    isolated_config, tmp_path, monkeypatch, result, attempt, next_attempt,
+):
+    runtime = FreeStockDBRuntime()
+    isolated_config.data.free_stockdb_managed = False
+    shared = {
+        "update_result": result, "next_retry_at": "2026-08-08T16:00:00+08:00",
+        "target_session": "2026-08-07", "attempt": attempt,
+    }
+    monkeypatch.setattr(runtime, "_ensure_control", lambda: SimpleNamespace(read_state=lambda: shared))
+    monkeypatch.setattr(runtime, "_control_path", lambda: tmp_path / "control.sqlite")
+    monkeypatch.setattr(runtime, "_write_owner_state", lambda payload: None)
+    monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: 1.0)
+    runtime._thread = SimpleNamespace(is_alive=lambda: True)
+    runtime.start()
+    assert runtime._retry_attempt == next_attempt
+    assert runtime._retry_target == "2026-08-07"
+    assert runtime._next_retry_at == datetime.fromisoformat(shared["next_retry_at"]).timestamp()
+    assert runtime._status["update_result"] == result
+
+
+def test_next_daily_budget_resolves_target_again(isolated_config, monkeypatch):
+    runtime = FreeStockDBRuntime()
+    isolated_config.data.free_stockdb_auto_update = True
+    isolated_config.data.free_stockdb_update_time = "16:00"
+    now = datetime(2026, 8, 10, 16, tzinfo=ZoneInfo("Asia/Shanghai"))
+    runtime._next_retry_at = now.timestamp()
+    runtime._retry_target = "2026-08-07"
+    runtime._retry_attempt = 1
+    runtime._last_target_check = now.timestamp()
+    calls = []
+    monkeypatch.setattr(runtime, "_process_command", lambda: False)
+    monkeypatch.setattr(runtime, "_supervise_service", lambda cfg: None)
+    monkeypatch.setattr(runtime, "_scheduler_now", lambda: now)
+    monkeypatch.setattr(free_stockdb_runtime.time, "time", lambda: now.timestamp())
+    monkeypatch.setattr(runtime, "_target_session", lambda **kw: ("2026-08-10", "calendar"))
+    monkeypatch.setattr(runtime, "_last_update_date", lambda: "2026-08-06")
+
+    def update(trigger, **kwargs):
+        calls.append((trigger, kwargs))
+        runtime._stop.set()
+
+    monkeypatch.setattr(runtime, "update_now", update)
+    runtime._scheduler()
+    assert calls == [("schedule", {"target_session": "2026-08-10", "attempt": 1})]
