@@ -148,27 +148,16 @@ def test_sealed_replay(symbol, isolated_config, tmp_path, monkeypatch):
             for day in ("14", "15", "16", "17"):
                 freeze_suspension_snapshot(json.loads(archive.read(f"official-2026-09-{day}.json")))
         outcome = DataRefreshManager._refresh_one(store, symbol, "2015-01-01", end)
-        assert outcome["code"] == "confirmed_suspension" and outcome["last_price_date"] == "2026-09-11"
-        assert len(outcome["suspension_evidence"]) == 4
+        assert outcome["code"] == "history_repair_rejected" and "warning" not in outcome
         assert (store._path(symbol).read_bytes(), store.metadata(symbol)) == before
-        report["confirmed_suspension"] = outcome
-        manager = DataRefreshManager()
-        monkeypatch.setattr(manager, "_start", lambda _: None)
-        monkeypatch.setattr(manager, "_stockdb_wait_reason", lambda: "")
-        monkeypatch.setattr(manager, "_uses_stockdb", lambda _: False)
-        monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
-        monkeypatch.setattr(manager, "_refresh_one", lambda *args: outcome)
-        try:
-            job = manager._submit("all_cached", "", "2015-01-01", end, [symbol])
-            manager._run(job["id"])
-            finished = manager.get(job["id"])
-            assert finished["succeeded"] == 1 and finished["failed"] == 0
-            assert len(finished["warnings"]) == 1
-            reused = manager._submit("all_cached", "", "2015-01-01", end, [symbol])
-            assert reused["id"] == job["id"] and reused["reused"]
-            report["job_projection"] = {key: finished[key] for key in ("succeeded", "failed", "warnings")}
-        finally:
-            manager.shutdown()
+        report["strict_suspension_outcome"] = outcome
+        # The sealed Sep 15 raw response has BOTH S and R. Legacy normalized
+        # symbols drop the R row; they cannot prove a full day without trading.
+        from quantmaster.data.instrument_snapshots import load_suspension_snapshot
+
+        receipts = [load_suspension_snapshot(f"2026-09-{day}") for day in ("14", "15", "16", "17")]
+        assert [r["trade_date"] for r in receipts if symbol not in r["full_day_symbols"]] == ["2026-09-15"]
+        report["unconfirmed_full_day_dates"] = ["2026-09-15"]
         output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         assert "rejection" not in report, report.get("rejection")

@@ -1128,13 +1128,23 @@ def freeze_suspension_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "contract": SUSPENSION_CONTRACT,
         "schema_version": SUSPENSION_SCHEMA_VERSION,
         "request_identity_sha256": core["request_evidence"]["request_identity_sha256"],
-        "full_day_symbols": sorted({
-            row["symbol"] for row in core["rows"]
-            if row["suspend_type"].upper() == "S" and not row["suspend_timing"]
-        }),
+        "full_day_symbols": _full_day_suspension_symbols(core),
         "relative_path": str(target.relative_to(get_config().data_root)),
         "file_sha256": _file_sha256(target),
     }
+
+
+def _full_day_suspension_symbols(core: dict[str, Any]) -> list[str]:
+    """Derive strict no-trade evidence without changing the stored legacy core."""
+    confirmed: set[str] = set()
+    conflicting: set[str] = set()
+    for row in core["request_evidence"]["raw_records"]:
+        symbol = _text(row.get("ts_code")).upper()
+        if _text(row.get("suspend_type")).upper() == "S" and not _text(row.get("suspend_timing")):
+            confirmed.add(symbol)
+        else:
+            conflicting.add(symbol)
+    return sorted(confirmed - conflicting)
 
 
 def load_suspension_snapshot(trade_date: str) -> dict[str, Any]:
@@ -1168,10 +1178,7 @@ def load_suspension_snapshot(trade_date: str) -> dict[str, Any]:
         "schema_version": SUSPENSION_SCHEMA_VERSION,
         "request_identity_sha256": core["request_evidence"]["request_identity_sha256"],
         "relative_path": str(path.relative_to(get_config().data_root)),
-        "full_day_symbols": sorted({
-            row["symbol"] for row in core["rows"]
-            if row["suspend_type"].upper() == "S" and not row["suspend_timing"]
-        }),
+        "full_day_symbols": _full_day_suspension_symbols(core),
         "file_sha256": _file_sha256(path),
     }
 

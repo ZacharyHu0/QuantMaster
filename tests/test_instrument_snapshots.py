@@ -799,7 +799,21 @@ def test_conflicting_same_day_suspension_rows_do_not_poison_unique_artifact(
     assert len(objects) == 1
 
 
-@pytest.mark.parametrize('fault', ['', 'missing', 'tamper', 'other_symbol', 'partial', 'resumed', 'numeric'])
+def _refresh_suspension_rows(symbol, day, fault):
+    row = {'ts_code': symbol, 'trade_date': day.replace('-', ''),
+           'suspend_type': 'S', 'suspend_timing': ''}
+    row.update({
+        'other_symbol': {'ts_code': '600000.SH'},
+        'partial': {'suspend_timing': '09:30-10:30'},
+        'resumed': {'suspend_type': 'R'},
+        'missing_type': {'suspend_type': None},
+    }.get(fault, {}))
+    return [row, {**row, 'suspend_type': 'R'}] if fault == 's_and_r' else [row]
+
+
+@pytest.mark.parametrize('fault', [
+    '', 'missing', 'tamper', 'other_symbol', 'partial', 'resumed', 'numeric', 'missing_type', 's_and_r',
+])
 def test_refresh_suspension_warning_requires_every_full_day_snapshot(isolated_config, monkeypatch, fault):
     from quantmaster.data.base import HistoryRepairError
     from quantmaster.data.maintenance import DataRefreshManager
@@ -809,16 +823,8 @@ def test_refresh_suspension_warning_requires_every_full_day_snapshot(isolated_co
     for day in days:
         if fault == 'missing' and day == days[-1]:
             continue
-        row = {'ts_code': symbol, 'trade_date': day.replace('-', ''),
-               'suspend_type': 'S', 'suspend_timing': ''}
-        if day == days[-1]:
-            if fault == 'other_symbol':
-                row['ts_code'] = '600000.SH'
-            elif fault == 'partial':
-                row['suspend_timing'] = '09:30-10:30'
-            elif fault == 'resumed':
-                row['suspend_type'] = 'R'
-        receipt = freeze_suspension_snapshot(_suspension_payload(day, day + 'T16:00:00+08:00', [row]))
+        raw = _refresh_suspension_rows(symbol, day, fault if day == days[-1] else '')
+        receipt = freeze_suspension_snapshot(_suspension_payload(day, day + 'T16:00:00+08:00', raw))
         if fault == 'tamper' and day == days[-1]:
             path = isolated_config.data_root / receipt['relative_path']
             path.write_bytes(path.read_bytes() + b' ')
