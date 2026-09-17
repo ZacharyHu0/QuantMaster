@@ -1220,7 +1220,11 @@ const settingsFeature = (() => {
   }
 
   function dataRefreshActive(task) {
-    return ['queued', 'running', 'cancelling'].includes(task.status);
+    return ['queued', 'running', 'cancelling'].includes(task.status) || dataRefreshWaiting(task);
+  }
+
+  function dataRefreshWaiting(task) {
+    return task.status === 'interrupted' && task.waiting_on === 'stockdb_update';
   }
 
   function renderDataRefresh(task) {
@@ -1232,20 +1236,24 @@ const settingsFeature = (() => {
       interrupted: '服务重启中断', completed: '增量同步完成', failed: '同步失败',
     };
     const active = dataRefreshActive(task);
+    const waiting = dataRefreshWaiting(task);
     const failures = task.failures || [];
     const failed = Number(task.failed || failures.length);
     const incomplete = task.outcome === 'completed_with_warnings' || failed > 0;
-    const warning = incomplete || ['failed', 'cancelled', 'interrupted'].includes(task.status);
-    const label = task.status === 'completed' && incomplete
+    const warning = incomplete || (!waiting && ['failed', 'cancelled', 'interrupted'].includes(task.status));
+    const label = waiting ? '等待 StockDB 恢复' : task.status === 'completed' && incomplete
       ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
       : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
     const count = task.total_known === false
       ? '标的数量待核验' : `${task.next_index || 0}/${task.total || 0}`;
     root.querySelector('[data-refresh-phase]').textContent =
-      `${task.planning ? '规划刷新中' : label} · ${count}${current}`;
+      `${task.planning && !waiting ? '规划刷新中' : label} · ${count}${current}`;
     root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
-    root.querySelector('[data-refresh-failures]').textContent = failed
+    const retryAt = task.next_retry_at ? new Date(task.next_retry_at * 1000).toLocaleTimeString() : '';
+    root.querySelector('[data-refresh-failures]').textContent = waiting
+      ? `${task.detail || label}；${retryAt ? `下次自动检查 ${retryAt}，` : ''}恢复后自动继续。`
+      : failed
       ? `${failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
       : warning || task.planning ? (task.detail || '同步未完整完成，请查看任务详情。')
         : `${task.succeeded || 0} 个标的已成功同步`;
@@ -1259,8 +1267,8 @@ const settingsFeature = (() => {
     state.dataRefreshId = active ? String(task.id || '') : '';
     const runtimeKey = `persistent:health:refresh:${task.id}`;
     if (active) {
-      window.QuantMasterRunInfo.add('info', '数据同步', '行情尾部正在增量同步', {
-        detail:`进度 ${task.progress || 0}%，当前 ${task.current_symbol || '准备中'}`,
+      window.QuantMasterRunInfo.add('info', '数据同步', waiting ? label : '行情尾部正在增量同步', {
+        detail:waiting ? task.detail : `进度 ${task.progress || 0}%，当前 ${task.current_symbol || '准备中'}`,
         action:'任务会在后台继续，可正常浏览其他页面。',
         key:runtimeKey, scope:'health', persistent:true,
         revision:`${task.status}:${task.progress || 0}:${task.current_symbol || ''}`,
@@ -1287,7 +1295,7 @@ const settingsFeature = (() => {
       if (!mounted || generation !== lifecycleGeneration || revision !== state.dataRefreshPollRevision) return;
       renderDataRefresh(task);
       if (dataRefreshActive(task)) {
-        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id, generation), 800);
+        state.dataRefreshTimer = setTimeout(() => pollDataRefresh(id, generation), dataRefreshWaiting(task) ? 5000 : 800);
       }
     } catch (error) {
       if (!mounted || generation !== lifecycleGeneration || revision !== state.dataRefreshPollRevision) return;
