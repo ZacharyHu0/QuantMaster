@@ -41,10 +41,12 @@ def stockdb_wait_reason(*, planned_only: bool = False) -> str:
         failed = phase == "retry_wait" or status.get("update_result") in {
             "failed", "manual_required", "retry_wait",
         }
-        if not planned and (planned_only or not failed):
-            return ""
         if time.time() - float(row[1]) > 30:
             return "" if planned_only else "StockDB 更新状态已失联，等待监督器恢复确认"
+        if status.get("state") in {"stopped", "disabled", "degraded"} and not planned_only:
+            return "StockDB 服务尚未恢复，等待监督器确认"
+        if not planned and (planned_only or not failed):
+            return ""
         message = redact_sensitive_text(str(status.get("message") or phase))[:500]
         return f"等待 StockDB 更新与验收：{message}"
     except FileNotFoundError:

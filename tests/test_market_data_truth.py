@@ -130,7 +130,7 @@ def test_stockdb_frame_assessment_never_calls_tushare(monkeypatch):
     assert any("复权" in issue for issue in quality.issues)
 
 
-def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
+def test_accepted_stockdb_session_does_not_fabricate_formal_factor_or_pit_evidence(
     isolated_config, monkeypatch,
 ):
     dates = pd.bdate_range("2026-07-01", "2026-08-07")
@@ -179,7 +179,7 @@ def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
         lambda _start, _end: (dates, "stockdb-ingest:complete"),
     )
 
-    bound = FreeStockDBSource._bind_formal_acceptance(local, "2026-08-07")
+    bound = FreeStockDBSource()._bind_session_acceptance(local, "2026-08-07")
     quality = registry._assess_daily_frame(
         bound,
         "2026-07-01",
@@ -188,17 +188,22 @@ def test_accepted_stockdb_native_qfq_is_formal_without_online_evidence(
         source="free-stockdb",
     )
 
-    assert quality.status == "verified", quality.issues
+    assert quality.status == "degraded", quality.issues
     assert bound.attrs["stockdb_no_trade_rows_normalized"] == 1
     assert bound.loc[placeholder_date, ["open", "high", "low"]].tolist() == [
         bound.loc[placeholder_date, "close"],
         bound.loc[placeholder_date, "close"],
         bound.loc[placeholder_date, "close"],
     ]
-    assert quality.adjustment == "forward_adjusted"
-    assert quality.formal_eligible is True
+    assert quality.adjustment == "forward_adjusted_unverified"
+    assert quality.formal_eligible is False
     assert quality.semantics is not None
-    assert quality.semantics.factor_coverage == "complete"
+    assert quality.semantics.factor_coverage == "unconfirmed"
+    assert bound.attrs["stockdb_accepted_session"] == "2026-08-07"
+    assert bound.attrs["stockdb_accepted_at"] == "2026-08-07T18:00:00+08:00"
+    for name in ("provider_published_at", "adjustment_company_actions",
+                 "adjustment_provider_definition", "adjustment_anchor_date", "formal_evidence"):
+        assert name not in bound.attrs
 
 
 def test_stockdb_quality_has_no_per_symbol_cross_source_contract(monkeypatch):

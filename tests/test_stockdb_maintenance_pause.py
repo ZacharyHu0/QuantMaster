@@ -6,11 +6,134 @@ import json
 import threading
 import time
 
+import pandas as pd
 import pytest
 
 from quantmaster.data.maintenance import DATA_REFRESH_TASK_TYPE, DataRefreshManager
 from quantmaster.runtime.jobs import JobOutcome, UnifiedJobRuntime, UnifiedJobStore
 from quantmaster.runtime.sqlite import connect_sqlite
+
+
+@pytest.fixture
+def accepted_bars(isolated_config, monkeypatch):
+    from quantmaster.data import registry
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+    from quantmaster.data.storage import BarStore
+
+    root = isolated_config.data_root / "stockdb"
+    root.mkdir()
+    isolated_config.data.free_stockdb_root = str(root)
+    isolated_config.data.primary_provider = "free-stockdb"
+    dates = pd.bdate_range("2026-07-01", "2026-08-07")
+    frame = FreeStockDBSource._frame([
+        {"date": day.strftime("%Y%m%d"), "open": 10, "high": 11, "low": 9,
+         "close": 10, "volume": 100, "amount": 1000} for day in dates
+    ], intraday=False)
+    calls = []
+
+    def daily(source, symbol, start, end):
+        calls.append((symbol, start, end))
+        return source._bind_session_acceptance(frame.loc[start:end].copy(), end)
+
+    monkeypatch.setattr(FreeStockDBSource, "daily", daily)
+    monkeypatch.setattr(registry, "_local_sessions", lambda *args: (pd.DatetimeIndex([]), "unavailable"))
+    monkeypatch.setattr(registry, "_request_factories", lambda **kwargs: {
+        registry.Market.CN: [FreeStockDBSource],
+    })
+    store = BarStore()
+    quality = registry._assess_daily_frame(
+        frame, "2026-07-01", "2026-08-07", symbol="600000.SH", source="free-stockdb",
+    )
+    store.put("600000.SH", frame, replace=True, replace_coverage=True,
+              request_start="2026-07-01", request_end="2026-08-07",
+              source="free-stockdb", quality=quality.to_dict())
+    store.mark_status("600000.SH", "stale")
+
+    def accept(stamp="2026-08-07T18:00:00+08:00"):
+        (root / ".quantmaster-update.json").write_text(json.dumps({
+            "schema_version": 2, "validated_session": "2026-08-07",
+            "target_session": "2026-08-07", "updated_at": stamp,
+            "validation": {"accepted": True, "complete": False,
+                           "actual_session": "2026-08-07", "target_session": "2026-08-07"},
+        }), encoding="utf-8")
+
+    return store, frame, calls, accept
+
+
+def test_accepted_generation_replaces_old_local_evidence_once(accepted_bars):
+    from quantmaster.data import registry
+
+    store, _, calls, accept = accepted_bars
+    accept()
+    first = registry.refresh_history("600000.SH", "2026-07-01", "2026-08-07", store=store)
+    assert calls == [("600000.SH", "2026-07-01", "2026-08-07")]
+    assert first.quality.analysis_eligible and not first.quality.stale
+    assert not first.quality.formal_eligible
+    assert first.quality.semantic_diagnostic_code == "factor_contract_incomplete"
+    assert len(json.loads(store.metadata("600000.SH")["source_chain_json"])) == 1
+    registry.refresh_history("600000.SH", "2026-07-01", "2026-08-07", store=store)
+    assert len(calls) == 1
+    accept("2026-08-07T19:00:00+08:00")
+    registry.refresh_history("600000.SH", "2026-07-01", "2026-08-07", store=store)
+    assert len(calls) == 2
+
+
+def test_accepted_resume_refreshes_real_cache_and_projects_formal_warnings(
+    manager, owner, accepted_bars, monkeypatch,
+):
+    monkeypatch.setattr(manager, "_fingerprint", DataRefreshManager._fingerprint)
+    store, _, calls, accept = accepted_bars
+    owner("validating", "validating")
+    job = manager._submit("watchlist", "", "2026-07-01", "2026-08-07", ["600000.SH"])
+    assert run_due(manager, job["id"])["waiting_on"] == "stockdb_update"
+    assert not calls
+    accept()
+    owner("completed", "success")
+    runtime = manager._ensure_runtime()
+    with runtime.store._conn() as db:
+        db.execute("UPDATE runtime_jobs SET next_retry_at=0 WHERE id=?", (job["id"],))
+    runtime.start()
+    runtime.wait(job["id"], 10)
+    result = manager.get(job["id"])
+    assert result["id"] == job["id"] and result["attempt"] == 1
+    assert result["status"] == "completed" and not result["waiting_on"]
+    assert result["succeeded"] == 1 and result["failed"] == 0
+    assert result["outcome"] == "completed_with_warnings" and result["warning_count"] == 1
+    assert result["warnings"][0]["formal_eligible"] is False
+    assert "factor_contract" in result["warnings"][0]["warning"]
+    assert len(calls) == 1
+    assert store.get("600000.SH").attrs["factor_coverage"] == "unconfirmed"
+    for _ in range(3):
+        reused = manager._submit("watchlist", "", "2026-07-01", "2026-08-07", ["600000.SH"])
+        assert reused["id"] == job["id"] and reused["reused"]
+    assert len(calls) == 1 and len(manager.list()) == 1
+    accept("2026-08-07T19:00:00+08:00")
+    changed = manager._submit("watchlist", "", "2026-07-01", "2026-08-07", ["600000.SH"])
+    assert changed["id"] != job["id"] and changed["created"]
+
+    from quantmaster.server.jobs import _apply_domain_projection
+
+    public = {}
+    _apply_domain_projection(public, "data", result)
+    assert public["warnings"] == result["warnings"] and public["warning_count"] == 1
+    assert public["outcome"] == "completed_with_warnings"
+
+
+@pytest.mark.parametrize("missing", ["receipt", "latest", "units", "numeric", "history"])
+def test_daily_preparation_does_not_hide_real_gaps(accepted_bars, missing):
+    store, frame, _, accept = accepted_bars
+    if missing != "receipt":
+        accept()
+    if missing == "latest":
+        frame.drop(frame.index[-1], inplace=True)
+    elif missing == "units":
+        frame.attrs["unit_status"] = "unverified"
+    elif missing == "numeric":
+        frame.loc[frame.index[-1], "high"] = -1
+    elif missing == "history":
+        frame.drop(frame.index[10], inplace=True)
+    outcome = DataRefreshManager._refresh_one(store, "600000.SH", "2026-07-01", "2026-08-07")
+    assert outcome and "error" in outcome and "warning" not in outcome
 
 
 @pytest.fixture
@@ -22,10 +145,10 @@ def owner(isolated_config, tmp_path, monkeypatch):
         db.execute("CREATE TABLE runtime_state(singleton INTEGER, payload_json TEXT, updated_at REAL)")
         db.execute("INSERT INTO runtime_state VALUES(1, '{}', 0)")
 
-    def publish(phase, result="running", *, age=0):
+    def publish(phase, result="running", *, age=0, state=""):
         phases = {"stopping", "syncing", "validating", "restarting", "closing"}
-        payload = {"state": "updating" if phase in phases
-                   else "running", "phase": phase, "update_result": result,
+        payload = {"state": state or ("updating" if phase in phases
+                   else "running"), "phase": phase, "update_result": result,
                    "managed": True, "message": f"owner:{phase}:{result}"}
         with connect_sqlite(path) as db:
             db.execute("UPDATE runtime_state SET payload_json=?,updated_at=?",
@@ -165,6 +288,14 @@ def test_disabled_auto_and_stale_owner_are_explicit(manager, owner, isolated_con
     assert not manager._stockdb_wait_reason()
 
 
+@pytest.mark.parametrize("state,age", [("running", 90), ("stopped", 0), ("degraded", 0)])
+def test_completed_receipt_does_not_hide_offline_owner(manager, owner, state, age):
+    owner("completed", "success", age=age, state=state)
+    assert manager._stockdb_wait_reason()
+    owner("completed", "success")
+    assert not manager._stockdb_wait_reason()
+
+
 def test_dependency_wait_cancel_fence(tmp_path):
     store = UnifiedJobStore(tmp_path / "jobs.sqlite")
     first = UnifiedJobRuntime(store, dispatch=False)
@@ -202,7 +333,8 @@ def test_wait_survives_manager_restart_and_rechecks_previous_success(manager, ow
         assert second.get(job["id"])["waiting_on"] == "stockdb_update"
         owner("completed", "success")
         assert run_due(second, job["id"])["status"] == "completed"
-        assert calls == ["600000.SH", "600000.SH", "600001.SH"]
+        assert calls[0] == "600000.SH"
+        assert sorted(calls[1:]) == ["600000.SH", "600001.SH"]
     finally:
         second.shutdown()
 
@@ -281,5 +413,6 @@ def test_recovery_waits_out_existing_cooldown_without_reset(manager, owner, monk
     assert PROVIDER_HEALTH.status("free-stockdb")["free-stockdb"] == before
     # Advance the clock past the actual recorded deadline, preserving the row.
     monkeypatch.setattr("quantmaster.data.maintenance.time.time", lambda: before["open_until"] + 1)
+    owner("completed", "success")  # The live owner continues heartbeating during cooldown.
     assert run_due(manager, job["id"])["status"] == "completed"
     assert calls == ["600000.SH"]

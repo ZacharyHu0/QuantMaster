@@ -147,6 +147,36 @@ def test_conflicting_qfq_rebuild_keeps_old_history_and_truthful_evidence(repair_
     pd.testing.assert_frame_equal(source.cached_daily(SYMBOL, START, END), saved)
 
 
+def test_maintenance_reuses_repaired_tushare_cache_without_formal_upgrade(repair_setup, monkeypatch):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    store, _, calls, _, _ = repair_setup
+    repair(store)
+    calls.clear()
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("fresh local repair"))
+    for _ in range(2):
+        outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, END)
+        assert outcome and outcome["code"] == "formal_evidence_missing"
+        assert outcome["formal_eligible"] is False and "warning" in outcome
+    assert not calls
+    envelope = registry.read_history(SYMBOL, START, END, store)
+    assert envelope.quality.semantics.factor_coverage == "complete"
+    assert not envelope.quality.formal_eligible
+
+
+@pytest.mark.parametrize("missing", ["instrument", "factor_coverage", "adjustment_provider_definition"])
+def test_maintenance_rejects_incomplete_repaired_source_contract(repair_setup, monkeypatch, missing):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    store, _, _, _, _ = repair_setup
+    repair(store)
+    frame = store.get(SYMBOL)
+    frame.attrs.pop(missing)
+    monkeypatch.setattr(store, "get", lambda symbol: frame)
+    outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, END)
+    assert outcome and "error" in outcome and "warning" not in outcome
+
+
 @pytest.mark.parametrize("fault", ["missing_old", "missing_gap", "network", "identity", "factor", "cancel"])
 def test_failed_or_cancelled_rebuild_preserves_bytes_and_metadata(repair_setup, fault):
     store, _, _, state, old = repair_setup
