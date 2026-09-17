@@ -193,6 +193,51 @@ const settingsFeature = (() => {
     scheduleAutomaticModelCheck();
   }
 
+  // Detailed owner status has a separate contract from the runtime worker summary.
+  function renderFreeStockDbStatus(stockdb) {
+    const stockdbStatus = document.getElementById('free-stockdb-sidecar-status');
+    if (stockdbStatus) {
+      stockdb = stockdb || {};
+      const elapsed = Number.isFinite(stockdb.elapsed_seconds) ? ` · 已用 ${stockdb.elapsed_seconds} 秒` : '';
+      const engine = stockdb.sdk_engine ? ` · ${stockdb.sdk_engine}` : '';
+      const sessions = stockdb.target_session
+        ? ` · 目标 ${stockdb.target_session} / 实际 ${stockdb.actual_session || '待验收'}`
+        : stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : '';
+      const attempts = stockdb.attempt && stockdb.max_attempts > 1
+        ? ` · 更新尝试 ${stockdb.attempt}/${stockdb.max_attempts}` : '';
+      const retry = stockdb.next_retry_at
+        ? ` · 下次 ${new Date(stockdb.next_retry_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}` : '';
+      const serviceAttempt = stockdb.service_restart_attempt
+        ? ` · 服务重启第 ${stockdb.service_restart_attempt} 次` : '';
+      const serviceRetry = stockdb.service_restart_next_at
+        ? ` · 服务下次 ${new Date(stockdb.service_restart_next_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}`
+        : stockdb.service_restart_backoff_seconds
+          ? ` · 服务退避 ${stockdb.service_restart_backoff_seconds} 秒` : '';
+      const labels = {
+        queued: '等待更新', updating: '正在更新或验证本地库', restarting: '正在重启本地服务',
+        running: '本地服务运行中', error: '本地库更新失败', degraded: '本地服务异常',
+        stopped: '本地服务已停止', disabled: '本地服务已停用',
+      };
+      const message = stockdb.message || (['failed', 'manual_required'].includes(stockdb.update_result)
+        ? '本地库更新未通过，请检查后重试'
+        : stockdb.update_result === 'retry_wait' ? '等待重试本地库更新'
+          : labels[stockdb.state] || '本地库详细状态暂不可用，等待后续状态确认');
+      stockdbStatus.textContent = `${message}${sessions}${attempts}${retry}${serviceAttempt}${serviceRetry}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
+      const failed = ['error', 'degraded'].includes(stockdb.state)
+        || ['failed', 'manual_required'].includes(stockdb.update_result);
+      const healthy = stockdb.state === 'running'
+        && !['failed', 'manual_required', 'retry_wait'].includes(stockdb.update_result);
+      stockdbStatus.className = `field-wide check-result ${failed ? 'error' : healthy ? 'success' : ''}`;
+      const active = isFreeStockDbActive(stockdb);
+      freeStockDbActive = active;
+      const updateButton = document.getElementById('free-stockdb-update-now');
+      if (updateButton) updateButton.disabled = active;
+      const resetButton = document.getElementById('free-stockdb-reset-retry');
+      if (resetButton) resetButton.disabled = active;
+      if (mounted && active) scheduleFreeStockDbPoll();
+    }
+  }
+
   function renderRuntime(runtime) {
     if (!runtime) return;
     const incomingRevision = Number(runtime.persisted_revision ?? runtime.config_revision ?? 0);
@@ -232,38 +277,6 @@ const settingsFeature = (() => {
     note.textContent = restart.length
       ? `${restart.join(' / ')} 已保存，重启服务后生效`
       : drift.length ? '设置已保存，等待各组件确认应用' : '当前 revision 已由所有组件确认';
-    const stockdb = runtime.free_stockdb;
-    const stockdbStatus = document.getElementById('free-stockdb-sidecar-status');
-    if (stockdb && stockdbStatus) {
-      const elapsed = Number.isFinite(stockdb.elapsed_seconds) ? ` · 已用 ${stockdb.elapsed_seconds} 秒` : '';
-      const engine = stockdb.sdk_engine ? ` · ${stockdb.sdk_engine}` : '';
-      const sessions = stockdb.target_session
-        ? ` · 目标 ${stockdb.target_session} / 实际 ${stockdb.actual_session || '待验收'}`
-        : stockdb.validated_session ? ` · 已验证 ${stockdb.validated_session}` : '';
-      const attempts = stockdb.attempt && stockdb.max_attempts > 1
-        ? ` · 更新尝试 ${stockdb.attempt}/${stockdb.max_attempts}` : '';
-      const retry = stockdb.next_retry_at
-        ? ` · 下次 ${new Date(stockdb.next_retry_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}` : '';
-      const serviceAttempt = stockdb.service_restart_attempt
-        ? ` · 服务重启第 ${stockdb.service_restart_attempt} 次` : '';
-      const serviceRetry = stockdb.service_restart_next_at
-        ? ` · 服务下次 ${new Date(stockdb.service_restart_next_at).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',hour12:false})}`
-        : stockdb.service_restart_backoff_seconds
-          ? ` · 服务退避 ${stockdb.service_restart_backoff_seconds} 秒` : '';
-      stockdbStatus.textContent = `${stockdb.message || stockdb.state}${sessions}${attempts}${retry}${serviceAttempt}${serviceRetry}${elapsed}${engine}${stockdb.updated_at ? ` · ${new Date(stockdb.updated_at).toLocaleString('zh-CN', {hour12: false})}` : ''}`;
-      const failed = ['error', 'degraded'].includes(stockdb.state)
-        || ['failed', 'manual_required'].includes(stockdb.update_result);
-      const healthy = stockdb.state === 'running'
-        && !['failed', 'manual_required', 'retry_wait'].includes(stockdb.update_result);
-      stockdbStatus.className = `field-wide check-result ${failed ? 'error' : healthy ? 'success' : ''}`;
-      const active = isFreeStockDbActive(stockdb);
-      freeStockDbActive = active;
-      const updateButton = document.getElementById('free-stockdb-update-now');
-      if (updateButton) updateButton.disabled = active;
-      const resetButton = document.getElementById('free-stockdb-reset-retry');
-      if (resetButton) resetButton.disabled = active;
-      if (mounted && active) scheduleFreeStockDbPoll();
-    }
     const labels = {
       running: '运行中', standby: '等待调度租约', disabled: '已停用',
       draining: '停止领取新任务', degraded: '运行异常', applied: '已应用',
@@ -1239,10 +1252,16 @@ const settingsFeature = (() => {
     const waiting = dataRefreshWaiting(task);
     const failures = task.failures || [];
     const failed = Number(task.failed || failures.length);
-    const incomplete = task.outcome === 'completed_with_warnings' || failed > 0;
+    const warnings = task.warnings || [];
+    const warningCount = Number(task.warning_count ?? warnings.length);
+    const evidenceDetail = warningCount > 0
+      ? `已更新 ${task.succeeded || 0}，${warningCount} 个正式证据待补${warnings.length
+        ? `：${warnings.slice(-3).map(item => `${item.symbol} ${item.warning}`).join('；')}` : ''}` : '';
+    const incomplete = task.outcome === 'completed_with_warnings' || failed > 0 || warningCount > 0;
     const warning = incomplete || (!waiting && ['failed', 'cancelled', 'interrupted'].includes(task.status));
     const label = waiting ? '等待 StockDB 恢复' : task.status === 'completed' && incomplete
-      ? (Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
+      ? (failed === 0 && warningCount > 0 ? '日常数据已更新，正式证据待补'
+        : Number(task.succeeded || 0) === 0 ? '同步未成功' : '同步部分完成')
       : labels[task.status] || task.status;
     const current = task.current_symbol ? ` · ${task.current_symbol}` : '';
     const count = task.total_known === false
@@ -1251,12 +1270,14 @@ const settingsFeature = (() => {
       `${task.planning && !waiting ? '规划刷新中' : label} · ${count}${current}`;
     root.querySelector('[data-refresh-percent]').textContent = `${task.progress || 0}%`;
     const retryAt = task.next_retry_at ? new Date(task.next_retry_at * 1000).toLocaleTimeString() : '';
-    root.querySelector('[data-refresh-failures]').textContent = waiting
+    const resultDetail = waiting
       ? `${task.detail || label}；${retryAt ? `下次自动检查 ${retryAt}，` : ''}恢复后自动继续。`
       : failed
       ? `${failed} 个失败：${failures.slice(-3).map(item => `${item.symbol} ${item.error}`).join('；')}`
       : warning || task.planning ? (task.detail || '同步未完整完成，请查看任务详情。')
         : `${task.succeeded || 0} 个标的已成功同步`;
+    root.querySelector('[data-refresh-failures]').textContent =
+      [evidenceDetail, task.status === 'completed' && !failed && evidenceDetail ? '' : resultDetail].filter(Boolean).join('；');
     const cancel = document.getElementById('data-refresh-cancel');
     cancel.hidden = !task.can_cancel;
     cancel.disabled = task.status === 'cancelling';
@@ -1275,10 +1296,10 @@ const settingsFeature = (() => {
       });
     } else if (warning) {
       window.QuantMasterRunInfo.add('warning', '数据刷新', '最近的数据刷新未完整完成', {
-        detail:failed ? `${failed} 个标的失败。` : (task.detail || label),
+        detail:[evidenceDetail, failed ? resultDetail : task.detail || ''].filter(Boolean).join('；') || label,
         action:task.can_retry ? '查看失败原因后重试未完成项。' : '查看任务详情与失败原因。',
         key:runtimeKey, scope:'health', persistent:true,
-        revision:`${task.status}:${task.failed || failures.length}`,
+        revision:`${task.status}:${failed}:${warningCount}:${evidenceDetail}`,
       });
     } else {
       window.QuantMasterRunInfo.resolve(runtimeKey);
@@ -1718,7 +1739,7 @@ const settingsFeature = (() => {
       const status = await request('/api/v1/settings/free-stockdb');
       if (!mounted || generation !== lifecycleGeneration) return;
       freeStockDbPollFailures = 0;
-      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      renderFreeStockDbStatus(status);
       const active = isFreeStockDbActive(status);
       freeStockDbActive = active;
       document.getElementById('free-stockdb-update-now').disabled = active;
@@ -1726,7 +1747,7 @@ const settingsFeature = (() => {
     } catch (error) {
       if (!mounted || generation !== lifecycleGeneration) return;
       freeStockDbPollFailures += 1;
-      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      renderFreeStockDbStatus({state: 'error', message: error.message || '本地库详细状态读取失败'});
       if (freeStockDbPollFailures < 5) {
         scheduleFreeStockDbPoll(
           Math.min(8000, 500 * (2 ** freeStockDbPollFailures)), generation,
@@ -1745,12 +1766,12 @@ const settingsFeature = (() => {
     try {
       const status = await request('/api/v1/settings/free-stockdb/update', {method: 'POST'});
       if (!mounted || generation !== lifecycleGeneration) return;
-      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      renderFreeStockDbStatus(status);
       scheduleFreeStockDbPoll(250, generation);
     } catch (error) {
       if (!mounted || generation !== lifecycleGeneration) return;
       freeStockDbActive = false;
-      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      renderFreeStockDbStatus({state: 'error', message: error.message || '本地库详细状态读取失败'});
       event.target.disabled = false;
     }
   });
@@ -1762,11 +1783,11 @@ const settingsFeature = (() => {
     try {
       const status = await request('/api/v1/settings/free-stockdb/reset', {method: 'POST'});
       if (!mounted || generation !== lifecycleGeneration) return;
-      renderRuntime({...state.lastRuntime, free_stockdb: status});
+      renderFreeStockDbStatus(status);
       scheduleFreeStockDbPoll(250, generation);
     } catch (error) {
       if (!mounted || generation !== lifecycleGeneration) return;
-      document.getElementById('free-stockdb-sidecar-status').textContent = error.message;
+      renderFreeStockDbStatus({state: 'error', message: error.message || '本地库详细状态读取失败'});
       button.disabled = false;
     }
   });
@@ -1797,6 +1818,7 @@ const settingsFeature = (() => {
       ?.dataset.settingsSection || 'llm';
     switchSection(initialSection);
     await loadSettings();
+    if (mounted && generation === lifecycleGeneration) scheduleFreeStockDbPoll(0, generation);
     if (resume && mounted && generation === lifecycleGeneration) resumeActiveWork();
   }
 
