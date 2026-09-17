@@ -12,6 +12,10 @@ _settings_manager: Any | None = migration_manager.config_manager
 _apply_runtime: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
 
+class SettingsApplyPending(RuntimeError):
+    """A process owner has not yet acknowledged a durable settings command."""
+
+
 def register_settings_control(
     manager: Any,
     apply_runtime: Callable[[dict[str, Any]], dict[str, Any]],

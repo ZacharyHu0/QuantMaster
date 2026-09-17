@@ -14,7 +14,7 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.runtime.jobs import JobContext, JobOutcome, UnifiedJobRuntime, UnifiedJobStore
-from quantmaster.server.settings_control import apply_runtime, settings_manager
+from quantmaster.server.settings_control import SettingsApplyPending, apply_runtime, settings_manager
 from quantmaster.settings import SettingsDocument
 
 APPLY_TASK_TYPE = "settings.apply"
@@ -107,7 +107,13 @@ class SettingsJobs:
                 "superseded_by": latest,
             }
         else:
-            applied = apply_runtime(saved)
+            try:
+                applied = apply_runtime(saved)
+            except SettingsApplyPending:
+                # Bounded automatic retry uses the existing durable lifecycle.
+                # The owner command coalesces while queued/running; no second
+                # owner or self-directed worker IPC is involved.
+                return JobOutcome("failed", "等待托管进程确认设置应用", retry_delay_seconds=1.0)
         context.ensure_active()
         context.progress(96, "记录运行时应用", "保存后台应用结果")
         artifact = context.write_artifact(

@@ -22,6 +22,7 @@ from quantmaster.runtime.supervisor import (
 )
 from quantmaster.runtime.worker import RuntimeWorker, WorkerPlan
 from quantmaster.runtime.worker_ipc import WorkerCommandError
+from quantmaster.server.settings_apply import initialize_worker_settings
 from quantmaster.server.settings_control import settings_manager
 from quantmaster.server.settings_jobs import get_settings_jobs, shutdown_settings_jobs
 from quantmaster.server.worker_hooks import (
@@ -240,6 +241,19 @@ class _DefaultWorkerPlan:
             _std,
         ) = server_worker_hooks()
 
+        from quantmaster.config import set_config
+        from quantmaster.server.settings_runtime import public_state
+
+        # An independent worker loads the manager's configured root. Embedded
+        # plans already receive their process configuration from the host.
+        if os.environ.get("QM_WORKER_SUPERVISOR") == "1":
+            set_config(_sm.load())
+        settings_state = public_state(_sm.path)
+        self._settings_applied = (
+            int(settings_state["persisted_revision"]), int(settings_state["latest_generation"]),
+        )
+        initialize_worker_settings(_sm, self._confirm_settings)
+
         # This installs only the bundled offline catalogue. It must not
         # trigger a remote catalogue refresh at worker startup.
         InstrumentStore()
@@ -296,10 +310,10 @@ class _DefaultWorkerPlan:
         self._shutdown_backtest_jobs = shutdown_backtest_job_managers
 
     def settings_projection(self) -> tuple[int, int]:
-        from quantmaster.server.settings_runtime import public_state
+        return self._settings_applied
 
-        state = public_state(self.settings_manager.path)
-        return int(state["persisted_revision"]), int(state["latest_generation"])
+    def _confirm_settings(self, revision: int, generation: int) -> None:
+        self._settings_applied = (revision, generation)
 
     def _publish_lab_capabilities(self) -> None:
         try:
@@ -403,7 +417,7 @@ class _DefaultWorkerPlan:
         )
 
     def _apply_latest_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        from quantmaster.config import load_config, set_config
+        from quantmaster.config import set_config
         from quantmaster.server.settings_runtime import persisted_revision
 
         revision = int(payload.get("revision") or 0)
@@ -416,7 +430,8 @@ class _DefaultWorkerPlan:
                 "latest_revision": latest,
                 "generation": generation,
             }
-        set_config(load_config())
+        set_config(self.settings_manager.load())
+        self._confirm_settings(latest, generation)
         return {"status": "effective", "revision": latest, "generation": generation}
 
     def handle_command(

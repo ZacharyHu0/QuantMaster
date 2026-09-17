@@ -428,6 +428,7 @@ def test_runtime_worker_status_exposes_schema_migration_block(isolated_config):
         {
             "schema_migration": "schema-migration-blocked",
             "schema_migration_detail": "lab schema 需显式迁移",
+            "settings_projection": lambda self: (0, 0),
         },
     )()
     worker._started = True
