@@ -667,7 +667,7 @@ class PaperStore:
         return self.account(account_id) or {}
 
     def permanently_delete_account(self, account_id: str, *, confirm_name: str) -> dict:
-        """Delete a hidden account and every account-scoped record and ledger file."""
+        """Delete a confirmed account without racing a live automation lease."""
         directory = self._account_directory(account_id)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -677,10 +677,14 @@ class PaperStore:
             ).fetchone()
             if row is None:
                 raise KeyError("模拟账户不存在")
-            if row["status"] != "archived":
-                raise ValueError("只有已隐藏的模拟账户可以永久删除")
             if confirm_name != row["name"]:
                 raise ValueError("确认名称不匹配，已取消永久删除")
+            if conn.execute(
+                "SELECT 1 FROM paper_auto_runs WHERE account_id=? "
+                "AND status='running' AND lease_expires>? LIMIT 1",
+                (account_id, time.time()),
+            ).fetchone():
+                raise ValueError("账户正在执行，请等待本次运行结束后再删除")
             conn.execute(
                 "DELETE FROM paper_order_fills WHERE order_id IN "
                 "(SELECT id FROM paper_orders WHERE account_id=?)",
@@ -738,6 +742,11 @@ class PaperStore:
         current = time.time() if now is None else float(now)
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM paper_accounts WHERE id=? AND status='active' AND mode='auto'",
+                (account_id,),
+            ).fetchone() is None:
+                return None
             row = conn.execute(
                 "SELECT status,attempts,next_retry_at,lease_expires FROM paper_auto_runs "
                 "WHERE run_date=? AND account_id=?",
@@ -915,8 +924,12 @@ class PaperStore:
         with self._conn() as conn:
             changed = conn.execute(
                 "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
-                "last_error='',failure_code='',updated_at=? WHERE run_date=? AND account_id=? "
-                "AND status='manual_recovery'",
+                "last_error='',failure_code='',diagnostic_code='',updated_at=? "
+                "WHERE run_date=? AND account_id=? "
+                "AND (status IN ('failed','manual_recovery') OR "
+                "(status='completed' AND EXISTS (SELECT 1 FROM paper_cycles "
+                "WHERE paper_cycles.account_id=paper_auto_runs.account_id "
+                "AND paper_cycles.status IN ('confirmed','blocked'))))",
                 (utc_now(), run_date, account_id),
             ).rowcount
         return bool(changed)
@@ -1712,6 +1725,23 @@ class PaperStore:
             )
         return self.cycle(cycle_id) or {}
 
+
+def _confirmed_full_day_suspensions(symbols: set[str], day: str) -> set[str]:
+    if not symbols:
+        return set()
+    from quantmaster.data.instrument_snapshots import (
+        InstrumentCatalogEvidenceError,
+        load_suspension_snapshot,
+    )
+
+    try:
+        snapshot = load_suspension_snapshot(day)
+    except (InstrumentCatalogEvidenceError, OSError, ValueError):
+        # Missing or corrupt evidence retains the existing closed gate.
+        return set()
+    return symbols.intersection(snapshot["full_day_symbols"])
+
+
 class PaperService:
     def __init__(self, store: PaperStore | None = None, *, read_only: bool = False):
         self.read_only = bool(read_only)
@@ -1788,7 +1818,7 @@ class PaperService:
             "strategy_effective_after": account.get("strategy_effective_after", ""),
             "can_hide": not archived,
             "can_restore": archived,
-            "can_permanently_delete": archived,
+            "can_permanently_delete": True,
             "delete_mode": "hide",
         }
         return account
@@ -1807,12 +1837,17 @@ class PaperService:
         if account is None:
             raise KeyError("模拟账户不存在")
         if strategy is None and universe is None:
-            return self.store.update_account(
+            updated = self.store.update_account(
                 account_id,
                 name=name,
                 status=status,
                 mode=mode,
             )
+            if status == "active" and updated["mode"] == "auto":
+                run = self.store.reportable_auto_run(account_id)
+                if run is not None:
+                    self.store.recover_auto_run(str(run["run_date"]), account_id)
+            return updated
         candidate_strategy = strategy if strategy is not None else account["strategy"]
         strategy_payload = (
             candidate_strategy.model_dump(mode="json")
@@ -2045,6 +2080,10 @@ class PaperService:
         value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
         value["symbol"] = value["symbol"].astype(str).str.upper()
         value = value.dropna(subset=["date", "symbol"])
+        # Only an immutable full-day suspension record can excuse an absent
+        # frontier row. Keep NaNs: a suspension is never a synthetic quote/fill.
+        absent = set(requested) - set(value.loc[value["date"] == required_end, "symbol"])
+        suspended = _confirmed_full_day_suspensions(absent, end)
         panels: dict[str, pd.DataFrame] = {}
         missing_symbols: set[str] = set()
         for field in fields:
@@ -2057,6 +2096,7 @@ class PaperService:
             else:
                 missing_symbols.update(
                     str(symbol) for symbol in matrix.columns[matrix.loc[required_end].isna()]
+                    if str(symbol) not in suspended
                 )
         latest = panels["close"].index.max() if not panels["close"].empty else None
         if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < required_end:
@@ -2083,6 +2123,13 @@ class PaperService:
                 quality,
                 ({"source": "free-stockdb", "evidence": evidence},),
             )
+        # Preserve factor inputs supplied by StockDB. Dropping amount here
+        # made vwap_reversion fail even when the local source had the field.
+        for field in ("amount", "turnover"):
+            if field in value:
+                panels[field] = value.pivot(
+                    index="date", columns="symbol", values=field,
+                ).reindex(index=panels["close"].index, columns=requested)
         return panels
 
     @staticmethod

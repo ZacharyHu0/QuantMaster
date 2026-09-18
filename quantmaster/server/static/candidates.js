@@ -801,12 +801,12 @@ const candidatesFeature = (() => {
     if (origin || (active && active !== 'candidates')) state.originTab = origin || active;
     state.pendingName = name || state.currentName || 'demo';
     document.querySelector('header [data-tab="candidates"]')?.click();
-    loadCandidates();
   }
 
   async function loadCandidates() {
-    if (!state.loaded) {
-      await refreshCatalog();
+    if (!state.dirty) {
+      const selected = state.pendingName || state.currentName;
+      await refreshCatalog({select:selected, loadDetail:Boolean(selected)});
     }
     const target = state.pendingName || state.currentName || state.catalog[0]?.name;
     state.pendingName = null;

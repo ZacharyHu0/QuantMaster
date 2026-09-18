@@ -71,7 +71,7 @@
 | 💰 真实账户账本 | 自选、重点关注与真实账户持有统一工作台；账本支持券商 CSV 导入、FIFO 成本、TWR / XIRR 与基准对比 |
 | 🔔 Bot 自动化 | 以飞书企业自建应用 Bot 为主通道（群聊/私聊命令、结构化告警卡片、个股分析进度卡），腾讯微信 ClawBot iLink 为轻量文本提醒；定时扫描变盘/重要消息/收盘任务，按会话选择推送强度 |
 | 🖥️ 本地 Web 界面 | FastAPI + ECharts 决策工作台；「今日 → 候选」集中查看与编辑研究范围，行情卡片逐标的呈现，决策按牛熊/板块/候选分阶段可用，不必等待整次任务结束 |
-| 📖 内置帮助 | 页头“帮助”提供按六部、两级目录组织的 21 章量化研究教材，从市场与数据递进到数学、定价、信号、组合和生产研究；覆盖测度变换、SDF/GMM、高级蒙特卡洛、波动率曲面、HJM、稳健优化、尾部风险与严格机器学习验证，并配有稳定深链、全文搜索、11 个可运行示例、42 道自测和 10 个本地实验工具 |
+| 📖 内置手册 | 页头“手册”提供按七部、两级目录组织的 24 章教材，从市场与数据递进到数学、定价、信号、组合、生产研究和投资职业训练；新增三表/DCF、VC/PE/LBO、市场规模/单位经济/投资备忘录与面试案例，并配有稳定深链、全文搜索、11 个可运行示例、51 道自测和 10 个本地实验工具 |
 
 ## 📸 界面预览
 
@@ -119,10 +119,11 @@ QuantMaster 处于同一 Windows Job Object 生命周期边界内。
 需要应用后端修改时，可打开页头版本号弹窗并点击“立即热更新”；该按钮是唯一的 Web
 worker 重载入口，只安全替换 Web worker，不会启停 FreeStockDB。
 
-启动后点击页头的“帮助”，可在应用内阅读完整手册；也可以直接打开
+启动后点击页头的“手册”，可在应用内阅读完整手册；也可以直接打开
 `http://127.0.0.1:8686/#help/start`。手册中的市场规则标有核验日期，实盘前仍应以
 交易所与开户券商的最新文件为准。搜索结果可以直达稳定小节地址，例如
-`#help/inference/help-inference-fdr`；所有计算、实验和自测均只在浏览器中运行。
+`#help/inference/help-inference-fdr`。面向 VC/PE 或咨询/战略，可从
+`#help/start/help-start-career-routes` 进入职业学习路线；所有计算、实验和自测均只在浏览器中运行。
 
 ### 日志与诊断
 
@@ -546,6 +547,7 @@ quantmaster/
 | [concepts.md](docs/concepts.md) | 核心概念与术语 |
 | [guide.md](docs/guide.md) | 使用指南 |
 | [research_pipeline.md](docs/research_pipeline.md) | 研究流水线与数据口径 |
+| [manual-theory-career-evidence.md](docs/research/manual-theory-career-evidence.md) | 手册理论与职业案例的一手来源、项目实现边界 |
 | [development-workflow.md](docs/development-workflow.md) | 开发流程与 worktree |
 | [github-workflow.md](docs/github-workflow.md) | GitHub Issue / PR / Actions 流程 |
 | [product-requirements.md](docs/product-requirements.md) | 产品需求 |

@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 
 from quantmaster.config import get_config
+from quantmaster.execution_evidence import EXECUTION_CONTRACT, execution_evidence_gate
 from quantmaster.lab.horizons import SUPPORTED_HORIZONS, require_supported_horizon
 
 TRADING_DAYS = 244
-EXECUTION_CONTRACT = "self_financing_open_v1"
 ENSEMBLE_MIN_COMPONENTS = 3
 ENSEMBLE_MAX_COMPONENTS = 8
 MAX_COMPONENT_CORRELATION = 0.70
@@ -122,17 +122,6 @@ def _execute_budgeted_day(
         purchases *= min(1.0, cash / (requested * (1 + buy_rate)))
     bought = float(purchases.sum())
     return previous - sales + purchases, bought * buy_rate + sold * sell_rate, (bought + sold) / 2
-
-
-def execution_evidence_gate(metrics: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
-    """Keep old evidence readable without granting it the current execution contract."""
-    if metrics.get("execution_contract") == EXECUTION_CONTRACT:
-        return dict(gate)
-    reason = "LAB_EXECUTION_REVALIDATION_REQUIRED: 执行证据已过期，需要重新运行研究"
-    failures = list(gate.get("failures") or [])
-    if reason not in failures:
-        failures.append(reason)
-    return {**gate, "passed": False, "override_allowed": False, "failures": failures}
 
 
 def execute_daily_targets(

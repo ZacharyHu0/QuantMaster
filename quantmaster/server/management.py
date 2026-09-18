@@ -346,6 +346,22 @@ def activate_system_update(request: Request, payload: UpdateActivationRequest) -
         ) from exc
 
 
+@router.post("/system/update/delete")
+def delete_system_update(request: Request, payload: UpdateActivationRequest) -> dict[str, object]:
+    """Remove a confirmed, unreferenced local stage slot."""
+    _require_csrf(request)
+    from quantmaster.runtime.update import delete_staged_slot
+
+    try:
+        return delete_staged_slot(payload.build_sha)
+    except ActivationBlocked as exc:
+        raise OperationProblem(409, make_problem(
+            exc.code, severity="warning", source="本地稳定更新", title="槽位未删除",
+            message=exc.detail, action="刷新槽位状态后重试。", blocking=True,
+            can_continue=True, build_sha=payload.build_sha,
+        )) from exc
+
+
 @router.get("/settings/free-stockdb")
 def free_stockdb_status(request: Request) -> dict:
     _require_local(request)

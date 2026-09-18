@@ -529,6 +529,26 @@ class TestBasics:
         assert ".operations-candidate-current { background:color-mix(in oklch,var(--s3)" in styles
         assert ".operations-candidate-previous { background:color-mix(in oklch,var(--s2)" in styles
 
+    def test_delete_update_route_validates_identity_and_reports_blockers(self, monkeypatch):
+        from quantmaster.runtime.activation import ActivationBlocked
+
+        calls = []
+
+        def remove(sha):
+            calls.append(sha)
+            if sha == "a" * 40:
+                raise ActivationBlocked("slot_protected", "当前槽位不可删除")
+            return {"status": "deleted", "build_sha": sha}
+
+        monkeypatch.setattr("quantmaster.runtime.update.delete_staged_slot", remove)
+        endpoint = "/api/v1/system/update/delete"
+        assert client.post(endpoint, json={"build_sha": "../outside"}).status_code == 422
+        assert calls == []
+        assert client.post(endpoint, json={"build_sha": "a" * 40}).status_code == 409
+        assert client.post(endpoint, json={"build_sha": "b" * 40}).json()["status"] == "deleted"
+        assert client.post(endpoint, json={"build_sha": "b" * 40},
+                           headers={"X-CSRF-Token": "invalid"}).status_code == 403
+
     def test_ashare_fear_greed_route_reads_local_snapshot(self, monkeypatch):
         from quantmaster import market
 
@@ -904,16 +924,17 @@ class TestBasics:
             "inference", "asset-pricing", "numerical-pricing", "derivatives",
             "fixed-income", "factors", "validation", "composition", "backtest",
             "risk", "machine-learning", "research-protocol", "models",
-            "workflow", "checklist", "calculators",
+            "workflow", "checklist", "corporate-finance", "private-capital",
+            "strategy-cases", "calculators",
         ]
-        assert len(topics[:-1]) == 21
+        assert len(topics[:-1]) == 24
         assert re.findall(r'data-help-part-intro="([^"]+)"', text) == [
             "market", "mathematics", "pricing", "signals", "portfolio",
-            "production",
+            "production", "career",
         ]
         assert re.findall(r'data-help-nav-part="([^"]+)"', text) == [
             "market", "mathematics", "pricing", "signals", "portfolio",
-            "production",
+            "production", "career",
         ]
         chapter_parts = re.findall(
             r'class="help-chapter(?: [^"]+)?"[^>]+data-help-part="([^"]+)"', text
@@ -925,10 +946,15 @@ class TestBasics:
             *("signals" for _ in range(2)),
             *("portfolio" for _ in range(4)),
             *("production" for _ in range(4)),
+            *("career" for _ in range(3)),
             "appendix",
         ]
-        assert text.count("<details data-self-test>") == 42
+        assert text.count("<details data-self-test>") == 51
         assert text.count('data-code-language="python"') == 11
+        assert "paired_payoff.std(ddof=1) / np.sqrt(half_paths)" in text
+        assert "quantmaster.factors.analysis.forward_returns" in text
+        assert "澄川工业科技”为纯教学虚构" in text
+        assert "智维云”为纯教学虚构" in text
 
         ids = re.findall(r'\bid="([^"]+)"', text)
         assert len(ids) == len(set(ids))

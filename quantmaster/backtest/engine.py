@@ -21,6 +21,7 @@ import pandas as pd
 
 from quantmaster.backtest.execution import (
     buy_cost,
+    executable_buy_shares,
     limit_reason,
     sell_cost,
 )
@@ -472,16 +473,16 @@ def _execute_buy_order(
     if blocked:
         state.blocked_orders.append(BlockedOrder(date_str, symbol, "buy", blocked))
         return True
-    execution_price = price * (1 + config.trade.slippage)
-    budget = min(difference, state.cash)
-    buy_shares = budget / (
-        execution_price
-        * (1 + config.trade.commission_rate + config.trade.transfer_fee_rate)
+    buy_shares = executable_buy_shares(
+        state.cash,
+        difference,
+        price,
+        config.trade,
+        allow_fractional=config.allow_fractional,
     )
-    if not config.allow_fractional:
-        buy_shares = int(buy_shares // config.trade.lot_size) * config.trade.lot_size
     if buy_shares <= 0:
         return False
+    execution_price = price * (1 + config.trade.slippage)
     amount = buy_shares * execution_price
     cost = _buy_cost(amount, config.trade)
     if amount + cost > state.cash + 1e-6:
