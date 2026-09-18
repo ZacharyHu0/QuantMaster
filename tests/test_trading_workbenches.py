@@ -2399,7 +2399,7 @@ def test_trading_api_requires_csrf_and_ui_exposes_workflow_contract(monkeypatch)
     )
     app_script = client.get("/static/app.js").text
     today_adapter = client.get("/static/workspaces/today.js").text
-    assert "await context.shell.loadDecisionHistory()" in today_adapter
+    assert "await context.shell.loadDecisionHistory({force:true})" in today_adapter
     assert "document.getElementById('decision-form').requestSubmit()" not in app_script
 
     css = client.get("/static/trading.css").text
