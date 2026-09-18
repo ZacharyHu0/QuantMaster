@@ -330,6 +330,64 @@ def test_ui_owner_assertion_waits_for_short_lived_runtime_thread() -> None:
         owner.join(timeout=1)
 
 
+def test_operations_stage_time_and_confirmed_deletion(live_server):
+    url, _ = live_server
+    candidate = {
+        "build_sha": "b" * 40, "title": "测试 Stage", "version": "1.0",
+        "release_date": "2026-09-18", "staged_at": "2026-09-19T01:02:03+00:00",
+        "eligible": True, "deletable": True,
+    }
+    protected = {**candidate, "build_sha": "a" * 40, "current": True, "deletable": False}
+    state = {"status": "stable", "staged": [candidate, protected]}
+    requests = []
+    fail = False
+
+    def remove(route):
+        requests.append(route.request.post_data_json)
+        if fail:
+            route.fulfill(status=409, json={"detail": "槽位删除失败"})
+        else:
+            state["staged"] = [protected]
+            route.fulfill(json={"status": "deleted"})
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch(headless=True)
+        page = browser.new_page(timezone_id="Asia/Shanghai", viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/system/update", lambda route: route.fulfill(json=state))
+        page.route("**/api/v1/system/update/delete", remove)
+        page.goto(f"{url}/#runtime/operations")
+        page.wait_for_load_state("networkidle")
+        button = page.locator('[data-operation-delete="' + "b" * 40 + '"]')
+        playwright_sync.expect(page.locator("#operations-staged-list")).to_contain_text(
+            "2026-09-19 09:02:03",
+        )
+        playwright_sync.expect(page.locator('[data-operation-delete="' + "a" * 40 + '"]')).to_be_disabled()
+        for width in (1280, 390):
+            page.set_viewport_size({"width": width, "height": 900})
+            _wait_for_document_fit(page)
+        dialogs = []
+
+        def cancel(dialog):
+            dialogs.append(dialog.message)
+            dialog.dismiss()
+
+        page.once("dialog", cancel)
+        button.click()
+        assert "不可恢复" in dialogs[0] and "b" * 40 in dialogs[0]
+        assert requests == []
+        fail = True
+        page.once("dialog", lambda dialog: dialog.accept())
+        button.click()
+        playwright_sync.expect(page.locator("#operations-progress")).to_contain_text("槽位删除失败")
+        playwright_sync.expect(button).to_be_enabled()
+        fail = False
+        page.once("dialog", lambda dialog: dialog.accept())
+        button.click()
+        playwright_sync.expect(button).to_have_count(0)
+        assert requests == [{"build_sha": "b" * 40}] * 2
+        browser.close()
+
+
 def test_after_close_prioritizes_sector_width_without_wide_screen_scroll(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:

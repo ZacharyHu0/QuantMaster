@@ -11,6 +11,7 @@ from quantmaster.runtime.activation import ActivationBlocked
 from quantmaster.runtime.launcher import read_launcher_target
 from quantmaster.runtime.update import (
     OPERATION_FILE,
+    delete_staged_slot,
     start_activation,
     update_status,
 )
@@ -102,6 +103,62 @@ def test_update_status_orders_staged_slots_by_time_and_marks_current_and_previou
     assert by_sha[SHA_A]["current"] is True and by_sha[SHA_A]["previous"] is False
     assert by_sha[SHA_C]["current"] is False and by_sha[SHA_C]["previous"] is True
     assert status["eligibility"]["eligible_sha"] == SHA_B
+    assert by_sha[SHA_B]["staged_at"] == "2026-08-16T10:00:00+00:00"
+    assert by_sha[SHA_D]["staged_at"] is None
+    assert by_sha[SHA_B]["deletable"] is True
+    assert by_sha[SHA_A]["deletable"] is False
+    assert by_sha[SHA_C]["deletable"] is False
+
+
+def test_delete_staged_slot_removes_only_unreferenced_slot(tmp_path):
+    for sha in (SHA_A, SHA_B, SHA_C):
+        _candidate(tmp_path, sha)
+    _state(tmp_path, active=SHA_A, previous=SHA_C)
+    for sha in (SHA_A, SHA_C):
+        with pytest.raises(ActivationBlocked) as error:
+            delete_staged_slot(sha, tmp_path)
+        assert error.value.code == "slot_protected"
+    assert delete_staged_slot(SHA_B, tmp_path)["status"] == "deleted"
+    assert not (tmp_path / "slots" / SHA_B).exists()
+    assert [item["build_sha"] for item in update_status(tmp_path)["staged"]] == [SHA_A, SHA_C]
+
+
+@pytest.mark.parametrize("condition,code", [
+    ("pending", "slot_protected"), ("accepted", "activation_in_progress"),
+    ("running", "activation_in_progress"), ("unreadable", "operation_unreadable"),
+    ("pointer", "activation_pointer_mismatch"), ("invalid", "invalid_sha"),
+])
+def test_delete_staged_slot_fails_closed(tmp_path, condition, code):
+    _candidate(tmp_path, SHA_A)
+    _candidate(tmp_path, SHA_B)
+    _state(tmp_path, active=SHA_A)
+    if condition == "pending":
+        path = tmp_path / "active.json"
+        state = json.loads(path.read_text())
+        path.write_text(json.dumps({**state, "status": "pending", "pending": SHA_B}))
+    elif condition in {"accepted", "running", "unreadable"}:
+        (tmp_path / OPERATION_FILE).write_text(
+            "invalid" if condition == "unreadable" else json.dumps({"status": condition}),
+        )
+    elif condition == "pointer":
+        (tmp_path / "launcher.target").write_text(SHA_C + "\n")
+    with pytest.raises(ActivationBlocked) as error:
+        delete_staged_slot("../outside" if condition == "invalid" else SHA_B, tmp_path)
+    assert error.value.code == code
+    assert (tmp_path / "slots" / SHA_B / "QuantMaster.exe").exists()
+
+
+def test_delete_staged_slot_reports_filesystem_failure(tmp_path, monkeypatch):
+    _candidate(tmp_path, SHA_B)
+
+    def denied(path):
+        raise PermissionError("private filesystem detail")
+
+    monkeypatch.setattr("quantmaster.runtime.update.shutil.rmtree", denied)
+    with pytest.raises(ActivationBlocked) as error:
+        delete_staged_slot(SHA_B, tmp_path)
+    assert error.value.code == "slot_delete_failed"
+    assert "private" not in error.value.detail
 
 
 def test_update_status_fails_closed_on_pointer_mismatch(tmp_path):
