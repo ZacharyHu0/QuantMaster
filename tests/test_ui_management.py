@@ -816,6 +816,53 @@ def test_market_subpages_can_return_to_panorama_without_refresh(
         browser.close()
 
 
+def test_market_search_does_not_remain_hidden_after_returning_to_panorama(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _install_market_workbench_routes(page)
+        page.goto(f"{url}/#today/market")
+        page.locator("[data-market-board]").first.wait_for(state="visible")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(2)
+
+        page.locator("[data-market-query]").fill("银行")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(1)
+        page.get_by_role("tab", name="行情", exact=True).click()
+        page.locator("#market-quotes-view").wait_for(state="visible")
+        page.get_by_role("tab", name="市场全景", exact=True).click()
+
+        page.locator(".market-workbench").wait_for(state="visible")
+        playwright_sync.expect(page.locator("[data-market-query]")).to_have_value("")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(2)
+        browser.close()
+
+
+def test_style_refresh_recovery_reports_result_in_the_visible_page(live_server):
+    url, _ = live_server
+    job = {
+        "id": "style-refresh", "status": "completed", "progress": 100,
+        "phase": "完成", "result": {"outcome": "updated", "as_of": "2026-08-17"},
+    }
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script(
+            "sessionStorage.setItem('quantmaster.rotation.active-job.v1', "
+            "JSON.stringify({id:'style-refresh', scope:'market'}))"
+        )
+        page.route("**/api/v1/jobs/style-refresh", lambda route: route.fulfill(json=job))
+        page.goto(f"{url}/#today/style")
+
+        result = page.locator("#market-style-content [data-rotation-job-result]")
+        playwright_sync.expect(result).to_contain_text("快照已更新")
+        playwright_sync.expect(result).to_contain_text("2026-08-17")
+        playwright_sync.expect(
+            page.locator("#market-temperature-content [data-rotation-job-result]")
+        ).to_have_count(0)
+        browser.close()
+
+
 def _legacy_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {

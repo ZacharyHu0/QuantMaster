@@ -1437,7 +1437,7 @@ const rotationFeature = (() => {
 
   function refreshResult(scope, title, detail, resultTone = 'warning') {
     const target = scope === 'market'
-      ? document.getElementById('market-temperature-content')
+      ? document.getElementById(`market-${activeMarketPage === 'style' ? 'style' : 'temperature'}-content`)
       : scope === 'industries' ? document.getElementById('rotation-industry-content')
       : scope === 'themes' ? document.getElementById('rotation-themes-content')
       : scope === 'etf' ? document.getElementById('rotation-etf-content')
@@ -1503,13 +1503,21 @@ const rotationFeature = (() => {
     }
   }
 
+  function refreshButton(scope) {
+    if (scope === 'market') {
+      const page = activeMarketPage === 'style' ? 'style' : 'temperature';
+      return document.querySelector(`#market-${page}-view [data-rotation-refresh="market"]`);
+    }
+    return document.querySelector(`[data-rotation-refresh="${scope}"]`)
+      || document.querySelector('[data-rotation-refresh]');
+  }
+
   function recoverActiveJob() {
     let saved;
     try { saved = JSON.parse(sessionStorage.getItem(ACTIVE_JOB_KEY) || 'null'); } catch (_) { saved = null; }
     if (!saved?.id) return;
     const scope = saved.scope || 'all';
-    const button = document.querySelector(`[data-rotation-refresh="${scope}"]`)
-      || document.querySelector('[data-rotation-refresh]');
+    const button = refreshButton(scope);
     if (!button) return;
     api(`/api/v1/jobs/${encodeURIComponent(saved.id)}`)
       .then(job => monitorRefresh(job,scope,button))
