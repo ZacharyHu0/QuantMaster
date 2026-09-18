@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -32,7 +33,7 @@ from quantmaster.backtest.spec import (
 from quantmaster.backtest.workbench import (
     BacktestStore,
 )
-from quantmaster.config import get_config
+from quantmaster.config import TradeConfig, get_config
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality, DataEvidenceNotReady
 from quantmaster.portfolio import TradeRecord
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
@@ -276,7 +277,13 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
     assert b"NaN" not in response.content and b"Infinity" not in response.content
 
 
-def account_spec(name="日频验证", *, rebalance="D"):
+def account_spec(
+    name="日频验证",
+    *,
+    rebalance="D",
+    initial_capital=100_000,
+    cap_weight=0.35,
+):
     return PaperAccountSpec.model_validate(
         {
             "name": name,
@@ -286,10 +293,10 @@ def account_spec(name="日频验证", *, rebalance="D"):
                 "top_n": 1,
                 "rebalance": rebalance,
                 "weighting": "equal",
-                "cap_weight": 0.35,
+                "cap_weight": cap_weight,
             },
             "universe": "demo",
-            "initial_capital": 100_000,
+            "initial_capital": initial_capital,
             "mode": "manual",
         }
     )
@@ -301,6 +308,8 @@ def make_paper_service(
     *,
     rebalance="D",
     initial_funding_date="2024-01-01",
+    initial_capital=100_000,
+    cap_weight=0.35,
 ):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     with patch(
@@ -308,7 +317,12 @@ def make_paper_service(
         return_value=date.fromisoformat(initial_funding_date),
     ):
         account = store.create_account(
-            account_spec(name, rebalance=rebalance),
+            account_spec(
+                name,
+                rebalance=rebalance,
+                initial_capital=initial_capital,
+                cap_weight=cap_weight,
+            ),
             symbols=["600000.SH", "000001.SZ"],
         )
     return PaperService(store), account
@@ -804,6 +818,47 @@ def test_backtest_and_paper_share_first_open_fill_semantics(tmp_path):
     assert matching.cost == paper_trade["fee"]
 
 
+def test_minimum_commission_quantity_matches_paper_and_backtest(tmp_path, monkeypatch):
+    trade = TradeConfig(
+        commission_rate=0,
+        commission_min=5,
+        transfer_fee_rate=0,
+        stamp_tax_rate=0,
+        slippage=0,
+        lot_size=100,
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.get_config",
+        lambda: SimpleNamespace(trade=trade),
+    )
+    service, account = make_paper_service(
+        tmp_path,
+        initial_capital=10_003,
+        cap_weight=1,
+    )
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    panel = price_panel(dates, first=(10.0, 9.0))
+    proposal = service.propose(
+        account["id"], panel={key: value.iloc[:-1] for key, value in panel.items()},
+    )
+    service.store.confirm(proposal["id"])
+
+    paper = service.process(account["id"], **validated_panel(panel))
+    weights = pd.DataFrame(float("nan"), index=dates, columns=panel["close"].columns)
+    weights.loc[dates[-2]] = pd.Series(proposal["target_weights"])
+    backtest = run_backtest(
+        panel,
+        weights,
+        BacktestConfig(initial_capital=10_003, trade=trade),
+    )
+
+    assert paper["filled"][0]["shares"] == 900
+    assert backtest.trades[0].shares == 900
+    assert paper["report"]["cash"] >= 0
+    backtest_cash = backtest.nav * 10_003 - backtest.positions.sum(axis=1)
+    assert (backtest_cash >= -1e-8).all()
+
+
 def test_limit_up_order_stays_blocked_and_retries_next_session(tmp_path):
     service, account = make_paper_service(tmp_path)
     signal_dates = pd.bdate_range("2024-01-01", periods=5)
@@ -952,7 +1007,7 @@ def test_paper_strategy_change_preserves_history_and_schedules_transition(
         "strategy_effective_after": "",
         "can_hide": True,
         "can_restore": False,
-        "can_permanently_delete": False,
+        "can_permanently_delete": True,
         "delete_mode": "hide",
     }
 
@@ -1030,7 +1085,8 @@ def test_paper_hide_is_recoverable_and_preserves_history(tmp_path):
     assert service.store.accounts()[0]["id"] == account["id"]
 
 
-def test_hidden_paper_account_can_be_permanently_deleted_with_name_confirmation(tmp_path):
+@pytest.mark.parametrize("status", ["active", "paused", "archived"])
+def test_paper_account_can_be_permanently_deleted_with_name_confirmation(tmp_path, status):
     service, account = make_paper_service(tmp_path, "待永久删除账户")
     ledger_directory = service.store.ledger_path(account["id"]).parent
     cycle, _created = service.store.create_cycle(
@@ -1054,12 +1110,11 @@ def test_hidden_paper_account_can_be_permanently_deleted_with_name_confirmation(
             (order["id"], "proposed", "queued", "test", "{}", "2026-08-06T09:30:00+08:00"),
         )
 
-    with pytest.raises(ValueError, match="已隐藏"):
-        service.permanently_delete_account(account["id"], confirm_name=account["name"])
-
-    service.archive_account(account["id"])
+    service.store.update_account(account["id"], status=status)
     with pytest.raises(ValueError, match="确认名称"):
         service.permanently_delete_account(account["id"], confirm_name="不匹配")
+    assert service.store.account(account["id"])["status"] == status
+    assert ledger_directory.exists()
 
     deleted = service.permanently_delete_account(account["id"], confirm_name=account["name"])
 
@@ -1077,6 +1132,106 @@ def test_hidden_paper_account_can_be_permanently_deleted_with_name_confirmation(
         )
     with pytest.raises(KeyError, match="模拟账户不存在"):
         service.store.ledger(account["id"])
+
+
+def test_paper_delete_fences_live_and_future_worker_claims(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    account_id = account["id"]
+    service.store.update_account(account_id, mode="auto")
+    token = service.store.claim_auto_run("2026-09-17", account_id, "worker")
+    assert token
+    with pytest.raises(ValueError, match="正在执行"):
+        service.permanently_delete_account(account_id, confirm_name=account["name"])
+    assert service.store.account(account_id) is not None
+    service.store.complete_auto_run("2026-09-17", account_id, "worker", token, {})
+    service.permanently_delete_account(account_id, confirm_name=account["name"])
+    assert service.store.claim_auto_run("2026-09-18", account_id, "worker") is None
+    assert service.store.latest_auto_run(account_id) is None
+
+
+@pytest.mark.parametrize("status", ["failed", "manual_recovery"])
+def test_explicit_paper_resume_rearms_failed_run_only(tmp_path, status):
+    service, account = make_paper_service(tmp_path)
+    account_id = account["id"]
+    service.store.update_account(account_id, mode="auto")
+    token = service.store.claim_auto_run("2026-09-17", account_id, "worker", now=100)
+    assert token
+    assert service.store.fail_auto_run(
+        "2026-09-17", account_id, "worker", token, "missing data", now=100,
+    )
+    with service.store._conn() as conn:
+        conn.execute(
+            "UPDATE paper_auto_runs SET status=?,attempts=6,next_retry_at=9999999999 "
+            "WHERE account_id=?", (status, account_id),
+        )
+    service.update_account(account_id, status="paused")
+    service.update_account(account_id, name="改名不触发恢复")
+    assert service.store.latest_auto_run(account_id)["attempts"] == 6
+    service.update_account(account_id, status="active")
+    run = service.store.latest_auto_run(account_id)
+    assert run["status"] == "failed"
+    assert run["attempts"] == 0
+    assert run["next_retry_at"] == 0
+    assert service.store.claim_auto_run("2026-09-17", account_id, "worker", now=200)
+    service.update_account(account_id, status="active")
+    assert service.store.latest_auto_run(account_id)["status"] == "running"
+
+
+@pytest.mark.parametrize("status", ["waiting_market_data", "blocked"])
+def test_auto_worker_keeps_unfinished_cycle_retryable(tmp_path, monkeypatch, status):
+    service, account = make_paper_service(tmp_path)
+    service.store.update_account(account["id"], mode="auto")
+    monkeypatch.setattr(
+        service, "run_auto_account", lambda *_args, **_kwargs: {"status": status},
+    )
+    worker = PaperAutomationWorker(
+        service, session_resolver=lambda _: SessionExpectation(
+            "2026-09-17", "fixture", True, "fixture",
+        ),
+    )
+    result = worker.run_due_once()
+    run = service.store.latest_auto_run(account["id"])
+    assert result["status"] == "partial"
+    assert run["status"] == "failed"
+    waiting_data = status == "waiting_market_data"
+    assert run["failure_code"] == ("market_data_unavailable" if waiting_data else "execution_error")
+    assert worker.requeue_market_data("2026-09-17") == int(waiting_data)
+    if waiting_data:
+        assert service.store.latest_auto_run(account["id"])["next_retry_at"] == 0
+
+
+def test_explicit_resume_retries_completed_run_only_with_unfinished_orders(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    account_id = account["id"]
+    service.store.update_account(account_id, mode="auto")
+    token = service.store.claim_auto_run("2026-09-17", account_id, "worker")
+    assert token
+    assert service.store.complete_auto_run("2026-09-17", account_id, "worker", token, {})
+    service.update_account(account_id, status="active")
+    assert service.store.latest_auto_run(account_id)["status"] == "completed"
+    cycle, _ = service.store.create_cycle(
+        service.store.account(account_id), "2026-09-17", {"600000.SH": 0.3},
+        {"600000.SH": 10.0}, [],
+    )
+    service.store.confirm(cycle["id"])
+    service.update_account(account_id, status="active")
+    assert service.store.latest_auto_run(account_id)["status"] == "failed"
+    assert service.store.claim_auto_run("2026-09-17", account_id, "worker")
+
+
+def test_paper_native_panel_preserves_factor_inputs():
+    from quantmaster.factors.base import _prepare_panel
+
+    frame = pd.DataFrame({
+        "symbol": ["600000.SH"], "date": ["2026-09-17"],
+        "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5],
+        "volume": [100.0], "amount": [1020.0], "turnover": [0.5],
+    })
+    panel = PaperService._stockdb_frame_to_panel(
+        frame, ["600000.SH"], "2026-09-17", "2026-09-17", evidence="fixture",
+    )
+    assert _prepare_panel(panel)["vwap"].iloc[0, 0] == 10.2
+    assert panel["turnover"].iloc[0, 0] == 0.5
 
 
 def test_removed_holding_is_quoted_but_not_ranked_for_new_target(tmp_path):
@@ -1736,8 +1891,6 @@ def test_stockdb_success_requeues_older_market_failures_and_only_resumes_data_pa
         account_spec("策略暂停").model_copy(update={"mode": "auto"}),
         symbols=["600000.SH"],
     )
-    for account in (data_paused, manual_paused, strategy_paused):
-        store.update_account(account["id"], status="paused")
     store.set_runtime_warning(data_paused["id"], "行情证据不可用：缺少目标日")
     store.set_runtime_warning(strategy_paused["id"], "策略快照需要人工迁移")
 
@@ -1756,6 +1909,8 @@ def test_stockdb_success_requeues_older_market_failures_and_only_resumes_data_pa
         "行情证据不可用", failure_code="market_data_unavailable", now=100,
     )
 
+    for account in (data_paused, manual_paused, strategy_paused):
+        store.update_account(account["id"], status="paused")
     assert store.requeue_market_data_failures("2026-08-13") == 1
     recovered = store.account(data_paused["id"])
     assert recovered["status"] == "active"

@@ -529,6 +529,26 @@ class TestBasics:
         assert ".operations-candidate-current { background:color-mix(in oklch,var(--s3)" in styles
         assert ".operations-candidate-previous { background:color-mix(in oklch,var(--s2)" in styles
 
+    def test_delete_update_route_validates_identity_and_reports_blockers(self, monkeypatch):
+        from quantmaster.runtime.activation import ActivationBlocked
+
+        calls = []
+
+        def remove(sha):
+            calls.append(sha)
+            if sha == "a" * 40:
+                raise ActivationBlocked("slot_protected", "当前槽位不可删除")
+            return {"status": "deleted", "build_sha": sha}
+
+        monkeypatch.setattr("quantmaster.runtime.update.delete_staged_slot", remove)
+        endpoint = "/api/v1/system/update/delete"
+        assert client.post(endpoint, json={"build_sha": "../outside"}).status_code == 422
+        assert calls == []
+        assert client.post(endpoint, json={"build_sha": "a" * 40}).status_code == 409
+        assert client.post(endpoint, json={"build_sha": "b" * 40}).json()["status"] == "deleted"
+        assert client.post(endpoint, json={"build_sha": "b" * 40},
+                           headers={"X-CSRF-Token": "invalid"}).status_code == 403
+
     def test_ashare_fear_greed_route_reads_local_snapshot(self, monkeypatch):
         from quantmaster import market
 

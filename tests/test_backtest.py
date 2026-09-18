@@ -12,6 +12,7 @@ from quantmaster.backtest.engine import (
     _risk_exit_reason,
     price_limit,
 )
+from quantmaster.backtest.execution import executable_buy_shares
 from quantmaster.backtest.strategy import BuyAndHold, rebalance_mask
 from quantmaster.config import TradeConfig
 from quantmaster.factors import ExpressionFactor
@@ -149,6 +150,66 @@ class TestEngineDecisions:
         config = BacktestConfig(stop_loss=0.10, take_profit=0.15)
 
         assert _risk_exit_reason(change, config) == expected
+
+    @pytest.mark.parametrize(
+        ("commission_rate", "allow_fractional", "expected"),
+        [(0, False, 900.0), (0.00025, False, 900.0), (0, True, 999.8)],
+    )
+    def test_minimum_commission_respects_cash_and_target_budget(
+        self, commission_rate, allow_fractional, expected,
+    ):
+        trade = TradeConfig(
+            commission_rate=commission_rate,
+            commission_min=5,
+            transfer_fee_rate=0,
+            stamp_tax_rate=0,
+            slippage=0,
+            lot_size=100,
+        )
+
+        shares = executable_buy_shares(
+            cash=10_003,
+            desired_value=10_003,
+            open_price=10,
+            trade=trade,
+            allow_fractional=allow_fractional,
+        )
+
+        assert shares == pytest.approx(expected)
+        assert shares * 10 + 5 <= 10_003
+        target_limited = executable_buy_shares(
+            cash=10_003,
+            desired_value=1_000,
+            open_price=10,
+            trade=trade,
+            allow_fractional=True,
+        )
+        assert target_limited == pytest.approx(99.5)
+        assert target_limited * 10 + 5 <= 1_000
+        assert executable_buy_shares(0, 1_000, 10, trade) == 0
+        assert executable_buy_shares(4, 1_000, 10, trade) == 0
+
+    def test_proportional_commission_caps_fractional_quantity(self):
+        trade = TradeConfig(
+            commission_rate=0.01,
+            commission_min=5,
+            transfer_fee_rate=0,
+            stamp_tax_rate=0,
+            slippage=0,
+            lot_size=100,
+        )
+
+        shares = executable_buy_shares(
+            cash=10_003,
+            desired_value=10_003,
+            open_price=10,
+            trade=trade,
+            allow_fractional=True,
+        )
+
+        assert shares == pytest.approx(10_003 / 1.01 / 10)
+        assert shares * 10 * trade.commission_rate > trade.commission_min
+        assert shares * 10 * (1 + trade.commission_rate) == pytest.approx(10_003)
 
 
 class TestPriceLimit:
