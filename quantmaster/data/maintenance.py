@@ -362,8 +362,15 @@ class DataRefreshManager:
     @staticmethod
     def _prepared_with_formal_gaps(envelope: BarDataEnvelope, symbol: str, start: str, end: str) -> bool:
         quality, frame = envelope.quality, envelope.data
+        target = end
         if (
-            quality.stale or quality.observed_end != end
+            quality.freshness_state == "fresh"
+            and quality.calendar_source not in {"", "unavailable"}
+            and start <= quality.expected_session <= end
+        ):
+            target = quality.expected_session
+        if (
+            quality.stale or quality.observed_end != target
             or quality.semantic_diagnostic_code not in {"", "factor_contract_incomplete"}
             or quality.coverage_ratio not in {None, 1.0}
             or any(unit == "unknown" for _, unit in quality.units)
@@ -381,7 +388,7 @@ class DataRefreshManager:
         acceptance = read_stockdb_session_acceptance(get_config().free_stockdb_root)
         return bool(
             quality.sources == ("free-stockdb",)
-            and acceptance is not None and acceptance.session >= end
+            and acceptance is not None and acceptance.session >= target
             and frame.attrs.get("stockdb_accepted_session") == acceptance.session
             and frame.attrs.get("stockdb_accepted_at") == acceptance.updated_at.isoformat()
             and frame.attrs.get("unit_status") == "verified_local_stockdb_schema_v1"

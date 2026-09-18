@@ -744,3 +744,38 @@ def test_repair_calendar_proves_closed_days_and_rejects_partial_evidence(repair_
             source.trade_calendar('2024-01-06', '2024-01-07')
     else:
         assert source.trade_calendar('2024-01-06', '2024-01-07').empty
+
+
+@pytest.mark.parametrize("fault", ["", "stale", "calendar", "expected", "tail", "units", "stamp"])
+def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_config, monkeypatch, fault):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from quantmaster.data import maintenance
+    from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+
+    accepted_at = datetime(2026, 9, 18, 10, tzinfo=UTC)
+    acceptance = SimpleNamespace(session="2026-09-18", updated_at=accepted_at)
+    monkeypatch.setattr(maintenance, "read_stockdb_session_acceptance", lambda _: acceptance)
+    frame = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2026-09-18"]))
+    frame.attrs.update(
+        stockdb_accepted_session="2026-09-18",
+        stockdb_accepted_at=accepted_at.isoformat() if fault != "stamp" else "old",
+        unit_status="verified_local_stockdb_schema_v1",
+    )
+    quality = BarDataQuality(
+        "degraded", "2026-09-01", "2026-09-19",
+        observed_end="2026-09-17" if fault == "tail" else "2026-09-18",
+        expected_session="" if fault == "expected" else "2026-09-18",
+        freshness_state="stale" if fault == "stale" else "fresh",
+        stale=fault == "stale",
+        calendar_source="unavailable" if fault == "calendar" else "tushare:trade_cal",
+        sources=("free-stockdb",), coverage_ratio=1.0,
+        units=(("close", "unknown" if fault == "units" else "CNY/share"),),
+        semantic_diagnostic_code="factor_contract_incomplete",
+    )
+    envelope = BarDataEnvelope(frame, quality, ())
+    assert maintenance.DataRefreshManager._prepared_with_formal_gaps(
+        envelope, SYMBOL, "2026-09-01", "2026-09-19",
+    ) is (not fault)
+    assert not quality.formal_eligible
