@@ -13,6 +13,7 @@ from quantmaster.lab.research import WalkForwardSpec, walk_forward_folds
 from quantmaster.lab.service import _ledger_weight_context
 from quantmaster.lab.store import LabStore
 from quantmaster.lab.strategy import (
+    EXECUTION_CONTRACT,
     ensemble_weights,
     execute_daily_targets,
     holding_actions,
@@ -85,8 +86,14 @@ def test_only_the_exact_passed_horizon_can_deploy(tmp_path) -> None:
     report = {
         "best_horizon": 3,
         "horizons": {
-            "3": {"gates": {"passed": True}},
-            "5": {"gates": {"passed": False, "soft_failures": ["RankIC"]}},
+            "3": {
+                "execution": {"execution_contract": EXECUTION_CONTRACT},
+                "gates": {"passed": True},
+            },
+            "5": {
+                "execution": {"execution_contract": EXECUTION_CONTRACT},
+                "gates": {"passed": False, "soft_failures": ["RankIC"]},
+            },
         },
         "gates": {"passed": True, "hard_failures": [], "soft_failures": []},
     }
