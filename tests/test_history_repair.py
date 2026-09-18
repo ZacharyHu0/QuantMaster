@@ -746,14 +746,20 @@ def test_repair_calendar_proves_closed_days_and_rejects_partial_evidence(repair_
         assert source.trade_calendar('2024-01-06', '2024-01-07').empty
 
 
-@pytest.mark.parametrize("fault", ["", "stale", "calendar", "expected", "tail", "units", "stamp"])
+@pytest.mark.parametrize("fault", [
+    "", "sparse_calendar", "stale", "calendar", "expected", "tail", "units", "stamp",
+])
 def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_config, monkeypatch, fault):
     from datetime import UTC, datetime
     from types import SimpleNamespace
 
     from quantmaster.data import maintenance
     from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+    from quantmaster.trading_sessions import SessionExpectation
 
+    monkeypatch.setattr(maintenance, "resolve_session_target", lambda: SessionExpectation(
+        session="" if fault == "expected" else "2026-09-18", ready=fault != "calendar",
+    ))
     accepted_at = datetime(2026, 9, 18, 10, tzinfo=UTC)
     acceptance = SimpleNamespace(session="2026-09-18", updated_at=accepted_at)
     monkeypatch.setattr(maintenance, "read_stockdb_session_acceptance", lambda _: acceptance)
@@ -766,7 +772,7 @@ def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_con
     quality = BarDataQuality(
         "degraded", "2026-09-01", "2026-09-19",
         observed_end="2026-09-17" if fault == "tail" else "2026-09-18",
-        expected_session="" if fault == "expected" else "2026-09-18",
+        expected_session="2026-08-31" if fault == "sparse_calendar" else "2026-09-18",
         freshness_state="stale" if fault == "stale" else "fresh",
         stale=fault == "stale",
         calendar_source="unavailable" if fault == "calendar" else "tushare:trade_cal",
@@ -777,5 +783,5 @@ def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_con
     envelope = BarDataEnvelope(frame, quality, ())
     assert maintenance.DataRefreshManager._prepared_with_formal_gaps(
         envelope, SYMBOL, "2026-09-01", "2026-09-19",
-    ) is (not fault)
+    ) is (fault in {"", "sparse_calendar"})
     assert not quality.formal_eligible

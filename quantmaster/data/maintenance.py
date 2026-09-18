@@ -28,7 +28,7 @@ from quantmaster.runtime.jobs import (
     UnifiedJobStore,
 )
 from quantmaster.stockdb_acceptance import read_stockdb_session_acceptance
-from quantmaster.trading_sessions import market_date, market_now
+from quantmaster.trading_sessions import market_date, market_now, resolve_session_target
 
 RefreshScope = Literal["market", "universe", "all_cached"]
 DATA_REFRESH_TASK_TYPE = "data.refresh"
@@ -363,12 +363,12 @@ class DataRefreshManager:
     def _prepared_with_formal_gaps(envelope: BarDataEnvelope, symbol: str, start: str, end: str) -> bool:
         quality, frame = envelope.quality, envelope.data
         target = end
-        if (
-            quality.freshness_state == "fresh"
-            and quality.calendar_source not in {"", "unavailable"}
-            and start <= quality.expected_session <= end
-        ):
-            target = quality.expected_session
+        if quality.observed_end != end:
+            # A sparse research partition calendar cannot prove the current
+            # frontier. Use the same completed-session evidence as paper runs.
+            expectation = resolve_session_target()
+            if expectation.ready and start <= expectation.session <= end:
+                target = expectation.session
         if (
             quality.stale or quality.observed_end != target
             or quality.semantic_diagnostic_code not in {"", "factor_contract_incomplete"}
