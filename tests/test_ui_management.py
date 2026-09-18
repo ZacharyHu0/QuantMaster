@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 import pytest
@@ -1685,6 +1685,78 @@ def test_factor_robustness_deep_link_renders_frozen_charts_and_tables(live_serve
         browser.close()
 
 
+def test_candidate_revisit_refreshes_catalog_without_overwriting_dirty_draft(live_server):
+    url, _ = live_server
+    catalog_version = [1]
+    catalog_calls = []
+    detail_calls = []
+    universes = {
+        "alpha": {
+            "name": "alpha", "kind": "fixed", "readonly": False,
+            "source": "custom", "research_quality": "sandbox", "references": [],
+            "symbols": ["600519.SH", "000001.SZ"], "count": 2,
+            "members": [
+                {"symbol": "600519.SH", "name": "贵州茅台", "exchange": "SH", "asset_type": "stock"},
+                {"symbol": "000001.SZ", "name": "平安银行", "exchange": "SZ", "asset_type": "stock"},
+            ],
+        },
+        "beta": {
+            "name": "beta", "kind": "fixed", "readonly": False,
+            "source": "custom", "research_quality": "sandbox", "references": [],
+            "symbols": ["300750.SZ"], "count": 1,
+            "members": [
+                {"symbol": "300750.SZ", "name": "宁德时代", "exchange": "SZ", "asset_type": "stock"},
+            ],
+        },
+    }
+
+    def universe_handler(route):
+        path = urlsplit(route.request.url).path
+        if path == "/api/v1/settings/universes":
+            catalog_calls.append(catalog_version[0])
+            names = ["alpha"] if catalog_version[0] == 1 else ["alpha", "beta"]
+            route.fulfill(json={
+                "universes": [
+                    {"name": name, "kind": "fixed", "readonly": False, "count": universes[name]["count"]}
+                    for name in names
+                ],
+                "index_presets": [], "conflicts": [],
+            })
+            return
+        name = unquote(path.rsplit("/", 1)[-1])
+        detail_calls.append(name)
+        route.fulfill(json=universes[name])
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/settings/universes**", universe_handler)
+        page.goto(f"{url}/#today/candidates")
+        page.get_by_role("heading", name="alpha", exact=True).wait_for()
+        assert catalog_calls == [1]
+        assert detail_calls == ["alpha"]
+
+        catalog_version[0] = 2
+        page.evaluate("location.hash = '#today/decision'")
+        page.locator("#tab-decision").wait_for(state="visible")
+        page.locator('#decision-form [data-candidate-view]').click()
+        page.locator('[data-candidate-name="beta"]').wait_for(state="visible")
+        assert catalog_calls == [1, 2]
+        assert detail_calls == ["alpha", "alpha"]
+
+        page.get_by_role("button", name="从候选移除 000001.SZ", exact=True).click()
+        page.get_by_text("有尚未生效的更改", exact=True).wait_for()
+        page.evaluate("location.hash = '#today/news'")
+        page.locator("#tab-news").wait_for(state="visible")
+        page.evaluate("location.hash = '#today/candidates'")
+        page.locator("#tab-candidates").wait_for(state="visible")
+        playwright_sync.expect(page.locator(".candidate-member-symbol")).to_have_text(["600519.SH"])
+        playwright_sync.expect(page.get_by_text("有尚未生效的更改", exact=True)).to_be_visible()
+        assert catalog_calls == [1, 2]
+        assert detail_calls == ["alpha", "alpha"]
+        browser.close()
+
+
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -2440,6 +2512,8 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         "holdings": [],
     }
     history_calls = []
+    def decision_history_handler(route):
+        route.fulfill(json={"snapshots": []})
 
     def history_handler(route):
         request_url = route.request.url
@@ -2485,9 +2559,23 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         )
         page.route("**/api/v1/market/history/**", history_handler)
         page.route("**/api/v1/portfolio/lists**", asset_handler)
+        page.route("**/api/v1/research/selection/history?*", decision_history_handler)
         page.goto(url)
-        page.get_by_role("tab", name="决策", exact=True).click()
+        with page.expect_request(
+            lambda request: "/research/selection/history?" in request.url,
+        ) as initial_history:
+            page.get_by_role("tab", name="决策", exact=True).click()
         page.wait_for_url(re.compile(r"#today/decision$"))
+        initial_query = parse_qs(urlsplit(initial_history.value.url).query)
+        assert initial_query["horizon"] == ["3"]
+        with page.expect_request(
+            lambda request: "/research/selection/history?" in request.url,
+        ) as changed_history:
+            page.locator('#decision-form select[name="horizon"]').select_option("5")
+        changed_query = parse_qs(urlsplit(changed_history.value.url).query)
+        assert changed_query["horizon"] == ["5"]
+        assert changed_query["universe"] == ["demo"]
+        assert changed_query["profile"] == ["risk_adjusted"]
         page.wait_for_function("() => typeof window.mkChart === 'function'")
         page.evaluate(
             """data => {
