@@ -5,15 +5,21 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import UTC, datetime
 
 import pytest
 
+import quantmaster.runtime.jobs as jobs
 from quantmaster.runtime.jobs import (
     JobLeaseLost,
     JobOutcome,
     UnifiedJobRuntime,
     UnifiedJobStore,
 )
+
+
+def _clocked_utc_now(clock: dict[str, float]) -> str:
+    return datetime.fromtimestamp(clock["value"], UTC).isoformat()
 
 
 def _wait(store: UnifiedJobStore, job_id: str, statuses: set[str], timeout: float = 5) -> dict:
@@ -24,6 +30,72 @@ def _wait(store: UnifiedJobStore, job_id: str, statuses: set[str], timeout: floa
             return job
         time.sleep(0.01)
     raise AssertionError(f"job did not reach {statuses}: {store.get(job_id)}")
+
+
+def test_public_elapsed_freezes_at_terminal_finish_and_keeps_retries_live(monkeypatch, tmp_path):
+    clock = {"value": 1_000.0}
+    monkeypatch.setattr(jobs.time, "time", lambda: clock["value"])
+    monkeypatch.setattr(jobs, "_utc_now", lambda: _clocked_utc_now(clock))
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, dispatch=False)
+    job, _ = store.submit("test.duration", {})
+
+    assert runtime.public(store.get(job["id"]))["elapsed_seconds"] == 0
+
+    clock["value"] = 1_005.0
+    assert store.claim(job["id"], runtime.identity.value)
+    clock["value"] = 1_010.0
+    assert runtime.public(store.get(job["id"]))["elapsed_seconds"] == 5
+
+    clock["value"] = 1_012.0
+    running = store.get(job["id"])
+    completed = store.finish(
+        job["id"],
+        runtime.identity.value,
+        JobOutcome("completed", "done"),
+        lease_token=running["lease_token"],
+    )
+    assert runtime.public(completed)["elapsed_seconds"] == 7
+
+    clock["value"] = 99_999.0
+    assert runtime.public(store.get(job["id"]))["elapsed_seconds"] == 7
+
+    retried = store.retry(job["id"])
+    assert retried["status"] == "queued"
+    assert runtime.public(retried)["elapsed_seconds"] == 98_994
+
+    assert store.claim(job["id"], runtime.identity.value)
+    runtime.pause()
+    paused = store.get(job["id"])
+    assert paused["status"] == "interrupted"
+    clock["value"] = 100_001.0
+    assert runtime.public(paused)["elapsed_seconds"] == 98_996
+    runtime.stop()
+
+
+def test_public_elapsed_uses_live_clock_for_legacy_terminal_timestamps(monkeypatch, tmp_path):
+    clock = {"value": 2_000.0}
+    monkeypatch.setattr(jobs.time, "time", lambda: clock["value"])
+    monkeypatch.setattr(jobs, "_utc_now", lambda: _clocked_utc_now(clock))
+    store = UnifiedJobStore(tmp_path / "jobs.sqlite")
+    runtime = UnifiedJobRuntime(store, dispatch=False)
+    job, _ = store.submit("test.duration", {})
+    clock["value"] = 2_003.0
+    assert store.claim(job["id"], runtime.identity.value)
+    clock["value"] = 2_008.0
+    running = store.get(job["id"])
+    completed = store.finish(
+        job["id"],
+        runtime.identity.value,
+        JobOutcome("completed", "done"),
+        lease_token=running["lease_token"],
+    )
+
+    clock["value"] = 2_020.0
+    for finished_at in ("", "not-an-iso-timestamp"):
+        legacy = {**completed, "finished_at": finished_at}
+        assert runtime.public(legacy)["elapsed_seconds"] == 17
+    runtime.stop()
 
 
 def test_unified_runtime_idempotency_events_artifacts_and_retry(tmp_path):

@@ -2488,7 +2488,18 @@ class UnifiedJobRuntime:
         elapsed = 0.0
         if job.get("started_at"):
             try:
-                elapsed = max(0.0, time.time() - datetime.fromisoformat(job["started_at"]).timestamp())
+                started_at = datetime.fromisoformat(job["started_at"]).timestamp()
+                elapsed = max(0.0, time.time() - started_at)
+                if job["status"] in TERMINAL_STATUSES and job.get("finished_at"):
+                    try:
+                        elapsed = max(
+                            0.0,
+                            datetime.fromisoformat(job["finished_at"]).timestamp() - started_at,
+                        )
+                    except ValueError:
+                        # Preserve the live-duration fallback for legacy records
+                        # whose terminal timestamp cannot be decoded.
+                        pass
             except ValueError:
                 elapsed = 0.0
         progress = max(0, min(100, int(job.get("progress") or 0)))
