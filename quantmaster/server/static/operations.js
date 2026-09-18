@@ -4,6 +4,7 @@ let pollDeadline = 0;
 let mounted = false;
 let bound = false;
 let snapshot = null;
+let deleting = false;
 
 const TERMINAL_OPERATIONS = new Set(['activated', 'already_active', 'rolled_back', 'blocked']);
 const RELEASE_STAGING_ACTIVE = new Set(['checking', 'downloading']);
@@ -106,7 +107,10 @@ function renderCandidates(data) {
     version.textContent = candidateTitle || (versionLabel ? `v${versionLabel}` : '未标注版本');
     heading.appendChild(version);
     const date = document.createElement('span');
-    date.textContent = text(candidate?.release_date);
+    const stagedAt = candidate?.staged_at ? new Date(candidate.staged_at) : null;
+    date.textContent = stagedAt && !Number.isNaN(stagedAt.getTime())
+      ? `Stage ${stagedAt.toLocaleString('sv-SE', {hour12:false})}` : 'Stage 时间未知';
+    date.title = '本地时间';
     if (date.textContent) heading.appendChild(date);
     const state = document.createElement('span');
     state.textContent = candidate?.current ? '当前 active'
@@ -145,6 +149,14 @@ function renderCandidates(data) {
     button.textContent = candidate?.current ? '当前版本' : '激活此槽';
     button.disabled = !candidate?.eligible || !text(candidate?.build_sha);
     item.append(heading, meta, detail, summary, button);
+    const remove = document.createElement('button');
+    remove.className = 'ghost operations-delete';
+    remove.type = 'button';
+    remove.dataset.operationDelete = text(candidate?.build_sha);
+    remove.textContent = '删除槽位';
+    remove.disabled = deleting || candidate?.deletable !== true;
+    remove.title = candidate?.deletable ? '永久删除此槽位' : '当前、回滚及切换中的槽位不可删除';
+    item.appendChild(remove);
     return item;
   }));
 }
@@ -226,6 +238,28 @@ async function activate(buildSha) {
   schedulePoll();
 }
 
+async function deleteSlot(buildSha) {
+  const candidate = snapshot?.staged?.find(item => item?.build_sha === buildSha && item?.deletable);
+  if (!candidate || deleting) return;
+  if (!window.confirm(`确认永久删除 Stage 槽位“${text(candidate.title) || text(candidate.version) || buildSha}”？\n${buildSha}\n\n删除后不可恢复，槽位内的程序文件将被永久移除。`)) return;
+  deleting = true;
+  renderCandidates(snapshot);
+  try {
+    await window.QuantMasterAPI('/api/v1/system/update/delete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({build_sha:buildSha}),
+    });
+    await load();
+    if (mounted) document.getElementById('operations-progress').textContent = '槽位已永久删除。';
+  } catch (error) {
+    await load();
+    if (mounted) document.getElementById('operations-progress').textContent = text(error?.message) || '槽位删除失败，请刷新后重试。';
+  } finally {
+    deleting = false;
+    if (mounted) renderCandidates(snapshot);
+  }
+}
+
 export async function mount(next) {
   context = next;
   mounted = true;
@@ -234,6 +268,8 @@ export async function mount(next) {
     document.getElementById('operations-staged-list').addEventListener('click', event => {
       const button = event.target.closest('[data-operation-activate]');
       if (button) void activate(button.dataset.operationActivate);
+      const remove = event.target.closest('[data-operation-delete]');
+      if (remove) void deleteSlot(remove.dataset.operationDelete);
     });
     bound = true;
   }

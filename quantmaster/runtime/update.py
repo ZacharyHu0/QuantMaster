@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ from quantmaster.runtime.activation import (
     ActivationBlocked,
     Candidate,
     SlotRegistry,
+    _is_link,
     installed_app_root,
     lifecycle_lock,
 )
@@ -336,7 +338,12 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
             if not path.is_dir() or path.is_symlink() or FULL_SHA.fullmatch(path.name) is None:
                 continue
             item = _candidate(registry, path.name, active=active, previous=previous)
-            staged_with_time.append((_staged_at(registry, path.name), item))
+            staged_at = _staged_at(registry, path.name)
+            item["staged_at"] = (
+                staged_at.isoformat(timespec="seconds") if staged_at != _STAGED_AT_FALLBACK else None
+            )
+            item["deletable"] = path.name not in {active, previous, pending}
+            staged_with_time.append((staged_at, item))
             item_blockers = item.get("blockers")
             if isinstance(item_blockers, list):
                 blockers.extend(
@@ -368,6 +375,32 @@ def update_status(app_root: str | Path | None = None) -> dict[str, object]:
         "operation": _read_json(operation_path(registry.app_root)),
         "release_staging": _release_staging_status(registry.app_root),
     }
+
+
+def delete_staged_slot(build_sha: str, app_root: str | Path | None = None) -> dict[str, object]:
+    """Delete one unreferenced slot under the staging/activation lifecycle lock."""
+    root = Path(app_root).resolve() if app_root is not None else installed_app_root()
+    registry = SlotRegistry(root)
+    with lifecycle_lock(root):
+        slot = registry.slot(build_sha)
+        state = registry.read()
+        pointer_blocker = _pointer_blocker(registry, str(state.get("active") or ""))
+        if pointer_blocker is not None:
+            raise ActivationBlocked(pointer_blocker["code"], pointer_blocker["message"])
+        if build_sha in {state.get("active"), state.get("previous"), state.get("pending")}:
+            raise ActivationBlocked("slot_protected", "当前、回滚及切换中的槽位不可删除")
+        operation = _read_json(operation_path(root))
+        if operation_path(root).exists() and operation is None:
+            raise ActivationBlocked("operation_unreadable", "无法确认更新操作状态，暂不能删除槽位")
+        if operation and operation.get("status") in {"accepted", "running"}:
+            raise ActivationBlocked("activation_in_progress", "更新操作进行中，暂不能删除槽位")
+        if _is_link(slot) or not slot.is_dir() or slot.resolve().parent != registry.slots.resolve():
+            raise ActivationBlocked("unsafe_slot", "槽位不存在或不是安全的本地目录")
+        try:
+            shutil.rmtree(slot)
+        except OSError as exc:
+            raise ActivationBlocked("slot_delete_failed", "槽位删除未完成，请刷新状态后重试") from exc
+    return {"status": "deleted", "build_sha": build_sha}
 
 
 def _root_pid() -> int | None:
