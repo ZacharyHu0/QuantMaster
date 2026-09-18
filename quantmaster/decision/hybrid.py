@@ -22,6 +22,7 @@ import pandas as pd
 
 from quantmaster.config import get_config
 from quantmaster.decision.schema import validate_current_policy
+from quantmaster.execution_evidence import execution_evidence_gate, factor_execution_gate
 from quantmaster.trading_sessions import daily_signal_cutoff
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,7 @@ def _is_a_share_symbols(symbols: list[str] | None) -> bool:
 def _component_summary(deployment: dict[str, Any], version: dict[str, Any]) -> dict[str, Any]:
     spec = version.get("spec") or {}
     validation = version.get("validation") or {}
+    horizon_evidence = (validation.get("horizons") or {}).get(str(deployment.get("horizon"))) or {}
     return {
         "role": str(deployment.get("role") or ("ml" if spec.get("kind") == "learned" else "factor")),
         "deployment_id": deployment.get("id", ""),
@@ -297,9 +299,29 @@ def _component_summary(deployment: dict[str, Any], version: dict[str, Any]) -> d
             "best_horizon": validation.get("best_horizon"),
             "coverage": validation.get("coverage"),
             "gates": validation.get("gates", {}),
+            "horizons": {
+                str(deployment.get("horizon")): {
+                    "execution": horizon_evidence.get("execution") or {},
+                    "gates": horizon_evidence.get("gates") or {},
+                },
+            },
         },
         "spec": spec,
     }
+
+
+def _lab_evidence_failure(validation: dict, *, composite: bool, horizon: int) -> str:
+    gate = (
+        execution_evidence_gate(validation.get("metrics") or {}, validation.get("gates") or {})
+        if composite else factor_execution_gate(validation, horizon)
+    )
+    if gate.get("passed"):
+        return ""
+    reasons = gate.get("failures") or gate.get("hard_failures") or gate.get("soft_failures") or []
+    return (
+        "LAB_EXECUTION_REVALIDATION_REQUIRED: 执行证据不可用于新决策；请使用当前本地数据重新研究。"
+        + "; ".join(reasons)
+    )
 
 
 def resolve_policy(
@@ -370,6 +392,14 @@ def resolve_policy(
                 version = store.version(deployment["version_id"])
             if not version or version.get("status") not in {"production", "approved"}:
                 continue
+            failure = _lab_evidence_failure(
+                version.get("validation") or {}, composite=False, horizon=horizon,
+            )
+            if failure:
+                if mode == "historical_replay":
+                    raise RuntimeError(failure)
+                warnings.append(f"{version.get('id')}: {failure}")
+                continue
             component = _component_summary(deployment, version)
             role = component["role"]
             if role not in {"factor", "ml"}:
@@ -383,8 +413,15 @@ def resolve_policy(
             if hasattr(store, "strategies")
             else []
         )
-        if champions:
-            champion = champions[0]
+        for champion in champions[:1]:
+            failure = _lab_evidence_failure(
+                champion.get("sealed_evidence") or {}, composite=True, horizon=horizon,
+            )
+            if failure:
+                if mode == "historical_replay":
+                    raise RuntimeError(failure)
+                warnings.append(f"{champion.get('id')}: {failure}")
+                continue
             nested = []
             frozen_versions = champion.get("component_versions") or {}
             for item in champion.get("components") or []:
@@ -610,6 +647,18 @@ def _composite_component(
     return 100 * _rank(combined / total)
 
 
+def _validate_policy_execution_evidence(snapshot: dict, horizon: int) -> None:
+    for component in snapshot.get("components") or []:
+        if component.get("role") == "rule":
+            continue
+        failure = _lab_evidence_failure(
+            component.get("validation") or {},
+            composite=component.get("kind") == "composite", horizon=horizon,
+        )
+        if failure:
+            raise RuntimeError(failure)
+
+
 def hybrid_score_bundle(
     panel: dict[str, pd.DataFrame],
     *,
@@ -625,6 +674,7 @@ def hybrid_score_bundle(
         universe, horizon, profile, symbols=list(close.columns)
     ), ensure_ascii=False))
     validate_current_policy(snapshot)
+    _validate_policy_execution_evidence(snapshot, horizon)
     rule_score, rule_weights, _ranked = rule_signal_bundle(panel, horizon)
     scores: dict[str, pd.DataFrame] = {"rule": rule_score}
     warnings = list(snapshot.get("warnings") or [])
