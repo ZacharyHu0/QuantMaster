@@ -65,22 +65,22 @@ def executable_buy_shares(
     *,
     allow_fractional: bool = False,
 ) -> float:
-    """在完整费用约束下返回不会使现金为负的最大买入数量。"""
+    """在现金和目标预算内返回可买入的最大数量。"""
     if cash <= 0 or desired_value <= 0 or open_price <= 0:
         return 0.0
     execution_price = open_price * (1 + trade.slippage)
     budget = min(cash, desired_value)
-    estimate = budget / (execution_price * (1 + trade.commission_rate + trade.transfer_fee_rate))
-    if allow_fractional:
-        shares = estimate
-    else:
-        shares = math.floor(estimate / trade.lot_size) * trade.lot_size
-    while shares > 0:
-        amount = shares * execution_price
-        if amount + buy_cost(amount, trade) <= cash + 1e-8:
-            return float(shares)
-        shares = shares - (1 if allow_fractional else trade.lot_size)
-    return 0.0
+    rate_amount = budget / (
+        1 + trade.commission_rate + trade.transfer_fee_rate
+    )
+    minimum_amount = max(
+        0.0,
+        (budget - trade.commission_min) / (1 + trade.transfer_fee_rate),
+    )
+    shares = min(rate_amount, minimum_amount) / execution_price
+    if not allow_fractional:
+        shares = math.floor(shares / trade.lot_size) * trade.lot_size
+    return float(shares)
 
 
 @dataclass(frozen=True)
