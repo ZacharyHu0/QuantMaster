@@ -55,7 +55,7 @@ from quantmaster.data.semantics import NumericSemantics, PriceType, SemanticCont
 from quantmaster.data.storage import BarStore, IntradayBarStore
 from quantmaster.market_capabilities import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
-from quantmaster.trading_sessions import SessionExpectation, market_date, market_now
+from quantmaster.trading_sessions import SessionExpectation, market_date, market_now, resolve_session_target
 
 logger = logging.getLogger(__name__)
 
@@ -1630,6 +1630,46 @@ def _accept_local_stockdb_without_remote_upgrade(
     )
 
 
+def _validate_local_overlap(
+    symbol: str, local: pd.DataFrame | None, candidate: pd.DataFrame,
+) -> None:
+    """Compare normalized fields; different qfq anchors do not prove a price conflict."""
+    evidence: dict[str, Any] = {"source": "free-stockdb", "status": "no_overlap", "rows": 0}
+    if local is not None and not local.empty:
+        common = local.index.intersection(candidate.index)
+        if len(common):
+            units = dict(_unit_contract(symbol)[0])
+            if (
+                local.attrs.get("instrument") != symbol
+                or candidate.attrs.get("instrument") != symbol
+                or local.attrs.get("unit_status") != "verified_local_stockdb_schema_v1"
+                or any(unit == "unknown" for unit in units.values())
+                or any(local.attrs.get("units", {}).get(key) != units.get(key)
+                       for key in (*OHLCV_COLUMNS, "amount"))
+            ):
+                evidence["status"] = "incomparable_units_or_identity"
+            else:
+                fields = [key for key in (*OHLCV_COLUMNS, "amount")
+                          if key in local and key in candidate]
+                left, right = local.loc[common, fields].copy(), candidate.loc[common, fields].copy()
+                prices = [key for key in ("open", "high", "low") if key in fields and "close" in fields]
+                for frame in (left, right):
+                    if prices:
+                        frame[prices] = frame[prices].div(frame["close"], axis=0)
+                # Relative daily OHLC shape is invariant to the qfq anchor.
+                # Volume and amount are already in canonical shares/CNY units.
+                compared = prices + [key for key in ("volume", "amount") if key in fields]
+                delta = (left[compared] - right[compared]).abs()
+                tolerance = right[compared].abs() * 0.01 + 0.0001
+                if not delta.le(tolerance).all().all():
+                    raise HistoryRepairError(symbol, "多来源重叠行情冲突，保留原缓存待核查")
+                evidence.update(
+                    status="matched" if compared else "incomparable_fields",
+                    rows=len(common), fields=compared,
+                )
+    candidate.attrs["local_cross_validation"] = evidence
+
+
 def _full_refresh(
     symbol: str,
     start: str,
@@ -1652,6 +1692,7 @@ def _full_refresh(
     market = guess_market(symbol)
     errors: list[str] = []
     degraded_candidate: tuple[pd.DataFrame, BarDataQuality, str] | None = None
+    local_reference: pd.DataFrame | None = None
 
     def persist(
         frame: pd.DataFrame,
@@ -1683,6 +1724,17 @@ def _full_refresh(
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
                 continue
+            if source.name == "free-stockdb":
+                local_reference = frame
+            else:
+                _validate_local_overlap(symbol, local_reference, frame)
+            if (
+                source.name == "tushare" and not provider
+                and frame.attrs.get("provider_interface") == "tushare:daily+adj_factor"
+            ):
+                return _repair_history_locked(
+                    symbol, start, end, store, priority, None, reference=local_reference,
+                )
             if not _is_complete_refresh(frame, cached, start, end, symbol=symbol):
                 errors.append(f"{factory.__name__}: 响应缺失已有交易日或内部过于稀疏")
                 continue
@@ -1690,9 +1742,7 @@ def _full_refresh(
                 frame, start, end, symbol=symbol, source=source.name,
             )
             storage_source = source.name
-            if quality.status == "verified" or (
-                source.name.startswith("free-stockdb") and quality.status == "degraded"
-            ):
+            if quality.status == "verified":
                 return persist(frame, quality, storage_source)
             # StockDB is the configured local source of truth. Its SDK does
             # not provide an independently versioned unit/adjustment manifest,
@@ -1700,6 +1750,8 @@ def _full_refresh(
             # downgrade must not fan out to every remote provider.
             if _accept_local_stockdb_without_remote_upgrade(source, quality):
                 return persist(frame, quality, storage_source)
+            if source.name == "free-stockdb" and quality.partial:
+                continue
             errors.append(
                 f"{factory.__name__}: 数据完整但真实性契约为 {quality.status}，继续后备源"
             )
@@ -1738,9 +1790,11 @@ def _fetch_segment(
     priority: str,
     refresh_provider_cache: bool = False,
     provider: str = "",
+    cancelled=None,
 ) -> tuple[pd.DataFrame | None, list[str], bool]:
     market = guess_market(symbol)
     errors: list[str] = []
+    local_reference: pd.DataFrame | None = None
     cached_latest = (
         pd.Timestamp(cached.index.max()).normalize() if cached is not None and not cached.empty else None
     )
@@ -1861,9 +1915,22 @@ def _fetch_segment(
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
                 continue
+            if source.name == "free-stockdb":
+                local_reference = frame
+            else:
+                _validate_local_overlap(symbol, local_reference, frame)
             if not _covers_requested_range(frame, start, end, symbol=symbol):
                 errors.append(f"{factory.__name__}: 响应内部过于稀疏")
                 continue
+            if (
+                source.name == "tushare"
+                and not provider
+                and frame.attrs.get("provider_interface") == "tushare:daily+adj_factor"
+            ):
+                _repair_history_locked(
+                    symbol, start, end, store, priority, cancelled, reference=local_reference,
+                )
+                return store.get(symbol), errors, True
             merged = frame if cached is None or cached.empty else _align_increment(cached, frame, direction)
             fresh_latest = pd.Timestamp(frame.index.max()).normalize()
             evaluated = evaluate(source, frame)
@@ -1875,12 +1942,12 @@ def _fetch_segment(
                 ):
                     best = (source, merged, frame, fresh_latest)
                 continue
-            if evaluated[1].status == "verified" or (
-                source.name.startswith("free-stockdb") and evaluated[1].status == "degraded"
-            ):
+            if evaluated[1].status == "verified":
                 return save(source, merged, frame, evaluated)
             if _accept_local_stockdb_without_remote_upgrade(source, evaluated[1]):
                 return save(source, merged, frame, evaluated)
+            if source.name == "free-stockdb" and evaluated[1].partial:
+                continue
             errors.append(
                 f"{factory.__name__}: 增量真实性契约为 {evaluated[1].status}，继续后备源"
             )
@@ -2372,10 +2439,12 @@ def _missing_closed_tail(symbol: str, cached: pd.DataFrame | None, end: str) -> 
 def _renew_tushare_cache(
     symbol: str, start: str, end: str, cached: pd.DataFrame,
     store: BarStore, priority: str, cancelled,
+    *, extend_head: bool = False,
 ) -> pd.DataFrame:
     """Renew stale AUTO history without splicing incompatible provider generations."""
     full_start, full_end, _, _ = _repair_history_ranges(cached, start, end)
     factories = _request_factories(priority=priority, allow_online=False).get(guess_market(symbol), [])
+    local_reference: pd.DataFrame | None = None
     for factory in factories:
         if cancelled and cancelled():
             raise InterruptedError("数据补齐已取消")
@@ -2383,11 +2452,15 @@ def _renew_tushare_cache(
         if source.name == "tushare":
             # The existing repair owns endpoint-cache reuse, factor evidence,
             # complete replacement when anchors differ, and atomic publication.
-            return _repair_history_locked(symbol, start, end, store, priority, cancelled, renew=True)
+            return _repair_history_locked(
+                symbol, start, end, store, priority, cancelled, renew=not extend_head,
+                reference=local_reference,
+            )
         if source.name != "free-stockdb":
             continue
         try:
             frame = source.daily(symbol, full_start, full_end)
+            local_reference = frame
             quality = _assess_daily_frame(
                 frame, full_start, full_end, symbol=symbol, source=source.name,
             )
@@ -2410,6 +2483,8 @@ def _renew_tushare_cache(
         except (OSError, RuntimeError, TypeError, ValueError):
             logger.debug("本地完整候选无法安全续更 %s", symbol, exc_info=True)
             continue
+        _validate_local_overlap(symbol, frame, cached)
+        frame.attrs["local_cross_validation"] = cached.attrs["local_cross_validation"]
         store.put(
             symbol, frame, replace=True, replace_coverage=True,
             request_start=full_start, request_end=full_end, source=source.name,
@@ -2442,6 +2517,15 @@ def _load_history_locked(
     cfg = get_config()
     cached = store.get(symbol)
     mode = _mode(use_cache, refresh)
+    effective_start, effective_end = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
+    start, end = str(effective_start.date()), str(effective_end.date())
+    if (
+        mode == RefreshMode.AUTO and not provider
+        and guess_market(symbol) == Market.CN and end <= market_date().isoformat()
+    ):
+        target = resolve_session_target()
+        if target.ready and start <= target.session <= end:
+            end = target.session
     # Evidence eligibility is intentionally *not* a refresh mode.  The former
     # ``priority='formal'`` branch promoted a merely degraded local cache to a
     # full upstream refresh and could do so once per symbol in a panel.  Formal
@@ -2503,7 +2587,7 @@ def _load_history_locked(
     if (
         mode == RefreshMode.AUTO and not provider and not covers_start and ttl_fresh
         and not failed_refresh and not missing_tail and sliced is not None
-        and _renewed_cache_answers(symbol, cached, meta, end)
+        and _renewed_cache_answers(symbol, cached, meta, start, end)
     ):
         return sliced
     if sliced is not None and covers_start and covers_end:
@@ -2516,9 +2600,11 @@ def _load_history_locked(
         mode == RefreshMode.AUTO and not provider
         and cached is not None and not cached.empty
         and meta.get("last_source") == "tushare"
-        and (failed_refresh or missing_tail)
+        and (failed_refresh or missing_tail or not covers_start)
     ):
-        return _renew_tushare_cache(symbol, start, end, cached, store, priority, cancelled)
+        return _renew_tushare_cache(
+            symbol, start, end, cached, store, priority, cancelled, extend_head=not covers_start,
+        )
 
     segments: list[tuple[str, str, str]] = []
     if cached is None or cached.empty:
@@ -2554,6 +2640,7 @@ def _load_history_locked(
             priority,
             refresh_provider_cache=(mode == RefreshMode.INCREMENTAL or session_refresh_due),
             provider=provider,
+            cancelled=cancelled,
         )
         errors.extend(segment_errors)
         all_segments_succeeded = all_segments_succeeded and succeeded
@@ -2625,11 +2712,12 @@ def _repair_candidate_quality(
 
 
 def _renewed_cache_answers(
-    symbol: str, cached: pd.DataFrame | None, meta: dict[str, Any], end: str,
+    symbol: str, cached: pd.DataFrame | None, meta: dict[str, Any], start: str, end: str,
 ) -> bool:
     if (
         cached is None or cached.empty or meta.get("last_source") != "tushare"
         or cached.attrs.get("renewed_session_end") != end
+        or start < str(cached.attrs.get("renewed_request_start") or cached.index.min().date())
         or cached.attrs.get("renewed_price_date") != str(cached.index.max().date())
     ):
         return False
@@ -2675,7 +2763,7 @@ def _compatible_repair_increment(
 
 def _repair_history_locked(
     symbol: str, start: str, end: str, store: BarStore, priority: str, cancelled,
-    *, renew: bool = False,
+    *, renew: bool = False, reference: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Stage one explicitly selected Tushare repair; never splice conflicting evidence."""
     def check_cancelled() -> None:
@@ -2725,12 +2813,14 @@ def _repair_history_locked(
         symbol, candidate, cached, start, end, source,
         renew=renew, check_cancelled=check_cancelled,
     )
+    _validate_local_overlap(symbol, reference, candidate)
     if renew:
         # Reassess the whole retained generation instead of OR-ing a previous
         # stale observation into today's successful read. Historical gaps and
         # factor/PIT limitations are still assessed over the complete candidate.
         quality = _repair_candidate_quality(symbol, candidate, owned_start, full_end, source.name)
         candidate.attrs["renewed_session_end"] = full_end
+        candidate.attrs["renewed_request_start"] = start
         candidate.attrs["renewed_price_date"] = str(candidate.index.max().date())
         full_start = max(full_start, str(meta.get("coverage_start") or owned_start))
         replace_coverage = True
@@ -3228,7 +3318,9 @@ def _load_bar_panel_frame(
                         # preview even before its immutable acceptance manifest
                         # has cross-source evidence.  Do not fan out into one
                         # remote fallback per symbol merely to upgrade it.
-                        if quality.status == "unavailable":
+                        if quality.status == "unavailable" or (
+                            quality.coverage_ratio is not None and quality.coverage_ratio < 1.0
+                        ):
                             return None
                         with daily_store.lock(symbol):
                             daily_store.put(
