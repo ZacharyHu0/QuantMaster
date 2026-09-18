@@ -327,6 +327,7 @@ mark.help-search-mark { background: #6e530f; color: #fff5cf; }
   color: #d8e8fb;
   font-size: .875em;
   font-variant-ligatures: none;
+  overflow-wrap: anywhere;
 }
 
 .help-code {
@@ -361,7 +362,7 @@ mark.help-search-mark { background: #6e530f; color: #fff5cf; }
 .help-copy-code[data-copy-state="success"] { color: #59bd95; }
 .help-copy-code[data-copy-state="fallback"] { color: #e1a82b; }
 .help-code pre { max-width: 100%; overflow-x: auto; padding: var(--help-space-lg); }
-.help-code pre code { display: block; width: max-content; min-width: 100%; border: 0; padding: 0; background: transparent; color: #d8e8fb; font-size: .8125rem; line-height: 1.7; tab-size: 4; }
+.help-code pre code { display: block; width: max-content; min-width: 100%; border: 0; padding: 0; background: transparent; color: #d8e8fb; font-size: .8125rem; line-height: 1.7; overflow-wrap: normal; tab-size: 4; }
 
 .help-diagram {
   margin-top: var(--help-space-xl);

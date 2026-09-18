@@ -14,6 +14,18 @@ Windows 提示：建议用 PowerShell + 官方 python.org 安装包，或直接�
 
 ## 1. 第一次跑通（10 分钟）
 
+### 把项目当成理论与职业案例教材
+
+启动 Web 后进入页头“手册”。24 章按市场、数学、定价、信号、组合、生产研究和投资职业
+训练递进，并为每个主题区分教学模型、项目实际实现与未实现边界。量化研究路线从第 01 章
+顺读；VC/成长投资可先读第 22→23→24 章，再补第 04、07、18 章；PE 可按第 22 章盈利质量
+与 DCF→第 23 章 LBO→第 24 章商业尽调；咨询/战略可先做第 24 章的市场规模和单位经济案例，
+再回到第 22 章增量 ROIC。稳定深链示例：`#help/private-capital/help-private-capital-lbo`。
+
+三章职业案例中的公司与交易数字均为教学虚构。项目能提供公开行情、估值、部分基本面、
+行业与带来源的证据快照；客户 cohort、CAC、私募条款、债务合同、访谈和因果证明必须从
+交易资料与独立尽调取得，不能由 QuantMaster 分数补写。
+
 ```bash
 # 预取内置示例候选（12 只大盘股）的行情到本地缓存
 qm fetch --universe demo --start 2022-01-01
@@ -117,7 +129,7 @@ from quantmaster.factors import (
 )
 
 values = compute_factors(list(BUILTIN_FACTORS.values()), panel)
-print(factor_correlation(values))              # 相关性矩阵：>0.6 的因子留一个就够
+print(factor_correlation(values))              # 相关性矩阵是同质性诊断；不设通用删除阈值
 picked = greedy_select(values, panel["close"]) # 按 |IC| 贪心挑出低相关因子组
 combined, weights = ic_weighted_combine(       # 滚动 IC 加权动态合成（权重已 shift 防未来）
     {k: values[k] for k in picked}, panel["close"], lookback=60)
