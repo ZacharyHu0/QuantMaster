@@ -3664,6 +3664,10 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         playwright_sync.expect(matrix).to_contain_text("一级成长")
         playwright_sync.expect(matrix).not_to_contain_text("二级软件")
         assert matrix.bounding_box()["y"] < 900
+        page.locator("[data-rotation-industry-sort]").select_option("weak")
+        playwright_sync.expect(
+            matrix.locator("tbody tr td:first-child button").first
+        ).to_have_text("一级价值")
 
         l1_tab.focus()
         page.keyboard.press("ArrowRight")

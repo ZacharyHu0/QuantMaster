@@ -870,7 +870,7 @@ const rotationFeature = (() => {
       if (industrySort === 'score') return Number(right.score.score ?? -Infinity) - Number(left.score.score ?? -Infinity);
       if (industrySort === 'excess') return Number(b.excess_return ?? -Infinity) - Number(a.excess_return ?? -Infinity);
       if (industrySort === 'amount') return Number(b.amount_activity ?? -Infinity) - Number(a.amount_activity ?? -Infinity);
-      if (industrySort === 'weak') return Number(b.weak_ratio ?? -Infinity) - Number(a.weak_ratio ?? -Infinity);
+      if (industrySort === 'weak') return Number(right.weak_ratio ?? -Infinity) - Number(left.weak_ratio ?? -Infinity);
       return Number(b.rotation_change_pp ?? -Infinity) - Number(a.rotation_change_pp ?? -Infinity);
     });
   }
