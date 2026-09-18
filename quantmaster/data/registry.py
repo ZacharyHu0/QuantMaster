@@ -2721,7 +2721,10 @@ def _repair_history_locked(
         candidate = candidate.loc[owned_start:].copy()
     if not _is_complete_refresh(candidate, cached, owned_start, full_end, symbol=symbol):
         raise HistoryRepairError(symbol, "新响应缺失旧交易日或完整历史范围")
-    _require_repair_coverage(symbol, candidate, cached, start, end, source, renew=renew)
+    _require_repair_coverage(
+        symbol, candidate, cached, start, end, source,
+        renew=renew, check_cancelled=check_cancelled,
+    )
     if renew:
         # Reassess the whole retained generation instead of OR-ing a previous
         # stale observation into today's successful read. Historical gaps and
@@ -2744,7 +2747,7 @@ def _repair_history_locked(
 
 def _require_repair_coverage(
     symbol: str, candidate: pd.DataFrame, cached: pd.DataFrame | None,
-    start: str, end: str, source: Any, *, renew: bool,
+    start: str, end: str, source: Any, *, renew: bool, check_cancelled: Callable[[], None],
 ) -> None:
     effective_start, effective_end = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
     if renew and cached is not None and not cached.empty:
@@ -2760,8 +2763,16 @@ def _require_repair_coverage(
         sessions = source.trade_calendar(
             effective_start.date().isoformat(), effective_end.date().isoformat(),
         )
-        if not sessions.difference(candidate.index).empty:
-            raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+        missing = sessions.difference(candidate.index)
+        if missing.empty:
+            return
+        from quantmaster.data.instrument_snapshots import load_or_fetch_suspension_snapshot
+
+        for day in missing:
+            check_cancelled()
+            snapshot = load_or_fetch_suspension_snapshot(source, day.date().isoformat())
+            if symbol not in snapshot["full_day_symbols"]:
+                raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
 
 
 def _require_repair_extensions(
