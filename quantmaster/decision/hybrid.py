@@ -780,34 +780,6 @@ def continuous_market_exposure(
     return exposure.clip(0.05, definition.max_exposure).where(state.notna(), 0.05)
 
 
-def _select_diversified(
-    ranked: pd.Series, top_n: int, industry_map: dict[str, str],
-) -> tuple[pd.Series, bool]:
-    if not industry_map or top_n <= 2:
-        return ranked.head(top_n), False
-    cap = max(1, math.ceil(top_n * 0.30))
-    selected: list[str] = []
-    counts: dict[str, int] = {}
-    for symbol in ranked.index:
-        industry = industry_map.get(str(symbol), "未知")
-        if industry != "未知" and counts.get(industry, 0) >= cap:
-            continue
-        selected.append(str(symbol))
-        counts[industry] = counts.get(industry, 0) + 1
-        if len(selected) == top_n:
-            break
-    relaxed = False
-    if len(selected) < top_n:
-        relaxed = True
-        for symbol in ranked.index:
-            value = str(symbol)
-            if value not in selected:
-                selected.append(value)
-            if len(selected) == top_n:
-                break
-    return ranked.loc[selected], relaxed
-
-
 def _safe_float(value: Any, digits: int = 4) -> float | None:
     try:
         number = float(value)

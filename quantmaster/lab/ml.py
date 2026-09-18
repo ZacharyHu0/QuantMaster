@@ -124,30 +124,6 @@ def engineer_features(panel: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]
     return features
 
 
-def normalize_features(
-    features: dict[str, pd.DataFrame],
-) -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
-    """Cross-sectionally winsorize/z-score features using same-date data only.
-
-    Missing values become the same-date cross-sectional median (zero after
-    standardization).  A separate validity mask is retained so callers can
-    enforce coverage rather than confusing imputation with observed data.
-    """
-    normalized: dict[str, pd.DataFrame] = {}
-    validity: dict[str, pd.DataFrame] = {}
-    for name, raw in features.items():
-        values = raw.astype(float).replace([np.inf, -np.inf], np.nan)
-        valid = values.notna()
-        lower = values.quantile(0.01, axis=1)
-        upper = values.quantile(0.99, axis=1)
-        clipped = values.clip(lower=lower, upper=upper, axis=0)
-        mean = clipped.mean(axis=1)
-        std = clipped.std(axis=1, ddof=0).replace(0, np.nan)
-        normalized[name] = clipped.sub(mean, axis=0).div(std, axis=0).fillna(0.0)
-        validity[name] = valid
-    return normalized, validity
-
-
 def _feature_cube(
     panel: dict[str, pd.DataFrame],
 ) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex, pd.Index, list[str]]:
@@ -450,36 +426,6 @@ def make_samples(
     if not samples:
         raise ValueError("清洗后没有可训练样本；请扩大日期范围或检查数据覆盖率")
     return np.stack(samples), np.asarray(labels, dtype=np.float32), metadata, names
-
-
-def make_inference_samples(
-    panel: dict[str, pd.DataFrame], *, sequence_length: int = 20,
-    minimum_coverage: float = 0.80,
-) -> tuple[np.ndarray, list[dict[str, str]], list[str]]:
-    """Build label-free samples with the exact training preprocessing path."""
-    if sequence_length < 1:
-        raise ValueError("sequence_length 必须为正整数")
-    cube, valid_counts, indexes, columns, names = _feature_cube(panel)
-    samples: list[np.ndarray] = []
-    metadata: list[dict[str, str]] = []
-    for date_pos in range(sequence_length - 1, len(indexes)):
-        window = cube[date_pos - sequence_length + 1:date_pos + 1]
-        for symbol_pos, symbol in enumerate(columns):
-            sample = window[:, symbol_pos, :]
-            coverage = float(
-                valid_counts[
-                    date_pos - sequence_length + 1:date_pos + 1, symbol_pos,
-                ].sum() / (sequence_length * len(names))
-            )
-            if coverage >= minimum_coverage and np.isfinite(sample).all():
-                samples.append(sample.astype(np.float32))
-                metadata.append({
-                    "date": pd.Timestamp(indexes[date_pos]).strftime("%Y-%m-%d"),
-                    "symbol": str(symbol),
-                })
-    if not samples:
-        raise ValueError("没有满足 80% 特征覆盖率的推理样本")
-    return np.stack(samples), metadata, names
 
 
 def _split_by_date(metadata: list[dict[str, str]], validation_ratio: float) -> int:
