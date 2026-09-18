@@ -662,6 +662,51 @@ def test_current_session_rejects_endpoint_cache_written_before_close():
     assert _current_session_cache_floor(
         "20260728", now=after_close,
     ) == pd.Timestamp("2026-07-28 15:30", tz="Asia/Shanghai").timestamp()
+    assert _current_session_cache_floor(
+        "20260729", now=after_close,
+    ) == pd.Timestamp("2026-07-28 15:30", tz="Asia/Shanghai").timestamp()
+
+
+@pytest.mark.parametrize("date_key", ["end_date", "trade_date"])
+def test_completed_date_refreshes_pre_close_cache_once_after_calendar_rollover(
+    date_key, tmp_path, isolated_config, monkeypatch,
+):
+    isolated_config.data.tushare_token = "test-token"
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.provider_call",
+        lambda lane, key, fetch, **kwargs: fetch(),
+    )
+    saturday = pd.Timestamp("2026-09-19 10:00", tz="Asia/Shanghai").to_pydatetime()
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source._current_session_cache_floor",
+        lambda target: _current_session_cache_floor(target, now=saturday),
+    )
+    params = {date_key: "20260918"}
+    cache = EndpointFrameCache("tushare", root=tmp_path / "cache")
+    cache.put(
+        "daily", params,
+        pd.DataFrame([{"ts_code": "600000.SH", "trade_date": "20260918"}]),
+    )
+    pre_close = pd.Timestamp("2026-09-18 14:00", tz="Asia/Shanghai").timestamp()
+    os.utime(cache.path_for("daily", params), (pre_close, pre_close))
+
+    class FakePro:
+        calls = 0
+
+        def daily(self, **_params):
+            self.calls += 1
+            return pd.DataFrame([
+                {"ts_code": "600000.SH", "trade_date": "20260918"},
+                {"ts_code": "000001.SZ", "trade_date": "20260918"},
+            ])
+
+    source = TushareSource(cache)
+    source._api = FakePro()
+
+    assert len(source._call("daily", 1, **params)) == 2
+    assert len(source._call("daily", 1, **params)) == 2
+    assert source._api.calls == 1
 
 
 def test_incremental_refresh_bypasses_cached_tushare_tail(

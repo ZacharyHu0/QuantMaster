@@ -2798,3 +2798,36 @@ def test_trading_route_contracts_cover_exports_and_paper_lifecycle(monkeypatch):
     with pytest.raises(trading.HTTPException) as missing_cycles:
         trading.paper_account_cycles("missing")
     assert missing_cycles.value.status_code == 404
+
+
+@pytest.mark.parametrize("fault", ["", "unverified", "intraday", "no_history", "malformed_row"])
+def test_paper_native_panel_excuses_only_proven_full_day_absence(monkeypatch, fault):
+    from quantmaster.data import instrument_snapshots
+    from quantmaster.data.base import DataEvidenceNotReady
+
+    def suspension(day):
+        assert day == "2026-09-18"
+        if fault == "unverified":
+            raise instrument_snapshots.InstrumentCatalogEvidenceError("no evidence")
+        return {"full_day_symbols": [] if fault == "intraday" else ["601059.SH"]}
+
+    monkeypatch.setattr(instrument_snapshots, "load_suspension_snapshot", suspension)
+    rows = [("600000.SH", "2026-09-17"), ("600000.SH", "2026-09-18")]
+    if fault != "no_history":
+        rows.append(("601059.SH", "2026-09-17"))
+    if fault == "malformed_row":
+        rows.append(("601059.SH", "2026-09-18"))
+    frame = pd.DataFrame(rows, columns=["symbol", "date"])
+    for field in ("open", "high", "low", "close", "volume"):
+        frame[field] = 10.0
+    if fault == "malformed_row":
+        frame.loc[3, "close"] = float("nan")
+    args = (frame, ["600000.SH", "601059.SH"], "2026-09-17", "2026-09-18")
+    if fault:
+        with pytest.raises(DataEvidenceNotReady):
+            PaperService._stockdb_frame_to_panel(*args, evidence="fixture")
+    else:
+        panel = PaperService._stockdb_frame_to_panel(*args, evidence="fixture")
+        assert panel["close"].loc["2026-09-18", "600000.SH"] == 10.0
+        assert pd.isna(panel["close"].loc["2026-09-18", "601059.SH"])
+        assert pd.isna(panel["open"].loc["2026-09-18", "601059.SH"])

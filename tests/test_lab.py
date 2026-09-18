@@ -1278,6 +1278,118 @@ def test_verified_tail_does_not_upgrade_unverified_legacy_history(
     assert "已验证来源链没有覆盖完整请求区间" in evidence["issues"]
 
 
+@pytest.mark.parametrize("tail", ["open", "closed", "suspended", "unknown"])
+def test_repair_plan_uses_observed_tail_and_local_no_trade_evidence(
+    tmp_path, monkeypatch, tail,
+):
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+    from quantmaster.lab import dataset
+
+    monkeypatch.setattr(dataset, "market_now", lambda: pd.Timestamp("2026-09-19", tz="Asia/Shanghai"))
+    monkeypatch.setattr("quantmaster.data.universe.load_universe", lambda *a, **k: ["A.SH"])
+    dates = pd.bdate_range("2025-12-01", "2026-09-17")
+    frame = pd.DataFrame({"open": 10., "high": 11., "low": 9., "close": 10.,
+                          "volume": 1000., "amount": 10000.}, index=dates)
+    store = BarStore()
+    quality = {"status": "degraded", "stale": True, "partial": True,
+               "observed_end": "2026-09-17", "issues": []}
+    store.put("A.SH", frame, request_end="2026-09-18", source="tushare", quality=quality)
+    if tail != "unknown":
+        root = tmp_path / "api_cache" / "tushare"
+        root.mkdir(parents=True)
+        pd.DataFrame({"exchange": ["SSE"], "cal_date": ["20260918"],
+                      "is_open": [int(tail != "closed")]}).to_parquet(root / "trade_cal-test.parquet")
+    if tail == "suspended":
+        monkeypatch.setattr(
+            "quantmaster.data.instrument_snapshots.load_suspension_snapshot",
+            lambda day: {"full_day_symbols": ["A.SH"]},
+        )
+    original_read = pd.read_parquet
+
+    def read_only_calendar(path, *args, **kwargs):
+        assert "trade_cal-" in str(path), "inspection must not read symbol parquet files"
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", read_only_calendar)
+    for clear in (False, False, True):
+        if clear:
+            dataset.clear_local_dataset_caches()
+        plan = dataset.dataset_repair_plan("demo", "2026-06-01", "2026-09-18")
+        needs_repair = tail in {"open", "unknown"}
+        assert plan["counts"]["complete"] == int(not needs_repair)
+        assert plan["critical_repair_symbol_count"] == int(needs_repair)
+        if needs_repair:
+            assert plan["gaps"][0]["segments"] == [{
+                "start": "2026-09-18", "end": "2026-09-18", "kind": "critical",
+            }]
+        if tail == "unknown":
+            inspected = dataset.inspect_local_dataset("demo", "2026-06-01", "2026-09-18")
+            assert any(w["code"] == "DATA_CALENDAR_UNAVAILABLE" for w in inspected["warnings"])
+    if tail == "open":
+        monkeypatch.setattr(pd, "read_parquet", original_read)
+        repaired = frame.reindex(pd.bdate_range("2025-12-01", "2026-09-18")).ffill()
+        store.put("A.SH", repaired, replace=True, replace_coverage=True, source="tushare",
+                  quality={"status": "verified", "stale": False, "partial": False})
+        plan = dataset.dataset_repair_plan("demo", "2026-06-01", "2026-09-18")
+        assert plan["counts"]["complete"] == 1
+        assert plan["critical_repair_symbol_count"] == 0
+
+
+def test_tail_calendar_conflicts_and_incomplete_days_remain_unknown(tmp_path):
+    _config(tmp_path)
+    from quantmaster.lab.dataset import _local_tail_calendar
+
+    root = tmp_path / "api_cache" / "tushare"
+    root.mkdir(parents=True)
+    for name, opened in (("a", 1), ("b", 0), ("c", 1)):
+        pd.DataFrame({"exchange": ["SSE"], "cal_date": ["20260918"],
+                      "is_open": [opened]}).to_parquet(root / f"trade_cal-{name}.parquet")
+    pd.DataFrame({"exchange": ["SSE", "SSE"], "cal_date": ["20260919", "20260921"],
+                  "is_open": [0, 1]}).to_parquet(root / "trade_cal-incomplete.parquet")
+    assert _local_tail_calendar() == {"2026-09-18": None}
+
+
+def test_tail_planning_waits_for_close_and_invalidates_calendar_cache(tmp_path, monkeypatch):
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+    from quantmaster.lab import dataset
+
+    monkeypatch.setattr("quantmaster.data.universe.load_universe", lambda *a, **k: ["A.SH"])
+    now = pd.Timestamp("2026-09-18 14:00", tz="Asia/Shanghai")
+    monkeypatch.setattr(dataset, "market_now", lambda: now)
+    frame = pd.DataFrame({"open": 10., "high": 11., "low": 9., "close": 10.,
+                          "volume": 1000., "amount": 10000.},
+                         index=pd.bdate_range("2025-12-01", "2026-09-17"))
+    BarStore().put("A.SH", frame, request_end="2026-09-20")
+    plan = dataset.dataset_repair_plan("demo", "2026-06-01", "2026-09-20")
+    assert plan["counts"]["pending"] == 1
+    assert plan["repair_symbol_count"] == 0
+    assert plan["as_of"] == "2026-09-17"
+    assert not plan["production_eligible"]
+    snapshot = dataset.load_local_dataset("demo", "2026-06-01", "2026-09-20")[2]
+    pool_identity = dataset._fast_pool_identity()
+    now = pd.Timestamp("2026-09-18 16:00", tz="Asia/Shanghai")
+    assert dataset._fast_pool_identity() != pool_identity
+    plan = dataset.dataset_repair_plan("demo", "2026-06-01", "2026-09-20")
+    assert plan["critical_repair_symbol_count"] == 1
+    assert plan["gaps"][0]["segments"] == [{
+        "start": "2026-09-18", "end": "2026-09-18", "kind": "critical",
+    }]
+    refreshed = dataset.load_local_dataset("demo", "2026-06-01", "2026-09-20")[2]
+    assert refreshed["snapshot_hash"] != snapshot["snapshot_hash"]
+    root = tmp_path / "api_cache" / "tushare"
+    root.mkdir(parents=True)
+    pool_identity = dataset._fast_pool_identity()
+    pd.DataFrame({"exchange": ["SSE"] * 3, "cal_date": ["20260918", "20260919", "20260920"],
+                  "is_open": [0, 0, 0]}).to_parquet(root / "trade_cal-closure.parquet")
+    assert dataset._fast_pool_identity() != pool_identity
+    now = pd.Timestamp("2026-09-21", tz="Asia/Shanghai")
+    plan = dataset.dataset_repair_plan("demo", "2026-06-01", "2026-09-20")
+    assert plan["repair_symbol_count"] == 0
+    assert plan["counts"]["complete"] == 1
+
+
 def test_indexed_samples_match_legacy_ridge_and_reuse_cube(tmp_path):
     _config(tmp_path)
     panel = _panel(days=240, symbols=6)

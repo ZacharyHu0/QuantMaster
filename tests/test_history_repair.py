@@ -154,6 +154,22 @@ def test_conflicting_qfq_rebuild_keeps_old_history_and_truthful_evidence(repair_
     pd.testing.assert_frame_equal(source.cached_daily(SYMBOL, START, END), saved)
 
 
+def test_explicit_repair_uses_official_calendar_beyond_local_snapshot(
+    repair_setup, monkeypatch,
+):
+    store, _, _, _, _ = repair_setup
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (pd.DatetimeIndex([]), "published-calendar"),
+    )
+
+    result = repair(store)
+
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert store.get(SYMBOL).index.max() == pd.Timestamp(END)
+
+
 def test_maintenance_reuses_repaired_tushare_cache_without_formal_upgrade(repair_setup, monkeypatch):
     from quantmaster.data.maintenance import DataRefreshManager
 
@@ -185,17 +201,90 @@ def test_maintenance_rejects_incomplete_repaired_source_contract(repair_setup, m
 
 
 @pytest.mark.parametrize("fault", ["missing_old", "missing_gap", "network", "identity", "factor", "cancel"])
-def test_failed_or_cancelled_rebuild_preserves_bytes_and_metadata(repair_setup, fault):
+def test_failed_or_cancelled_rebuild_preserves_bytes_and_metadata(
+    repair_setup, monkeypatch, fault,
+):
     store, _, _, state, old = repair_setup
     original = store._path(SYMBOL).read_bytes()
     metadata = store.metadata(SYMBOL)
     state["fault"] = fault
+    if fault == "missing_gap":
+        monkeypatch.setattr(
+            "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+            lambda *args: {"full_day_symbols": []},
+        )
     expected = InterruptedError if fault == "cancel" else HistoryRepairError
     with pytest.raises(expected):
         repair(store, cancelled=lambda: state["cancelled"])
     assert store._path(SYMBOL).read_bytes() == original
     assert store.metadata(SYMBOL) == metadata
     pd.testing.assert_frame_equal(store.get(SYMBOL), old)
+
+
+def test_explicit_repair_accepts_verified_full_day_suspension(repair_setup, monkeypatch):
+    store, source, _, state, _ = repair_setup
+    state["fault"] = "missing_gap"
+    requested = []
+    published = pd.bdate_range(START, "2024-01-17")
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (published[(published >= start) & (published <= end)], "published-calendar"),
+    )
+
+    def suspension_snapshot(selected, day):
+        assert selected is source
+        requested.append(day)
+        return {"full_day_symbols": [SYMBOL]}
+
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+        suspension_snapshot,
+    )
+
+    result = repair(store)
+
+    assert requested == ["2024-01-18"]
+    assert pd.Timestamp("2024-01-18") not in result.data.index
+    assert result.data.index.max() == pd.Timestamp(END)
+
+
+def test_explicit_repair_cancels_between_suspension_checks(repair_setup, monkeypatch):
+    store, source, _, _, _ = repair_setup
+    daily = source.daily
+    cancelled = False
+    requested = []
+    original = store._path(SYMBOL).read_bytes()
+    metadata = store.metadata(SYMBOL)
+    published = pd.bdate_range(START, "2024-01-16")
+
+    def missing_suspended_days(*args):
+        return daily(*args).drop(pd.to_datetime(["2024-01-17", "2024-01-18"]), errors="ignore")
+
+    def suspension_snapshot(selected, day):
+        nonlocal cancelled
+        assert selected is source
+        requested.append(day)
+        cancelled = True
+        return {"full_day_symbols": [SYMBOL]}
+
+    monkeypatch.setattr(source, "daily", missing_suspended_days)
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (published[(published >= start) & (published <= end)], "published-calendar"),
+    )
+    monkeypatch.setattr(
+        "quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot",
+        suspension_snapshot,
+    )
+
+    with pytest.raises(InterruptedError):
+        repair(store, cancelled=lambda: cancelled)
+
+    assert requested == ["2024-01-17"]
+    assert store._path(SYMBOL).read_bytes() == original
+    assert store.metadata(SYMBOL) == metadata
 
 
 def test_rebuild_reuses_trusted_full_source_cache(repair_setup):
@@ -298,7 +387,11 @@ def test_insufficient_evidence_keeps_original_cache(repair_setup, monkeypatch, m
             registry, "_unit_contract", lambda symbol: ((("close", "unknown"),), "unknown units")
         )
     elif missing == "calendar":
-        monkeypatch.setattr(registry, "_local_sessions", lambda *args: (pd.DatetimeIndex([]), "unavailable"))
+        monkeypatch.setattr(
+            source,
+            "trade_calendar",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("official calendar unavailable")),
+        )
     else:
         daily = source.daily
 
@@ -601,6 +694,10 @@ def test_auto_existing_gap_only_allows_safe_extensions(repair_setup, monkeypatch
         monkeypatch.setattr(registry, '_local_sessions', lambda left, right: (
             days[(days >= left) & (days <= right) & (days != days[70])],
             'research_lake' if fault == 'calendar_sparse' else 'stockdb-ingest:tushare:trade_cal'))
+    monkeypatch.setattr(
+        'quantmaster.data.instrument_snapshots.load_or_fetch_suspension_snapshot',
+        lambda *args: {'full_day_symbols': []},
+    )
     original, metadata = store._path(SYMBOL).read_bytes(), store.metadata(SYMBOL)
     if fault == 'head':
         with pytest.raises(HistoryRepairError):
@@ -647,3 +744,38 @@ def test_repair_calendar_proves_closed_days_and_rejects_partial_evidence(repair_
             source.trade_calendar('2024-01-06', '2024-01-07')
     else:
         assert source.trade_calendar('2024-01-06', '2024-01-07').empty
+
+
+@pytest.mark.parametrize("fault", ["", "stale", "calendar", "expected", "tail", "units", "stamp"])
+def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_config, monkeypatch, fault):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from quantmaster.data import maintenance
+    from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+
+    accepted_at = datetime(2026, 9, 18, 10, tzinfo=UTC)
+    acceptance = SimpleNamespace(session="2026-09-18", updated_at=accepted_at)
+    monkeypatch.setattr(maintenance, "read_stockdb_session_acceptance", lambda _: acceptance)
+    frame = pd.DataFrame({"close": [10.0]}, index=pd.to_datetime(["2026-09-18"]))
+    frame.attrs.update(
+        stockdb_accepted_session="2026-09-18",
+        stockdb_accepted_at=accepted_at.isoformat() if fault != "stamp" else "old",
+        unit_status="verified_local_stockdb_schema_v1",
+    )
+    quality = BarDataQuality(
+        "degraded", "2026-09-01", "2026-09-19",
+        observed_end="2026-09-17" if fault == "tail" else "2026-09-18",
+        expected_session="" if fault == "expected" else "2026-09-18",
+        freshness_state="stale" if fault == "stale" else "fresh",
+        stale=fault == "stale",
+        calendar_source="unavailable" if fault == "calendar" else "tushare:trade_cal",
+        sources=("free-stockdb",), coverage_ratio=1.0,
+        units=(("close", "unknown" if fault == "units" else "CNY/share"),),
+        semantic_diagnostic_code="factor_contract_incomplete",
+    )
+    envelope = BarDataEnvelope(frame, quality, ())
+    assert maintenance.DataRefreshManager._prepared_with_formal_gaps(
+        envelope, SYMBOL, "2026-09-01", "2026-09-19",
+    ) is (not fault)
+    assert not quality.formal_eligible
