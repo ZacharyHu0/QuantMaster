@@ -154,6 +154,22 @@ def test_conflicting_qfq_rebuild_keeps_old_history_and_truthful_evidence(repair_
     pd.testing.assert_frame_equal(source.cached_daily(SYMBOL, START, END), saved)
 
 
+def test_explicit_repair_uses_official_calendar_beyond_local_snapshot(
+    repair_setup, monkeypatch,
+):
+    store, _, _, _, _ = repair_setup
+    monkeypatch.setattr(
+        registry,
+        "_local_sessions",
+        lambda start, end: (pd.DatetimeIndex([]), "published-calendar"),
+    )
+
+    result = repair(store)
+
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert store.get(SYMBOL).index.max() == pd.Timestamp(END)
+
+
 def test_maintenance_reuses_repaired_tushare_cache_without_formal_upgrade(repair_setup, monkeypatch):
     from quantmaster.data.maintenance import DataRefreshManager
 
@@ -298,7 +314,11 @@ def test_insufficient_evidence_keeps_original_cache(repair_setup, monkeypatch, m
             registry, "_unit_contract", lambda symbol: ((("close", "unknown"),), "unknown units")
         )
     elif missing == "calendar":
-        monkeypatch.setattr(registry, "_local_sessions", lambda *args: (pd.DatetimeIndex([]), "unavailable"))
+        monkeypatch.setattr(
+            source,
+            "trade_calendar",
+            lambda *args: (_ for _ in ()).throw(RuntimeError("official calendar unavailable")),
+        )
     else:
         daily = source.daily
 
