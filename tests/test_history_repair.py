@@ -785,3 +785,127 @@ def test_maintenance_closed_day_target_keeps_stockdb_evidence_gates(isolated_con
         envelope, SYMBOL, "2026-09-01", "2026-09-19",
     ) is (fault in {"", "sparse_calendar"})
     assert not quality.formal_eligible
+
+
+@pytest.mark.parametrize("requested_end", [END, "2024-01-21"])
+def test_auto_ipo_gap_uses_listing_boundary_and_reuses_supplement(
+    repair_setup, monkeypatch, tmp_path, requested_end,
+):
+    from quantmaster.data.instruments import InstrumentStore
+
+    _, source, calls, _, _ = repair_setup
+    monkeypatch.setattr(registry, "market_date", lambda: pd.Timestamp("2024-01-21").date())
+    monkeypatch.setattr(registry, "resolve_session_target", lambda: registry.SessionExpectation(
+        session=END, ready=True,
+    ))
+    listing = "2024-01-08"
+    InstrumentStore().upsert([{
+        "symbol": SYMBOL, "code": "000938", "market": "CN", "exchange": "SZ",
+        "asset_type": "stock", "currency": "CNY", "list_date": listing,
+    }], source="test", source_priority=100)
+    native_requests = []
+
+    class Local:
+        name = "free-stockdb"
+
+        def daily(self, symbol, start, end):
+            native_requests.append((start, end))
+            return pd.DataFrame()
+
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: {
+        registry.Market.CN: [lambda: source] if kw.get("provider") == "tushare"
+        else [Local, lambda: source],
+    })
+    store = BarStore(tmp_path / "ipo-bars")
+    result = registry.refresh_history(SYMBOL, START, requested_end, store=store)
+    assert result.data.index.min() == pd.Timestamp(listing)
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert native_requests == [(listing, END)]
+    assert calls and all(left >= "20240108" for _, left, _ in calls)
+    assert result.data.attrs["local_cross_validation"]["status"] == "no_overlap"
+    assert not result.quality.formal_eligible
+    calls.clear()
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("warm cache"))
+    again = registry.refresh_history(SYMBOL, START, requested_end, store=store)
+    assert len(again.data) == len(result.data)
+    assert not calls
+
+
+def test_auto_expanded_head_rebuilds_incompatible_tushare_anchor(repair_setup, monkeypatch):
+    store, source, calls, _, _ = repair_setup
+    tail = source.daily(SYMBOL, "2024-01-09", END)
+    tail.attrs["adjustment_anchor_date"] = OLD_END
+    quality = registry._assess_daily_frame(tail, "2024-01-09", END, symbol=SYMBOL, source="tushare")
+    store.put(SYMBOL, tail, replace=True, replace_coverage=True, source="tushare",
+              request_start="2024-01-09", request_end=END, quality=quality.to_dict())
+    calls.clear()
+    _auto_sources(monkeypatch, source, pd.DataFrame())
+    result = registry.refresh_history(SYMBOL, START, END, store=store)
+    assert result.data.index.min() == pd.Timestamp(START)
+    assert result.data.attrs["adjustment_anchor_date"] == END
+    assert result.data.loc[START, "close"] == 5
+    assert store.metadata(SYMBOL)["coverage_start"] == START
+    calls.clear()
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("warm cache"))
+    registry.refresh_history(SYMBOL, START, END, store=store)
+    assert not calls
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+@pytest.mark.parametrize("missing", ["", "volume", "amount"])
+def test_native_gap_cross_checks_supplement_before_publication(
+    repair_setup, monkeypatch, tmp_path, conflict, missing,
+):
+    _, source, _, _, _ = repair_setup
+    native = source.daily(SYMBOL, START, END).iloc[1:].copy()
+    native.attrs.update(
+        provider_interface="stock_sdk:daily", unit_status="verified_local_stockdb_schema_v1",
+        units=dict(registry._unit_contract(SYMBOL)[0]),
+    )
+    native[["open", "high", "low", "close"]] *= 2  # different qfq anchor is comparable
+    if conflict:
+        field = "amount" if missing != "amount" else "volume"
+        native.iloc[0, native.columns.get_loc(field)] *= 2
+    if missing:
+        native = native.drop(columns=missing)
+    _auto_sources(monkeypatch, source, native)
+    store = BarStore(tmp_path / "cross-bars")
+    if conflict:
+        with pytest.raises(registry.MarketDataUnavailable, match="多来源重叠行情冲突"):
+            registry.refresh_history(SYMBOL, START, END, store=store)
+        assert store.get(SYMBOL) is None
+    else:
+        result = registry.refresh_history(SYMBOL, START, END, store=store)
+        assert result.data.index.min() == pd.Timestamp(START)
+        assert result.data.attrs["local_cross_validation"]["status"] == "matched"
+        assert result.data.attrs["local_cross_validation"]["rows"] == len(native)
+        assert missing not in result.data.attrs["local_cross_validation"]["fields"]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_recovered_stockdb_cross_checks_existing_supplement(repair_setup, monkeypatch, conflict):
+    store, source, calls, _, _ = repair_setup
+    old = source.daily(SYMBOL, START, OLD_END)
+    quality = registry._assess_daily_frame(old, START, OLD_END, symbol=SYMBOL, source="tushare")
+    store.put(SYMBOL, old, replace=True, replace_coverage=True, source="tushare",
+              request_start=START, request_end=OLD_END, quality=quality.to_dict())
+    native = source.daily(SYMBOL, START, END)
+    native.attrs.update(
+        provider_interface="stock_sdk:daily", unit_status="verified_local_stockdb_schema_v1",
+        units=dict(registry._unit_contract(SYMBOL)[0]),
+    )
+    if conflict:
+        native.loc[START, "amount"] *= 2
+    _auto_sources(monkeypatch, source, native)
+    calls.clear()
+    original, metadata = store._path(SYMBOL).read_bytes(), store.metadata(SYMBOL)
+    if conflict:
+        with pytest.raises(HistoryRepairError, match="多来源重叠行情冲突"):
+            registry.refresh_history(SYMBOL, START, END, store=store)
+        assert store._path(SYMBOL).read_bytes() == original
+        assert store.metadata(SYMBOL) == metadata
+    else:
+        result = registry.refresh_history(SYMBOL, START, END, store=store)
+        assert store.metadata(SYMBOL)["last_source"] == "free-stockdb"
+        assert result.data.attrs["local_cross_validation"]["status"] == "matched"
+    assert not calls
