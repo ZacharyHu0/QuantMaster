@@ -49,6 +49,10 @@ def _deployed_store(tmp_path, monkeypatch, created_at: str) -> tuple[LabStore, s
     )
     store.save_validation(version["id"], "dataset", {
         "gates": {"hard_failures": [], "soft_failures": []},
+        "horizons": {"3": {
+            "execution": {"execution_contract": EXECUTION_CONTRACT},
+            "gates": {"passed": True},
+        }},
         "candidate_score": 80,
     })
     store.approve(version["id"], actor="tester", reason="PIT cutoff test")

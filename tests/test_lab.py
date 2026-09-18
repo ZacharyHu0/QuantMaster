@@ -583,6 +583,10 @@ def test_store_versions_validation_approval_and_deployment(tmp_path):
         store.approve(version["id"], actor="tester")
     report = {
         "gates": {"hard_failures": [], "soft_failures": ["IC 偏低"]},
+        "horizons": {"3": {
+            "execution": {"execution_contract": "self_financing_open_v1"},
+            "gates": {"passed": True},
+        }},
         "candidate_score": 60,
     }
     updated = store.save_validation(version["id"], "dataset", report)

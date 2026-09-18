@@ -330,7 +330,10 @@ def test_profile_constraints_survive_missing_factor_component():
                 "name": "ML Champion",
                 "status": "approved",
                 "content_hash": "hash",
-                "validation": {},
+                "validation": {"horizons": {"3": {
+                    "execution": {"execution_contract": "self_financing_open_v1"},
+                    "gates": {"passed": True},
+                }}},
                 "spec": {"kind": "learned", "model": {"manifest": "unused.json"}},
             }
 

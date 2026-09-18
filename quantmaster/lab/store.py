@@ -13,6 +13,7 @@ from typing import Any
 
 from quantmaster.config import get_config
 from quantmaster.data.schema_access import register_lab_store
+from quantmaster.execution_evidence import execution_evidence_gate, factor_execution_gate
 from quantmaster.lab.horizons import require_supported_horizon
 from quantmaster.lab.models import (
     FACTOR_STATUSES,
@@ -23,7 +24,6 @@ from quantmaster.lab.models import (
     normalize_factor_name,
     utc_now,
 )
-from quantmaster.lab.strategy import execution_evidence_gate
 from quantmaster.runtime.sqlite import connect_sqlite, execute_sql_script, migrate_schema
 from quantmaster.trading_sessions import daily_signal_cutoff
 
@@ -655,6 +655,9 @@ class LabStore:
         report = value.get("validation") or {}
         if not report:
             raise ValueError("候选尚未完成统一验证，不能批准")
+        execution_gate = factor_execution_gate(report)
+        if execution_gate.get("revalidation_required"):
+            raise ValueError("; ".join(execution_gate["failures"]))
         gates = report.get("gates") or {}
         if gates.get("hard_failures"):
             raise ValueError("数据完整性或防泄漏硬门槛未通过，不能批准")
@@ -704,6 +707,9 @@ class LabStore:
         if scope not in {"exact", "a_share"}:
             raise ValueError("scope 只支持 exact/a_share")
         report = value.get("validation") or {}
+        execution_gate = factor_execution_gate(report, horizon)
+        if execution_gate.get("revalidation_required"):
+            raise ValueError("; ".join(execution_gate["failures"]))
         gates = report.get("gates") or {}
         if gates.get("hard_failures"):
             raise ValueError("当前验证存在硬门槛失败，不能设为 champion")
