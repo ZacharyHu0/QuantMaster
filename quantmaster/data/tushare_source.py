@@ -192,10 +192,11 @@ def _current_session_cache_floor(
     *,
     now: datetime | None = None,
 ) -> float | None:
-    """Invalidate responses captured before the requested date's A-share close.
+    """Invalidate responses captured before the relevant elapsed A-share close.
 
     A request made shortly after midnight legitimately returns the previous trading day,
-    but it must not remain reusable after that date's 15:30 close boundary.
+    but it must not remain reusable after that date's 15:30 close boundary. Future-ended
+    ranges continue advancing at each current-day close.
     """
     if not end:
         return None
@@ -209,7 +210,10 @@ def _current_session_cache_floor(
     except (TypeError, ValueError):
         return None
     close = datetime.combine(
-        requested_end, datetime_time(hour=15, minute=30), tzinfo=_CHINA_TZ)
+        min(requested_end, current.date()),
+        datetime_time(hour=15, minute=30),
+        tzinfo=_CHINA_TZ,
+    )
     if current >= close:
         return close.timestamp()
     return None

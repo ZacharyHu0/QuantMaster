@@ -662,6 +662,9 @@ def test_current_session_rejects_endpoint_cache_written_before_close():
     assert _current_session_cache_floor(
         "20260728", now=after_close,
     ) == pd.Timestamp("2026-07-28 15:30", tz="Asia/Shanghai").timestamp()
+    assert _current_session_cache_floor(
+        "20260729", now=after_close,
+    ) == pd.Timestamp("2026-07-28 15:30", tz="Asia/Shanghai").timestamp()
 
 
 @pytest.mark.parametrize("date_key", ["end_date", "trade_date"])
