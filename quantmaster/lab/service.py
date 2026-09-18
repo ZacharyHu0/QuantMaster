@@ -1380,7 +1380,10 @@ class LabService:
             python_features, _catalog, snapshot, _bundle_hash = self._python_mining_context(
                 universe, start, end, progress,
             )
-            panel = {"close": python_features["close"]}
+            if "raw_open" not in python_features:
+                raise ValueError("LAB_EXECUTION_REVALIDATION_REQUIRED: Python 因子缺少原始开盘价执行证据")
+            # Registered `open` is adjusted signal data; limits use raw prices.
+            panel = {"close": python_features["close"], "open": python_features["raw_open"]}
             membership = (
                 python_features.get("membership", pd.DataFrame()).astype(bool)
                 if "membership" in python_features else None
