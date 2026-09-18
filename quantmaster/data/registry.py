@@ -1624,7 +1624,7 @@ def _accept_local_stockdb_without_remote_upgrade(
     return bool(
         quality.status == "degraded"
         and not quality.stale
-        and not quality.partial
+        and quality.coverage_ratio in {None, 1.0}
         and source.name.startswith("free-stockdb")
         and get_config().data.primary_provider == "free-stockdb"
     )
