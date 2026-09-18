@@ -192,10 +192,11 @@ def _current_session_cache_floor(
     *,
     now: datetime | None = None,
 ) -> float | None:
-    """Invalidate responses captured before today's A-share close.
+    """Invalidate responses captured before the relevant elapsed A-share close.
 
     A request made shortly after midnight legitimately returns the previous trading day,
-    but it must not remain reusable after the 15:30 close boundary.
+    but it must not remain reusable after that date's 15:30 close boundary. Future-ended
+    ranges continue advancing at each current-day close.
     """
     if not end:
         return None
@@ -209,8 +210,11 @@ def _current_session_cache_floor(
     except (TypeError, ValueError):
         return None
     close = datetime.combine(
-        current.date(), datetime_time(hour=15, minute=30), tzinfo=_CHINA_TZ)
-    if requested_end >= current.date() and current >= close:
+        min(requested_end, current.date()),
+        datetime_time(hour=15, minute=30),
+        tzinfo=_CHINA_TZ,
+    )
+    if current >= close:
         return close.timestamp()
     return None
 
@@ -242,7 +246,9 @@ class TushareSource(DataSource):
         clean = {key: value for key, value in params.items() if value not in (None, "")}
         provider_lane = provider_lane or f"tushare:{endpoint}"
         force_refresh = endpoint_cache_bypassed()
-        min_mtime = _current_session_cache_floor(clean.get("end_date"))
+        min_mtime = _current_session_cache_floor(
+            clean.get("end_date") or clean.get("trade_date")
+        )
 
         def read_cache() -> pd.DataFrame | None:
             if force_refresh:
