@@ -710,6 +710,30 @@ def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
     assert stats["ingested_24h"] == 2
 
 
+def test_sector_windows_publish_matching_scores_and_counts(tmp_path, monkeypatch):
+    now = 2_000_000_000.0
+    monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
+    store = NewsStore(tmp_path / "news.sqlite")
+    ages = [1, 3, 7, 30, 30 + 1 / 86400]
+    store.save([
+        official_news(
+            store, title=f"窗口证据 {age}", content=f"窗口正文 {age}",
+            sectors=["电子"], sentiment=0.6, confidence=1, importance_score=100,
+            analysis_status="complete", published_at_epoch=now - age * 86400,
+        )
+        for age in ages
+    ])
+    store.publish_dashboard_materializations()
+    reader = NewsStore(store.path, read_only=True)
+    for count, days in enumerate((1, 3, 7, 30), 1):
+        data = reader.stats(days)
+        sector = data["sector_scores"][0]
+        assert data["days"] == days
+        assert sector["event_count"] == sector["positive"] == count
+        expected = 60 * sum(2 ** (-age / data["halflife_days"]) for age in ages[:count]) / (count + 1)
+        assert sector["score"] == pytest.approx(expected, abs=0.01)
+
+
 def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
     store = NewsStore(tmp_path / "news.sqlite")
     store.save([NewsItem(source="unit", title="待标注", content="pending")])
@@ -1664,6 +1688,10 @@ def test_news_api_csrf_and_ui_contract():
     assert '<svg id="news-factor-chart"' not in page
     assert 'id="news-market-label"' in page
     assert 'id="news-sector-scores"' in page
+    assert 'id="news-sector-window"' in page
+    assert page.count('data-news-sector-days=') == 4
+    assert 'data-news-sector-days="30" aria-pressed="true"' in page
+    assert 'id="news-sector-feedback"' in page
     assert 'id="news-annotation-progress"' in page
     assert 'id="news-retry-failed"' in page
     assert 'id="news-pending-action-count"' in page
@@ -1694,6 +1722,10 @@ def test_news_api_csrf_and_ui_contract():
     assert "requestId !== state.eventFocusRequest" in chart_source
     assert "button.dataset.newsFocusDays" in chart_source
     assert "loadEventFocus(state.eventFocusRetryDays)" in chart_source
+    assert "`/api/v1/news/stats?days=${days}`" in chart_source
+    assert "requestId !== state.sectorRequest" in chart_source
+    assert "button.dataset.newsSectorDays" in chart_source
+    assert "loadSectorScores();" in chart_source
     assert "过去 ${days} 日暂无达到质量门槛的标的提及" in chart_source
     assert "--news-scroll-edge: 12px" in news_styles
     assert '.news-focus-window button[aria-pressed="true"]::after' in news_styles

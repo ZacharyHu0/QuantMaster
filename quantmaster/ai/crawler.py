@@ -1549,6 +1549,7 @@ class NewsStore:
                 symbol_counts[item_key] = event_count
         series.sort(key=lambda item: item[0])
         data: dict[str, Any] = dict(counts) if counts else {}
+        data["days"] = max(1, min(days, 3650))
         data["queue"] = {
             key: int((queue_counts[key] if queue_counts else 0) or 0)
             for key in (
