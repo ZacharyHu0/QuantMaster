@@ -920,17 +920,17 @@ class PaperStore:
             ).rowcount
         return bool(changed)
 
-    def recover_auto_run(self, run_date: str, account_id: str) -> bool:
+    def recover_auto_runs(self, run_date: str, account_id: str) -> bool:
+        """Explicit account resume re-arms every failed date, without touching live leases."""
         with self._conn() as conn:
             changed = conn.execute(
                 "UPDATE paper_auto_runs SET status='failed',attempts=0,next_retry_at=0,"
                 "last_error='',failure_code='',diagnostic_code='',updated_at=? "
-                "WHERE run_date=? AND account_id=? "
-                "AND (status IN ('failed','manual_recovery') OR "
-                "(status='completed' AND EXISTS (SELECT 1 FROM paper_cycles "
+                "WHERE account_id=? AND (status IN ('failed','manual_recovery') OR "
+                "(run_date=? AND status='completed' AND EXISTS (SELECT 1 FROM paper_cycles "
                 "WHERE paper_cycles.account_id=paper_auto_runs.account_id "
                 "AND paper_cycles.status IN ('confirmed','blocked'))))",
-                (utc_now(), run_date, account_id),
+                (utc_now(), account_id, run_date),
             ).rowcount
         return bool(changed)
 
@@ -1846,7 +1846,7 @@ class PaperService:
             if status == "active" and updated["mode"] == "auto":
                 run = self.store.reportable_auto_run(account_id)
                 if run is not None:
-                    self.store.recover_auto_run(str(run["run_date"]), account_id)
+                    self.store.recover_auto_runs(str(run["run_date"]), account_id)
             return updated
         candidate_strategy = strategy if strategy is not None else account["strategy"]
         strategy_payload = (

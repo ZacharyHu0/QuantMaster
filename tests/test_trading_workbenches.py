@@ -1508,7 +1508,7 @@ def test_auto_run_lease_token_fences_old_worker_and_exhausts_at_six(tmp_path):
     latest = store.latest_auto_run(account_id)
     assert latest["status"] == "manual_recovery"
     assert latest["attempts"] == 6
-    assert store.recover_auto_run("2026-10-09", account_id) is True
+    assert store.recover_auto_runs("2026-10-09", account_id) is True
 
 
 def test_paper_order_state_machine_requires_reason_and_rejects_invalid_transition(tmp_path):
@@ -2831,3 +2831,33 @@ def test_paper_native_panel_excuses_only_proven_full_day_absence(monkeypatch, fa
         assert panel["close"].loc["2026-09-18", "600000.SH"] == 10.0
         assert pd.isna(panel["close"].loc["2026-09-18", "601059.SH"])
         assert pd.isna(panel["open"].loc["2026-09-18", "601059.SH"])
+
+
+def test_explicit_resume_rearms_all_failed_dates_preserving_completed_and_live_runs(tmp_path):
+    service, account = make_paper_service(tmp_path)
+    aid = account["id"]
+    service.store.update_account(aid, mode="auto")
+    for day in ("2026-09-15", "2026-09-16"):
+        token = service.store.claim_auto_run(day, aid, "worker")
+        assert token
+        assert service.store.fail_auto_run(day, aid, "worker", token, "old data gap")
+    with service.store._conn() as conn:
+        conn.execute("UPDATE paper_auto_runs SET status='manual_recovery',attempts=6 "
+                     "WHERE run_date='2026-09-16' AND account_id=?", (aid,))
+    token = service.store.claim_auto_run("2026-09-17", aid, "worker")
+    assert service.store.complete_auto_run("2026-09-17", aid, "worker", token, {"proof": "kept"})
+    live_token = service.store.claim_auto_run("2026-09-18", aid, "worker")
+    service.update_account(aid, status="active")
+    with service.store._conn() as conn:
+        runs = {row["run_date"]: dict(row) for row in conn.execute(
+            "SELECT * FROM paper_auto_runs WHERE account_id=?", (aid,),
+        )}
+    for day in ("2026-09-15", "2026-09-16"):
+        assert runs[day]["status"] == "failed"
+        assert runs[day]["attempts"] == 0
+        assert runs[day]["next_retry_at"] == 0
+        assert runs[day]["last_error"] == ""
+    assert runs["2026-09-17"]["status"] == "completed"
+    assert json.loads(runs["2026-09-17"]["result_json"]) == {"proof": "kept"}
+    assert runs["2026-09-18"]["status"] == "running"
+    assert runs["2026-09-18"]["lease_token"] == live_token
