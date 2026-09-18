@@ -59,3 +59,9 @@ The 12-stock demo refresh is a separate problem from this 49-symbol native gap. 
 | 920258.BJ | 聚仁新材 | 2026-08-03 | 10.71 | 32686.28 |
 
 Volume follows the Tushare daily API unit (lots), not the native StockDB share unit. The prices and volumes above are evidence of trading activity, not a recommendation.
+
+## Separate paper suspension blocker
+
+The CSI800 paper proposal was blocked by 601059.SH, 601198.SH, 601238.SH and 601995.SH on 2026-09-18. Unlike the 49 securities above, these four are present in the accepted immutable full-day suspension evidence. Their earlier native history exists, but their target-day rows do not.
+
+The panel conversion now excuses only a wholly absent target-day row backed by that exact-date full-day suspension snapshot. It preserves NaNs, requires historical observations, and still rejects an unexplained gap or a malformed partial row. A read-only check against the recovered native service retained the traded 600519.SH quote while all four suspended target-day prices remained NaN.

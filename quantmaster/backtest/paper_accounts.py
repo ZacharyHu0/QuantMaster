@@ -1725,6 +1725,23 @@ class PaperStore:
             )
         return self.cycle(cycle_id) or {}
 
+
+def _confirmed_full_day_suspensions(symbols: set[str], day: str) -> set[str]:
+    if not symbols:
+        return set()
+    from quantmaster.data.instrument_snapshots import (
+        InstrumentCatalogEvidenceError,
+        load_suspension_snapshot,
+    )
+
+    try:
+        snapshot = load_suspension_snapshot(day)
+    except (InstrumentCatalogEvidenceError, OSError, ValueError):
+        # Missing or corrupt evidence retains the existing closed gate.
+        return set()
+    return symbols.intersection(snapshot["full_day_symbols"])
+
+
 class PaperService:
     def __init__(self, store: PaperStore | None = None, *, read_only: bool = False):
         self.read_only = bool(read_only)
@@ -2063,6 +2080,10 @@ class PaperService:
         value["date"] = pd.to_datetime(value["date"], errors="coerce").dt.normalize()
         value["symbol"] = value["symbol"].astype(str).str.upper()
         value = value.dropna(subset=["date", "symbol"])
+        # Only an immutable full-day suspension record can excuse an absent
+        # frontier row. Keep NaNs: a suspension is never a synthetic quote/fill.
+        absent = set(requested) - set(value.loc[value["date"] == required_end, "symbol"])
+        suspended = _confirmed_full_day_suspensions(absent, end)
         panels: dict[str, pd.DataFrame] = {}
         missing_symbols: set[str] = set()
         for field in fields:
@@ -2075,6 +2096,7 @@ class PaperService:
             else:
                 missing_symbols.update(
                     str(symbol) for symbol in matrix.columns[matrix.loc[required_end].isna()]
+                    if str(symbol) not in suspended
                 )
         latest = panels["close"].index.max() if not panels["close"].empty else None
         if missing_symbols or latest is None or pd.Timestamp(latest).normalize() < required_end:
