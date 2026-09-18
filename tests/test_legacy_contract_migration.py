@@ -76,17 +76,23 @@ def test_status_read_does_not_create_state_database(tmp_path):
     assert not manager.state_path.exists()
 
 
-def test_builtin_domain_migrations_are_registered_without_touching_data(tmp_path):
+def test_builtin_domain_migrations_plan_without_touching_data(tmp_path):
     registered = set(registered_migrations())
-    assert {
+    assert registered == {
         "market_data", "decision", "after_close", "news", "automation-contract-v9",
         "paper-ledger", "startup-schema", "backtest-jobs", "store-schema",
         "data-jobs", "lab-jobs", "research-jobs", "remaining-schema",
         "lab-model-artifact",
-    } <= registered
-    assert not {
-        "startup-schemas", "store-schemas", "remaining-schemas", "lab-model-artifacts",
-    } & registered
+    }
+
+    before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+    manager = LegacyMigrationManager(tmp_path, backup_root=tmp_path / "backups")
+    for domain in sorted(registered):
+        plan = manager.plan(domain)
+        assert plan["domain"] == domain
+        assert plan["migration_evidence"] == []
+
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == before
     assert not (tmp_path / "legacy_contract_migrations.sqlite").exists()
 
 
