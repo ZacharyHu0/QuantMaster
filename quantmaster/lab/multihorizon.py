@@ -196,17 +196,6 @@ def _engineered_research_features(
         yield "news_sentiment_observed", news.reindex_like(close).notna().astype(float)
 
 
-def engineer_research_features(
-    panel: dict[str, pd.DataFrame], *, fundamentals: dict[str, pd.DataFrame] | None = None,
-    spec: FeatureSetSpec | None = None,
-) -> dict[str, pd.DataFrame]:
-    """版本化特征注册表；所有变换仅使用当日及过去数据。"""
-    features = dict(_engineered_research_features(panel, fundamentals=fundamentals, spec=spec))
-    if not features:
-        raise ValueError("特征注册表为空")
-    return features
-
-
 def _feature_cube(
     panel: dict[str, pd.DataFrame], fundamentals: dict[str, pd.DataFrame] | None,
     feature_spec: FeatureSetSpec, storage_dir: Path | None = None,
@@ -442,21 +431,6 @@ def fold_positions(samples: MultiHorizonSamples, fold: TimeFold) -> tuple[np.nda
     if min(len(train), len(valid)) < 20:
         raise ValueError(f"{fold.name} 的训练或验证样本不足")
     return train, valid
-
-
-def _constant_logit(values: np.ndarray) -> float:
-    probability = float(np.clip(np.mean(values), 1e-5, 1 - 1e-5))
-    return math.log(probability / (1 - probability))
-
-
-def _fit_logistic(features: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, float]:
-    if len(np.unique(labels)) < 2:
-        return np.zeros(features.shape[1], dtype=float), _constant_logit(labels)
-    from sklearn.linear_model import LogisticRegression
-
-    model = LogisticRegression(C=1.0, max_iter=300, random_state=42)
-    model.fit(features, labels)
-    return model.coef_[0].astype(float), float(model.intercept_[0])
 
 
 def _sigmoid(value: np.ndarray) -> np.ndarray:
