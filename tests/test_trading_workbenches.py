@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -32,7 +33,7 @@ from quantmaster.backtest.spec import (
 from quantmaster.backtest.workbench import (
     BacktestStore,
 )
-from quantmaster.config import get_config
+from quantmaster.config import TradeConfig, get_config
 from quantmaster.data.base import BarDataEnvelope, BarDataQuality, DataEvidenceNotReady
 from quantmaster.portfolio import TradeRecord
 from quantmaster.runtime.jobs import UnifiedJobRuntime, UnifiedJobStore
@@ -276,7 +277,13 @@ def test_backtest_json_export_is_strict_for_nonfinite_artifact_values(monkeypatc
     assert b"NaN" not in response.content and b"Infinity" not in response.content
 
 
-def account_spec(name="日频验证", *, rebalance="D"):
+def account_spec(
+    name="日频验证",
+    *,
+    rebalance="D",
+    initial_capital=100_000,
+    cap_weight=0.35,
+):
     return PaperAccountSpec.model_validate(
         {
             "name": name,
@@ -286,10 +293,10 @@ def account_spec(name="日频验证", *, rebalance="D"):
                 "top_n": 1,
                 "rebalance": rebalance,
                 "weighting": "equal",
-                "cap_weight": 0.35,
+                "cap_weight": cap_weight,
             },
             "universe": "demo",
-            "initial_capital": 100_000,
+            "initial_capital": initial_capital,
             "mode": "manual",
         }
     )
@@ -301,6 +308,8 @@ def make_paper_service(
     *,
     rebalance="D",
     initial_funding_date="2024-01-01",
+    initial_capital=100_000,
+    cap_weight=0.35,
 ):
     store = PaperStore(tmp_path / "paper.sqlite", tmp_path / "accounts")
     with patch(
@@ -308,7 +317,12 @@ def make_paper_service(
         return_value=date.fromisoformat(initial_funding_date),
     ):
         account = store.create_account(
-            account_spec(name, rebalance=rebalance),
+            account_spec(
+                name,
+                rebalance=rebalance,
+                initial_capital=initial_capital,
+                cap_weight=cap_weight,
+            ),
             symbols=["600000.SH", "000001.SZ"],
         )
     return PaperService(store), account
@@ -802,6 +816,47 @@ def test_backtest_and_paper_share_first_open_fill_semantics(tmp_path):
     assert matching.shares == paper_trade["shares"]
     assert matching.price == paper_trade["price"]
     assert matching.cost == paper_trade["fee"]
+
+
+def test_minimum_commission_quantity_matches_paper_and_backtest(tmp_path, monkeypatch):
+    trade = TradeConfig(
+        commission_rate=0,
+        commission_min=5,
+        transfer_fee_rate=0,
+        stamp_tax_rate=0,
+        slippage=0,
+        lot_size=100,
+    )
+    monkeypatch.setattr(
+        "quantmaster.backtest.paper_accounts.get_config",
+        lambda: SimpleNamespace(trade=trade),
+    )
+    service, account = make_paper_service(
+        tmp_path,
+        initial_capital=10_003,
+        cap_weight=1,
+    )
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    panel = price_panel(dates, first=(10.0, 9.0))
+    proposal = service.propose(
+        account["id"], panel={key: value.iloc[:-1] for key, value in panel.items()},
+    )
+    service.store.confirm(proposal["id"])
+
+    paper = service.process(account["id"], **validated_panel(panel))
+    weights = pd.DataFrame(float("nan"), index=dates, columns=panel["close"].columns)
+    weights.loc[dates[-2]] = pd.Series(proposal["target_weights"])
+    backtest = run_backtest(
+        panel,
+        weights,
+        BacktestConfig(initial_capital=10_003, trade=trade),
+    )
+
+    assert paper["filled"][0]["shares"] == 900
+    assert backtest.trades[0].shares == 900
+    assert paper["report"]["cash"] >= 0
+    backtest_cash = backtest.nav * 10_003 - backtest.positions.sum(axis=1)
+    assert (backtest_cash >= -1e-8).all()
 
 
 def test_limit_up_order_stays_blocked_and_retries_next_session(tmp_path):
