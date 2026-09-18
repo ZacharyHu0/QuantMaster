@@ -77,6 +77,7 @@ const marketWorkbench = (() => {
     const selectedWindow = Number(route.window);
     state.window = WINDOWS.includes(selectedWindow) ? selectedWindow : 5;
     state.code = String(route.code || '');
+    state.query = '';
     state.page = 1;
   }
 

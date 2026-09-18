@@ -23,7 +23,7 @@ from quantmaster.data.index_membership import (
     load_cached_csi800_records,
 )
 from quantmaster.lab.models import DatasetSnapshot, content_hash
-from quantmaster.trading_sessions import daily_signal_cutoff, market_date
+from quantmaster.trading_sessions import daily_signal_cutoff, market_date, market_now
 
 _PANEL_CACHE_LOCK = threading.RLock()
 _PANEL_CACHE: OrderedDict[
@@ -32,7 +32,7 @@ _PANEL_CACHE: OrderedDict[
 _PANEL_CACHE_BYTES = 0
 _PANEL_REQUEST_KEYS: dict[
     tuple[str, str, str, str, str],
-    tuple[str, tuple[tuple[int, int], ...], tuple[int, int, int]],
+    tuple[str, str, tuple[int, int, int]],
 ] = {}
 _INSPECTION_CACHE: OrderedDict[
     tuple[str, str, str, str], tuple[dict[str, Any], str, tuple[int, int, int]]
@@ -238,7 +238,7 @@ def _membership_storage_identity(universe: str) -> tuple[int, int, int]:
     )
 
 
-def _fast_pool_identity() -> tuple[tuple[int, int], ...]:
+def _fast_pool_identity() -> str:
     """Cheap invalidation key for an already materialized in-process panel."""
     bars_root = get_config().data_root / "bars"
     identities: list[tuple[int, int]] = []
@@ -248,11 +248,31 @@ def _fast_pool_identity() -> tuple[tuple[int, int], ...]:
             identities.append((stat.st_size, stat.st_mtime_ns))
         except OSError:
             identities.append((0, 0))
-    return tuple(identities)
+    return content_hash({"bars": identities, "tail": _tail_evidence_identity()})
+
+
+def _tail_evidence_identity() -> str:
+    digest = hashlib.sha256()
+    current = market_now()
+    closed_through = current.date() - pd.Timedelta(
+        days=int(current < daily_signal_cutoff(current.date())),
+    )
+    digest.update(str(closed_through).encode())
+    root = get_config().data_root
+    for path in sorted([
+        *root.joinpath("api_cache", "tushare").glob("trade_cal-*.parquet"),
+        *root.joinpath("suspension_snapshots", "objects").glob("*.json"),
+    ]):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        digest.update(f"{path.name}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
 
 
 def _bar_storage_identity(symbols: list[str], store) -> str:
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(_tail_evidence_identity().encode())
     metadata = store.metadata_many(symbols)
     for symbol in symbols:
         path = store.path_for_repair(symbol)
@@ -264,12 +284,82 @@ def _bar_storage_identity(symbols: list[str], store) -> str:
         digest.update(identity.encode("utf-8"))
         item = metadata.get(symbol) or {}
         digest.update(json.dumps({
+            "bounds": [item.get(key) for key in (
+                "start", "end", "coverage_start", "coverage_end", "observed_start", "observed_end",
+            )],
             "content_sha256": item.get("content_sha256"),
             "last_status": item.get("last_status"),
             "quality_json": item.get("quality_json"),
             "source_chain_json": item.get("source_chain_json"),
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()
+
+
+def _local_tail_calendar() -> dict[str, bool | None]:
+    """Read full natural-day SSE cache evidence; conflicting dates stay unknown."""
+    from quantmaster.data.tushare_source import _parse_tushare_dates
+
+    result: dict[str, bool | None] = {}
+    root = get_config().data_root / "api_cache" / "tushare"
+    for path in root.glob("trade_cal-*.parquet"):
+        try:
+            frame = pd.read_parquet(path)
+            if frame.empty or not {"exchange", "cal_date", "is_open"} <= set(frame):
+                continue
+            dates = pd.DatetimeIndex(_parse_tushare_dates(frame["cal_date"], field="cal_date"))
+            opened = pd.to_numeric(frame["is_open"], errors="coerce")
+            if (
+                not frame["exchange"].eq("SSE").all() or not opened.isin([0, 1]).all()
+                or dates.has_duplicates
+                or not dates.sort_values().equals(pd.date_range(dates.min(), dates.max()))
+            ):
+                continue
+            for day, is_open in zip(dates.strftime("%Y-%m-%d"), opened.eq(1), strict=True):
+                result[day] = is_open if day not in result or result[day] == is_open else None
+        except (OSError, RuntimeError, ValueError, TypeError):
+            continue
+    return result
+
+
+def _local_suspensions(day: str) -> set[str]:
+    from quantmaster.data.instrument_snapshots import (
+        InstrumentCatalogEvidenceError,
+        load_suspension_snapshot,
+    )
+
+    try:
+        return set(load_suspension_snapshot(day)["full_day_symbols"])
+    except (InstrumentCatalogEvidenceError, OSError, ValueError):
+        return set()
+
+
+def _observed_tail(
+    symbol: str, observed_end: str, required_end: str,
+    calendar: dict[str, bool | None], suspensions: dict[str, set[str]],
+) -> tuple[str, list[dict[str, str]], bool, bool]:
+    segments: list[dict[str, str]] = []
+    unknown = False
+    pending = False
+    covered_end = observed_end
+    current = market_now()
+    for day in pd.date_range(pd.Timestamp(observed_end) + pd.Timedelta(days=1), required_end):
+        label = day.strftime("%Y-%m-%d")
+        if daily_signal_cutoff(label) > current:
+            pending = True
+            break
+        opened = calendar.get(label)
+        if opened is True and label not in suspensions:
+            suspensions[label] = _local_suspensions(label)
+        if opened is False or (opened is True and symbol in suspensions[label]):
+            if not segments:
+                covered_end = label
+            continue
+        unknown |= opened is None
+        if segments and pd.Timestamp(segments[-1]["end"]) + pd.Timedelta(days=1) == day:
+            segments[-1]["end"] = label
+        else:
+            segments.append({"start": label, "end": label, "kind": "critical"})
+    return covered_end, segments, unknown, pending
 
 
 def _bar_quality_for_range(
@@ -455,7 +545,7 @@ def _cached_required_ranges(
 
 
 def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]:
-    """Inspect local manifests without opening Parquet files or contacting providers."""
+    """Inspect local evidence without opening symbol Parquet files or contacting providers."""
     from quantmaster.data.storage import BarStore
     from quantmaster.data.universe import load_universe
 
@@ -490,11 +580,12 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     catalog_identity = []
     for catalog_path in (store.meta_db,):
         try:
-            stat = catalog_path.stat()
-            catalog_identity.append((stat.st_size, stat.st_mtime_ns))
+            catalog_stat = catalog_path.stat()
+            catalog_identity.append((catalog_stat.st_size, catalog_stat.st_mtime_ns))
         except OSError:
             continue
     persistent_key = content_hash({
+        "contract": "observed-tail-v1",
         "root": str(get_config().data_root.resolve()), "universe": universe,
         "start": start, "end": end, "membership": membership_identity,
         "bars": bar_identity, "catalog": catalog_identity,
@@ -519,13 +610,27 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     warmup_gaps: list[dict[str, Any]] = []
     quality_gaps: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
+    calendar = _local_tail_calendar()
+    suspensions: dict[str, set[str]] = {}
+    calendar_unknown: list[str] = []
+    pending_symbols: list[str] = []
     for symbol in symbols:
         item = metadata.get(symbol) or {}
         path = store.path_for_repair(symbol)
         stat = path.stat() if path.is_file() else None
         available_start = str(item.get("coverage_start") or item.get("start") or "")
-        available_end = str(item.get("coverage_end") or item.get("end") or "")
+        available_end = str(item.get("end") or item.get("observed_end") or "")
         required = ranges[symbol]
+        observed_end = available_end
+        tail_segments: list[dict[str, str]] = []
+        if available_end and available_end < required["end"]:
+            available_end, tail_segments, unknown, pending = _observed_tail(
+                symbol, available_end, required["end"], calendar, suspensions,
+            )
+            if unknown:
+                calendar_unknown.append(symbol)
+            if pending:
+                pending_symbols.append(symbol)
         bar_quality = _bar_quality_for_range(item, required)
         reason = ""
         if stat is None:
@@ -539,7 +644,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
                 "symbol": symbol, "reason": "active_start_missing",
                 "required": required, "available": [available_start, available_end],
             })
-        elif available_end < required["end"]:
+        elif tail_segments:
             coverage_gaps.append({
                 "symbol": symbol, "reason": "active_end_missing",
                 "required": required, "available": [available_start, available_end],
@@ -567,6 +672,9 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
             "symbol": symbol,
             "required": required,
             "coverage": [available_start, available_end],
+            "observed_end": observed_end,
+            "tail_segments": tail_segments,
+            "tail_pending": symbol in pending_symbols,
             "bytes": int(stat.st_size if stat is not None else 0),
             "mtime_ns": int(stat.st_mtime_ns if stat is not None else 0),
             "content_sha256": str(item.get("content_sha256") or ""),
@@ -596,6 +704,19 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     )
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    if pending_symbols:
+        warnings.append({
+            "code": "DATA_SESSION_PENDING",
+            "message": "请求终点尚未收盘；收盘后重新检查行情覆盖",
+            "context": {"count": len(pending_symbols), "sample": pending_symbols[:20]},
+        })
+    if calendar_unknown:
+        warnings.append({
+            "code": "DATA_CALENDAR_UNAVAILABLE",
+            "message": "尾部区间缺少完整本地官方日历证据；缺口日期仍待核验",
+            "action": "显式数据准备时核验官方日历，不将未知日期视为休市",
+            "context": {"count": len(calendar_unknown), "sample": calendar_unknown[:20]},
+        })
     if universe.lower() == "csi800" and records.empty:
         blockers.append({
             "code": "DATASET_MISSING",
@@ -646,7 +767,8 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         "active_symbol_coverage": round(active_symbol_coverage, 6),
         "research_eligible": research_eligible,
         "production_eligible": bool(
-            state == "ready" and active_symbol_coverage >= 0.98 and not quality_gaps
+            state == "ready" and active_symbol_coverage >= 0.98
+            and not quality_gaps and not pending_symbols
         ),
         "symbols": symbols,
         "symbol_count": len(symbols),
@@ -730,6 +852,8 @@ def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
             health = "critical"
         elif symbol in warmup_symbols:
             health = "warmup"
+        elif row.get("tail_pending"):
+            health = "pending"
         segments: list[dict[str, Any]] = []
         if health == "missing" or not available_start or not available_end:
             segments.append({"start": required_start, "end": required_end, "kind": "critical"})
@@ -755,14 +879,7 @@ def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
                         "kind": "critical",
                     })
             if available_end < required_end:
-                right_start = (
-                    pd.Timestamp(available_end) + pd.offsets.BDay(1)
-                ).strftime("%Y-%m-%d")
-                segments.append({
-                    "start": max(required_start, right_start),
-                    "end": required_end,
-                    "kind": "critical",
-                })
+                segments.extend(row.get("tail_segments") or [])
         missing_sessions = sum(
             sessions(str(segment["start"]), str(segment["end"]))
             for segment in segments
@@ -814,6 +931,7 @@ def dataset_repair_plan(universe: str, start: str, end: str) -> dict[str, Any]:
             "critical": sum(item["health"] == "critical" for item in cells),
             "warmup": sum(item["health"] == "warmup" for item in cells),
             "missing": sum(item["health"] == "missing" for item in cells),
+            "pending": sum(item["health"] == "pending" for item in cells),
         },
         "cells": cells,
         "gaps": gaps,

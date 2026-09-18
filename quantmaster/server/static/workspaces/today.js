@@ -50,21 +50,24 @@ async function loadPage(page) {
   if (['market', 'temperature', 'style', 'rotation', 'industry', 'themes', 'etfs', 'news'].includes(page)) {
     const {loadAdvancedCharts} = await import('../advanced-charts.js');
     const [, module] = await Promise.all([loadAdvancedCharts(), feature(page)]);
+    mountedFeature = module;
     await module?.mount?.(page, context);
     if (['temperature', 'style'].includes(page)) {
       document.getElementById('market-workbench-view')?.setAttribute('hidden', '');
     }
-    mountedFeature = module;
     return;
   }
   if (page === 'decision') {
     const {loadAdvancedCharts} = await import('../advanced-charts.js');
-    await loadAdvancedCharts();
+    const [, candidates] = await Promise.all([loadAdvancedCharts(), feature('candidates')]);
+    mountedFeature = candidates;
+    await candidates?.refresh?.();
+    await context.shell.loadDecisionHistory({force:true});
+    return;
   }
   const module = await feature(page);
-  await module?.mount?.(page);
   mountedFeature = module;
-  if (page === 'decision') await context.shell.loadDecisionHistory();
+  await module?.mount?.();
 }
 
 export async function mount(next) {

@@ -157,14 +157,6 @@ wheels = [
 ]
 
 [[package]]
-name = "backtrader"
-version = "1.9.78.123"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/ef/328c6ec332435f63b3e18febd263686b8ba07e990676a862cc8522ba38f5/backtrader-1.9.78.123-py2.py3-none-any.whl", hash = "sha256:9a07a516b0de9155539a35c56e9404d8711dd7020b3d37b30495e83e1b9d5dfd", size = 419517, upload-time = "2023-04-19T14:13:18.842Z" },
-]
-
-[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2389,9 +2381,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-backtrader = [
-    { name = "backtrader" },
-]
 data = [
     { name = "akshare" },
     { name = "yfinance" },
@@ -2432,7 +2421,6 @@ ui = [
 requires-dist = [
     { name = "akshare", marker = "extra == 'data'", specifier = ">=1.18.94" },
     { name = "apscheduler", specifier = ">=3.11,<4" },
-    { name = "backtrader", marker = "extra == 'backtrader'", specifier = ">=1.9" },
     { name = "beautifulsoup4", specifier = ">=4.12,<5" },
     { name = "build", marker = "extra == 'quality'", specifier = ">=1.5.0" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'quality'", specifier = ">=7.15.4" },
@@ -2467,7 +2455,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.2" },
     { name = "yfinance", marker = "extra == 'data'", specifier = ">=1.6.0" },
 ]
-provides-extras = ["data", "tushare", "ml", "backtrader", "rust", "dev", "quality", "ui", "release"]
+provides-extras = ["data", "tushare", "ml", "rust", "dev", "quality", "ui", "release"]
 
 [[package]]
 name = "requests"
