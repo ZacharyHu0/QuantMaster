@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pandas as pd
@@ -196,6 +196,12 @@ def test_native_board_index_maps_all_public_zhishu_methods(monkeypatch) -> None:
 
 
 def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 8, 8, tzinfo=tz)
+
+    monkeypatch.setattr(free_stockdb, "datetime", Clock)
     source = FreeStockDBSource()
     source._sdk_checked = True
     source._client = None
@@ -222,6 +228,73 @@ def test_http_probe_uses_supported_read_only_daily_contract(monkeypatch) -> None
     assert calls[0][0]["cmd"] == "vals"
     assert calls[0][0]["t"] == "日k"
     assert calls[0][1] is True
+
+
+@pytest.mark.parametrize("sdk", [True, False])
+@pytest.mark.parametrize("records", [
+    [],
+    [{"date": "20260918", "close": float("nan")}],
+    [{"date": "20260918", "close": 0}],
+    [{"date": "20260918", "close": None}],
+    [{"date": "20260931", "close": 10}],
+    [{"date": "20260920", "close": 10}],
+    [{"date": "20260807", "close": 10}],
+])
+def test_probe_rejects_unverifiable_recent_evidence(monkeypatch, sdk, records) -> None:
+    source, _client = _source(monkeypatch)
+    sdk_data = source._sdk_data
+    if not sdk:
+        source._client = None
+    monkeypatch.setattr(source, "_sdk_data", lambda *_args, **_kwargs: records)
+    monkeypatch.setattr(source, "_request", lambda *_args, **_kwargs: records)
+    monkeypatch.setattr(source, "sdk_version", lambda: "test")
+    monkeypatch.setattr(source, "artifact_identity", lambda: SimpleNamespace(to_dict=dict))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 19, tzinfo=tz)
+
+    monkeypatch.setattr(free_stockdb, "datetime", Clock)
+    with pytest.raises(RuntimeError, match=r"最近 14 个自然日.*没有返回可验证记录"):
+        source.probe()
+    if sdk:
+        # A failed recent probe must not disable still-readable older history.
+        monkeypatch.setattr(source, "_sdk_data", sdk_data)
+        assert not source.daily("600519.SH", "2026-08-05", "2026-08-05").empty
+
+
+def test_sdk_probe_reads_history_on_weekend_without_claiming_freshness(monkeypatch) -> None:
+    source, client = _source(monkeypatch)
+    calls = []
+
+    def read(**kwargs):
+        calls.append(kwargs)
+        return [{"code": "600519", "date": "20260918", "close": 10}]
+
+    client.get_data = read
+    monkeypatch.setattr(source, "sdk_version", lambda: "test")
+    monkeypatch.setattr(source, "artifact_identity", lambda: SimpleNamespace(to_dict=dict))
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 19, tzinfo=tz)
+
+    monkeypatch.setattr(free_stockdb, "datetime", Clock)
+    result = source.probe()
+
+    assert result["status"] == result["connectivity_status"] == "ok"
+    assert result["probe_contract"] == "stockdb-sdk-daily-v1"
+    assert result["sample_latest"] == "20260918"
+    assert result["sample_age_days"] == 1
+    assert result["freshness_status"] == "unverified"
+    assert result["observation_window_days"] == 14
+    assert len(calls) == 1
+    assert calls[0]["code"] == "600519"
+    assert calls[0]["start"] == "20260905"
+    assert calls[0]["end"] == "20260919"
+    assert calls[0]["fq"] is None
 
 
 def test_http_probe_rejects_connected_but_unverifiable_payload(monkeypatch) -> None:

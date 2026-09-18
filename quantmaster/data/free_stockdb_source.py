@@ -1348,55 +1348,64 @@ class FreeStockDBSource(DataSource):
         ]
 
     def probe(self) -> dict:
+        # This proves bounded read capability, not current-session completeness.
+        # A calendar-day window also allows weekends/holidays without guessing
+        # which dates should have traded. Historical reads remain independent.
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        start = (now - timedelta(days=14)).strftime("%Y%m%d")
+        end = now.strftime("%Y%m%d")
         client = self._sdk_client()
         if client is not None:
-            today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
-            self._sdk_data("000001", today, today, "1d", fq=None, probe=True)
-            return {
-                "status": "ok",
+            payload = self._sdk_data("600519", start, end, "1d", fq=None, probe=True)
+            details = {
                 "engine": "stock_sdk",
-                "sdk_path": self.sdk_path,
-                "service_url": self.base_url.rstrip("/"),
+                "probe_contract": "stockdb-sdk-daily-v1",
                 "sdk_version": self.sdk_version(),
                 "artifact": self.artifact_identity().to_dict(),
             }
-        now = datetime.now(ZoneInfo("Asia/Shanghai"))
-        start = (now - timedelta(days=45)).strftime("%Y%m%d")
-        end = now.strftime("%Y%m%d")
-        payload = self._request(
-            {
-                "cmd": "vals",
-                "t": "日k",
-                "k1": "key:600519",
-                "k2": f"fwd:{start},{end}",
-            },
-            probe=True,
-        )
+        else:
+            payload = self._request(
+                {
+                    "cmd": "vals",
+                    "t": "日k",
+                    "k1": "key:600519",
+                    "k2": f"fwd:{start},{end}",
+                },
+                probe=True,
+            )
+            details = {
+                "engine": "http-compatible",
+                "probe_contract": "stockdb-http-vals-daily-v1",
+            }
         records = self._dictionary_rows(
-            payload, contract="free-stockdb HTTP vals probe",
+            payload, contract="free-stockdb daily probe",
         )
         valid = []
         for item in records:
-            raw_close = item.get("close")
-            if raw_close is None:
-                continue
+            stamp = str(item.get("date") or "")
             try:
-                close = float(raw_close)
+                if len(stamp) != 8 or not start <= stamp <= end:
+                    continue
+                datetime.strptime(stamp, "%Y%m%d")
+                close = float(item.get("close"))
             except (TypeError, ValueError):
                 continue
-            if str(item.get("date") or "")[:8].isdigit() and math.isfinite(close) and close > 0:
+            if math.isfinite(close) and close > 0:
                 valid.append(item)
         if not valid:
-            raise RuntimeError("本地 StockDB 可连接，但只读日线探针没有返回可验证记录")
+            raise RuntimeError("本地 StockDB 可连接，但最近 14 个自然日的只读日线探针没有返回可验证记录")
         latest = max(str(item["date"])[:8] for item in valid)
         return {
+            **details,
             "status": "ok",
-            "engine": "http-compatible",
+            "connectivity_status": "ok",
+            "freshness_status": "unverified",
             "sdk_path": self.sdk_path,
             "service_url": self.base_url.rstrip("/"),
-            "probe_contract": "stockdb-http-vals-daily-v1",
+            "observation_window_days": 14,
             "sample_symbol": "600519.SH",
             "sample_latest": latest,
+            "sample_age_days": (now.date() - datetime.strptime(latest, "%Y%m%d").date()).days,
             "sample_rows": len(valid),
         }
 
