@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from quantmaster.backtest.paper_accounts import (
+    PROCESS_BLOCKING_STATUSES,
     PaperService,
     PaperStore,
     get_paper_service,
@@ -157,6 +158,15 @@ class PaperAutomationWorker:
                         expected_signal_date=claim_date,
                         lease_guard=lease_current,
                     )
+                    if result.get("status") in PROCESS_BLOCKING_STATUSES:
+                        # A successful worker call is not a completed trading
+                        # cycle. Keep it retryable so a later data acceptance
+                        # can resume the same orders instead of hiding them.
+                        reason = (
+                            "待撮合行情证据尚未满足" if result["status"] == "waiting_market_data"
+                            else "自动撮合交易条件尚未满足"
+                        )
+                        raise RuntimeError(reason + "，保留原订单等待重试")
                     completed = lease_alive.is_set() and self.service.store.complete_auto_run(
                         claim_date,
                         account_id,

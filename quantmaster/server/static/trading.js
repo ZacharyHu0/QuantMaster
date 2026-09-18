@@ -860,13 +860,17 @@ const tradingFeature = (() => {
     return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('zh-CN', {hour12: false});
   }
 
-  function renderAutomation(automation) {
+  function renderAutomation(automation, account, cycles = []) {
     if (!automation) return `<section class="paper-task-panel" aria-labelledby="paper-task-title">
       <div><span class="paper-kicker">后台撮合任务</span><h3 id="paper-task-title">尚无运行记录</h3></div>
       <p>订单业务状态仍以下方记录为准；未启动后台任务不代表订单卡死。</p></section>`;
     const status = automation.task_status || automation.status || 'idle';
     const diagnostic = automation.diagnostic_code || automation.failure_code || '';
     const isProblem = ['stalled', 'orphaned', 'manual_recovery'].includes(status) || automation.health === 'needs_manual_recovery';
+    const canRetry = account.status !== 'archived' && account.mode === 'auto' && (
+      ['failed', 'manual_recovery'].includes(automation.status) ||
+      (automation.status === 'completed' && cycles.some(cycle => ['confirmed', 'blocked'].includes(cycle.status)))
+    );
     return `<section class="paper-task-panel" data-health="${isProblem ? 'problem' : 'normal'}" aria-labelledby="paper-task-title">
       <div class="paper-task-heading"><div><span class="paper-kicker">后台撮合任务</span><h3 id="paper-task-title">${escapeHtml(statusLabel[status] || status)}</h3></div><span class="trading-status ${escapeHtml(status)}">${escapeHtml(statusLabel[status] || status)}</span></div>
       <dl class="paper-task-facts">
@@ -876,6 +880,7 @@ const tradingFeature = (() => {
         <div><dt>下次尝试</dt><dd>${escapeHtml(timeValue(automation.next_attempt_at || automation.next_retry_at))}</dd></div>
       </dl>
       <p>${escapeHtml(automation.last_progress || automation.last_error || '任务没有报告异常。')}${diagnostic ? ` <code>${escapeHtml(diagnostic)}</code>` : ''}</p>
+      ${canRetry ? '<button class="trading-secondary" type="button" data-paper-retry>恢复并重试</button>' : ''}
       ${automation.recovered_lease ? '<small>本次已安全接管过期租约，并从上次进度继续。</small>' : ''}
     </section>`;
   }
@@ -981,12 +986,13 @@ const tradingFeature = (() => {
     pause.hidden = account.status === 'archived';
     document.getElementById('paper-hide').hidden = account.status === 'archived';
     document.getElementById('paper-restore').hidden = account.status !== 'archived';
-    document.getElementById('paper-permanent-delete').hidden = account.status !== 'archived';
+    document.getElementById('paper-permanent-delete').hidden = false;
     const edit = document.getElementById('paper-edit');
     edit.disabled = account.status === 'archived';
     paperOut.innerHTML = '<div class="trading-skeleton"></div>';
     try {
       const payload = await api(`/api/v1/paper/accounts/${accountId}/report`, {cache: 'no-store'});
+      if (paperState.activeId !== accountId) return;
       paperState.activeReport = payload;
       account = payload.account || account;
       const index = paperState.accounts.findIndex(item => item.id === accountId);
@@ -1000,10 +1006,11 @@ const tradingFeature = (() => {
       document.getElementById('paper-propose').disabled = account.status !== 'active' || integrityBlocked;
       document.getElementById('paper-process').disabled = account.status !== 'active' || integrityBlocked;
       edit.disabled = account.status === 'archived' || integrityBlocked || !account.management?.strategy_editable;
-      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderAutomation(payload.automation)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
+      paperOut.innerHTML = `${renderWarnings(payload.warnings)}${renderAutomation(payload.automation, account, payload.cycles)}${renderStrategyPanel(account)}${renderPaperSummary(payload.report)}
         <div class="trading-history-head"><h3>订单周期</h3><span>${account.mode === 'auto' ? '每日自动检查；信号后的下一交易日开盘撮合' : '确认只会排队，下一可用交易日开盘才撮合'}</span></div>${renderCycles(payload.cycles)}`;
       drawPaperNav(payload);
     } catch (error) {
+      if (paperState.activeId !== accountId) return;
       renderError(paperOut, error, '账户报告读取失败');
     }
   }
@@ -1310,6 +1317,19 @@ const tradingFeature = (() => {
   });
 
   paperOut?.addEventListener('click', async event => {
+    const retry = event.target.closest('[data-paper-retry]');
+    if (retry) {
+      const accountId = paperState.activeId;
+      setButtonBusy(retry, true, '正在恢复…');
+      try {
+        await mutate(`/api/v1/paper/accounts/${accountId}`, 'PATCH', {status: 'active'});
+        await loadPaperAccounts(false);
+        await openPaperAccount(accountId);
+        paperStatus.innerHTML = '<div class="trading-success">已恢复并提交重试；行情和成交核验仍需通过检查。</div>';
+      } catch (error) { renderError(paperStatus, error, '恢复重试失败'); }
+      finally { setButtonBusy(retry, false); }
+      return;
+    }
     const button = event.target.closest('[data-cycle-confirm]');
     if (!button) return;
     const cycleId = button.closest('[data-cycle-id]').dataset.cycleId;
