@@ -3509,9 +3509,6 @@ async function loadDecisionHistory({force = false} = {}) {
   const out = document.getElementById('decision-out');
   out.innerHTML = '<div class="trading-skeleton" aria-label="正在读取历史决策"></div>';
   try {
-    const params = new URLSearchParams();
-    if (universe) params.set('universe', universe);
-    if (profile) params.set('profile', profile);
     const data = await api(`/api/v1/research/selection/history?${params}`, {cache:'no-store'});
     if (request !== decisionViewRequest) return;
     decisionHistoryKey = key;

@@ -115,6 +115,7 @@ function routeContext(query = '') {
     board, asOf,
     category: params.get('category') || '',
     code: params.get('code') || '',
+    focus: params.get('focus') || '',
     method: params.get('method') || '',
     window: params.get('window') || '',
   };

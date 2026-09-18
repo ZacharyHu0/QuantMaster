@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 import pytest
@@ -874,6 +874,53 @@ def test_market_subpages_can_return_to_panorama_without_refresh(
         browser.close()
 
 
+def test_market_search_does_not_remain_hidden_after_returning_to_panorama(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        _install_market_workbench_routes(page)
+        page.goto(f"{url}/#today/market")
+        page.locator("[data-market-board]").first.wait_for(state="visible")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(2)
+
+        page.locator("[data-market-query]").fill("银行")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(1)
+        page.get_by_role("tab", name="行情", exact=True).click()
+        page.locator("#market-quotes-view").wait_for(state="visible")
+        page.get_by_role("tab", name="市场全景", exact=True).click()
+
+        page.locator(".market-workbench").wait_for(state="visible")
+        playwright_sync.expect(page.locator("[data-market-query]")).to_have_value("")
+        playwright_sync.expect(page.locator("[data-market-board]")).to_have_count(2)
+        browser.close()
+
+
+def test_style_refresh_recovery_reports_result_in_the_visible_page(live_server):
+    url, _ = live_server
+    job = {
+        "id": "style-refresh", "status": "completed", "progress": 100,
+        "phase": "完成", "result": {"outcome": "updated", "as_of": "2026-08-17"},
+    }
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.add_init_script(
+            "sessionStorage.setItem('quantmaster.rotation.active-job.v1', "
+            "JSON.stringify({id:'style-refresh', scope:'market'}))"
+        )
+        page.route("**/api/v1/jobs/style-refresh", lambda route: route.fulfill(json=job))
+        page.goto(f"{url}/#today/style")
+
+        result = page.locator("#market-style-content [data-rotation-job-result]")
+        playwright_sync.expect(result).to_contain_text("快照已更新")
+        playwright_sync.expect(result).to_contain_text("2026-08-17")
+        playwright_sync.expect(
+            page.locator("#market-temperature-content [data-rotation-job-result]")
+        ).to_have_count(0)
+        browser.close()
+
+
 def _legacy_today_uses_native_canvas_without_echarts_across_themes(live_server):
     url, _ = live_server
     market = {
@@ -1199,6 +1246,72 @@ def test_lab_action_sizes_wait_for_motion_and_reject_undersized_css(theme):
         ))
         with pytest.raises(AssertionError, match=r"43\.5"):
             _assert_lab_action_sizes(page)
+        browser.close()
+
+
+def test_today_deep_links_mount_their_page_dependencies(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        requested: list[str] = []
+        page.on("request", lambda request: requested.append(urlsplit(request.url).path))
+        _install_market_workbench_routes(page)
+
+        catalog = {
+            "universes": [
+                {
+                    "name": "demo", "count": 1, "readonly": True, "kind": "fixed",
+                    "source": "builtin", "research_quality": "sandbox", "references": [],
+                },
+                {
+                    "name": "watchlist", "count": 1, "readonly": False, "kind": "fixed",
+                    "source": "local", "research_quality": "sandbox", "references": [],
+                },
+            ],
+            "index_presets": [],
+            "conflicts": [],
+        }
+        def serve_universes(route):
+            path = urlsplit(route.request.url).path
+            name = path.rsplit("/", 1)[-1]
+            payload = catalog if name == "universes" else {
+                "name": name, "symbols": ["000001.SZ"],
+                "members": [{"symbol": "000001.SZ", "name": "平安银行"}],
+                "count": 1, "readonly": name == "demo", "kind": "fixed",
+                "source": "builtin" if name == "demo" else "local",
+                "research_quality": "sandbox", "references": [],
+            }
+            route.fulfill(content_type="application/json", body=json.dumps(payload))
+
+        page.route("**/api/v1/settings/universes*", serve_universes)
+
+        page.goto(f"{url}/#today/after-close")
+        page.locator(".after-close-workbench").wait_for(state="visible")
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource').some(entry => "
+            "entry.name.includes('/api/v1/after-close/snapshots/'))"
+        )
+        assert "/api/v1/after-close/snapshots/latest" in requested
+        assert "/api/v1/after-close/snapshots/after-close" not in requested
+
+        page.goto(f"{url}/#today/decision")
+        candidate = page.locator("#decision-form [data-candidate-select]")
+        playwright_sync.expect(candidate.locator("option")).to_have_count(2)
+        page.locator("#decision-form [data-candidate-view]").click()
+        page.wait_for_url(re.compile(r"#today/candidates$"))
+        playwright_sync.expect(page.locator("#candidate-workspace")).to_contain_text("demo")
+        page.get_by_role("tab", name="决策", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/decision$"))
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource').filter(entry => "
+            "entry.name.includes('/api/v1/research/selection/history?')).length >= 2"
+        )
+
+        page.goto(f"{url}/#today/quotes?focus=ashare-fear-greed")
+        page.locator("#market-ashare-fear-greed").wait_for(state="visible")
+        page.wait_for_function("() => window.scrollY > 0")
+        assert page.url.endswith("#today/quotes?focus=ashare-fear-greed")
         browser.close()
 
 
@@ -1630,6 +1743,78 @@ def test_factor_robustness_deep_link_renders_frozen_charts_and_tables(live_serve
         browser.close()
 
 
+def test_candidate_revisit_refreshes_catalog_without_overwriting_dirty_draft(live_server):
+    url, _ = live_server
+    catalog_version = [1]
+    catalog_calls = []
+    detail_calls = []
+    universes = {
+        "alpha": {
+            "name": "alpha", "kind": "fixed", "readonly": False,
+            "source": "custom", "research_quality": "sandbox", "references": [],
+            "symbols": ["600519.SH", "000001.SZ"], "count": 2,
+            "members": [
+                {"symbol": "600519.SH", "name": "贵州茅台", "exchange": "SH", "asset_type": "stock"},
+                {"symbol": "000001.SZ", "name": "平安银行", "exchange": "SZ", "asset_type": "stock"},
+            ],
+        },
+        "beta": {
+            "name": "beta", "kind": "fixed", "readonly": False,
+            "source": "custom", "research_quality": "sandbox", "references": [],
+            "symbols": ["300750.SZ"], "count": 1,
+            "members": [
+                {"symbol": "300750.SZ", "name": "宁德时代", "exchange": "SZ", "asset_type": "stock"},
+            ],
+        },
+    }
+
+    def universe_handler(route):
+        path = urlsplit(route.request.url).path
+        if path == "/api/v1/settings/universes":
+            catalog_calls.append(catalog_version[0])
+            names = ["alpha"] if catalog_version[0] == 1 else ["alpha", "beta"]
+            route.fulfill(json={
+                "universes": [
+                    {"name": name, "kind": "fixed", "readonly": False, "count": universes[name]["count"]}
+                    for name in names
+                ],
+                "index_presets": [], "conflicts": [],
+            })
+            return
+        name = unquote(path.rsplit("/", 1)[-1])
+        detail_calls.append(name)
+        route.fulfill(json=universes[name])
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/settings/universes**", universe_handler)
+        page.goto(f"{url}/#today/candidates")
+        page.get_by_role("heading", name="alpha", exact=True).wait_for()
+        assert catalog_calls == [1]
+        assert detail_calls == ["alpha"]
+
+        catalog_version[0] = 2
+        page.evaluate("location.hash = '#today/decision'")
+        page.locator("#tab-decision").wait_for(state="visible")
+        page.locator('#decision-form [data-candidate-view]').click()
+        page.locator('[data-candidate-name="beta"]').wait_for(state="visible")
+        assert catalog_calls == [1, 2, 2]
+        assert detail_calls == ["alpha", "alpha"]
+
+        page.get_by_role("button", name="从候选移除 000001.SZ", exact=True).click()
+        page.get_by_text("有尚未生效的更改", exact=True).wait_for()
+        page.evaluate("location.hash = '#today/news'")
+        page.locator("#tab-news").wait_for(state="visible")
+        page.evaluate("location.hash = '#today/candidates'")
+        page.locator("#tab-candidates").wait_for(state="visible")
+        playwright_sync.expect(page.locator(".candidate-member-symbol")).to_have_text(["600519.SH"])
+        playwright_sync.expect(page.get_by_text("有尚未生效的更改", exact=True)).to_be_visible()
+        assert catalog_calls == [1, 2, 2]
+        assert detail_calls == ["alpha", "alpha"]
+        browser.close()
+
+
 def test_settings_candidate_and_csv_flow(live_server, tmp_path):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
@@ -1883,7 +2068,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator(".candidate-detail").wait_for()
         page.locator("#candidate-new").click()
         preset_buttons = page.locator("[data-candidate-index-preset]")
-        assert preset_buttons.count() == 9
+        playwright_sync.expect(preset_buttons).to_have_count(9)
         assert preset_buttons.nth(0).get_attribute("data-candidate-index-preset") == "000688.SH"
         assert "科创50" in preset_buttons.nth(0).inner_text()
         assert "中证1000" in preset_buttons.nth(8).inner_text()
@@ -1955,7 +2140,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
 
         page.set_viewport_size({"width": 390, "height": 844})
         page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
-        assert page.locator("#candidate-mobile-select").is_visible()
+        playwright_sync.expect(page.locator("#candidate-mobile-select")).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="设置", exact=True).click()
         mobile_settings = page.locator("#settings-section-select")
@@ -2385,6 +2570,8 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         "holdings": [],
     }
     history_calls = []
+    def decision_history_handler(route):
+        route.fulfill(json={"snapshots": []})
 
     def history_handler(route):
         request_url = route.request.url
@@ -2430,9 +2617,23 @@ def test_decision_pick_expands_inline_and_toggles_asset_lists(live_server):
         )
         page.route("**/api/v1/market/history/**", history_handler)
         page.route("**/api/v1/portfolio/lists**", asset_handler)
+        page.route("**/api/v1/research/selection/history?*", decision_history_handler)
         page.goto(url)
-        page.get_by_role("tab", name="决策", exact=True).click()
+        with page.expect_request(
+            lambda request: "/research/selection/history?" in request.url,
+        ) as initial_history:
+            page.get_by_role("tab", name="决策", exact=True).click()
         page.wait_for_url(re.compile(r"#today/decision$"))
+        initial_query = parse_qs(urlsplit(initial_history.value.url).query)
+        assert initial_query["horizon"] == ["3"]
+        with page.expect_request(
+            lambda request: "/research/selection/history?" in request.url,
+        ) as changed_history:
+            page.locator('#decision-form select[name="horizon"]').select_option("5")
+        changed_query = parse_qs(urlsplit(changed_history.value.url).query)
+        assert changed_query["horizon"] == ["5"]
+        assert changed_query["universe"] == ["demo"]
+        assert changed_query["profile"] == ["risk_adjusted"]
         page.wait_for_function("() => typeof window.mkChart === 'function'")
         page.evaluate(
             """data => {
@@ -3722,6 +3923,10 @@ def test_industry_cycle_level_tabs_chart_and_compact_layout(live_server):
         playwright_sync.expect(matrix).to_contain_text("一级成长")
         playwright_sync.expect(matrix).not_to_contain_text("二级软件")
         assert matrix.bounding_box()["y"] < 900
+        page.locator("[data-rotation-industry-sort]").select_option("weak")
+        playwright_sync.expect(
+            matrix.locator("tbody tr td:first-child button").first
+        ).to_have_text("一级价值")
 
         l1_tab.focus()
         page.keyboard.press("ArrowRight")
