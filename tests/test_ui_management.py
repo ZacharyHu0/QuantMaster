@@ -1144,6 +1144,72 @@ def test_lab_action_sizes_wait_for_motion_and_reject_undersized_css(theme):
         browser.close()
 
 
+def test_today_deep_links_mount_their_page_dependencies(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        requested: list[str] = []
+        page.on("request", lambda request: requested.append(urlsplit(request.url).path))
+        _install_market_workbench_routes(page)
+
+        catalog = {
+            "universes": [
+                {
+                    "name": "demo", "count": 1, "readonly": True, "kind": "fixed",
+                    "source": "builtin", "research_quality": "sandbox", "references": [],
+                },
+                {
+                    "name": "watchlist", "count": 1, "readonly": False, "kind": "fixed",
+                    "source": "local", "research_quality": "sandbox", "references": [],
+                },
+            ],
+            "index_presets": [],
+            "conflicts": [],
+        }
+        def serve_universes(route):
+            path = urlsplit(route.request.url).path
+            name = path.rsplit("/", 1)[-1]
+            payload = catalog if name == "universes" else {
+                "name": name, "symbols": ["000001.SZ"],
+                "members": [{"symbol": "000001.SZ", "name": "平安银行"}],
+                "count": 1, "readonly": name == "demo", "kind": "fixed",
+                "source": "builtin" if name == "demo" else "local",
+                "research_quality": "sandbox", "references": [],
+            }
+            route.fulfill(content_type="application/json", body=json.dumps(payload))
+
+        page.route("**/api/v1/settings/universes*", serve_universes)
+
+        page.goto(f"{url}/#today/after-close")
+        page.locator(".after-close-workbench").wait_for(state="visible")
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource').some(entry => "
+            "entry.name.includes('/api/v1/after-close/snapshots/'))"
+        )
+        assert "/api/v1/after-close/snapshots/latest" in requested
+        assert "/api/v1/after-close/snapshots/after-close" not in requested
+
+        page.goto(f"{url}/#today/decision")
+        candidate = page.locator("#decision-form [data-candidate-select]")
+        playwright_sync.expect(candidate.locator("option")).to_have_count(2)
+        page.locator("#decision-form [data-candidate-view]").click()
+        page.wait_for_url(re.compile(r"#today/candidates$"))
+        playwright_sync.expect(page.locator("#candidate-workspace")).to_contain_text("demo")
+        page.get_by_role("tab", name="决策", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/decision$"))
+        page.wait_for_function(
+            "() => performance.getEntriesByType('resource').filter(entry => "
+            "entry.name.includes('/api/v1/research/selection/history?')).length >= 2"
+        )
+
+        page.goto(f"{url}/#today/quotes?focus=ashare-fear-greed")
+        page.locator("#market-ashare-fear-greed").wait_for(state="visible")
+        page.wait_for_function("() => window.scrollY > 0")
+        assert page.url.endswith("#today/quotes?focus=ashare-fear-greed")
+        browser.close()
+
+
 def test_workspace_loader_owns_lazy_journeys_and_reuses_modules(live_server):
     url, _ = live_server
     with playwright_sync.sync_playwright() as manager:
