@@ -2068,7 +2068,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
         page.locator(".candidate-detail").wait_for()
         page.locator("#candidate-new").click()
         preset_buttons = page.locator("[data-candidate-index-preset]")
-        assert preset_buttons.count() == 9
+        playwright_sync.expect(preset_buttons).to_have_count(9)
         assert preset_buttons.nth(0).get_attribute("data-candidate-index-preset") == "000688.SH"
         assert "科创50" in preset_buttons.nth(0).inner_text()
         assert "中证1000" in preset_buttons.nth(8).inner_text()
@@ -2140,7 +2140,7 @@ def test_settings_candidate_and_csv_flow(live_server, tmp_path):
 
         page.set_viewport_size({"width": 390, "height": 844})
         page.locator('header [data-tab="candidates"]').evaluate("element => element.click()")
-        assert page.locator("#candidate-mobile-select").is_visible()
+        playwright_sync.expect(page.locator("#candidate-mobile-select")).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
         page.get_by_role("button", name="设置", exact=True).click()
         mobile_settings = page.locator("#settings-section-select")
