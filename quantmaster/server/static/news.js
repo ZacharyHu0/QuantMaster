@@ -18,6 +18,8 @@ const newsFeature = (() => {
     annotationBusy: false,
     queue: null,
     eventFocusDays: 7,
+    sectorDays: 30,
+    sectorRequest: 0,
     eventFocusLoadedDays: null,
     eventFocusRequest: 0,
     eventFocusRetryDays: 7,
@@ -498,7 +500,6 @@ const newsFeature = (() => {
     const series = data.sentiment_series || [];
     const scale = data.display_scale || {};
     const marketScale = Math.max(10,Number(scale.market_abs_max) || 20);
-    const sectorScale = Math.max(10,Number(scale.sector_abs_max) || 20);
     const market = data.market_sentiment || {};
     const hasMarket = Number(market.event_count || 0) > 0;
     const current = hasMarket ? Number(market.score || 0) : null;
@@ -514,6 +515,10 @@ const newsFeature = (() => {
     const marker = document.getElementById('news-factor-marker');
     marker.style.left = `${current === null ? 50 : Math.max(0, Math.min(100, (current + marketScale) / (2 * marketScale) * 100))}%`;
     factorChart(series,marketScale);
+  }
+
+  function renderSectorScores(data) {
+    const sectorScale = Math.max(10, Number(data.display_scale?.sector_abs_max) || 20);
     const sectors = data.sector_scores || [];
     document.getElementById('news-sector-scale').textContent = `自适应 ±${sectorScale}`;
     document.getElementById('news-sector-scores').innerHTML = sectors.length ? sectors.map(item => {
@@ -526,7 +531,39 @@ const newsFeature = (() => {
         <i><b class="${direction}" style="--sector-magnitude:${magnitude}"></b></i>
         <em class="${direction}">${signed}</em>
       </div>`;
-    }).join('') : '<span class="news-muted">暂无达到质量门槛的板块标注</span>';
+    }).join('') : `<span class="news-muted">过去 ${state.sectorDays} 日暂无达到质量门槛的板块标注</span>`;
+    document.getElementById('news-sector-meta').textContent =
+      `过去 ${state.sectorDays} 日 · ${Number(data.halflife_days || 3)} 日半衰期 · 小样本向中性收缩`;
+  }
+
+  async function loadSectorScores(cachedStats = null) {
+    const days = state.sectorDays;
+    const requestId = ++state.sectorRequest;
+    const target = document.getElementById('news-sector-scores');
+    const feedback = document.getElementById('news-sector-feedback');
+    document.querySelectorAll('[data-news-sector-days]').forEach(button => {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.newsSectorDays) === days));
+    });
+    target.setAttribute('aria-busy', 'true');
+    target.innerHTML = '<span class="news-muted">正在加载板块情绪…</span>';
+    document.getElementById('news-sector-scale').textContent = '加载中';
+    document.getElementById('news-sector-meta').textContent = `过去 ${days} 日`;
+    feedback.hidden = true;
+    try {
+      const data = Number(cachedStats?.days) === days
+        ? cachedStats : await api(`/api/v1/news/stats?days=${days}`);
+      if (requestId !== state.sectorRequest) return;
+      if (Number(data.days) !== days) throw new Error('板块情绪返回了错误的时间窗口');
+      renderSectorScores(data);
+    } catch (error) {
+      if (requestId !== state.sectorRequest) return;
+      target.innerHTML = '<span class="news-muted">板块情绪暂不可用</span>';
+      document.getElementById('news-sector-scale').textContent = '暂无数据';
+      feedback.querySelector('span').textContent = `${days} 日数据加载失败，请重试。`;
+      feedback.hidden = false;
+    } finally {
+      if (requestId === state.sectorRequest) target.removeAttribute('aria-busy');
+    }
   }
 
   function setEventFocusSelection(days) {
@@ -589,9 +626,11 @@ const newsFeature = (() => {
     try {
       const data = await api('/api/v1/news/stats?days=30');
       renderStats(data);
+      await loadSectorScores(data);
       return data;
     } catch (error) {
       report('量化摘要读取失败', error);
+      await loadSectorScores();
       return null;
     }
   }
@@ -877,6 +916,13 @@ const newsFeature = (() => {
 
   filterForm.onsubmit = event => { event.preventDefault(); loadFeed(); };
   document.getElementById('news-reset').onclick = () => { filterForm.reset(); loadFeed(); };
+  document.getElementById('news-sector-window').onclick = event => {
+    const button = event.target.closest('[data-news-sector-days]');
+    if (!button) return;
+    state.sectorDays = Number(button.dataset.newsSectorDays);
+    loadSectorScores();
+  };
+  document.querySelector('#news-sector-feedback button').onclick = () => loadSectorScores();
   document.getElementById('news-focus-window').onclick = event => {
     const button = event.target.closest('[data-news-focus-days]');
     if (button) loadEventFocus(Number(button.dataset.newsFocusDays));

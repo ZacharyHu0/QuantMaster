@@ -540,7 +540,7 @@ WITH base AS (
       FROM selected
 ), sectors AS (
     SELECT d.sector AS item_key,SUM(s.sentiment*s.current_weight) AS weighted_score,
-           SUM(s.current_weight) AS total_weight,COUNT(*) AS event_count,
+           SUM(s.quality_weight) AS total_weight,COUNT(*) AS event_count,
            SUM(s.sentiment>0.15) AS positive,SUM(s.sentiment< -0.15) AS negative
       FROM selected s JOIN news_analysis_sectors d ON d.news_id=s.id
      GROUP BY d.sector

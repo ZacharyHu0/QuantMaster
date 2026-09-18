@@ -80,7 +80,7 @@ SECTOR_ALIASES = {
 }
 
 _DASHBOARD_WINDOWS = (1, 3, 7, 30)
-_DASHBOARD_ALGORITHM_VERSION = "QM_NEWS_DASHBOARD_V1"
+_DASHBOARD_ALGORITHM_VERSION = "QM_NEWS_DASHBOARD_V2"
 
 
 def _id_chunks(values: list[int], size: int = 400) -> Iterator[list[int]]:
@@ -373,6 +373,10 @@ class NewsStore:
             ).fetchone()
         if row is None:
             raise FileNotFoundError(f"资讯 {kind}/{window_days} 尚未物化")
+        if str(row["snapshot_id"]) != self._dashboard_snapshot_id(
+            kind, window_days, str(row["input_fingerprint"]), str(row["payload_json"]),
+        ):
+            raise FileNotFoundError(f"资讯 {kind}/{window_days} 物化算法已过期，等待资讯刷新")
         try:
             payload = json.loads(str(row["payload_json"]))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -1530,10 +1534,13 @@ class NewsStore:
                     "event_count": event_count,
                 }
             elif item_type == "sector":
+                # Keep age decay in the numerator: decaying both sides cancels
+                # time for unchanged evidence. One neutral unit tempers sparse
+                # samples; quality weights remain frozen at analysis time.
                 sector_scores.append({
                     "sector": item_key,
                     **_sentiment_snapshot_from_totals(
-                        weighted_score, total_weight, event_count,
+                        weighted_score, total_weight + 1.0, event_count,
                     ),
                     "positive": int(row["positive"] or 0),
                     "negative": int(row["negative"] or 0),
@@ -1542,6 +1549,7 @@ class NewsStore:
                 symbol_counts[item_key] = event_count
         series.sort(key=lambda item: item[0])
         data: dict[str, Any] = dict(counts) if counts else {}
+        data["days"] = max(1, min(days, 3650))
         data["queue"] = {
             key: int((queue_counts[key] if queue_counts else 0) or 0)
             for key in (

@@ -642,17 +642,49 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     assert stats["market_sentiment"]["label"] == "中性"
     assert stats["market_sentiment"]["event_count"] == 3
     sectors = {item["sector"]: item for item in stats["sector_scores"]}
-    assert sectors["电子"]["score"] == pytest.approx(30.0, abs=0.02)
+    assert sectors["电子"]["score"] == pytest.approx(20.0, abs=0.02)
     assert sectors["电子"]["event_count"] == 2
     assert sectors["电子"]["positive"] == 1
-    assert sectors["银行"]["score"] == pytest.approx(-50.0, abs=0.02)
-    assert sectors["银行"]["label"] == "明显偏空"
+    assert sectors["银行"]["score"] == pytest.approx(-25.0, abs=0.02)
+    assert sectors["银行"]["label"] == "偏空"
     assert stats["display_scale"] == {
         "mode": "adaptive_bucket_v1",
         "theoretical_abs_max": 100,
         "market_abs_max": 10,
-        "sector_abs_max": 60,
+        "sector_abs_max": 40,
     }
+
+
+def test_sector_scores_temper_sparse_evidence_and_decay_with_time(tmp_path, monkeypatch):
+    store = NewsStore(tmp_path / "news.sqlite")
+    published = time.time() - 60
+    store.save([
+        official_news(
+            store, title=title, content=title, sectors=[sector],
+            sentiment=sentiment, confidence=1, importance_score=100,
+            analysis_status="complete", published_at_epoch=published,
+        )
+        for title, sector, sentiment in [
+            ("单条军工利好", "国防军工", 0.65),
+            ("电子需求", "电子", 0.6),
+            ("电子订单", "电子", 0.6),
+            ("银行压力", "银行", -0.65),
+        ]
+    ])
+    now = time.time() + 1
+    monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
+    before = store.stats(30)
+    scores = {row["sector"]: row for row in before["sector_scores"]}
+    assert before["sector_scores"][0]["sector"] == "电子"
+    assert scores["国防军工"]["score"] == pytest.approx(32.5, abs=0.02)
+    assert scores["银行"]["score"] == pytest.approx(-32.5, abs=0.02)
+    now += before["halflife_days"] * 86400
+    after = store.stats(30)
+    for row in after["sector_scores"]:
+        assert row["score"] == pytest.approx(scores[row["sector"]]["score"] / 2, abs=0.01)
+        assert row["event_count"] == scores[row["sector"]]["event_count"]
+    now += 31 * 86400
+    assert store.stats(30)["sector_scores"] == []
 
 
 def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
@@ -676,6 +708,30 @@ def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
 
     assert stats["total"] == 3
     assert stats["ingested_24h"] == 2
+
+
+def test_sector_windows_publish_matching_scores_and_counts(tmp_path, monkeypatch):
+    now = 2_000_000_000.0
+    monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
+    store = NewsStore(tmp_path / "news.sqlite")
+    ages = [1, 3, 7, 30, 30 + 1 / 86400]
+    store.save([
+        official_news(
+            store, title=f"窗口证据 {age}", content=f"窗口正文 {age}",
+            sectors=["电子"], sentiment=0.6, confidence=1, importance_score=100,
+            analysis_status="complete", published_at_epoch=now - age * 86400,
+        )
+        for age in ages
+    ])
+    store.publish_dashboard_materializations()
+    reader = NewsStore(store.path, read_only=True)
+    for count, days in enumerate((1, 3, 7, 30), 1):
+        data = reader.stats(days)
+        sector = data["sector_scores"][0]
+        assert data["days"] == days
+        assert sector["event_count"] == sector["positive"] == count
+        expected = 60 * sum(2 ** (-age / data["halflife_days"]) for age in ages[:count]) / (count + 1)
+        assert sector["score"] == pytest.approx(expected, abs=0.01)
 
 
 def test_news_stats_exposes_global_analysis_queue_counts(tmp_path):
@@ -1632,6 +1688,10 @@ def test_news_api_csrf_and_ui_contract():
     assert '<svg id="news-factor-chart"' not in page
     assert 'id="news-market-label"' in page
     assert 'id="news-sector-scores"' in page
+    assert 'id="news-sector-window"' in page
+    assert page.count('data-news-sector-days=') == 4
+    assert 'data-news-sector-days="30" aria-pressed="true"' in page
+    assert 'id="news-sector-feedback"' in page
     assert 'id="news-annotation-progress"' in page
     assert 'id="news-retry-failed"' in page
     assert 'id="news-pending-action-count"' in page
@@ -1662,6 +1722,10 @@ def test_news_api_csrf_and_ui_contract():
     assert "requestId !== state.eventFocusRequest" in chart_source
     assert "button.dataset.newsFocusDays" in chart_source
     assert "loadEventFocus(state.eventFocusRetryDays)" in chart_source
+    assert "`/api/v1/news/stats?days=${days}`" in chart_source
+    assert "requestId !== state.sectorRequest" in chart_source
+    assert "button.dataset.newsSectorDays" in chart_source
+    assert "loadSectorScores();" in chart_source
     assert "过去 ${days} 日暂无达到质量门槛的标的提及" in chart_source
     assert "--news-scroll-edge: 12px" in news_styles
     assert '.news-focus-window button[aria-pressed="true"]::after' in news_styles
@@ -2084,8 +2148,21 @@ def test_news_read_only_dashboard_uses_published_materialization(tmp_path, monke
     focus = reader.event_focus(7)
 
     assert stats["meta"]["snapshot_id"] == published["snapshots"]["stats:30"]
-    assert stats["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V1"
+    assert stats["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V2"
     assert focus["meta"]["snapshot_id"] == published["snapshots"]["event_focus:7"]
+
+
+def test_news_dashboard_rejects_old_scoring_snapshots(tmp_path, monkeypatch):
+    path = tmp_path / "news.sqlite"
+    writer = NewsStore(path)
+    with monkeypatch.context() as legacy:
+        legacy.setattr("quantmaster.ai.crawler._DASHBOARD_ALGORITHM_VERSION", "QM_NEWS_DASHBOARD_V1")
+        writer.publish_dashboard_materializations()
+    reader = NewsStore(path, read_only=True)
+    with pytest.raises(FileNotFoundError, match="物化算法已过期"):
+        reader.stats(30)
+    writer.publish_dashboard_materializations()
+    assert reader.stats(30)["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V2"
 
 
 def test_news_crawl_submission_uses_versioned_unified_singleflight(tmp_path, monkeypatch):
