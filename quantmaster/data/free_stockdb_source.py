@@ -1383,11 +1383,14 @@ class FreeStockDBSource(DataSource):
         valid = []
         for item in records:
             stamp = str(item.get("date") or "")
+            raw_close = item.get("close")
+            if raw_close is None:
+                continue
             try:
                 if len(stamp) != 8 or not start <= stamp <= end:
                     continue
                 datetime.strptime(stamp, "%Y%m%d")
-                close = float(item.get("close"))
+                close = float(raw_close)
             except (TypeError, ValueError):
                 continue
             if math.isfinite(close) and close > 0:
