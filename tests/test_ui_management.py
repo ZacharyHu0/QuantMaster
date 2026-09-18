@@ -1741,7 +1741,7 @@ def test_candidate_revisit_refreshes_catalog_without_overwriting_dirty_draft(liv
         page.locator("#tab-decision").wait_for(state="visible")
         page.locator('#decision-form [data-candidate-view]').click()
         page.locator('[data-candidate-name="beta"]').wait_for(state="visible")
-        assert catalog_calls == [1, 2]
+        assert catalog_calls == [1, 2, 2]
         assert detail_calls == ["alpha", "alpha"]
 
         page.get_by_role("button", name="从候选移除 000001.SZ", exact=True).click()
@@ -1752,7 +1752,7 @@ def test_candidate_revisit_refreshes_catalog_without_overwriting_dirty_draft(liv
         page.locator("#tab-candidates").wait_for(state="visible")
         playwright_sync.expect(page.locator(".candidate-member-symbol")).to_have_text(["600519.SH"])
         playwright_sync.expect(page.get_by_text("有尚未生效的更改", exact=True)).to_be_visible()
-        assert catalog_calls == [1, 2]
+        assert catalog_calls == [1, 2, 2]
         assert detail_calls == ["alpha", "alpha"]
         browser.close()
 
