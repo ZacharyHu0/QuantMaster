@@ -642,17 +642,49 @@ def test_news_stats_calculate_market_and_independent_sector_scores(tmp_path):
     assert stats["market_sentiment"]["label"] == "中性"
     assert stats["market_sentiment"]["event_count"] == 3
     sectors = {item["sector"]: item for item in stats["sector_scores"]}
-    assert sectors["电子"]["score"] == pytest.approx(30.0, abs=0.02)
+    assert sectors["电子"]["score"] == pytest.approx(20.0, abs=0.02)
     assert sectors["电子"]["event_count"] == 2
     assert sectors["电子"]["positive"] == 1
-    assert sectors["银行"]["score"] == pytest.approx(-50.0, abs=0.02)
-    assert sectors["银行"]["label"] == "明显偏空"
+    assert sectors["银行"]["score"] == pytest.approx(-25.0, abs=0.02)
+    assert sectors["银行"]["label"] == "偏空"
     assert stats["display_scale"] == {
         "mode": "adaptive_bucket_v1",
         "theoretical_abs_max": 100,
         "market_abs_max": 10,
-        "sector_abs_max": 60,
+        "sector_abs_max": 40,
     }
+
+
+def test_sector_scores_temper_sparse_evidence_and_decay_with_time(tmp_path, monkeypatch):
+    store = NewsStore(tmp_path / "news.sqlite")
+    published = time.time() - 60
+    store.save([
+        official_news(
+            store, title=title, content=title, sectors=[sector],
+            sentiment=sentiment, confidence=1, importance_score=100,
+            analysis_status="complete", published_at_epoch=published,
+        )
+        for title, sector, sentiment in [
+            ("单条军工利好", "国防军工", 0.65),
+            ("电子需求", "电子", 0.6),
+            ("电子订单", "电子", 0.6),
+            ("银行压力", "银行", -0.65),
+        ]
+    ])
+    now = time.time() + 1
+    monkeypatch.setattr("quantmaster.ai.crawler.time.time", lambda: now)
+    before = store.stats(30)
+    scores = {row["sector"]: row for row in before["sector_scores"]}
+    assert before["sector_scores"][0]["sector"] == "电子"
+    assert scores["国防军工"]["score"] == pytest.approx(32.5, abs=0.02)
+    assert scores["银行"]["score"] == pytest.approx(-32.5, abs=0.02)
+    now += before["halflife_days"] * 86400
+    after = store.stats(30)
+    for row in after["sector_scores"]:
+        assert row["score"] == pytest.approx(scores[row["sector"]]["score"] / 2, abs=0.01)
+        assert row["event_count"] == scores[row["sector"]]["event_count"]
+    now += 31 * 86400
+    assert store.stats(30)["sector_scores"] == []
 
 
 def test_news_stats_counts_articles_ingested_within_24_hours(tmp_path):
@@ -2084,8 +2116,21 @@ def test_news_read_only_dashboard_uses_published_materialization(tmp_path, monke
     focus = reader.event_focus(7)
 
     assert stats["meta"]["snapshot_id"] == published["snapshots"]["stats:30"]
-    assert stats["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V1"
+    assert stats["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V2"
     assert focus["meta"]["snapshot_id"] == published["snapshots"]["event_focus:7"]
+
+
+def test_news_dashboard_rejects_old_scoring_snapshots(tmp_path, monkeypatch):
+    path = tmp_path / "news.sqlite"
+    writer = NewsStore(path)
+    with monkeypatch.context() as legacy:
+        legacy.setattr("quantmaster.ai.crawler._DASHBOARD_ALGORITHM_VERSION", "QM_NEWS_DASHBOARD_V1")
+        writer.publish_dashboard_materializations()
+    reader = NewsStore(path, read_only=True)
+    with pytest.raises(FileNotFoundError, match="物化算法已过期"):
+        reader.stats(30)
+    writer.publish_dashboard_materializations()
+    assert reader.stats(30)["meta"]["algorithm_version"] == "QM_NEWS_DASHBOARD_V2"
 
 
 def test_news_crawl_submission_uses_versioned_unified_singleflight(tmp_path, monkeypatch):
