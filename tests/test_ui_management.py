@@ -2411,9 +2411,9 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert page.evaluate("window.__helpObservers.created") == 1
         _wait_for_text(page.locator("#help-settings-status"), "已载入")
         assert page.locator("#help-settings-status").inner_text().startswith("已载入")
-        assert page.locator("#help-article h2").count() == 28
-        assert page.locator(".help-sidebar .help-nav-part").count() == 6
-        assert page.locator(".help-sidebar .help-nav-part > ol").count() == 6
+        assert page.locator("#help-article h2").count() == 32
+        assert page.locator(".help-sidebar .help-nav-part").count() == 7
+        assert page.locator(".help-sidebar .help-nav-part > ol").count() == 7
         assert page.evaluate("location.hash") == "#runtime/help"
 
         page.reload()
@@ -2438,6 +2438,15 @@ def test_help_handbook_search_routes_and_calculators(live_server):
         assert "T+1" in page.locator("#help-search-results").inner_text()
         page.locator("#help-search-clear").click()
         assert page.locator("#help-search-results").is_hidden()
+
+        search.fill("MOIC")
+        page.locator(".help-search-result").first.wait_for()
+        assert "MOIC、IRR 与回报门槛" in page.locator("#help-search-results").inner_text()
+        page.locator("#help-search-clear").click()
+
+        page.locator('[data-help-link="strategy-cases"]').click()
+        page.locator("#help-strategy-cases-interview").wait_for(state="visible")
+        assert "七步限时 case" in page.locator("#help-strategy-cases-interview").inner_text()
 
         page.locator('[data-help-link="calculators"]').click()
         page.locator("#calc-compound").wait_for(state="visible")
