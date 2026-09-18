@@ -269,6 +269,18 @@ def _instrument_range(
     return start, end
 
 
+def _daily_request_range(
+    symbol: str, start: str, end: str, *, completed: bool,
+) -> tuple[str, str]:
+    left, right = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
+    start, end = str(left.date()), str(right.date())
+    if completed and guess_market(symbol) == Market.CN and end <= market_date().isoformat():
+        target = resolve_session_target()
+        if target.ready and start <= target.session <= end:
+            end = target.session
+    return start, end
+
+
 def _unit_contract(symbol: str) -> tuple[tuple[tuple[str, str], ...], str]:
     """Resolve units from local instrument evidence; never infer asset type."""
     unknown = tuple((field, "unknown") for field in (*OHLCV_COLUMNS[:-1], "volume", "amount"))
@@ -1555,6 +1567,9 @@ def _bar_envelope(
         )
     requested_start = _shanghai_wall_time(start)
     requested_end = _shanghai_wall_time(end)
+    if frequency == "1d":
+        left, right = _daily_request_range(symbol, start, end, completed=True)
+        requested_start, requested_end = pd.Timestamp(left), pd.Timestamp(right)
     provenance = _provenance_for_range(metadata, requested_start, requested_end)
     lineage_complete = _lineage_covers(
         provenance, requested_start, requested_end, frequency,
@@ -2517,15 +2532,9 @@ def _load_history_locked(
     cfg = get_config()
     cached = store.get(symbol)
     mode = _mode(use_cache, refresh)
-    effective_start, effective_end = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
-    start, end = str(effective_start.date()), str(effective_end.date())
-    if (
-        mode == RefreshMode.AUTO and not provider
-        and guess_market(symbol) == Market.CN and end <= market_date().isoformat()
-    ):
-        target = resolve_session_target()
-        if target.ready and start <= target.session <= end:
-            end = target.session
+    start, end = _daily_request_range(
+        symbol, start, end, completed=mode == RefreshMode.AUTO and not provider,
+    )
     # Evidence eligibility is intentionally *not* a refresh mode.  The former
     # ``priority='formal'`` branch promoted a merely degraded local cache to a
     # full upstream refresh and could do so once per symbol in a panel.  Formal

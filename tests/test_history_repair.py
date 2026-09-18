@@ -829,6 +829,26 @@ def test_auto_ipo_gap_uses_listing_boundary_and_reuses_supplement(
     again = registry.refresh_history(SYMBOL, START, requested_end, store=store)
     assert len(again.data) == len(result.data)
     assert not calls
+    assert not any(item.get("diagnostic_code") == "provenance_incomplete" for item in again.provenance)
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    monkeypatch.setattr(
+        "quantmaster.data.maintenance.resolve_session_target", registry.resolve_session_target,
+    )
+    outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, requested_end)
+    assert outcome and outcome["code"] == "formal_evidence_missing"
+    assert "warning" in outcome and not outcome["formal_eligible"]
+
+    # A real post-listing evidence gap must remain a gap after normalization.
+    shortened = again.data.iloc[1:].copy()
+    shortened_start = str(shortened.index.min().date())
+    quality = registry._assess_daily_frame(
+        shortened, shortened_start, END, symbol=SYMBOL, source="tushare",
+    )
+    store.put(SYMBOL, shortened, replace=True, replace_coverage=True, source="tushare",
+              request_start=shortened_start, request_end=END, quality=quality.to_dict())
+    missing = registry.read_history(SYMBOL, START, requested_end, store=store)
+    assert any(item.get("diagnostic_code") == "provenance_incomplete" for item in missing.provenance)
 
 
 def test_auto_expanded_head_rebuilds_incompatible_tushare_anchor(repair_setup, monkeypatch):
