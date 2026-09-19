@@ -1628,7 +1628,33 @@ def _align_increment(
         aligned = cached.copy()
         aligned[ohlc] = aligned[ohlc] * ratio
         merged = pd.concat([aligned, fresh])
-    return merged[~merged.index.duplicated(keep="last")].sort_index()
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    # Frame attrs describe every row. Preserve evidence independently asserted
+    # by both retained and fresh portions, including provider-specific numeric
+    # semantics. Per-request cross-validation is not a whole-frame contract.
+    acceptance_fields = ("stockdb_accepted_session", "stockdb_accepted_at")
+    scoped_fields = {*acceptance_fields, "local_cross_validation"}
+    merged.attrs = {
+        key: fresh.attrs[key]
+        for key in fresh.attrs
+        if key not in scoped_fields
+        and key in cached.attrs
+        and cached.attrs[key] == fresh.attrs[key]
+    }
+    # A new StockDB acceptance stamp must not attest older bytes from another
+    # generation or provider, so preserve the generation pair atomically.
+    same_stockdb_scope = bool(
+        cached.attrs.get("instrument")
+        and cached.attrs.get("instrument") == fresh.attrs.get("instrument")
+        and cached.attrs.get("provider_interface") == "stock_sdk:daily"
+        and fresh.attrs.get("provider_interface") == "stock_sdk:daily"
+    )
+    if same_stockdb_scope and all(
+        cached.attrs.get(key) and cached.attrs.get(key) == fresh.attrs.get(key)
+        for key in acceptance_fields
+    ):
+        merged.attrs.update({key: fresh.attrs[key] for key in acceptance_fields})
+    return merged
 
 
 def _accept_local_stockdb_without_remote_upgrade(
