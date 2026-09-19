@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat as stat_module
 import threading
 import time
 from collections import OrderedDict
@@ -271,13 +272,18 @@ def _tail_evidence_identity() -> str:
     return digest.hexdigest()
 
 
-def _bar_storage_identity(symbols: list[str], store) -> str:
+def _bar_storage_evidence(
+    symbols: list[str], store,
+) -> tuple[str, dict[str, dict], dict[str, os.stat_result]]:
     digest = hashlib.sha256(_tail_evidence_identity().encode())
     metadata = store.metadata_many(symbols)
+    files: dict[str, os.stat_result] = {}
     for symbol in symbols:
         path = store.path_for_repair(symbol)
         try:
             stat = path.stat()
+            if stat_module.S_ISREG(stat.st_mode):
+                files[symbol] = stat
             identity = f"{symbol}\0{stat.st_size}\0{stat.st_mtime_ns}\n"
         except OSError:
             identity = f"{symbol}\0missing\n"
@@ -292,7 +298,7 @@ def _bar_storage_identity(symbols: list[str], store) -> str:
             "quality_json": item.get("quality_json"),
             "source_chain_json": item.get("source_chain_json"),
         }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    return digest.hexdigest()
+    return digest.hexdigest(), metadata, files
 
 
 def _local_tail_calendar() -> dict[str, bool | None]:
@@ -467,7 +473,15 @@ def _frame_hash(frame: pd.DataFrame) -> str:
     ]
     stable = frame[columns].copy()
     if "trade_date" in stable:
-        stable["trade_date"] = pd.to_datetime(stable["trade_date"]).dt.strftime("%Y-%m-%d")
+        dates = pd.to_datetime(stable["trade_date"])
+        codes, unique_dates = pd.factorize(dates, use_na_sentinel=False)
+        stable["trade_date"] = unique_dates.strftime("%Y-%m-%d").to_numpy()[codes]
+    # Monthly evidence repeats dates/codes across millions of acquired rows.
+    # Categoricals retain the same value hashes and ordering without repeatedly
+    # sorting and hashing their string representation for every row.
+    for column in columns:
+        if column != "weight":
+            stable[column] = pd.Categorical(stable[column])
     stable = stable.sort_values(columns, kind="stable").reset_index(drop=True)
     values = pd.util.hash_pandas_object(stable, index=False).to_numpy().tobytes()
     return hashlib.sha256(values).hexdigest()
@@ -554,11 +568,15 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     membership_identity = _membership_storage_identity(universe)
     with _PANEL_CACHE_LOCK:
         cached = _INSPECTION_CACHE.get(cache_key)
+    evidence = None
+    evidence_symbols = None
     if cached is not None:
         cached_value, cached_bars, cached_membership = cached
+        if cached_membership == membership_identity:
+            evidence_symbols = cached_value["symbols"]
+            evidence = _bar_storage_evidence(evidence_symbols, store)
         if (
-            cached_membership == membership_identity
-            and cached_bars == _bar_storage_identity(cached_value["symbols"], store)
+            evidence is not None and cached_bars == evidence[0]
         ):
             with _PANEL_CACHE_LOCK:
                 if _INSPECTION_CACHE.get(cache_key) is cached:
@@ -576,7 +594,9 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
         membership_source = "fixed"
     ranges = _cached_required_ranges(universe, start, end, records, fixed_symbols)
     symbols = sorted(ranges)
-    bar_identity = _bar_storage_identity(symbols, store)
+    if evidence is None or evidence_symbols != symbols:
+        evidence = _bar_storage_evidence(symbols, store)
+    bar_identity, metadata, files = evidence
     catalog_identity = []
     for catalog_path in (store.meta_db,):
         try:
@@ -604,7 +624,6 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
                 return dict(saved)
         except (OSError, ValueError, TypeError):
             pass
-    metadata = store.metadata_many(symbols)
     missing: list[dict[str, Any]] = []
     coverage_gaps: list[dict[str, Any]] = []
     warmup_gaps: list[dict[str, Any]] = []
@@ -616,8 +635,7 @@ def inspect_local_dataset(universe: str, start: str, end: str) -> dict[str, Any]
     pending_symbols: list[str] = []
     for symbol in symbols:
         item = metadata.get(symbol) or {}
-        path = store.path_for_repair(symbol)
-        stat = path.stat() if path.is_file() else None
+        stat = files.get(symbol)
         available_start = str(item.get("coverage_start") or item.get("start") or "")
         available_end = str(item.get("end") or item.get("observed_end") or "")
         required = ranges[symbol]

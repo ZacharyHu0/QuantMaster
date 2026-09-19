@@ -2057,8 +2057,14 @@ def test_inspection_cache_clear_during_identity_check_is_a_cache_miss(tmp_path, 
     monkeypatch.setattr('quantmaster.data.universe.load_universe', lambda *_a, **_k: ['A.SH'])
     dataset.clear_local_dataset_caches()
     expected = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
-    original = dataset._bar_storage_identity
+    original = dataset._bar_storage_evidence
     calls = 0
+    recomputed = []
+    original_ranges = dataset._cached_required_ranges
+
+    def ranges(*args):
+        recomputed.append(True)
+        return original_ranges(*args)
 
     def invalidate(symbols, store):
         nonlocal calls
@@ -2067,10 +2073,107 @@ def test_inspection_cache_clear_during_identity_check_is_a_cache_miss(tmp_path, 
             dataset.clear_local_dataset_caches()
         return original(symbols, store)
 
-    monkeypatch.setattr(dataset, '_bar_storage_identity', invalidate)
+    monkeypatch.setattr(dataset, '_bar_storage_evidence', invalidate)
+    monkeypatch.setattr(dataset, '_cached_required_ranges', ranges)
     actual = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
     assert actual['manifest_hash'] == expected['manifest_hash']
-    assert calls >= 2
+    assert calls == 1
+    assert recomputed
+
+
+def test_inspection_reuses_scan_and_invalidates_metadata_and_file_changes(tmp_path, monkeypatch):
+    _config(tmp_path)
+    import os
+
+    import quantmaster.lab.dataset as dataset
+    from quantmaster.data.storage import BarStore
+
+    monkeypatch.setattr('quantmaster.data.universe.load_universe', lambda *_a, **_k: ['A.SH'])
+    store = BarStore()
+    dates = pd.bdate_range('2023-01-02', '2024-01-31')
+    frame = pd.DataFrame({
+        'open': 10., 'high': 11., 'low': 9., 'close': 10.,
+        'volume': 1000., 'amount': 10000.,
+    }, index=dates)
+    store.put('A.SH', frame, source='test', quality={
+        'status': 'verified', 'stale': False, 'partial': False, 'issues': [],
+    })
+    path = store.path_for_repair('A.SH')
+    original_stat = path.stat()
+    original_metadata = BarStore.metadata_many
+    original_path = BarStore.path_for_repair
+    reads = []
+    paths = []
+
+    def metadata(self, symbols=None):
+        reads.append(symbols)
+        return original_metadata(self, symbols)
+
+    def resolve(self, symbol):
+        paths.append(symbol)
+        return original_path(self, symbol)
+
+    monkeypatch.setattr(BarStore, 'metadata_many', metadata)
+    monkeypatch.setattr(BarStore, 'path_for_repair', resolve)
+    dataset.clear_local_dataset_caches()
+    ready = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
+    assert ready['production_eligible']
+    assert reads == [['A.SH']] and paths == ['A.SH']
+
+    store.mark_status('A.SH', 'refresh_failed')
+    assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
+    reads.clear()
+    paths.clear()
+    degraded = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
+    assert not degraded['production_eligible']
+    assert degraded['quality_gaps'][0]['stale']
+    assert reads == [['A.SH']] and paths == ['A.SH']
+    assert degraded['manifest_hash'] != ready['manifest_hash']
+
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns + 1_000_000_000))
+    changed = dataset.inspect_local_dataset('demo', '2024-01-01', '2024-01-31')
+    assert changed['manifest_hash'] != degraded['manifest_hash']
+
+
+@pytest.mark.parametrize('dtype', ['object', 'str', 'string', 'category'])
+@pytest.mark.parametrize('timezone', [None, 'Asia/Shanghai'])
+def test_membership_hash_preserves_existing_digest_with_repeated_and_missing_values(dtype, timezone):
+    import hashlib
+
+    from quantmaster.lab.dataset import _frame_hash
+
+    frame = pd.DataFrame({
+        'index_code': pd.Series(['b', None, 'a', 'a'], dtype=dtype),
+        'symbol': pd.Series(['B', None, 'A', 'A'], dtype=dtype),
+        'trade_date': pd.DatetimeIndex([
+            '2024-01-02', None, '2024-01-01', '2024-01-01',
+        ], tz=timezone),
+        'weight': [1., np.nan, 0., 0.],
+    })
+    stable = frame[['index_code', 'trade_date', 'symbol', 'weight']].copy()
+    stable['trade_date'] = pd.to_datetime(stable['trade_date']).dt.strftime('%Y-%m-%d')
+    stable = stable.sort_values(list(stable.columns), kind='stable').reset_index(drop=True)
+    expected = hashlib.sha256(
+        pd.util.hash_pandas_object(stable, index=False).to_numpy().tobytes(),
+    ).hexdigest()
+    assert _frame_hash(frame) == expected
+    assert _frame_hash(frame.iloc[::-1]) == expected
+
+
+def test_empty_bar_metadata_request_does_not_read_catalog(tmp_path, monkeypatch):
+    _config(tmp_path)
+    from quantmaster.data.storage import BarStore
+
+    store = BarStore()
+    with store._conn() as conn:
+        conn.execute("INSERT INTO bar_meta (symbol) VALUES ('A.SH')")
+    assert list(store.metadata_many()) == ['A.SH']
+
+    def forbidden():
+        pytest.fail('Empty symbol selection must not open the catalog')
+
+    monkeypatch.setattr(store, '_conn', forbidden)
+    assert store.metadata_many([]) == {}
 
 @pytest.fixture
 def prepared_partitions(tmp_path, monkeypatch):

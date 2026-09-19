@@ -317,7 +317,7 @@ class BarStore:
 
     def path_for_repair(self, symbol: str) -> Path:
         """Resolve a repair target without exposing arbitrary path construction."""
-        return self._path(symbol).resolve()
+        return self._path(symbol)
 
     def _resolve_integrity_repair(
         self, symbol: str, content_hash: str, reason: str,
@@ -952,6 +952,8 @@ class BarStore:
 
     def metadata_many(self, symbols: list[str] | None = None) -> dict[str, dict]:
         """批量读取元信息，避免面板加载时为每只股票反复连接 SQLite。"""
+        if symbols is not None and not symbols:
+            return {}
         try:
             with self._conn() as conn:
                 conn.row_factory = sqlite3.Row
