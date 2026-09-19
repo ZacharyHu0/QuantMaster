@@ -300,7 +300,6 @@ class FreeStockDBSource(DataSource):
         fq: str | None,
         fields: str | None = None,
         probe: bool = False,
-        batch_member: bool = False,
     ):
         client = self._sdk_client()
         if client is None:
@@ -308,24 +307,22 @@ class FreeStockDBSource(DataSource):
         if isinstance(code, list):
             # The installed SDK's multi-code pipeline loses rows, including
             # non-empty ones. Never infer absence from that path. Each unique
-            # code gets one scheduled single-code read (with bounded provider
-            # retries); an exception prevents publishing any partial batch.
-            projected = f"{fields},code" if fields and "code" not in fields.split(",") else fields
+            # code still gets a validated scalar read. Schedule only a small
+            # chunk at once: health/rate-limit SQLite bookkeeping per symbol
+            # otherwise costs more than the local reads themselves.
             result = {}
-            for symbol in dict.fromkeys(code):
-                payload = self._sdk_data(
-                    symbol, start, end, frequency, fq=fq, fields=projected, probe=probe,
-                    batch_member=True,
-                )
-                rows = (
-                    self._projected_rows(payload, projected)
-                    if projected else self._dictionary_rows(payload, contract="stock_sdk single")
-                )
-                result[symbol] = (
-                    [[row[name] for name in fields.split(",")] for row in rows]
-                    if fields else rows
-                )
+            ordered = list(dict.fromkeys(code))
+            chunk_size = 32 if self.name == "free-stockdb" and not self._trust_env else 1
+            for offset in range(0, len(ordered), chunk_size):
+                result.update(self._sdk_query(
+                    client, ordered[offset:offset + chunk_size], start, end, frequency,
+                    fq=fq, fields=fields, probe=probe,
+                ))
             return result
+        return self._sdk_query(client, code, start, end, frequency, fq=fq, fields=fields, probe=probe)
+
+    def _sdk_query(self, client, code, start, end, frequency, *, fq, fields, probe):
+        batch_member = isinstance(code, list)
         key = json.dumps(
             {
                 "sdk": True,
@@ -349,21 +346,28 @@ class FreeStockDBSource(DataSource):
             "fq": fq,
             "as_df": False,
         }
-        if fields is not None:
-            arguments["fields"] = fields
+        projected = (
+            f"{fields},code" if batch_member and fields and "code" not in fields.split(",") else fields
+        )
+        if projected is not None:
+            arguments["fields"] = projected
 
-        def fetch():
+        def read(symbol):
             # Source instances can share this cached connection; its native
             # query state must not be used simultaneously by scheduler workers.
             with self._sdk_read_lock:
-                payload = client.get_data(**arguments)
+                payload = client.get_data(**{**arguments, "code": symbol})
             if batch_member:
                 rows = (
-                    self._projected_rows(payload, fields)
-                    if fields else self._dictionary_rows(payload, contract="stock_sdk single")
+                    self._projected_rows(payload, projected)
+                    if projected else self._dictionary_rows(payload, contract="stock_sdk single")
                 )
-                self._validate_sdk_rows(rows, code, start, end, frequency, fields)
+                self._validate_sdk_rows(rows, symbol, start, end, frequency, projected)
+                return [[row[name] for name in fields.split(",")] for row in rows] if fields else rows
             return payload
+
+        def fetch():
+            return {symbol: read(symbol) for symbol in code} if batch_member else read(code)
 
         try:
             return provider_call(

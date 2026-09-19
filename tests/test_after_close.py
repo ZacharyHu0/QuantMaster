@@ -197,6 +197,69 @@ def test_after_close_scan_is_immutable_auditable_and_filters_stock_pool(service)
     assert service._frame_hash(revised) != service._frame_hash(service.source.frame)
 
 
+@pytest.mark.parametrize("phase", ["归档本地行情", "计算板块优先级", "发布不可变快照"])
+def test_cancel_before_publication_keeps_previous_snapshot(service, phase):
+    cancelled = False
+
+    def progress(_percent, current, _detail):
+        nonlocal cancelled
+        cancelled = cancelled or current == phase
+
+    with pytest.raises(InterruptedError):
+        service.scan(progress=progress, cancelled=lambda: cancelled)
+    assert service.store.latest() is None
+
+
+def test_native_qfq_reports_progress_and_cancels_between_bounded_reads(service, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_ingest.read_stockdb_session_acceptance",
+        lambda _root: SimpleNamespace(session="2026-08-05"),
+    )
+    symbols = [f"{i:06d}.SZ" for i in range(251)]
+    calls = []
+    updates = []
+
+    def read(batch, _start, _end):
+        calls.append(batch)
+        return {symbol: service.source.frame.iloc[:1].drop(columns=["symbol"]).copy() for symbol in batch}
+
+    monkeypatch.setattr(service.source, "daily_many", read)
+    result = service.ingest.read_native_research_history(
+        symbols, "2025-01-01", "2026-08-05",
+        progress=lambda percent, *_: updates.append(percent), cancelled=lambda: False,
+    )
+    assert result["symbol"].nunique() == len(symbols)
+    assert [len(batch) for batch in calls] == [100, 100, 51]
+    assert updates == sorted(updates) and updates[-1] == 60
+    calls.clear()
+    with pytest.raises(InterruptedError):
+        service.ingest.read_native_research_history(
+            symbols, "2025-01-01", "2026-08-05",
+            progress=lambda *_: None, cancelled=lambda: bool(calls),
+        )
+    assert len(calls) == 1
+
+
+def test_raw_read_batches_bound_progress_and_cancel(service, monkeypatch):
+    calls = []
+    updates = []
+
+    def read(batch, _start, _end):
+        calls.append(batch)
+        return pd.DataFrame({"symbol": batch})
+
+    monkeypatch.setattr(service.source, "daily_cross_section", read)
+    with pytest.raises(InterruptedError):
+        service.ingest.read_cross_section_history(
+            [f"{i:06d}.SZ" for i in range(5543)], "2025-01-01", "2026-08-05",
+            progress=lambda *args: updates.append(args), cancelled=lambda: bool(calls),
+        )
+    assert len(calls[0]) == 100
+    assert "100/5543" in updates[0][2]
+
+
 def test_accepted_stockdb_marker_admits_native_qfq_without_online_evidence(
     service, isolated_config, monkeypatch,
 ) -> None:
@@ -365,6 +428,15 @@ def test_historical_force_rejects_future_dated_board_taxonomy(service, monkeypat
     service.source.board_hierarchy = future_boards
     with pytest.raises(DataGateRejected, match="晚于历史目标日"):
         service.scan(as_of="2026-08-05", force=True)
+
+
+def test_current_snapshot_skips_unrealized_label_work(service, monkeypatch):
+    service.scan()
+    monkeypatch.setattr(
+        service.store, "labels",
+        lambda *_: pytest.fail("no future sessions: skip label and baseline work"),
+    )
+    service.evaluate_pending(service.source.frame)
 
 
 def test_future_labels_use_only_realized_sessions_and_market_baseline(service) -> None:

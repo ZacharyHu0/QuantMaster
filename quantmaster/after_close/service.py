@@ -841,6 +841,8 @@ class AfterCloseService:
                 expected_symbols=symbols,
                 expected_session_value=target.isoformat(),
             )
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         progress(62, "计算板块优先级", "聚合申万层级与概念板块")
         try:
             sectors, candidates, shadow_candidates, excluded, score_diagnostics = self._score(
@@ -913,6 +915,8 @@ class AfterCloseService:
             "ac_"
             + hashlib.sha256(f"{actual_as_of}:{active_score_version}:{input_hash}".encode()).hexdigest()[:24]
         )
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         existing_snapshot = self.store.get(snapshot_id)
         if existing_snapshot is not None:
             self.ingest.store.pin(
@@ -993,6 +997,8 @@ class AfterCloseService:
             },
         )
         progress(88, "发布不可变快照", snapshot_id)
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         self.store.publish(snapshot)
         self.ingest.store.pin(
             snapshot.ingest_id,
@@ -1070,6 +1076,7 @@ class AfterCloseService:
     def evaluate_pending(self, frame: pd.DataFrame) -> None:
         if frame.empty:
             return
+        sessions = pd.DatetimeIndex(pd.to_datetime(frame["date"]).dropna().unique())
         by_symbol = {
             symbol: group.sort_values("date").set_index(pd.to_datetime(group["date"]))
             for symbol, group in frame.groupby("symbol")
@@ -1077,6 +1084,9 @@ class AfterCloseService:
         for meta in self.store.history(100):
             snapshot = self.store.get(str(meta["snapshot_id"]))
             if snapshot is None:
+                continue
+            future_sessions = int((sessions > pd.Timestamp(snapshot.as_of_date)).sum())
+            if not future_sessions:
                 continue
             existing = {item["horizon"]: item for item in self.store.labels(snapshot.snapshot_id)}
             csi_symbols: set[str] = set()
@@ -1093,6 +1103,8 @@ class AfterCloseService:
                 except (ImportError, OSError, RuntimeError, TypeError, ValueError):
                     csi_symbols = set()
             for horizon in (1, 3, 5, 7, 10, 20, 30):
+                if horizon > future_sessions:
+                    break
                 if (
                     horizon in existing
                     and (not csi_symbols or existing[horizon].get("csi800_mean_return") is not None)
