@@ -268,3 +268,26 @@ def test_deadline_client_can_read_old_standard_listener_protocol(tmp_path):
         assert received[0]["application_identity"] == get_application_identity().__dict__
     finally:
         listener.close()
+
+
+@pytest.mark.parametrize("operation", ["data.refresh.create", "data.refresh.retry"])
+def test_refresh_receipt_waits_for_durable_admission(tmp_path, operation):
+    received = []
+
+    def handler(name, payload):
+        # Local fingerprint/ledger work can outlive the short liveness budget.
+        time.sleep(0.65)
+        received.append(name)
+        return {"id": "durable-job", "status": "queued"}
+
+    server = RuntimeCommandServer(handler, root=tmp_path)
+    server.start()
+    try:
+        assert call_worker_command(operation, root=tmp_path) == {
+            "id": "durable-job", "status": "queued",
+        }
+        assert received == [operation]
+        with pytest.raises(WorkerCommandUnavailable):
+            call_worker_command(operation, root=tmp_path, timeout=0.05)
+    finally:
+        server.stop()
