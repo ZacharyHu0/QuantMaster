@@ -1629,21 +1629,20 @@ def _align_increment(
         aligned[ohlc] = aligned[ohlc] * ratio
         merged = pd.concat([aligned, fresh])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-    # Frame attrs describe every row. Preserve only the stable contract fields
-    # independently asserted by both retained and fresh portions. In
-    # particular, a new StockDB acceptance stamp must not attest older bytes
-    # from another generation or provider.
-    shared_contract = (
-        "timezone", "instrument", "units", "unit_status", "adjustment",
-        "adjustment_status", "factor_coverage", "provider_interface",
-    )
+    # Frame attrs describe every row. Preserve evidence independently asserted
+    # by both retained and fresh portions, including provider-specific numeric
+    # semantics. Per-request cross-validation is not a whole-frame contract.
+    acceptance_fields = ("stockdb_accepted_session", "stockdb_accepted_at")
+    scoped_fields = {*acceptance_fields, "local_cross_validation"}
     merged.attrs = {
         key: fresh.attrs[key]
-        for key in shared_contract
-        if key in cached.attrs and key in fresh.attrs
+        for key in fresh.attrs
+        if key not in scoped_fields
+        and key in cached.attrs
         and cached.attrs[key] == fresh.attrs[key]
     }
-    acceptance_fields = ("stockdb_accepted_session", "stockdb_accepted_at")
+    # A new StockDB acceptance stamp must not attest older bytes from another
+    # generation or provider, so preserve the generation pair atomically.
     if all(
         cached.attrs.get(key) and cached.attrs.get(key) == fresh.attrs.get(key)
         for key in acceptance_fields

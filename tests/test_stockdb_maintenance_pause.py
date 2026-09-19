@@ -161,6 +161,55 @@ def test_increment_does_not_widen_different_evidence_to_retained_history(
     )
 
 
+@pytest.mark.parametrize("attrs_differ", [False, True])
+def test_increment_keeps_complete_shared_factor_contract(
+    accepted_bars, monkeypatch, attrs_differ,
+):
+    from quantmaster.data import registry
+
+    _store, frame, _calls, _accept = accepted_bars
+    sessions = pd.DatetimeIndex(frame.index)
+    monkeypatch.setattr(registry, "_local_sessions", lambda start, end: (
+        sessions[(sessions >= start) & (sessions <= end)], "fixture-calendar",
+    ))
+    monkeypatch.setattr(registry, "_unit_contract", lambda symbol: ((
+        ("open", "CNY/share"), ("high", "CNY/share"), ("low", "CNY/share"),
+        ("close", "CNY/share"), ("volume", "share"), ("amount", "CNY"),
+    ), ""))
+    contract = {
+        "instrument": "600000.SH",
+        "provider_interface": "tushare:daily+adj_factor",
+        "adjustment": "qfq",
+        "adjustment_anchor_date": str(sessions.max().date()),
+        "adjustment_provider_definition": "fixture:prices*factors/latest-factor",
+        "adjustment_company_actions": "fixture-actions-through:2026-08-07",
+        "factor_coverage": "complete",
+        "provider_contract_revision": "fixture-v1",
+    }
+    cached = frame.iloc[:-1].copy()
+    fresh = frame.iloc[-5:].copy()
+    cached.attrs = dict(contract)
+    fresh.attrs = dict(contract)
+    if attrs_differ:
+        cached.attrs["local_cross_validation"] = {
+            "source": "stockdb", "status": "matched", "rows": 5,
+        }
+
+    merged = registry._align_increment(cached, fresh, "right")
+    quality = registry._assess_daily_frame(
+        merged, str(sessions.min().date()), str(sessions.max().date()),
+        symbol="600000.SH", source="tushare",
+    )
+
+    assert quality.status == "verified", quality.issues
+    assert quality.semantics.factor_coverage == "complete"
+    assert quality.semantics.adjustment_provider_definition == contract[
+        "adjustment_provider_definition"
+    ]
+    assert merged.attrs["provider_contract_revision"] == "fixture-v1"
+    assert "local_cross_validation" not in merged.attrs
+
+
 def test_accepted_resume_refreshes_real_cache_and_projects_formal_warnings(
     manager, owner, accepted_bars, monkeypatch,
 ):
