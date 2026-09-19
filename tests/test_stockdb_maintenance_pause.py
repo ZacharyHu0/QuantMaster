@@ -93,6 +93,7 @@ def test_same_accepted_generation_increment_keeps_shared_evidence_after_roundtri
     source = FreeStockDBSource()
     start, end = str(sessions.min().date()), str(sessions.max().date())
     old_end = str(sessions[-2].date())
+    frame.attrs["instrument"] = "600000.SH"
     cached = source._bind_session_acceptance(frame.iloc[:-1].copy(), end)
     cached.attrs["local_cross_validation"] = {
         "source": "tushare", "status": "matched", "rows": 5,
@@ -138,8 +139,6 @@ def test_increment_does_not_widen_different_evidence_to_retained_history(
     if different == "generation":
         cached.attrs["stockdb_accepted_at"] = "2026-08-07T17:00:00+08:00"
     else:
-        cached.attrs.pop("stockdb_accepted_session")
-        cached.attrs.pop("stockdb_accepted_at")
         cached.attrs["provider_interface"] = "tushare:daily+adj_factor"
 
     merged = registry._align_increment(cached, fresh, "right")

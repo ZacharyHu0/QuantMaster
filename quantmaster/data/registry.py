@@ -1643,7 +1643,13 @@ def _align_increment(
     }
     # A new StockDB acceptance stamp must not attest older bytes from another
     # generation or provider, so preserve the generation pair atomically.
-    if all(
+    same_stockdb_scope = bool(
+        cached.attrs.get("instrument")
+        and cached.attrs.get("instrument") == fresh.attrs.get("instrument")
+        and cached.attrs.get("provider_interface") == "stock_sdk:daily"
+        and fresh.attrs.get("provider_interface") == "stock_sdk:daily"
+    )
+    if same_stockdb_scope and all(
         cached.attrs.get(key) and cached.attrs.get(key) == fresh.attrs.get(key)
         for key in acceptance_fields
     ):
