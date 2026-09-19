@@ -1628,7 +1628,28 @@ def _align_increment(
         aligned = cached.copy()
         aligned[ohlc] = aligned[ohlc] * ratio
         merged = pd.concat([aligned, fresh])
-    return merged[~merged.index.duplicated(keep="last")].sort_index()
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    # Frame attrs describe every row. Preserve only the stable contract fields
+    # independently asserted by both retained and fresh portions. In
+    # particular, a new StockDB acceptance stamp must not attest older bytes
+    # from another generation or provider.
+    shared_contract = (
+        "timezone", "instrument", "units", "unit_status", "adjustment",
+        "adjustment_status", "factor_coverage", "provider_interface",
+    )
+    merged.attrs = {
+        key: fresh.attrs[key]
+        for key in shared_contract
+        if key in cached.attrs and key in fresh.attrs
+        and cached.attrs[key] == fresh.attrs[key]
+    }
+    acceptance_fields = ("stockdb_accepted_session", "stockdb_accepted_at")
+    if all(
+        cached.attrs.get(key) and cached.attrs.get(key) == fresh.attrs.get(key)
+        for key in acceptance_fields
+    ):
+        merged.attrs.update({key: fresh.attrs[key] for key in acceptance_fields})
+    return merged
 
 
 def _accept_local_stockdb_without_remote_upgrade(

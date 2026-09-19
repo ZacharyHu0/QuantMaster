@@ -78,6 +78,89 @@ def test_accepted_generation_replaces_old_local_evidence_once(accepted_bars):
     assert len(calls) == 2
 
 
+def test_same_accepted_generation_increment_keeps_shared_evidence_after_roundtrip(
+    accepted_bars, monkeypatch,
+):
+    from quantmaster.data import registry
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    store, frame, calls, accept = accepted_bars
+    accept()
+    sessions = pd.DatetimeIndex(frame.index)
+    monkeypatch.setattr(registry, "_local_sessions", lambda start, end: (
+        sessions[(sessions >= start) & (sessions <= end)], "fixture-calendar",
+    ))
+    source = FreeStockDBSource()
+    start, end = str(sessions.min().date()), str(sessions.max().date())
+    old_end = str(sessions[-2].date())
+    cached = source._bind_session_acceptance(frame.iloc[:-1].copy(), end)
+    cached.attrs["local_cross_validation"] = {
+        "source": "tushare", "status": "matched", "rows": 5,
+    }
+    quality = registry._assess_daily_frame(
+        cached, start, old_end, symbol="600000.SH", source="free-stockdb",
+    )
+    store.put(
+        "600000.SH", cached, replace=True, replace_coverage=True,
+        request_start=start, request_end=old_end,
+        source="free-stockdb", quality=quality.to_dict(),
+    )
+    calls.clear()
+
+    outcome = DataRefreshManager._refresh_one(store, "600000.SH", start, end)
+
+    assert calls
+    assert outcome and outcome["code"] == "formal_evidence_missing"
+    assert "warning" in outcome and "error" not in outcome
+    reloaded = store.get("600000.SH")
+    assert reloaded is not None
+    assert reloaded.attrs["stockdb_accepted_session"] == end
+    assert reloaded.attrs["unit_status"] == "verified_local_stockdb_schema_v1"
+    assert "local_cross_validation" not in reloaded.attrs
+
+
+@pytest.mark.parametrize("different", ["generation", "provider"])
+def test_increment_does_not_widen_different_evidence_to_retained_history(
+    accepted_bars, different,
+):
+    from quantmaster.data import registry
+    from quantmaster.data.base import BarDataEnvelope, BarDataQuality
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    _store, frame, _calls, accept = accepted_bars
+    accept()
+    source = FreeStockDBSource()
+    end = str(frame.index.max().date())
+    fresh = source._bind_session_acceptance(frame.iloc[-5:].copy(), end)
+    fresh.attrs["instrument"] = "600000.SH"
+    cached = source._bind_session_acceptance(frame.iloc[:-1].copy(), end)
+    cached.attrs["instrument"] = "600000.SH"
+    if different == "generation":
+        cached.attrs["stockdb_accepted_at"] = "2026-08-07T17:00:00+08:00"
+    else:
+        cached.attrs.pop("stockdb_accepted_session")
+        cached.attrs.pop("stockdb_accepted_at")
+        cached.attrs["provider_interface"] = "tushare:daily+adj_factor"
+
+    merged = registry._align_increment(cached, fresh, "right")
+
+    assert merged.attrs["unit_status"] == "verified_local_stockdb_schema_v1"
+    assert "stockdb_accepted_session" not in merged.attrs
+    assert "stockdb_accepted_at" not in merged.attrs
+    if different == "provider":
+        assert "provider_interface" not in merged.attrs
+    quality = BarDataQuality(
+        "degraded", str(frame.index.min().date()), end,
+        observed_end=end, coverage_ratio=1.0, sources=("free-stockdb",),
+        issues=("factor_contract_incomplete",),
+        units=tuple(fresh.attrs["units"].items()),
+        semantic_diagnostic_code="factor_contract_incomplete",
+    )
+    assert not DataRefreshManager._prepared_with_formal_gaps(
+        BarDataEnvelope(merged, quality), "600000.SH", quality.requested_start, end,
+    )
+
+
 def test_accepted_resume_refreshes_real_cache_and_projects_formal_warnings(
     manager, owner, accepted_bars, monkeypatch,
 ):
