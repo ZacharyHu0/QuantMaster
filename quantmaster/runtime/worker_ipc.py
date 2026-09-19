@@ -31,6 +31,7 @@ from quantmaster.runtime.ipc_transport import DeadlineConnection
 
 logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 0.5
+DATA_REFRESH_COMMAND_TIMEOUT_SECONDS = 5.0
 
 
 class WorkerCommandError(RuntimeError):
@@ -209,7 +210,7 @@ def call_worker_command(
     operation: str,
     payload: Mapping[str, Any] | None = None,
     *,
-    timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    timeout: float | None = None,
     root: str | Path | None = None,
     application_identity: ApplicationIdentity | None = None,
 ) -> dict[str, Any]:
@@ -217,6 +218,12 @@ def call_worker_command(
 
     base = (Path(root) if root is not None else get_config().data_root).resolve()
     endpoint = worker_command_endpoint(base)
+    # Refresh admission checks retained input fingerprints and the durable
+    # ledger before replying. It is not a sub-second liveness probe. Explicit
+    # caller budgets remain authoritative, including maintenance shutdowns.
+    if timeout is None:
+        timeout = (DATA_REFRESH_COMMAND_TIMEOUT_SECONDS if operation.startswith("data.refresh.")
+                   else DEFAULT_COMMAND_TIMEOUT_SECONDS)
     deadline = time.monotonic() + max(0.001, float(timeout))
     identity = application_identity or get_application_identity()
     try:
