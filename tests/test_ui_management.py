@@ -5218,6 +5218,105 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         browser.close()
 
 
+def test_after_close_scan_recovers_poll_navigation_and_reload(live_server):
+    url, _ = live_server
+    state = {"started": False, "failed_once": False, "complete": False, "interrupted": False}
+
+    def job():
+        status = "completed" if state["complete"] else "interrupted" if state["interrupted"] else "running"
+        phase = {"completed": "扫描完成", "interrupted": "等待恢复", "running": "分批读取行情"}[status]
+        return {
+            "id": "job-after-close", "type": "after_close.scan",
+            "status": status, "phase": phase,
+            "progress": 100 if state["complete"] else 25, "can_cancel": not state["complete"],
+        }
+
+    def route_api(route):
+        path = urlsplit(route.request.url).path
+        if path == "/api/v1/jobs" and "domain=after_close" in route.request.url:
+            route.fulfill(json={"items": [job()] if state["started"] else []})
+        elif path == "/api/v1/after-close/scan":
+            state["started"] = True
+            route.fulfill(json=job())
+        elif path == "/api/v1/jobs/job-after-close":
+            if not state["failed_once"]:
+                state["failed_once"] = True
+                route.fulfill(status=503, json={"detail": "transient progress failure"})
+            else:
+                route.fulfill(json=job())
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.route("**/api/v1/**", route_api)
+        page.goto(f"{url}/#today/after-close")
+        scan = page.locator("#after-close-scan-form button.primary")
+        scan.click()
+        page.get_by_text("进度连接暂时中断，正在重新连接…", exact=True).wait_for()
+        assert scan.is_disabled()
+        page.get_by_text("分批读取行情", exact=True).wait_for()
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.get_by_role("button", name="今日", exact=True).click()
+        page.wait_for_url(re.compile(r"#today/after-close$"))
+        page.get_by_text("分批读取行情", exact=True).wait_for()
+        assert scan.is_disabled()
+        state["interrupted"] = True
+        page.get_by_text("等待恢复", exact=True).wait_for()
+        assert scan.is_disabled()
+        page.reload()
+        page.get_by_text("等待恢复", exact=True).wait_for()
+        assert scan.is_disabled()
+        state["interrupted"] = False
+        page.get_by_text("分批读取行情", exact=True).wait_for()
+        assert scan.is_disabled()
+        state["complete"] = True
+        page.get_by_text("扫描完成", exact=True).wait_for()
+        page.wait_for_function(
+            "() => !document.querySelector('#after-close-scan-form button.primary').disabled"
+        )
+        browser.close()
+
+
+def test_after_close_ignores_inflight_response_after_unmount(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{url}/#today/after-close")
+        page.locator("#after-close-scan-form").wait_for(state="visible")
+        page.evaluate("""() => {
+          const nativeApi = window.api;
+          window.__afterClosePolls = 0;
+          window.api = (input, options) => {
+            const path = new URL(input, location.href).pathname;
+            if (path === '/api/v1/after-close/scan') return Promise.resolve({id:'job-race'});
+            if (path === '/api/v1/jobs/job-race') {
+              window.__afterClosePolls += 1;
+              if (window.__afterClosePolls === 1) return new Promise(resolve => {
+                window.__resolveAfterClose = () => resolve({
+                  id:'job-race', status:'running', phase:'过期响应',
+                });
+              });
+              return Promise.resolve({id:'job-race', status:'completed', phase:'已恢复完成', progress:100});
+            }
+            return nativeApi(input, options);
+          };
+        }""")
+        page.locator("#after-close-scan-form button.primary").click()
+        page.wait_for_function("() => window.__afterClosePolls === 1")
+        page.get_by_role("button", name="账户", exact=True).click()
+        page.wait_for_url(re.compile(r"#account/paper$"))
+        page.evaluate("window.__resolveAfterClose()")
+        page.wait_for_timeout(1200)
+        assert page.evaluate("window.__afterClosePolls") == 1
+        page.get_by_role("button", name="今日", exact=True).click()
+        page.get_by_text("已恢复完成", exact=True).wait_for()
+        browser.close()
+
+
 def test_stock_analysis_remount_resumes_nonterminal_poll_and_clock(live_server):
     url, _ = live_server
     event_calls = {"count": 0}

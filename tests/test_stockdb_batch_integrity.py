@@ -60,13 +60,24 @@ def test_observed_empty_pipeline_does_not_become_missing_coverage(source):
     assert all(isinstance(call['code'], str) for call in source._client.calls)
 
 
-def test_large_reused_batches_have_linear_call_budget(source):
+def test_large_reused_batches_have_linear_call_budget(source, monkeypatch):
     codes = [f'{number:06d}' for number in range(100000, 100701)]
+    scheduled_sizes = []
+
+    def schedule(_lane, _key, fetch, **kwargs):
+        before = len(source._client.calls)
+        result = fetch()
+        scheduled_sizes.append(len(source._client.calls) - before)
+        return result
+
+    monkeypatch.setattr(stockdb, 'provider_call', schedule)
     for ordered in (codes, list(reversed(codes))):
         rows = source._sdk_data(ordered + ordered[:3], '20260907', '20260917', '1d', fq=None)
         assert list(rows) == ordered
         assert all(value[0]['code'] == code for code, value in rows.items())
     assert len(source._client.calls) == 2 * len(codes)
+    assert max(scheduled_sizes) <= 32
+    assert len(scheduled_sizes) == 44
     assert source._sdk_data([], '20260907', '20260917', '1d', fq=None) == {}
 
 
@@ -77,6 +88,20 @@ def test_projection_preserves_raw_prices_and_checks_hidden_identity(source):
     assert all('code' in call['fields'].split(',') for call in source._client.calls)
     assert 'code' not in frame.columns
     assert all(call['fq'] is None for call in source._client.calls)
+
+
+def test_remote_sdk_keeps_per_symbol_rate_limiting(source, monkeypatch):
+    source.name = 'free-stockdb-online'
+    requests = []
+
+    def schedule(_lane, key, fetch, **kwargs):
+        requests.append(key)
+        return fetch()
+
+    monkeypatch.setattr(stockdb, 'provider_call', schedule)
+    result = source._sdk_data(['000001', '600000'], '20260907', '20260917', '1d', fq=None)
+    assert set(result) == {'000001', '600000'}
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize('bad, message', [
@@ -161,7 +186,7 @@ def test_real_scheduler_keeps_large_batch_outside_single_call_timeout(monkeypatc
     elapsed = perf_counter() - begin
     assert list(result) == codes
     assert len(source._client.calls) == 300
-    # The scheduler sees short scalar calls, never one growing full-market call.
+    # The scheduler sees bounded chunks, never one growing full-market call.
     with capsys.disabled():
         print(f'\nStockDB synthetic scheduler: 300 scalar reads in {elapsed:.3f}s')
 

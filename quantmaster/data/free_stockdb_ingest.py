@@ -885,13 +885,9 @@ class StockDBIngestService:
         progress_span: int = 48,
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
-        # The native SDK is optimized for broad cross-section reads.  Small
-        # 300-symbol slices multiply Python/SQLite setup costs and make a full
-        # A-share refresh needlessly chatty.  Keep one SDK call in flight (the
-        # vendor runtime is not documented as thread-safe), but start with a
-        # materially wider batch and adapt around a human-scale two-second
-        # slice budget.
-        offset, batch_size = 0, 1000
+        # Native reads are scalar for correctness. Bound each slice so progress
+        # and cancellation remain responsive even on a cold local database.
+        offset, batch_size = 0, 100
         target_seconds = 2.5
         while offset < len(symbols):
             if cancelled():
@@ -912,13 +908,13 @@ class StockDBIngestService:
             )
             offset += len(batch)
             if elapsed > target_seconds:
-                batch_size = max(500, int(batch_size * 0.80))
+                batch_size = max(25, int(batch_size * 0.80))
             elif elapsed < target_seconds * 0.55:
-                batch_size = min(2000, int(batch_size * 1.25))
+                batch_size = min(250, int(batch_size * 1.25))
             progress(
                 progress_start + int(progress_span * offset / max(1, len(symbols))),
                 "读取本地数据库",
-                f"已读取 {offset}/{len(symbols)} · 批次 {batch_size} · {elapsed:.2f}s",
+                f"已读取 {offset}/{len(symbols)} · 批次 {len(batch)} · {elapsed:.2f}s",
             )
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -962,23 +958,24 @@ class StockDBIngestService:
         if acceptance is None or acceptance.session < end:
             raise ValueError("正式研究需要覆盖目标日的 accepted StockDB v2 验收记录")
         ordered = list(dict.fromkeys(str(symbol).upper() for symbol in symbols))
-        if cancelled():
-            raise InterruptedError("free-stockdb 正式研究读取已取消")
-        values = self.source.daily_many(ordered, start, end)
         frames: list[pd.DataFrame] = []
         normalized_no_trade_rows = 0
-        for symbol in ordered:
-            frame = values.get(symbol)
-            if frame is None or frame.empty:
-                continue
-            value = normalize_stockdb_no_trade_bars(frame)
-            normalized_no_trade_rows += int(
-                value.attrs.get("stockdb_no_trade_rows_normalized") or 0
+        for offset in range(0, len(ordered), 100):
+            if cancelled():
+                raise InterruptedError("free-stockdb 正式研究读取已取消")
+            batch = ordered[offset:offset + 100]
+            progress(
+                54 + int(6 * offset / max(1, len(ordered))),
+                "读取已验收 StockDB qfq", f"已读取 {offset}/{len(ordered)} 只股票",
             )
-            if "date" not in value:
-                value = value.rename_axis("date").reset_index()
-            value["symbol"] = symbol
-            frames.append(value)
+            values = self.source.daily_many(batch, start, end)
+            batch_frames = self._native_research_frames(values, batch)
+            normalized_no_trade_rows += sum(
+                int(value.attrs.get("stockdb_no_trade_rows_normalized") or 0) for value in batch_frames
+            )
+            frames.extend(batch_frames)
+        if cancelled():
+            raise InterruptedError("free-stockdb 正式研究读取已取消")
         result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         required = {"symbol", "date", "open", "high", "low", "close", "volume"}
         if result.empty or not required.issubset(result):
@@ -1004,7 +1001,7 @@ class StockDBIngestService:
         result["price_adjustment"] = "forward_adjusted_from_stockdb_accepted_v2"
         result["adjustment_status"] = "stockdb_accepted"
         progress(
-            53,
+            60,
             "读取已验收 StockDB qfq",
             f"已读取 {result['symbol'].nunique()}/{len(ordered)} 只股票；"
             f"规范化 {normalized_no_trade_rows} 行停牌占位",
@@ -1012,6 +1009,20 @@ class StockDBIngestService:
         result = result.sort_values(["symbol", "date"]).reset_index(drop=True)
         result.attrs["stockdb_no_trade_rows_normalized"] = normalized_no_trade_rows
         return result
+
+    @staticmethod
+    def _native_research_frames(values, symbols) -> list[pd.DataFrame]:
+        frames = []
+        for symbol in symbols:
+            frame = values.get(symbol)
+            if frame is None or frame.empty:
+                continue
+            value = normalize_stockdb_no_trade_bars(frame)
+            if "date" not in value:
+                value = value.rename_axis("date").reset_index()
+            value["symbol"] = symbol
+            frames.append(value)
+        return frames
 
     @staticmethod
     def cross_validation_sample(frame: pd.DataFrame) -> dict[str, Any]:
@@ -1390,6 +1401,7 @@ class StockDBIngestService:
         master_id = self.master_snapshot_id(instruments)
         data_session = self._data_session(end)
         identity = getattr(self.source, "artifact_identity", None)
+        progress(5, "读取本地数据库", "读取板块与证券目录")
         boards = self.source.board_hierarchy()
         catalog: list[dict[str, Any]] = []
         delisted: list[dict[str, Any]] = []
@@ -1658,6 +1670,9 @@ class StockDBIngestService:
             acceptance_issues.append(
                 "StockDB 整批独立抽检未通过正式资格：" + cross_status
             )
+        progress(61, "归档本地行情", f"校验并保存 {len(frame)} 行行情与复权证据")
+        if cancelled():
+            raise InterruptedError("free-stockdb 摄取已取消")
         snapshot = self.store.publish(
             frame=frame,
             research_frame=research_frame,

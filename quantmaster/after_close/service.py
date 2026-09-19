@@ -841,6 +841,8 @@ class AfterCloseService:
                 expected_symbols=symbols,
                 expected_session_value=target.isoformat(),
             )
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         progress(62, "计算板块优先级", "聚合申万层级与概念板块")
         try:
             sectors, candidates, shadow_candidates, excluded, score_diagnostics = self._score(
@@ -913,6 +915,8 @@ class AfterCloseService:
             "ac_"
             + hashlib.sha256(f"{actual_as_of}:{active_score_version}:{input_hash}".encode()).hexdigest()[:24]
         )
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         existing_snapshot = self.store.get(snapshot_id)
         if existing_snapshot is not None:
             self.ingest.store.pin(
@@ -993,6 +997,8 @@ class AfterCloseService:
             },
         )
         progress(88, "发布不可变快照", snapshot_id)
+        if cancelled():
+            raise InterruptedError("盘后扫描已取消")
         self.store.publish(snapshot)
         self.ingest.store.pin(
             snapshot.ingest_id,

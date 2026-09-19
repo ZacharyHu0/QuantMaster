@@ -2,6 +2,7 @@ const afterCloseFeature = (() => {
   const state = {
     loaded:false, loading:null, snapshot:null, labels:[], level:'L1', sector:'',
     jobId:'', poll:null, stockdbPoll:null, stockdbActive:false,
+    mounted:false, epoch:0, discovering:false, submitting:false,
   };
   const root = document.getElementById('tab-after-close');
   if (!root) return;
@@ -195,8 +196,6 @@ const afterCloseFeature = (() => {
   function renderStockdbUpdate(status) {
     const box = document.getElementById('after-close-source-status');
     const updateButton = document.getElementById('after-close-update-data');
-    const scanButton = document.querySelector('#after-close-scan-form button.primary');
-    const rerunButton = document.getElementById('after-close-rerun');
     const active = stockdbIsActive(status);
     const failed = ['error','degraded'].includes(status?.state)
       || ['failed','manual_required'].includes(status?.update_result);
@@ -227,8 +226,7 @@ const afterCloseFeature = (() => {
     box.hidden = false;
     updateButton.textContent = active ? '正在更新扫描数据…' : '更新扫描数据';
     updateButton.disabled = active;
-    scanButton.disabled = active || Boolean(state.jobId);
-    rerunButton.disabled = active || Boolean(state.jobId);
+    syncScanControls();
     return active;
   }
 
@@ -258,33 +256,67 @@ const afterCloseFeature = (() => {
     }
   }
 
-  async function pollJob() {
-    if (!state.jobId) return;
-    const job = await api(`/api/v1/jobs/${encodeURIComponent(state.jobId)}`);
-    progress(job);
-    if (['completed','completed_with_warnings'].includes(job.status)) {
-      state.jobId = ''; clearTimeout(state.poll); state.poll = null;
-      await load(); return;
+  function syncScanControls() {
+    const disabled = state.stockdbActive || Boolean(state.jobId) || state.discovering || state.submitting;
+    document.querySelector('#after-close-scan-form button.primary').disabled = disabled;
+    document.getElementById('after-close-rerun').disabled = disabled;
+  }
+
+  async function pollJob(epoch = state.epoch) {
+    if (!state.mounted || epoch !== state.epoch) return;
+    clearTimeout(state.poll);
+    state.poll = null;
+    const current = () => state.mounted && epoch === state.epoch;
+    let retry = false;
+    try {
+      if (!state.jobId) {
+        const jobs = await api('/api/v1/jobs?domain=after_close&limit=100');
+        if (!current()) return;
+        state.jobId = (jobs.items || []).find(job => job.type === 'after_close.scan'
+          && ['queued','running','cancelling','interrupted'].includes(job.status))?.id || '';
+        state.discovering = false;
+      }
+      if (!state.jobId) return;
+      const jobId = state.jobId;
+      const job = await api(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+      if (!current() || state.jobId !== jobId) return;
+      progress(job);
+      if (['completed','completed_with_warnings','failed','cancelled'].includes(job.status)) {
+        state.jobId = '';
+        await load();
+      }
+    } catch (error) {
+      if (!current()) return;
+      retry = true;
+      const box = document.getElementById('after-close-progress');
+      box.hidden = false;
+      box.querySelector('[data-after-close-phase]').textContent = '进度连接暂时中断，正在重新连接…';
+    } finally {
+      if (current()) {
+        syncScanControls();
+        if (retry || state.jobId) state.poll = setTimeout(() => void pollJob(epoch), retry ? 2000 : 900);
+      }
     }
-    if (['failed','cancelled'].includes(job.status)) {
-      state.jobId = ''; clearTimeout(state.poll); state.poll = null;
-      document.getElementById('after-close-progress').hidden = true;
-      await load(); return;
-    }
-    state.poll = setTimeout(() => void pollJob(), 900);
   }
 
   async function submit(force) {
+    if (state.jobId || state.discovering || state.submitting || state.stockdbActive) return;
     const form = document.getElementById('after-close-scan-form');
+    state.submitting = true;
     busy(form, true, '正在提交…');
+    syncScanControls();
     try {
       const job = await post('/api/v1/after-close/scan', {
         as_of:document.getElementById('after-close-as-of').value || '', force:Boolean(force),
       });
-      state.jobId = job.id; progress(job); void pollJob();
+      state.jobId = job.id;
+      if (state.mounted) { progress(job); void pollJob(); }
+    } catch (error) {
+      if (state.mounted) progress({phase:`扫描提交失败：${error.message}`});
     } finally {
+      state.submitting = false;
       busy(form, false);
-      form.querySelector('button.primary').disabled = state.stockdbActive;
+      syncScanControls();
     }
   }
 
@@ -341,13 +373,24 @@ const afterCloseFeature = (() => {
   });
 
   function unmount() {
+    state.mounted = false;
+    state.epoch += 1;
     clearTimeout(state.poll);
     clearTimeout(state.stockdbPoll);
     state.poll = null;
     state.stockdbPoll = null;
   }
 
-  return {mount:load, unmount, refresh:load};
+  function mount() {
+    state.mounted = true;
+    state.epoch += 1;
+    state.discovering = !state.jobId;
+    syncScanControls();
+    void pollJob();
+    return load();
+  }
+
+  return {mount, unmount, refresh:load};
 })();
 
 export const {mount, unmount, refresh} = afterCloseFeature;
