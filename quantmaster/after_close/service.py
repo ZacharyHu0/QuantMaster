@@ -1076,6 +1076,7 @@ class AfterCloseService:
     def evaluate_pending(self, frame: pd.DataFrame) -> None:
         if frame.empty:
             return
+        sessions = pd.DatetimeIndex(pd.to_datetime(frame["date"]).dropna().unique())
         by_symbol = {
             symbol: group.sort_values("date").set_index(pd.to_datetime(group["date"]))
             for symbol, group in frame.groupby("symbol")
@@ -1083,6 +1084,9 @@ class AfterCloseService:
         for meta in self.store.history(100):
             snapshot = self.store.get(str(meta["snapshot_id"]))
             if snapshot is None:
+                continue
+            future_sessions = int((sessions > pd.Timestamp(snapshot.as_of_date)).sum())
+            if not future_sessions:
                 continue
             existing = {item["horizon"]: item for item in self.store.labels(snapshot.snapshot_id)}
             csi_symbols: set[str] = set()
@@ -1099,6 +1103,8 @@ class AfterCloseService:
                 except (ImportError, OSError, RuntimeError, TypeError, ValueError):
                     csi_symbols = set()
             for horizon in (1, 3, 5, 7, 10, 20, 30):
+                if horizon > future_sessions:
+                    break
                 if (
                     horizon in existing
                     and (not csi_symbols or existing[horizon].get("csi800_mean_return") is not None)

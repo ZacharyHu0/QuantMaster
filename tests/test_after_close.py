@@ -430,6 +430,15 @@ def test_historical_force_rejects_future_dated_board_taxonomy(service, monkeypat
         service.scan(as_of="2026-08-05", force=True)
 
 
+def test_current_snapshot_skips_unrealized_label_work(service, monkeypatch):
+    service.scan()
+    monkeypatch.setattr(
+        service.store, "labels",
+        lambda *_: pytest.fail("no future sessions: skip label and baseline work"),
+    )
+    service.evaluate_pending(service.source.frame)
+
+
 def test_future_labels_use_only_realized_sessions_and_market_baseline(service) -> None:
     snapshot = service.scan()
     future_dates = pd.bdate_range("2026-08-06", periods=7)
