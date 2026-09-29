@@ -1183,6 +1183,8 @@ def _clean_expected_detail_text() -> str:
 
 
 def test_rss_snapshot_gap_stays_degraded_without_a_verified_cursor(monkeypatch, tmp_path):
+    now = pd.Timestamp("2026-08-09T10:10:00+08:00").timestamp()
+    monkeypatch.setattr("quantmaster.ai.news_providers.time.time", lambda: now)
     store = NewsSourceStore(tmp_path / "news.sqlite")
     store.record_batch(FetchBatch(
         source_id="nbs_release", watermark="old-guid",
