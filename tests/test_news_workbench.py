@@ -250,6 +250,8 @@ def test_source_list_projects_last_run_progress_without_exposing_secrets(tmp_pat
 
 
 def test_declarative_parsers(monkeypatch, tmp_path):
+    now = pd.Timestamp("2026-08-09T10:10:00+08:00").timestamp()
+    monkeypatch.setattr("quantmaster.ai.news_sources.time.time", lambda: now)
     store = NewsSourceStore(tmp_path / "news.sqlite", credentials=FakeCredentials())
     payloads = {
         "rss": b"<rss><channel><item><title>RSS title</title><description>RSS body</description>"
