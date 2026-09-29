@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import gc
 import multiprocessing
 import os
 import sqlite3
 import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import ClassVar
@@ -1369,6 +1371,44 @@ def test_provider_scheduler_enforces_global_network_concurrency_ceiling():
         assert sorted(item.result(timeout=2.0) for item in pending) == list(
             range(scheduler.MAX_NETWORK_CONCURRENCY + 1)
         )
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_idle_provider_worker_releases_completed_payloads(fails):
+    scheduler = ProviderScheduler()
+    references = []
+
+    class Payload:
+        pass
+
+    def call_once():
+        captured = Payload()
+        references.append(weakref.ref(captured))
+
+        def fetch():
+            assert captured is not None
+            result = Payload()
+            references.append(weakref.ref(result))
+            if fails:
+                raise ValueError("payload failure")
+            return result
+
+        if fails:
+            with pytest.raises(ValueError, match="payload failure"):
+                scheduler.call("free-stockdb", "payload", fetch)
+        else:
+            result = scheduler.call("free-stockdb", "payload", fetch)
+            assert result is references[-1]()
+
+    call_once()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        gc.collect()
+        if all(reference() is None for reference in references):
+            break
+        time.sleep(0.01)
+    assert len(references) == 2
+    assert all(reference() is None for reference in references)
 
 
 def test_provider_scheduler_uses_fixed_provider_family_pools():

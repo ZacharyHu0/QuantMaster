@@ -408,6 +408,7 @@ class ProviderScheduler:
     def _worker(self, family: str, work: queue.PriorityQueue) -> None:
         while True:
             item: _ScheduledCall = work.get()
+            result = None
             owns_lane = False
             rescheduled = False
             try:
@@ -472,6 +473,8 @@ class ProviderScheduler:
                             self._active_providers.pop(provider, None)
                     if not rescheduled and self._inflight.get((item.lane, item.key)) is item:
                         self._inflight.pop((item.lane, item.key), None)
+                # Idle threads must not retain payloads, closures or failed-call tracebacks.
+                del item, result
                 work.task_done()
 
     def _expire(self, lane: str, item: _ScheduledCall) -> ProviderTimeoutError:
