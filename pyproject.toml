@@ -57,7 +57,7 @@ dev = [
     "scikit-learn>=1.9.0",
 ]
 quality = [
-    "build>=1.5.0",
+    "build>=1.6.1",
     "coverage[toml]>=7.15.4",
     "mypy>=1.11",
     "pip-audit==2.10.1",
