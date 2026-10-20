@@ -41,7 +41,7 @@ tushare = ["tushare>=1.4"]
 # AI Quant Lab：Ridge + MLP/TCN/GRU/Transformer/DAE（可选，核心安装保持轻量）
 ml = [
     "scikit-learn>=1.9.0",
-    "torch>=2.2",
+    "torch>=2.14.0",
     "optuna>=4.9.0,<5",
 ]
 # 可选原生研究内核的本地构建工具；正式桌面包会预编译并内置扩展。
