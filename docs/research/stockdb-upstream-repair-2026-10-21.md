@@ -33,3 +33,15 @@ whether synchronization succeeded; notices and process exit are not evidence.
 Rollback: revert the code and restore the previous vendor updater from the
 original distribution. Restore the saved sentinel only while no update is
 running; doing so blocks the full-history resync again. No market schema changes.
+
+
+Live installed-slot inspection found that the active updater and sync origins were
+already current, but the accepted data frontier remained September 30. The primary
+calendar failed its response contract and the updater reused the accepted historical
+reader fallback as its target. The configured online calendar still used the old host.
+The [current quick start](https://dns.novapi.cc/tabs/start.html) publishes native
+`106.75.217.246:7899` and online SDK `106.75.217.246:12328`. A live SDK call to
+the latter returned the October 21 trading session. Update targets now require an
+official closed-session calendar, use the enabled online calendar if primary evidence
+is unavailable, and never certify a historical reader fallback as the newest target.
+Only the obsolete official online origin is migrated; custom endpoints are preserved.

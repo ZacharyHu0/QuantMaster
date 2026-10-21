@@ -1159,11 +1159,26 @@ class FreeStockDBRuntime:
                 getattr(expectation, "completion", "")
                 == "current_session_closed_waiting_provider"
             )
-            if expectation.session and (expectation.ready or calendar_target):
+            if expectation.session and calendar_target:
                 return expectation.session, expectation.source
+            if get_config().data.free_stockdb_online_enabled:
+                return self._online_update_target()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
         return "", "unavailable"
+
+    @staticmethod
+    def _online_update_target() -> tuple[str, str]:
+        """A read fallback session cannot prove that no newer update is due."""
+        from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource
+        from quantmaster.trading_sessions import SessionExpectationResolver, market_now
+
+        now = market_now()
+        sessions = FreeStockDBOnlineSource().official_trade_days(
+            (now - timedelta(days=45)).date(), now.date(),
+        )
+        closed = SessionExpectationResolver._closed_sessions(sessions, now)
+        return (max(closed), "free-stockdb-online:calendar") if closed else ("", "unavailable")
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:
         """Validate a target-date full-market slice without publishing research."""

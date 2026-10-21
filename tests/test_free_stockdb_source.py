@@ -456,7 +456,7 @@ def test_online_source_reads_official_trade_calendar_from_sdk(monkeypatch) -> No
     assert result == ["2026-08-17", "2026-08-18"]
     assert calls == [
         ("lane", "free-stockdb-online:calendar"),
-        ("init", "8.138.149.215:7899", {"df": False}),
+        ("init", "106.75.217.246:12328", {"df": False}),
         ("calendar", {"start_date": "2026-08-17", "end_date": "2026-08-18"}),
     ]
 
@@ -642,3 +642,12 @@ def test_explicit_online_source_respects_disabled_switch(monkeypatch) -> None:
             allow_online=True,
             provider="free-stockdb-online",
         )
+
+
+@pytest.mark.parametrize("origin, expected", [
+    ("http://8.138.149.215:7899", "http://106.75.217.246:7899/"),
+    ("http://private.example:1234", "http://private.example:1234/"),
+])
+def test_online_source_migrates_only_obsolete_official_origin(isolated_config, origin, expected):
+    isolated_config.data.free_stockdb_online_url = origin
+    assert FreeStockDBOnlineSource().base_url == expected

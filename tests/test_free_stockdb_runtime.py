@@ -144,7 +144,7 @@ def test_free_stockdb_settings_validate_schedule_and_root() -> None:
     assert settings.free_stockdb_auto_update is True
     assert settings.free_stockdb_update_time == "18:30"
     assert settings.free_stockdb_online_enabled is False
-    assert settings.free_stockdb_online_url == "http://8.138.149.215:7899"
+    assert settings.free_stockdb_online_url == "http://106.75.217.246:7899"
 
     with pytest.raises(ValueError):
         DataSettings(free_stockdb_update_time="25:00")
@@ -400,7 +400,7 @@ def test_vendor_target_does_not_advance_marker_when_validation_fails(
     assert runtime._last_update_date() == "2026-08-12"
 
 
-def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> None:
+def test_local_reader_fallback_never_nominates_update_target(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(
         runtime, "check_vendor_notice",
@@ -413,7 +413,7 @@ def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> N
         ),
     )
 
-    assert runtime._target_session() == ("2026-08-13", "stockdb:validated")
+    assert runtime._target_session() == ("", "unavailable")
 
 
 def test_update_target_uses_latest_closed_official_session_over_reader_fallback(
@@ -1825,3 +1825,23 @@ def test_upstream_preparation_failure_never_stops_service_or_launches_updater(
     if not local_ready:
         assert "上游更新准备失败" in runtime._status["message"]
         assert "private" not in runtime._status["message"]
+
+
+def test_update_target_recovers_official_calendar_after_primary_failure(
+    isolated_config, monkeypatch,
+):
+    runtime = FreeStockDBRuntime()
+    isolated_config.data.free_stockdb_online_enabled = True
+    monkeypatch.setattr(runtime, "check_vendor_notice", lambda **kw: {})
+    monkeypatch.setattr("quantmaster.trading_sessions.resolve_session_target", lambda: SimpleNamespace(
+        ready=True, session="2026-09-30", source="stockdb:validated",
+        completion="current_session_complete", coverage={"official_dates": []},
+    ))
+    monkeypatch.setattr("quantmaster.trading_sessions.market_now", lambda: datetime(
+        2026, 10, 21, 14, tzinfo=ZoneInfo("Asia/Shanghai"),
+    ))
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source.FreeStockDBOnlineSource.official_trade_days",
+        lambda *a: ["2026-10-20", "2026-10-21"],
+    )
+    assert runtime._target_session() == ("2026-10-20", "free-stockdb-online:calendar")
