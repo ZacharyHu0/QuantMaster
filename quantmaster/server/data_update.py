@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 
 from quantmaster.config import get_config
@@ -129,15 +130,17 @@ def _prepare_source(context: JobContext, state: dict[str, Any], target: str) -> 
 
 def run_update(context: JobContext, spec: dict[str, Any], manager: Any) -> JobOutcome:
     """Yield between dependencies, so child jobs can use the same worker pool."""
+    admitted_at = datetime.fromisoformat(context.created_at).timestamp()
     state = context.load_checkpoint(UPDATE_STATE, context.spec_hash) or {
         "target_session": spec["target_session"], "steps": {}, "children": [],
-        "plan_started_at": time.time(),
+        "plan_started_at": admitted_at,
     }
     steps = state["steps"]
     if context.cancelled():
         return JobOutcome("cancelled", "已停止后续更新；已提交的共享数据任务继续运行")
-    # Dependency yields create new runtime attempts; bound the whole plan as well.
-    if time.time() - state.setdefault("plan_started_at", time.time()) >= context.deadline_seconds:
+    # Admission time includes queue wait, even for a plan saved by the older handler.
+    state["plan_started_at"] = min(state.get("plan_started_at", admitted_at), admitted_at)
+    if time.time() - state["plan_started_at"] >= context.deadline_seconds:
         for stage in ("stockdb", "consumers", "analysis"):
             if steps.get(stage, {}).get("status") not in {"completed", "partial"}:
                 steps[stage] = {

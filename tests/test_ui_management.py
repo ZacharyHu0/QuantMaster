@@ -6426,7 +6426,12 @@ def test_data_update_survives_long_wait_reload_and_partial_completion(live_serve
             posts.append(route.request.url)
             job = {"id": "update-plan", "type": "data.update", "status": "interrupted",
                    "waiting_on": "data_dependencies", "detail": "后台任务仍在执行",
-                   "target_session": "2026-10-20"}
+                   "target_session": "2026-10-20", "queue": {
+                       "phase": "waiting_for_slot", "elapsed_seconds": 1080,
+                       "remaining_seconds": 2520, "overdue": False,
+                       "blockers": [{"id": "older-csi800", "scope": "CSI800", "status": "running",
+                                     "progress": 99, "detail": "799/800"}],
+                   }}
             route.fulfill(json=job)
         else:
             route.fulfill(json={"job": job, "tasks": [job] if job else [], "automatic": {
@@ -6449,11 +6454,14 @@ def test_data_update_survives_long_wait_reload_and_partial_completion(live_serve
         page.clock.fast_forward(80000)
         playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("后台任务仍在执行")
         playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("本次目标 2026-10-20")
+        playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("总用时18分0秒（含排队）")
+        playwright_sync.expect(page.locator("#data-update-steps")).to_contain_text("older-csi800")
         assert len(posts) == 1
         page.reload()
         page.wait_for_load_state("networkidle")
         playwright_sync.expect(page.locator("#data-update-start")).to_be_disabled()
         assert len(posts) == 1
+        playwright_sync.expect(page.locator("#data-update-steps")).to_contain_text("799/800")
         page.evaluate("""window.__published = 0;
             document.addEventListener('quantmaster:data-updated', () => window.__published++);""")
         job.update(status="failed", waiting_on="", outcome="partial", finished_at="now",

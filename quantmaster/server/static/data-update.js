@@ -23,11 +23,25 @@
     const a = value.automatic || {};
     summary.textContent = `行情库至 ${a.data_as_of || '尚未验收'} · ${summary.textContent}`;
     if (current?.target_session) summary.textContent += ` · 本次目标 ${current.target_session}`;
+    const queue = current?.queue;
+    if (queue && active(current)) {
+      const duration = seconds => seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+      const phase = {waiting_for_slot:'等待执行槽', queued:'等待后台领取', dependencies:'等待依赖'}[queue.phase];
+      if (phase) summary.textContent += ` · ${phase}`;
+      summary.textContent += ` · 总用时${duration(queue.elapsed_seconds)}（含排队）`;
+      summary.textContent += queue.overdue ? ' · 预算已用尽，等待后台收尾；共享任务继续运行'
+        : ` · 剩余预算${duration(queue.remaining_seconds)}`;
+    }
     summary.title = summary.textContent;
     document.getElementById('data-update-current').textContent = summary.textContent;
     auto.textContent = `行情库自动更新：${a.enabled ? '已开启' : '已关闭'}；缓存自动维护：${a.cache_enabled ? '已开启' : '已关闭'}。后台：${a.worker_available ? '在线' : '离线，自动维护暂不可执行'}。行情已验收到 ${a.data_as_of || '尚无证据'}（目标 ${a.target_session || '待确认'}）。下一次 ${a.next_retry_at || a.next_update_at || '尚未安排'}。${a.detail || ''}`;
     steps.replaceChildren();
     const rows = Object.entries(current?.steps || {}).map(([key, v]) => ({kind:labels[key] || key, ...v}));
+    const taskLabels = {'data.refresh':'行情缓存', 'data.update':'更新计划', 'rotation.refresh':'板块分析', 'after_close.scan':'盘后扫描'};
+    rows.unshift(...(queue?.blockers || []).map(job => ({
+      kind:`占用执行槽 · ${taskLabels[job.type] || '后台任务'} · ${job.scope}`, status:job.status,
+      detail:`${job.progress}% · ${job.detail || '后台执行中'} · 任务 ${job.id}`, blocker:true,
+    })));
     rows.push(...(current?.results || []));
     const childIds = new Set((current?.children || []).map(j => j.id));
     rows.push(...(value.tasks || []).filter(j => j.type === 'data.refresh' && !childIds.has(j.id)).map(j => ({
@@ -38,6 +52,12 @@
     for (const row of rows) {
       const li = document.createElement('li');
       li.textContent = `${row.kind} · ${states[row.status] || row.status} · ${row.detail || ''}${row.data_as_of ? ' · ' + row.data_as_of : ''}`;
+      if (row.blocker) {
+        const link = document.createElement('a');
+        link.href = '#runtime/operations';
+        link.textContent = '查看后台任务';
+        li.append(' · ', link);
+      }
       steps.append(li);
     }
     // Ignore intermediate source changes: publish completed cache/analysis work only.

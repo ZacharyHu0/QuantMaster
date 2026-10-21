@@ -679,15 +679,22 @@ class UnifiedJobStore:
                 )
         return self.get(job_id)
 
-    def list(self, limit: int = 100, *, job_type: str = "") -> list[dict[str, Any]]:
+    def list(
+        self, limit: int = 100, *, job_type: str = "", statuses: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM runtime_jobs"
-        params: tuple[Any, ...]
+        conditions = []
+        params: list[Any] = []
         if job_type:
-            query += " WHERE type=?"
-            params = (job_type, max(1, min(1000, int(limit))))
-        else:
-            params = (max(1, min(1000, int(limit))),)
+            conditions.append("type=?")
+            params.append(job_type)
+        if statuses:
+            conditions.append(f"status IN ({','.join('?' for _ in statuses)})")
+            params.extend(statuses)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(1000, int(limit))))
         with self._conn() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._decode_job(row) or {} for row in rows]
@@ -1524,6 +1531,7 @@ class JobContext:
         if not self._lease_token:
             raise JobLeaseLost(self.job_id)
         self.deadline_seconds = float(job["deadline_seconds"])
+        self.created_at = str(job["created_at"])
         self._deadline_at = time.monotonic() + self.deadline_seconds
         self._lease_alive = lease_alive
         self._generation = int(generation)
