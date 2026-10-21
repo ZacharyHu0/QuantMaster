@@ -14,7 +14,8 @@ ACTIVE = {"queued", "running", "cancelling", "interrupted"}
 def project_update(store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
     state = store.checkpoint(job["id"], UPDATE_STATE, job["spec_hash"]) or {}
     return {
-        **UnifiedJobRuntime.public(job), **state,
+        **UnifiedJobRuntime.public(job),
+        "target_session": job["spec"]["target_session"], **state,
         "waiting_on": str(job.get("waiting_on") or ""), "can_retry": False,
     }
 

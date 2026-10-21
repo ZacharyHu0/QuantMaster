@@ -98,12 +98,12 @@ def test_overlapping_automatic_intake_reuses_unchanged_failed_inputs(
 
     monkeypatch.setattr(manager, "_refresh_one", refresh)
     try:
-        first = manager.maintain_consumed()
+        first = manager.maintain_consumed(end="2026-09-17")
         for job in first:
             manager._run(job["id"])
         assert sorted(calls) == ["A", "A", "B", "C"]
         for _ in range(3):
-            reused = manager.maintain_consumed()
+            reused = manager.maintain_consumed(end="2026-09-17")
             assert [job["id"] for job in reused] == [job["id"] for job in first]
             assert all(job["reused"] and not job["can_retry"] for job in reused)
             assert all(job["failed"] == job["total"] for job in reused)
@@ -111,7 +111,7 @@ def test_overlapping_automatic_intake_reuses_unchanged_failed_inputs(
         before = maintenance.DataRefreshManager._fingerprint(["A"])
         store.put("A", pd.DataFrame({"close": [11.0]}, index=pd.to_datetime(["2026-09-17"])))
         assert maintenance.DataRefreshManager._fingerprint(["A"]) != before
-        assert manager.maintain_consumed()[1]["id"] != first[1]["id"]
+        assert manager.maintain_consumed(end="2026-09-17")[1]["id"] != first[1]["id"]
     finally:
         manager.shutdown()
 

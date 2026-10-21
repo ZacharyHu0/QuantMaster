@@ -154,9 +154,11 @@ class DataRefreshManager:
         return load_universe(universe)
 
     def preview(
-        self, scope: RefreshScope, universe: str = "", start: str = "",
+        self, scope: RefreshScope, universe: str = "", start: str = "", *, end: str = "",
     ) -> dict[str, Any]:
-        end = market_date().isoformat()
+        end = end or market_date().isoformat()
+        if date.fromisoformat(end) > market_date():
+            raise ValueError("刷新目标日期不能晚于今天")
         if scope == "market":
             start = str(market_date() - timedelta(days=365))
         elif not start:
@@ -201,28 +203,32 @@ class DataRefreshManager:
         }
 
     def create(
-        self, scope: RefreshScope, universe: str = "", start: str = "",
+        self, scope: RefreshScope, universe: str = "", start: str = "", *, end: str = "",
     ) -> dict[str, Any]:
-        preview = self.preview(scope, universe, start)
+        preview = self.preview(scope, universe, start, end=end)
         with self._lock:
             return self._submit(scope, universe, str(preview["start"]), str(preview["end"]))
 
     def create_update(self, *, manual: bool = True, as_of: str = "") -> dict[str, Any]:
+        from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
         from quantmaster.data.update import UPDATE_TASK
 
-        target = resolve_session_target(as_of)
-        if not target.ready or not target.session:
-            raise ValueError("交易日目标尚未确认，无法安全更新")
+        if as_of:
+            target = resolve_session_target(as_of).session
+            if not target:
+                raise ValueError("交易日目标尚未确认，无法安全更新")
+        else:
+            target = free_stockdb_runtime.update_target()
         runtime = self._ensure_runtime()
         job, _created = runtime.submit(
             UPDATE_TASK, {
-                "target_session": target.session,
+                "target_session": target,
                 "include_cache": manual or get_config().data.repair_enabled,
                 "include_scan": get_config().data.after_close_enabled and (
                     manual or get_config().data.after_close_auto_run
                 ),
             },
-            algorithm_version="1", deadline_seconds=3600, max_attempts=2,
+            algorithm_version="2", deadline_seconds=3600, max_attempts=2,
         )
         return self.get(str(job["id"]))
 
@@ -760,24 +766,29 @@ class DataRefreshManager:
                         )
                         self._scheduler.start()
 
-    def maintain_consumed(self, *, manual: bool = False) -> builtins.list[dict[str, Any]]:
+    def maintain_consumed(
+        self, *, manual: bool = False, end: str = "",
+    ) -> builtins.list[dict[str, Any]]:
         """Worker-only intake; page reads remain strictly local and read-only."""
         cfg = get_config()
         if not manual and not cfg.data.repair_enabled:
             return []
-        jobs = [self.create("market")]
+        from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+
+        end = end or free_stockdb_runtime.update_target()
+        jobs = [self.create("market", end=end)]
         watched = sorted(set([*cfg.automation.watchlist, *self.consumed_symbols()]))
         if watched:
             jobs.append(self._submit(
                 "watchlist", "", str(market_date() - timedelta(days=365)),
-                str(market_date()), watched,
+                end, watched,
             ))
         universes = {cfg.automation.primary_universe}
         if cfg.lab.enabled:
             universes.add(cfg.lab.universe)
         for universe in sorted(universes - {""}):
             try:
-                jobs.append(self.create("universe", universe=universe))
+                jobs.append(self.create("universe", universe=universe, end=end))
             except (OSError, RuntimeError, TypeError, ValueError):
                 if manual:
                     raise

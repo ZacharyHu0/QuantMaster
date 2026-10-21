@@ -836,10 +836,10 @@ def test_refresh_worker_intake_tracks_consumed_scopes(isolated_config, monkeypat
     manager = DataRefreshManager()
     monkeypatch.setattr(manager, "create", lambda scope, **kw: calls.append((scope, kw)) or {})
     monkeypatch.setattr(manager, "_submit", lambda *args: calls.append(args) or {})
-    assert len(manager.maintain_consumed()) == 4
-    assert ("market", {}) in calls
-    assert ("universe", {"universe": "selected"}) in calls
-    assert ("universe", {"universe": "research"}) in calls
+    assert len(manager.maintain_consumed(end="2026-10-20")) == 4
+    assert ("market", {"end": "2026-10-20"}) in calls
+    assert ("universe", {"universe": "selected", "end": "2026-10-20"}) in calls
+    assert ("universe", {"universe": "research", "end": "2026-10-20"}) in calls
     assert any(call[0] == "watchlist" for call in calls)
 
 
