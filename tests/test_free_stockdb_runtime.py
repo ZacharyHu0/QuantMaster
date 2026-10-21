@@ -1413,15 +1413,25 @@ def test_live_owner_process_is_never_reclaimed(tmp_path, monkeypatch) -> None:
     assert marker.exists()
 
 
+def _mock_catalog(monkeypatch, instruments):
+    from quantmaster.data import instrument_snapshots
+
+    monkeypatch.setattr(
+        instrument_snapshots, "load_instrument_catalog_snapshot",
+        lambda **kwargs: (None, {item.symbol for item in instruments}, {
+            "snapshot_id": "verified-catalog", "membership_as_of": kwargs["as_of"],
+        }),
+    )
+
+
 def test_full_market_validation_uses_actual_target_rows(isolated_config, monkeypatch) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     instruments = [
         SimpleNamespace(symbol=f"{index:06d}.SZ", status="listed", exchange="SZ")
         for index in range(10)
     ]
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
 
     def cross_section(_self, symbols, _start, _end):
         return pd.DataFrame({
@@ -1445,18 +1455,11 @@ def test_full_market_validation_contains_native_sdk_timeout(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     class NativeTimeout(Exception):
         pass
 
-    monkeypatch.setattr(
-        InstrumentStore,
-        "list",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
-        ],
-    )
+    _mock_catalog(monkeypatch, [SimpleNamespace(symbol="000001.SZ")])
     monkeypatch.setattr(
         FreeStockDBSource,
         "daily_cross_section",
@@ -1476,13 +1479,12 @@ def test_full_market_validation_rejects_coverage_below_operational_floor(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     instruments = [
         SimpleNamespace(symbol=f"{index:06d}.SZ", status="listed", exchange="SZ")
         for index in range(10)
     ]
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
 
     def cross_section(_self, symbols, _start, _end):
         selected = symbols[:8]
@@ -1509,13 +1511,12 @@ def test_full_market_validation_accepts_5493_of_5538_with_warning(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     instruments = [
         SimpleNamespace(symbol=f"{index:06d}.SZ", status="listed", exchange="SZ")
         for index in range(5538)
     ]
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
 
     def cross_section(_self, symbols, _start, _end):
         selected = [symbol for symbol in symbols if int(symbol[:6]) < 5493]
@@ -1547,14 +1548,13 @@ def test_full_market_validation_accepts_only_explicit_suspension_evidence(
 ) -> None:
     from quantmaster.data import instrument_snapshots
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     instruments = [
         SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
         SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
     ]
     isolated_config.data.tushare_token = "test-token"
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
     monkeypatch.setattr(
         FreeStockDBSource,
         "daily_cross_section",
@@ -1597,7 +1597,6 @@ def test_self_signed_suspension_payload_cannot_reduce_expected_denominator(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
     from quantmaster.data.tushare_source import TushareSource
 
     isolated_config.data.tushare_token = "test-token"
@@ -1605,7 +1604,7 @@ def test_self_signed_suspension_payload_cannot_reduce_expected_denominator(
         SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
         SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
     ]
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
     monkeypatch.setattr(
         FreeStockDBSource,
         "daily_cross_section",
@@ -1642,13 +1641,12 @@ def test_full_market_validation_rejects_nonfinite_and_impossible_ohlcv(
     isolated_config, monkeypatch,
 ) -> None:
     from quantmaster.data.free_stockdb_source import FreeStockDBSource
-    from quantmaster.data.instruments import InstrumentStore
 
     instruments = [
         SimpleNamespace(symbol="000001.SZ", status="listed", exchange="SZ"),
         SimpleNamespace(symbol="000002.SZ", status="listed", exchange="SZ"),
     ]
-    monkeypatch.setattr(InstrumentStore, "list", lambda *_args, **_kwargs: instruments)
+    _mock_catalog(monkeypatch, instruments)
 
     def cross_section(_self, symbols, _start, _end):
         return pd.DataFrame({
@@ -1883,3 +1881,25 @@ def test_update_target_recovers_official_calendar_after_primary_failure(
         lambda *a: ["2026-10-20", "2026-10-21"],
     )
     assert runtime._target_session() == ("2026-10-20", "free-stockdb-online:calendar")
+
+
+def test_validation_refreshes_missing_lifecycle_evidence_and_fails_closed(
+    isolated_config, monkeypatch,
+):
+    from quantmaster.data import instrument_snapshots, instruments
+    from quantmaster.data.free_stockdb_source import FreeStockDBSource
+
+    attempts = []
+
+    def missing(**kwargs):
+        attempts.append(kwargs["as_of"])
+        raise instrument_snapshots.InstrumentCatalogEvidenceError("stale")
+
+    monkeypatch.setattr(instrument_snapshots, "load_instrument_catalog_snapshot", missing)
+    monkeypatch.setattr(instruments, "refresh_authoritative_instrument_catalog", lambda: None)
+    monkeypatch.setattr(FreeStockDBSource, "daily_cross_section", lambda *args: pytest.fail("no denominator"))
+    result = FreeStockDBRuntime()._validate_data("2026-10-21")
+    assert attempts == ["2026-10-21", "2026-10-21"]
+    assert not result["accepted"]
+    assert result["expected_symbols"] == 0
+    assert "目录证据不足" in result["issues"][0]

@@ -113,6 +113,11 @@ def _validate_tushare_frame(
     declared = tuple(
         item.strip() for item in str(params.get("fields") or "").split(",") if item.strip()
     )
+    # hk_basic documents ts_code, not symbol; its catalog normalizer derives
+    # the display code from ts_code. Do not disable that lane for an optional
+    # field present in the catalog request's frozen identity.
+    if endpoint == "hk_basic":
+        declared = tuple(column for column in declared if column != "symbol")
     missing = [column for column in (*required_columns, *declared) if column not in frame.columns]
     if missing:
         raise ProviderContractChanged(

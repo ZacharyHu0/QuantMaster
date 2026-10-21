@@ -1190,17 +1190,16 @@ class FreeStockDBRuntime:
         import pandas as pd
 
         from quantmaster.data.free_stockdb_source import FreeStockDBSource
-        from quantmaster.data.instruments import InstrumentStore
+        from quantmaster.data.instrument_snapshots import (
+            InstrumentCatalogEvidenceError,
+            load_instrument_catalog_snapshot,
+        )
+        from quantmaster.data.instruments import refresh_authoritative_instrument_catalog
 
-        active = {"listed", "active", "l"}
-        symbols = [
-            item.symbol for item in InstrumentStore().list(market="CN", asset_type="stock")
-            if item.status.casefold() in active and item.exchange in {"SH", "SZ", "BJ"}
-        ]
         result: dict[str, Any] = {
             "target_session": target_session,
             "actual_session": "",
-            "expected_symbols": len(symbols),
+            "expected_symbols": 0,
             "observed_symbols": 0,
             "symbol_ratio": 0.0,
             "required_ohlcv_ratio": 0.0,
@@ -1209,8 +1208,27 @@ class FreeStockDBRuntime:
             "warnings": [],
             "issues": [],
         }
-        if not target_session or not symbols:
-            result["issues"] = ["无法确定目标交易日或 A 股证券目录为空"]
+        if not target_session:
+            result["issues"] = ["无法确定目标交易日"]
+            return result
+        try:
+            try:
+                _snapshot, members, evidence = load_instrument_catalog_snapshot(
+                    as_of=target_session, market="CN", asset_type="stock",
+                )
+            except InstrumentCatalogEvidenceError:
+                # Only a missing/stale local observation permits a remote refresh.
+                # Mutable InstrumentStore rows cannot prove the denominator.
+                refresh_authoritative_instrument_catalog()
+                _snapshot, members, evidence = load_instrument_catalog_snapshot(
+                    as_of=target_session, market="CN", asset_type="stock",
+                )
+            symbols = sorted(members)
+            result["expected_symbols"] = len(symbols)
+            result["catalog_evidence"] = evidence
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning("StockDB 覆盖率目录证据不足", exc_info=True)
+            result["issues"] = [f"StockDB 覆盖率目录证据不足：{type(exc).__name__}"]
             return result
         target = date.fromisoformat(target_session)
         start = (target - timedelta(days=10)).isoformat()

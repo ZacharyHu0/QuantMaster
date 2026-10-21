@@ -851,3 +851,27 @@ def test_refresh_suspension_warning_requires_every_full_day_snapshot(isolated_co
         assert manager._submit('all_cached', '', days[0], days[-1], [symbol])['reused']
     finally:
         manager.shutdown()
+
+
+@pytest.mark.parametrize("offset,expected", [(-1, True), (0, False), (1, False)])
+@pytest.mark.parametrize("status", ["L", "D"])
+def test_delisting_effective_date_is_exclusive(isolated_config, offset, expected, status):
+    from dataclasses import replace
+
+    acquired = _after_close()
+    observation = (acquired + timedelta(hours=8)).date()
+    snapshot = freeze_instrument_catalog(
+        _complete_records(), source="tushare:catalog", query=TUSHARE_CATALOG_QUERY,
+        request_outcomes=_request_outcomes(), acquired_at=acquired,
+    )
+    delisted = observation - timedelta(days=2)
+    row = {"symbol": "601059.SH", "market": "CN", "asset_type": "stock",
+           "status": status, "list_date": "2010-01-01", "delist_date": delisted.isoformat()}
+    future = {**row, "symbol": "920999.BJ", "status": "L",
+              "list_date": (observation + timedelta(days=1)).isoformat(), "delist_date": ""}
+    snapshot = replace(snapshot, records=(*(item for item in snapshot.records
+                                            if item["symbol"] != row["symbol"]), row, future))
+    symbols = snapshot_symbols(snapshot, market="CN", asset_type="stock",
+                               as_of=(delisted + timedelta(days=offset)).isoformat())
+    assert ("601059.SH" in symbols) is expected
+    assert "920999.BJ" not in symbols

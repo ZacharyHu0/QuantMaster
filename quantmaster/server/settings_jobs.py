@@ -19,7 +19,8 @@ from quantmaster.settings import SettingsDocument
 
 APPLY_TASK_TYPE = "settings.apply"
 DIAGNOSTIC_TASK_TYPE = "settings.diagnostic"
-_TASK_TYPES = frozenset({APPLY_TASK_TYPE, DIAGNOSTIC_TASK_TYPE})
+CATALOG_TASK_TYPE = "settings.catalog_refresh"
+_TASK_TYPES = frozenset({APPLY_TASK_TYPE, DIAGNOSTIC_TASK_TYPE, CATALOG_TASK_TYPE})
 
 
 class _DiagnosticCredentialVault:
@@ -86,7 +87,27 @@ class SettingsJobs:
         self.apply_runtime = UnifiedJobRuntime(store, max_workers=1)
         self.diagnostic_runtime = UnifiedJobRuntime(store, max_workers=1)
         self.apply_runtime.register(APPLY_TASK_TYPE, self._apply)
+        self.apply_runtime.register(CATALOG_TASK_TYPE, self._refresh_catalog)
         self.diagnostic_runtime.register(DIAGNOSTIC_TASK_TYPE, self._diagnostic)
+
+    @staticmethod
+    def _refresh_catalog(context: JobContext, _spec: dict[str, Any]) -> JobOutcome:
+        from quantmaster.data.instruments import refresh_instrument_master
+
+        context.progress(5, "刷新证券目录", "读取权威上市与退市生命周期")
+        result = refresh_instrument_master(force=True)
+        context.ensure_active()
+        authoritative = result.get("sources", {}).get("tushare:catalog", {})
+        if authoritative.get("status") != "success":
+            return JobOutcome("failed", "权威证券目录刷新失败，请检查数据源状态")
+        artifact = context.write_artifact("settings.catalog.result", result, {"schema_version": "1.0"})
+        return JobOutcome("completed", "证券目录已刷新", artifact["id"])
+
+    def submit_catalog_refresh(self) -> tuple[dict[str, Any], bool]:
+        return self.apply_runtime.submit(
+            CATALOG_TASK_TYPE, {},
+            algorithm_version="QM_CATALOG_REFRESH_V1", deadline_seconds=600, max_attempts=1,
+        )
 
     @staticmethod
     def _apply(context: JobContext, spec: dict[str, Any]) -> JobOutcome:
@@ -242,7 +263,7 @@ class SettingsJobs:
 
     def runtime_for(self, job_id: str) -> UnifiedJobRuntime:
         value = self.get(job_id)
-        return self.apply_runtime if value["type"] == APPLY_TASK_TYPE else self.diagnostic_runtime
+        return self.diagnostic_runtime if value["type"] == DIAGNOSTIC_TASK_TYPE else self.apply_runtime
 
     def get(self, job_id: str) -> dict[str, Any]:
         value = self.apply_runtime.store.get(job_id)

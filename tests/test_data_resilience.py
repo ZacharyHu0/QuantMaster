@@ -1775,3 +1775,16 @@ def test_tushare_settings_probe_does_not_mark_blank_sdk_response_healthy(
     })
     assert check_tushare("test-token")["status"] == "success"
     assert PROVIDER_HEALTH.status("tushare:trade_cal")["tushare:trade_cal"]["state"] == "closed"
+
+
+def test_hk_catalog_validates_official_identity_without_undocumented_symbol():
+    from quantmaster.data.resilience import ProviderContractChanged
+    from quantmaster.data.tushare_source import _validate_tushare_frame
+
+    frame = pd.DataFrame([{"ts_code": "00001.HK", "name": "CK Hutchison"}])
+    params = {"fields": "ts_code,symbol,name"}
+    _validate_tushare_frame("hk_basic", params, frame, required_nonempty=True,
+                           required_columns=("ts_code", "name"))
+    with pytest.raises(ProviderContractChanged, match="ts_code"):
+        _validate_tushare_frame("hk_basic", params, frame.drop(columns="ts_code"),
+                               required_nonempty=True, required_columns=("ts_code", "name"))
