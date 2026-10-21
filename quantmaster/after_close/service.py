@@ -785,6 +785,7 @@ class AfterCloseService:
         if historical and not force:
             frozen = self.store.for_date(as_of)
             if frozen is not None:
+                self.store.record_replay(frozen)
                 return frozen
         progress = progress or (lambda *_: None)
         cancelled = cancelled or (lambda: False)
@@ -793,10 +794,18 @@ class AfterCloseService:
             raise RuntimeError("证券主数据中没有可扫描的 A 股普通股")
         symbols = [item.symbol for item in instruments]
         instrument_map = {item.symbol: item for item in instruments}
-        expectation = resolve_session_target(as_of) if historical else expected_session()
+        try:
+            expectation = resolve_session_target(as_of) if historical else expected_session()
+        except ValueError as exc:
+            self.store.record_failure([str(exc)], as_of_date=as_of, purpose=purpose)
+            raise
         if not expectation.ready and not historical:
             expectation = self._fallback_source_session(symbols)
         if not expectation.ready or not expectation.session:
+            self.store.record_failure(
+                [expectation.reason or "无法确认最近已完成交易日"], as_of_date=as_of,
+                coverage={"expected_session": expectation.as_dict()}, purpose=purpose,
+            )
             raise DataGateRejected(
                 [expectation.reason or "无法确认最近已完成交易日"],
                 {"expected_session": expectation.as_dict()},
@@ -804,6 +813,10 @@ class AfterCloseService:
             )
         target = date.fromisoformat(expectation.session)
         if as_of and not historical and as_of != target.isoformat():
+            self.store.record_failure(
+                [f"当前分析目标 {as_of} 与最近已完成交易日 {target.isoformat()} 不同；请重新更新"],
+                as_of_date=as_of, purpose=purpose,
+            )
             raise DataGateRejected(
                 [f"当前分析目标 {as_of} 与最近已完成交易日 {target.isoformat()} 不同；"
                  "请重新更新，或选择历史重放"], {}, as_of,
@@ -834,13 +847,16 @@ class AfterCloseService:
             actual_as_of = ingest_snapshot.as_of_date
             coverage = dict(ingest_snapshot.coverage)
         except DataGateRejected as exc:
-            self.store.record_failure(exc.reasons, as_of_date=exc.as_of, coverage=exc.coverage)
+            self.store.record_failure(
+                exc.reasons, as_of_date=exc.as_of, coverage=exc.coverage, purpose=purpose,
+            )
             raise
         except StockDBIngestRejected as exc:
             self.store.record_failure(
                 exc.reasons,
                 as_of_date=exc.as_of_date,
                 coverage=exc.coverage,
+                purpose=purpose,
             )
             raise DataGateRejected(exc.reasons, exc.coverage, exc.as_of_date) from None
         if historical and actual_as_of > as_of:
@@ -871,6 +887,7 @@ class AfterCloseService:
                 exc.reasons,
                 as_of_date=exc.as_of,
                 coverage=exc.coverage,
+                purpose=purpose,
             )
             raise
         filters = {
@@ -931,6 +948,7 @@ class AfterCloseService:
             raise InterruptedError("盘后扫描已取消")
         existing_snapshot = self.store.get(snapshot_id)
         if existing_snapshot is not None:
+            self.store.publish(existing_snapshot)
             self.ingest.store.pin(
                 existing_snapshot.ingest_id,
                 "after_close",

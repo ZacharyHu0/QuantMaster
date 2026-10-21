@@ -127,6 +127,23 @@ const afterCloseFeature = (() => {
     };
   }
 
+  function renderAttempt(snapshot) {
+    const box = document.getElementById('after-close-replay-status');
+    const attempt = snapshot.attempts?.latest;
+    box.hidden = !attempt || attempt.purpose === 'current_analysis';
+    if (box.hidden) return;
+    const historical = attempt.purpose === 'historical_replay';
+    const rejected = attempt.status === 'rejected';
+    box.querySelector('[data-after-close-attempt-title]').textContent = historical
+      ? (rejected ? '历史重算未完成' : '历史快照已重放或发布') : '最近扫描用途未记录';
+    box.querySelector('[data-after-close-attempt-detail]').textContent = historical
+      ? `${attempt.as_of_date} · ${attempt.reason || '已读取不可变历史结果'} · ${attempt.created_at}`
+      : '旧尝试没有执行用途证据，无法据此判断当前分析是否需要更新。';
+    box.querySelector('[data-after-close-attempt-help]').textContent = historical
+      ? '历史重放结果单独记录；当前分析状态见上方，当前快照内容保持不变。'
+      : '请使用“更新数据与分析”或不填历史日期运行扫描，获取明确的当前分析状态。';
+  }
+
   function render() {
     const snapshot = state.snapshot;
     if (!snapshot) {
@@ -148,6 +165,7 @@ const afterCloseFeature = (() => {
       staleBox.querySelector('[data-after-close-stale-help]').textContent = copy.help;
     }
     staleBox.hidden = !stale;
+    renderAttempt(snapshot);
     const json = document.getElementById('after-close-json');
     const csv = document.getElementById('after-close-csv');
     json.href = `/api/v1/after-close/export/${encodeURIComponent(snapshot.snapshot_id)}?format=json`;

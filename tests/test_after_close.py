@@ -346,6 +346,82 @@ def test_gate_rejects_first_snapshot_with_stable_twenty_percent_symbol_gap(servi
         service._gate(service.source.frame, service.source.board_hierarchy(), expected_count=5)
 
 
+def test_historical_rejection_does_not_mark_current_snapshot_stale(service, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.after_close.service.resolve_session_target",
+        lambda as_of: SessionExpectation(as_of, "fixture", True, "verified", "previous_session_complete"),
+    )
+    published = service.scan()
+    frozen = service.store.get(published.snapshot_id).to_dict()
+    with pytest.raises(DataGateRejected, match="点时生效日期"):
+        service.scan(as_of=published.as_of_date, force=True)
+    latest = service.store.public_latest()
+    assert latest["snapshot_id"] == published.snapshot_id
+    assert not latest.get("staleness", {}).get("stale")
+    assert latest["attempts"]["current_analysis"]["status"] == "published"
+    assert latest["attempts"]["historical_replay"]["status"] == "rejected"
+    assert latest["attempts"]["latest"]["purpose"] == "historical_replay"
+    assert service.store.get(published.snapshot_id).to_dict() == frozen
+
+
+def test_historical_replay_never_hides_current_failure(service, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "quantmaster.after_close.service.resolve_session_target",
+        lambda as_of: SessionExpectation(as_of, "fixture", True, "verified", "previous_session_complete"),
+    )
+    published = service.scan()
+    frozen = service.store.get(published.snapshot_id).to_dict()
+    service.source.frame = service.source.frame.loc[service.source.frame["symbol"] == "600001.SH"].copy()
+    with pytest.raises(DataGateRejected):
+        service.scan(force=True)
+    replay = service.scan(as_of=published.as_of_date)
+    assert replay.to_dict() == frozen
+    latest = service.store.public_latest()
+    assert latest["staleness"]["stale"] is True
+    assert "覆盖" in latest["staleness"]["reason"]
+    assert latest["attempts"]["historical_replay"]["status"] == "replayed"
+    with pytest.raises(DataGateRejected):
+        service.scan(as_of=published.as_of_date, force=True)
+    assert service.store.public_latest()["staleness"]["stale"] is True
+
+
+def test_unclassified_attempt_is_explicitly_unknown_and_not_current(service) -> None:
+    published = service.scan()
+    with service.store._conn() as connection:
+        connection.execute("UPDATE attempts SET coverage_json='{}'")
+    service.store.record_failure(["旧记录没有用途"], as_of_date=published.as_of_date)
+    latest = service.store.public_latest()
+    assert latest["attempts"]["latest"]["purpose"] == "unknown"
+    assert latest["attempts"]["current_analysis"] is None
+    assert not latest.get("staleness", {}).get("stale")
+
+
+def test_current_revalidation_clears_failure_when_reusing_frozen_snapshot(service, monkeypatch) -> None:
+    ingests = []
+    load_or_create = service.ingest.load_or_create
+
+    def capture_ingest(**kwargs):
+        result = load_or_create(**kwargs)
+        ingests.append(result)
+        return result
+
+    monkeypatch.setattr(service.ingest, "load_or_create", capture_ingest)
+    published = service.scan()
+    frozen = service.store.get(published.snapshot_id).to_dict()
+    original = service.source.frame.copy()
+    service.source.frame = original.loc[original["symbol"] == "600001.SH"].copy()
+    with pytest.raises(DataGateRejected):
+        service.scan(force=True)
+    assert service.store.public_latest()["staleness"]["stale"] is True
+    service.source.frame = original
+    monkeypatch.setattr(service.ingest, "load_or_create", lambda **_kwargs: ingests[0])
+    verified = service.scan(force=True)
+    assert verified.to_dict() == frozen
+    latest = service.store.public_latest()
+    assert not latest.get("staleness", {}).get("stale")
+    assert latest["attempts"]["current_analysis"]["status"] == "published"
+
+
 @pytest.mark.parametrize("full_day", [True, False, None])
 def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
     service, isolated_config, monkeypatch, full_day,

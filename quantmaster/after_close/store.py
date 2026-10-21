@@ -10,6 +10,7 @@ from quantmaster.after_close.models import (
     SCORE_VERSION,
     SHADOW_SCORE_VERSION,
     AfterCloseSnapshot,
+    ScanPurpose,
     utc_now,
 )
 from quantmaster.config import get_config
@@ -95,7 +96,9 @@ class AfterCloseStore:
             connection.execute(
                 "INSERT INTO attempts(status,as_of_date,reasons_json,coverage_json,snapshot_id,created_at) "
                 "VALUES ('published',?, '[]', ?, ?, ?)",
-                (snapshot.as_of_date, strict_json_dumps(snapshot.coverage), snapshot.snapshot_id, now),
+                (snapshot.as_of_date, strict_json_dumps({
+                    **snapshot.coverage, "scan_purpose": snapshot.filters.get("purpose", "unknown"),
+                }), snapshot.snapshot_id, now),
             )
         return {"snapshot_id": snapshot.snapshot_id, "published_at": now}
 
@@ -105,13 +108,26 @@ class AfterCloseStore:
         *,
         as_of_date: str = "",
         coverage: dict | None = None,
+        purpose: ScanPurpose | None = None,
     ) -> None:
         self._require_writer()
         with self._conn() as connection:
             connection.execute(
                 "INSERT INTO attempts(status,as_of_date,reasons_json,coverage_json,created_at) "
                 "VALUES ('rejected',?,?,?,?)",
-                (as_of_date, strict_json_dumps(reasons), strict_json_dumps(coverage or {}), utc_now()),
+                (as_of_date, strict_json_dumps(reasons), strict_json_dumps({
+                    **(coverage or {}), "scan_purpose": purpose or "unknown",
+                }), utc_now()),
+            )
+
+    def record_replay(self, snapshot: AfterCloseSnapshot) -> None:
+        self._require_writer()
+        with self._conn() as connection:
+            connection.execute(
+                "INSERT INTO attempts(status,as_of_date,coverage_json,snapshot_id,created_at) "
+                "VALUES ('replayed',?,?,?,?)",
+                (snapshot.as_of_date, strict_json_dumps({"scan_purpose": "historical_replay"}),
+                 snapshot.snapshot_id, utc_now()),
             )
 
     @staticmethod
@@ -150,11 +166,20 @@ class AfterCloseStore:
             return None
         value = snapshot.to_dict()
         with self._conn() as connection:
-            attempt = connection.execute("SELECT * FROM attempts ORDER BY id DESC LIMIT 1").fetchone()
-        if attempt and str(attempt["status"]) == "rejected":
+            latest = connection.execute("SELECT * FROM attempts ORDER BY id DESC LIMIT 1").fetchone()
+            attempts = {"latest": self._public_attempt(latest)}
+            for purpose in ("current_analysis", "historical_replay"):
+                row = connection.execute(
+                    "SELECT * FROM attempts WHERE json_extract(coverage_json,'$.scan_purpose')=? "
+                    "ORDER BY id DESC LIMIT 1", (purpose,),
+                ).fetchone()
+                attempts[purpose] = self._public_attempt(row)
+        value["attempts"] = attempts
+        attempt = attempts["current_analysis"]
+        if attempt and attempt["status"] == "rejected":
             value["staleness"] = {
                 "stale": True,
-                "reason": "；".join(json.loads(str(attempt["reasons_json"])))[:1000],
+                "reason": attempt["reason"],
                 "last_attempt_at": str(attempt["created_at"]),
                 "attempted_as_of": str(attempt["as_of_date"]),
             }
@@ -163,6 +188,20 @@ class AfterCloseStore:
             for sector in value.get("sectors", []):
                 sector["staleness"] = dict(value["staleness"])
         return value
+
+    @staticmethod
+    def _public_attempt(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        purpose = json.loads(str(row["coverage_json"])).get("scan_purpose", "unknown")
+        return {
+            "purpose": purpose if purpose in {"current_analysis", "historical_replay"} else "unknown",
+            "status": str(row["status"]),
+            "as_of_date": str(row["as_of_date"]),
+            "created_at": str(row["created_at"]),
+            "snapshot_id": str(row["snapshot_id"]),
+            "reason": "；".join(json.loads(str(row["reasons_json"])))[:1000],
+        }
 
     def history(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._conn() as connection:
