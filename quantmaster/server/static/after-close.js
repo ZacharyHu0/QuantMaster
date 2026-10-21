@@ -247,6 +247,12 @@ const afterCloseFeature = (() => {
     await window.QuantMasterDataUpdate.start();
   }
 
+  function syncScanControls() {
+    const disabled = state.stockdbActive || Boolean(state.jobId) || state.discovering || state.submitting;
+    document.querySelector('#after-close-scan-form button.primary').disabled = disabled;
+    document.getElementById('after-close-rerun').disabled = disabled;
+  }
+
   async function pollJob(epoch = state.epoch) {
     if (!state.mounted || epoch !== state.epoch) return;
     clearTimeout(state.poll);

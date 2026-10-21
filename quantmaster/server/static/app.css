@@ -851,6 +851,7 @@ html[data-qm-theme="ink"] main{max-width:1120px;margin:0 auto;padding:56px 32px 
 .theme-control__option{padding:6px 10px}
 }
 
+.header-primary { flex-wrap:wrap; }
 .data-update-panel { position:relative; display:flex; align-items:center; gap:10px; min-width:0; max-width:420px; color:var(--ink-2); overflow-wrap:anywhere; }
 .data-update-heading { display:flex; align-items:center; gap:8px; min-width:0; }
 .data-update-heading button { flex-shrink:0; white-space:nowrap; min-height:40px; }
@@ -861,7 +862,7 @@ html[data-qm-theme="ink"] main{max-width:1120px;margin:0 auto;padding:56px 32px 
 .data-update-panel p { margin-top:8px; }
 .data-update-panel ol { padding-left:24px; }
 .data-update-panel li { padding:4px 0; }
-@media (max-width:900px) {
+@media (max-width:1200px) {
   #data-update-summary { max-width:100px; }
 }
 @media (max-width:560px) {
