@@ -406,6 +406,9 @@ def test_historical_force_rejects_current_board_taxonomy(service, monkeypatch) -
             as_of, "fixture", True, "verified", "previous_session_complete",
         ),
     )
+    monkeypatch.setattr(service.ingest, "_read_batches", lambda *_args, **_kw: pytest.fail(
+        "invalid historical catalog must fail before reading market history",
+    ))
     with pytest.raises(DataGateRejected, match="当前分类"):
         service.scan(as_of="2026-08-05", force=True)
 
@@ -426,6 +429,9 @@ def test_historical_force_rejects_future_dated_board_taxonomy(service, monkeypat
         ]
 
     service.source.board_hierarchy = future_boards
+    monkeypatch.setattr(service.ingest, "_read_batches", lambda *_args, **_kw: pytest.fail(
+        "future catalog must fail before reading market history",
+    ))
     with pytest.raises(DataGateRejected, match="晚于历史目标日"):
         service.scan(as_of="2026-08-05", force=True)
 
@@ -745,10 +751,44 @@ def test_after_close_submit_uses_versioned_singleflight_key(monkeypatch) -> None
     assert created is True
     assert replacement["id"] == "new-1"
     assert runtime.submissions[0][2]["input_fingerprint"] == "after-close-generation-v1"
-    assert runtime.submissions[0][2]["algorithm_version"] == "score-v1"
+    assert runtime.submissions[0][2]["algorithm_version"] == "score-v1:catalog-purpose-v2"
+    assert replacement["spec"]["purpose"] == "current_analysis"
     assert runtime.submissions[0][2]["max_attempts"] == 2
 
     duplicate, duplicate_created = jobs.submit()
     assert duplicate_created is False
     assert duplicate["id"] == replacement["id"]
     assert len(runtime.submissions) == 1
+
+    current, _ = jobs.submit(as_of="2026-08-05", purpose="current_analysis")
+    replay, _ = jobs.submit(as_of="2026-08-05")
+    assert current["id"] != replay["id"]
+    assert replay["spec"]["purpose"] == "historical_replay"
+
+
+def test_current_analysis_pins_data_day_without_backdating_catalog(service):
+    result = service.scan(as_of="2026-08-05", purpose="current_analysis")
+    assert result.as_of_date == "2026-08-05"
+    assert result.filters["purpose"] == "current_analysis"
+    assert result.provenance["taxonomy_purpose"] == "current_analysis"
+    assert result.provenance["taxonomy_observed_at"]
+    assert all("effective_date" not in board for board in service.source.board_hierarchy())
+    assert service.scan(as_of="2026-08-05").snapshot_id == result.snapshot_id
+
+
+def test_current_analysis_rejects_old_pinned_target_before_ingestion(service, monkeypatch):
+    monkeypatch.setattr(service.ingest, "load_or_create", lambda **_kw: pytest.fail(
+        "expired current-analysis target must not be recomputed using today's taxonomy",
+    ))
+    with pytest.raises(DataGateRejected, match="与最近已完成交易日"):
+        service.scan(as_of="2026-08-04", purpose="current_analysis")
+
+
+def test_legacy_scan_job_requires_explicit_resubmission(monkeypatch):
+    from types import SimpleNamespace
+
+    from quantmaster.after_close.jobs import AfterCloseJobs, run_after_close_job
+
+    monkeypatch.setattr(AfterCloseJobs, "_notify_failure", lambda *_args: None)
+    with pytest.raises(ValueError, match="缺少执行用途"):
+        run_after_close_job(SimpleNamespace(job_id="old"), {"as_of": "2026-08-05"})

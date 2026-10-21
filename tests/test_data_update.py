@@ -50,13 +50,14 @@ def test_update_yields_for_dependencies_and_reports_partial(
     monkeypatch.setattr(free_stockdb_runtime, "status", lambda: status)
     children = {"cache": {"id": "cache", "status": "running"}}
     calls = []
+    scan_specs = []
     rotation = SimpleNamespace(
         start=lambda: None,
         submit=lambda spec: calls.append("analysis") or {"id": "analysis"},
     )
     monkeypatch.setattr(service, "get_rotation_worker", lambda: rotation)
     monkeypatch.setattr(after_close, "get_after_close_jobs", lambda: SimpleNamespace(
-        submit=lambda **kw: ({"id": "scan"}, True),
+        submit=lambda **kw: scan_specs.append(kw) or ({"id": "scan"}, True),
     ))
     store = SimpleNamespace(get=lambda key: children[key])
     manager = SimpleNamespace(
@@ -93,6 +94,7 @@ def test_update_yields_for_dependencies_and_reports_partial(
     assert restored.checkpoint["outcome"] == ("completed" if result.status == "completed" else "partial")
     assert requests == ["source"]
     assert calls.count("analysis") == 1
+    assert scan_specs == [{"as_of": "2026-10-20", "force": False, "purpose": "current_analysis"}]
 
 
 def test_update_duplicate_admission_reuses_durable_job(isolated_config, monkeypatch):

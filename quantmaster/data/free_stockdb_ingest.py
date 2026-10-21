@@ -1390,6 +1390,7 @@ class StockDBIngestService:
         validator: Validator,
         progress: Progress,
         cancelled: Cancelled,
+        catalog_validator: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> tuple[StockDBIngestSnapshot, pd.DataFrame, list[dict[str, Any]], bool]:
         ingest_started = time.perf_counter()
         self.read_metrics = []
@@ -1403,6 +1404,8 @@ class StockDBIngestService:
         identity = getattr(self.source, "artifact_identity", None)
         progress(5, "读取本地数据库", "读取板块与证券目录")
         boards = self.source.board_hierarchy()
+        if catalog_validator is not None:
+            catalog_validator(boards)
         catalog: list[dict[str, Any]] = []
         delisted: list[dict[str, Any]] = []
         catalog_issue = ""

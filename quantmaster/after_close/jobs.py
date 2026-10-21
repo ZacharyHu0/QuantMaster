@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-from quantmaster.after_close.models import SCORE_VERSION
+from quantmaster.after_close.models import SCORE_VERSION, ScanPurpose, resolve_scan_purpose
 from quantmaster.after_close.service import get_after_close_service
 from quantmaster.after_close.store import AfterCloseStore
 from quantmaster.automation.runtime import get_runtime
@@ -30,8 +30,11 @@ def run_after_close_job(context: JobContext, spec: dict[str, Any]) -> JobOutcome
     """
 
     try:
+        if "purpose" not in spec:
+            raise ValueError("盘后扫描任务缺少执行用途；请从更新入口重新提交，原有快照保留")
         snapshot = get_after_close_service().scan(
             as_of=str(spec.get("as_of") or ""),
+            purpose=spec["purpose"],
             force=bool(spec.get("force")),
             progress=context.progress,
             cancelled=context.cancelled,
@@ -72,7 +75,9 @@ class AfterCloseJobs:
         return run_after_close_job(context, spec)
 
     @staticmethod
-    def input_fingerprint(*, as_of: str, force: bool) -> tuple[str, str]:
+    def input_fingerprint(
+        *, as_of: str, force: bool, purpose: ScanPurpose | None = None,
+    ) -> tuple[str, str]:
         """Use catalog generations before admitting a costly after-close scan."""
 
         if force:
@@ -101,6 +106,7 @@ class AfterCloseJobs:
                     parameters={
                         "task": TASK_TYPE,
                         "as_of": target,
+                        "purpose": resolve_scan_purpose(as_of, purpose),
                         "include_bj": bool(cfg.after_close_include_bj),
                         "min_listing_sessions": int(cfg.after_close_min_listing_sessions),
                         "min_avg_amount": float(cfg.after_close_min_avg_amount),
@@ -161,14 +167,17 @@ class AfterCloseJobs:
             payload={"title": "盘后研究未更新", "job_id": job_id},
         ))
 
-    def submit(self, *, as_of: str = "", force: bool = False) -> tuple[dict, bool]:
-        spec = {"as_of": as_of, "force": bool(force)}
-        fingerprint, score_version = self.input_fingerprint(as_of=as_of, force=force)
+    def submit(
+        self, *, as_of: str = "", force: bool = False, purpose: ScanPurpose | None = None,
+    ) -> tuple[dict, bool]:
+        purpose = resolve_scan_purpose(as_of, purpose)
+        spec = {"as_of": as_of, "force": bool(force), "purpose": purpose}
+        fingerprint, score_version = self.input_fingerprint(as_of=as_of, force=force, purpose=purpose)
         return self.runtime.submit(
             TASK_TYPE,
             spec,
             input_fingerprint=fingerprint,
-            algorithm_version=score_version,
+            algorithm_version=f"{score_version}:catalog-purpose-v2",
             deadline_seconds=3600,
             max_attempts=2,
         )
@@ -196,6 +205,7 @@ class AfterCloseJobs:
                 completed = str(payload.get("as_of_date") or "")
         public.update({
             "target_as_of": target,
+            "purpose": str(spec.get("purpose") or "unknown"),
             "completed_as_of": completed,
             "failure_reason": str(value.get("detail") or "")[:1000]
             if str(value.get("status") or "") in {"failed", "interrupted"} else "",

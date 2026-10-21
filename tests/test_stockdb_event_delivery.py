@@ -80,7 +80,9 @@ def test_complete_event_dispatches_all_real_consumers(isolated_config):
     ))
 
     assert calls[0:2] == ["reset_after_close", "reset_etf_research"]
-    assert ("after_close", {"as_of": "2026-08-10", "force": False}) in calls
+    assert ("after_close", {
+        "as_of": "2026-08-10", "force": False, "purpose": "current_analysis",
+    }) in calls
     rotation = next(
         item[1] for item in calls
         if isinstance(item, tuple) and item[0] == "rotation"
