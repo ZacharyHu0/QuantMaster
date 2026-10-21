@@ -58,8 +58,10 @@ The write command must also use `git -C <absolute-worktree>`. `safe.directory` o
 trust and never selects the working tree.
 
 Stop immediately for unmerged files, an in-progress merge/rebase/cherry-pick, detached or
-unexpected HEAD, an unexpectedly dirty checkout the next write would affect, partial command
-success, or unrelated task changes. Report the exact repository state before another write.
+unexpected HEAD, an unexpectedly dirty checkout the next write would affect, an ambiguous partial
+mutation, or unrelated task changes. Reconcile the affected state before another write. Recoverable
+network failures are retried with bounded timeouts after checking local and remote state; preserve
+completed steps and resume only unfinished operations.
 Movement of `main` during development is expected and is not an error to inspect.
 
 ## 4. Integration happens once
@@ -76,7 +78,9 @@ Only after development is complete:
    Without GitHub/CI access, run `tasks.py ready` locally (add `--ui` / `--rust` / `--package` for
    those lanes).
 7. Update the PR with the exact evidence. After review passes, squash-merge as one independently
-   revertible `main` commit, then run `tasks.py finish <slug> --pr <number>` from the primary checkout.
+   revertible `main` commit. Synchronize local main, stage and activate the exact merged slot with
+   required package evidence, verify health and the affected workflow, then run
+   `tasks.py finish <slug> --pr <number>` from the primary checkout and verify cleanup.
 
 The integration baseline is fixed for that attempt. A genuine dependency or conflicting change
 requires a deliberate new integration attempt, not a background loop that chases `main`.
@@ -184,8 +188,9 @@ The stable application and task worktrees are different execution environments:
   database under `.artifacts/worktrees/<slug>/runtime/dev`.
 - A development server may read an explicitly configured stable StockDB read-only; it cannot
   update, stop, or replace the stable instance.
-- Integrating a task does not activate it. Activation is owner-managed and replaces the complete
-  application generation.
+- Integrating a task does not itself activate it. The normal authorized task completion flow
+  includes staging and activating the merged main slot, replacing the complete application
+  generation and verifying runtime identity, health and the affected real workflow before cleanup.
 
 Start a task server from the primary checkout:
 
@@ -206,7 +211,13 @@ development-phase view:
 4. Complete the one-time integration alignment and push the aligned Draft commit.
 5. Wait for Draft fast/core, mark the PR Ready, and let the full CI matrix run.
 6. Record the green exact-SHA evidence with `tasks.py ready --accept-ci`, resolve review,
-   squash-merge, then `tasks.py finish <slug> --pr <number>`.
+   squash-merge, synchronize clean local main, stage with `scripts/dev/live.py stage --from-task
+   <slug>` using the required package evidence, activate with the installed-slot lifecycle command,
+   and verify runtime identity, health and the affected workflow. Keep the task evidence until
+   staging and activation pass; then run `tasks.py finish <slug> --pr <number>` and verify cleanup.
+7. Recover from network failures by inspecting local/remote state and retrying only unfinished
+   steps with bounded timeouts. Partial completion is resumable; ambiguous mutations require
+   state reconciliation before another write. Local tests or a Draft PR alone are not completion.
 
 Discussions host architecture proposals and evidence-backed decisions. Irreversible migrations,
 required features that exceed a hard package budget, or inconclusive SciPy/Rust benchmarks pause
