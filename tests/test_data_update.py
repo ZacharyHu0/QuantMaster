@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ class Context:
 
     def __init__(self):
         self.checkpoint = None
+        self.created_at = datetime.now(UTC).isoformat()
 
     def load_checkpoint(self, *args):
         return deepcopy(self.checkpoint)
@@ -219,3 +221,39 @@ def test_source_coverage_warning_is_not_projected_as_full_success(monkeypatch):
     step = _source_step({}, "2026-10-20")
     assert step["status"] == "partial"
     assert "46" in step["detail"]
+
+
+def test_update_queue_finds_old_slot_owner_beyond_recent_history(isolated_config):
+    from quantmaster.data.update import UPDATE_TASK, project_update
+    from quantmaster.runtime.jobs import UnifiedJobStore
+
+    store = UnifiedJobStore()
+    old, _ = store.submit("rotation.refresh", {"scope": "themes"})
+    assert store.claim(old["id"], "existing-worker")
+    for index in range(25):
+        store.submit("rotation.refresh", {"scope": "themes", "index": index})
+    child, _ = store.submit("rotation.refresh", {"scope": "all", "as_of": "2026-10-20"})
+    job, _ = store.submit(UPDATE_TASK, {"target_session": "2026-10-20"})
+    store.write_artifact(job["id"], "data.update.plan", {
+        "children": [{"id": child["id"], "kind": "市场与板块分析"}],
+    }, checkpoint_key="data.update.plan")
+    before = store.get(job["id"])
+    value = project_update(store, before)
+    assert value["queue"]["phase"] == "waiting_for_slot"
+    assert [item["id"] for item in value["queue"]["blockers"]] == [old["id"]]
+    assert old["id"] not in [item["id"] for item in store.list(20)]
+    assert store.get(job["id"]) == before  # Status reads must not mutate queue state.
+
+
+def test_queue_wait_consumes_plan_budget_before_source_or_children(monkeypatch):
+    from quantmaster.server import data_update
+
+    ctx = Context()
+    ctx.created_at = datetime.fromtimestamp(100, UTC).isoformat()
+    monkeypatch.setattr(data_update.time, "time", lambda: 3701)
+    monkeypatch.setattr(data_update, "_source_step", lambda *_: pytest.fail("expired before source"))
+    result = run_update(ctx, {"target_session": "2026-10-20"}, None)
+    assert result.status == "failed"
+    assert ctx.checkpoint["plan_started_at"] == 100
+    assert ctx.checkpoint["steps"]["stockdb"]["status"] == "blocked"
+    assert ctx.checkpoint["children"] == []
