@@ -264,6 +264,12 @@ def check_tushare(token: str) -> dict[str, Any]:
         pro = ts.pro_api(token)
         frame = pro.trade_cal(exchange="SSE", start_date="20240102", end_date="20240103")
         from quantmaster.data.resilience import PROVIDER_HEALTH
+        from quantmaster.data.tushare_source import _validate_tushare_frame
+
+        _validate_tushare_frame(
+            "trade_cal", {"exchange": "SSE", "start_date": "20240102", "end_date": "20240103"},
+            frame, required_nonempty=True, required_columns=("exchange", "cal_date", "is_open"),
+        )
 
         PROVIDER_HEALTH.success("tushare:trade_cal")
         return _result(

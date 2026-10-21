@@ -27,8 +27,10 @@ LIFECYCLE_LOCK = ".lifecycle.lock"
 LAUNCHER_TARGET = "launcher.target"
 RECOVERY_HANDOFF_MARKER = ".schema-handoff.json"
 DETACHED_ACTIVATION_ENV = "QM_ACTIVATION_DETACHED"
-READY_TIMEOUT_SECONDS = 30.0
-ROLLBACK_TIMEOUT_SECONDS = 15.0
+# Web startup includes the bounded 60-second StockDB cold start before its
+# runtime worker becomes available. Rollback must allow the same startup work.
+READY_TIMEOUT_SECONDS = 90.0
+ROLLBACK_TIMEOUT_SECONDS = 90.0
 WORKER_DRAIN_TIMEOUT_SECONDS = 10.0
 WORKER_DRAIN_RECONCILE_TIMEOUT_SECONDS = 2.0
 WORKER_DRAIN_STATUS_TIMEOUT_SECONDS = 0.5

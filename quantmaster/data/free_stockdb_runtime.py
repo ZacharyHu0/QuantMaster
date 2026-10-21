@@ -55,6 +55,7 @@ _UPDATER_TIMEOUT_SECONDS = 60 * 60
 _UPDATER_IDLE_SECONDS = 2 * 60
 _TARGET_CHECK_SECONDS = 5 * 60
 _SERVICE_CHECK_SECONDS = 5
+_SERVICE_START_TIMEOUT_SECONDS = 60
 _SERVICE_RESTART_BACKOFF_BASE_SECONDS = 2 * 60
 _SERVICE_RESTART_BACKOFF_MAX_SECONDS = 30 * 60
 _DATA_STABILITY_SECONDS = 10
@@ -635,7 +636,10 @@ class FreeStockDBRuntime:
                 )
                 return False
             launcher = self._process
-            deadline = _monotonic() + 10
+            # A freshly synchronized database took 24 seconds to open in the
+            # installed runtime. Keep cold startup bounded without killing it
+            # at the former ten-second window.
+            deadline = _monotonic() + _SERVICE_START_TIMEOUT_SECONDS
             while _monotonic() < deadline and not self._stop.is_set():
                 if self._listening():
                     self._daemon_started = True

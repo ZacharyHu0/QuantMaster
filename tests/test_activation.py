@@ -144,8 +144,8 @@ def test_activation_commits_a_new_generation_and_preserves_previous(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("budget, expected", [(None, 30.0), (0, 0.1), (0.25, 0.25), (60, 30.0)])
-def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path, budget, expected):
+@pytest.mark.parametrize("budget, expected", [(None, 90.0), (0, 0.1), (0.25, 0.25), (60, 60.0), (120, 90.0)])
+def test_activation_ready_timeout_covers_cold_start_and_remains_bounded(tmp_path, budget, expected):
     _candidate(tmp_path, SHA_A)
     _candidate(tmp_path, SHA_B)
     _write_state(tmp_path, active=SHA_A)
@@ -178,7 +178,8 @@ def test_activation_ready_timeout_is_bounded_at_thirty_seconds(tmp_path, budget,
     )
 
     assert coordinator.activate(SHA_B)["status"] == "activated"
-    assert activation.READY_TIMEOUT_SECONDS == 30.0
+    assert activation.READY_TIMEOUT_SECONDS == 90.0
+    assert coordinator.rollback_timeout == 90.0
     assert controller.ready_timeout == expected
 
 
