@@ -396,6 +396,32 @@ def test_unclassified_attempt_is_explicitly_unknown_and_not_current(service) -> 
     assert not latest.get("staleness", {}).get("stale")
 
 
+def test_current_revalidation_clears_failure_when_reusing_frozen_snapshot(service, monkeypatch) -> None:
+    ingests = []
+    load_or_create = service.ingest.load_or_create
+
+    def capture_ingest(**kwargs):
+        result = load_or_create(**kwargs)
+        ingests.append(result)
+        return result
+
+    monkeypatch.setattr(service.ingest, "load_or_create", capture_ingest)
+    published = service.scan()
+    frozen = service.store.get(published.snapshot_id).to_dict()
+    original = service.source.frame.copy()
+    service.source.frame = original.loc[original["symbol"] == "600001.SH"].copy()
+    with pytest.raises(DataGateRejected):
+        service.scan(force=True)
+    assert service.store.public_latest()["staleness"]["stale"] is True
+    service.source.frame = original
+    monkeypatch.setattr(service.ingest, "load_or_create", lambda **_kwargs: ingests[0])
+    verified = service.scan(force=True)
+    assert verified.to_dict() == frozen
+    latest = service.store.public_latest()
+    assert not latest.get("staleness", {}).get("stale")
+    assert latest["attempts"]["current_analysis"]["status"] == "published"
+
+
 @pytest.mark.parametrize("full_day", [True, False, None])
 def test_gate_accepts_missing_symbol_only_with_explicit_suspension_evidence(
     service, isolated_config, monkeypatch, full_day,

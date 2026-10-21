@@ -948,6 +948,7 @@ class AfterCloseService:
             raise InterruptedError("盘后扫描已取消")
         existing_snapshot = self.store.get(snapshot_id)
         if existing_snapshot is not None:
+            self.store.publish(existing_snapshot)
             self.ingest.store.pin(
                 existing_snapshot.ingest_id,
                 "after_close",
