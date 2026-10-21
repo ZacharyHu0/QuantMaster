@@ -203,7 +203,7 @@ const afterCloseFeature = (() => {
     box.querySelector('[data-after-close-phase]').textContent = `${job.phase || '扫描中'}${job.detail ? ` · ${job.detail}` : ''}`;
     box.querySelector('[data-after-close-percent]').textContent = `${job.progress || 0}%`;
     box.querySelector('.load-fill').style.transform = `scaleX(${Math.max(0, Math.min(100, job.progress || 0)) / 100})`;
-    box.querySelector('[data-after-close-cancel]').disabled = !job.can_cancel;
+    box.querySelector('[data-after-close-cancel]').hidden = !job.can_cancel;
   }
 
   function stockdbIsActive(status) {

@@ -5297,10 +5297,14 @@ def test_after_close_scan_recovers_poll_navigation_and_reload(live_server):
         page.route("**/api/v1/**", route_api)
         page.goto(f"{url}/#today/after-close")
         scan = page.locator("#after-close-scan-form button.primary")
+        page.locator("#after-close-scan-form").wait_for(state="visible")
+        assert page.locator("#after-close-progress").is_hidden()
         scan.click()
         page.get_by_text("进度连接暂时中断，正在重新连接…", exact=True).wait_for()
         assert scan.is_disabled()
         page.get_by_text("分批读取行情", exact=True).wait_for()
+        assert page.locator("#after-close-progress").is_visible()
+        assert page.locator("[data-after-close-cancel]").is_visible()
         page.get_by_role("button", name="账户", exact=True).click()
         page.wait_for_url(re.compile(r"#account/paper$"))
         page.get_by_role("button", name="今日", exact=True).click()
@@ -5321,6 +5325,11 @@ def test_after_close_scan_recovers_poll_navigation_and_reload(live_server):
         page.wait_for_function(
             "() => !document.querySelector('#after-close-scan-form button.primary').disabled"
         )
+        assert page.locator("[data-after-close-cancel]").is_hidden()
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.reload()
+        page.locator("#after-close-scan-form").wait_for(state="visible")
+        assert page.locator("#after-close-progress").is_hidden()
         browser.close()
 
 
