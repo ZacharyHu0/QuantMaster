@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -413,6 +414,45 @@ def _local_sessions(start: pd.Timestamp, end: pd.Timestamp) -> tuple[pd.Datetime
     return pd.DatetimeIndex([]), "unavailable"
 
 
+def _daily_coverage_sessions(
+    df: pd.DataFrame, symbol: str, market: Market, start: pd.Timestamp, end: pd.Timestamp,
+    observed: pd.DatetimeIndex,
+) -> tuple[pd.DatetimeIndex, str, bool, pd.DatetimeIndex, bool]:
+    """Read calendar and no-trade evidence locally; frame attrs are only cache hints."""
+    from quantmaster.data.instrument_snapshots import (
+        InstrumentCatalogEvidenceError,
+        load_suspension_snapshot,
+    )
+
+    sessions, source, complete = _market_sessions(market, start, end, observed_dates=observed)
+    official = False
+    hint = df.attrs.get("repair_calendar_range")
+    if market == Market.CN and isinstance(hint, list) and len(hint) == 2:
+        from quantmaster.data.resilience import EndpointFrameCache
+        from quantmaster.data.tushare_source import TushareSource
+
+        try:
+            left, right = str(hint[0]), str(hint[1])
+            if pd.Timestamp(left) <= start <= end <= pd.Timestamp(right):
+                cached = TushareSource(EndpointFrameCache(read_only=True)).cached_trade_calendar(left, right)
+                if cached is not None:
+                    sessions = cached[(cached >= start) & (cached <= end)]
+                    source, complete, official = "tushare:trade_cal", True, True
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass  # An absent or invalid cache hint never proves a boundary.
+    suspended = []
+    if market == Market.CN and symbol:
+        for day in sessions.difference(observed):
+            try:
+                snapshot = load_suspension_snapshot(day.date().isoformat())
+            except InstrumentCatalogEvidenceError:
+                continue
+            if symbol in snapshot["full_day_symbols"]:
+                suspended.append(day)
+    no_trade = pd.DatetimeIndex(suspended)
+    return sessions.difference(no_trade), source, complete, no_trade, official
+
+
 def _assess_daily_frame(
     df: pd.DataFrame | None,
     start: str,
@@ -548,21 +588,24 @@ def _assess_daily_frame(
     if source.startswith("free-stockdb") and df.attrs.get("adjustment_status") != "verified":
         adjustment = "forward_adjusted_unverified"
         issues.append("本地 StockDB 返回了前复权行情，但没有附带可核验的复权因子记录")
+    sessions, calendar_source, calendar_complete, suspended, official_calendar = _daily_coverage_sessions(
+        df, symbol, market, effective_start, effective_end, valid_index.normalize(),
+    )
+    boundary_start, boundary_end = effective_start, effective_end
+    if official_calendar and len(sessions):
+        boundary_start, boundary_end = sessions.min(), sessions.max()
     boundary_tolerance = pd.Timedelta(days=14)
     if pd.isna(observed_start) or pd.isna(observed_end):
         issues.append("没有有效交易日期")
     else:
-        if observed_start - effective_start > boundary_tolerance:
+        if observed_start - boundary_start > boundary_tolerance:
             issues.append(
                 f"响应起点 {observed_start.date()} 晚于有证据的请求起点 {effective_start.date()}"
             )
-        if effective_end - observed_end > boundary_tolerance:
+        if boundary_end - observed_end > boundary_tolerance:
             issues.append(
                 f"响应终点 {observed_end.date()} 早于有证据的请求终点 {effective_end.date()}"
             )
-    sessions, calendar_source, calendar_complete = _market_sessions(
-        market, effective_start, effective_end, observed_dates=valid_index.normalize(),
-    )
     coverage_ratio: float | None = None
     partial = False
     if len(sessions):
@@ -637,7 +680,7 @@ def _assess_daily_frame(
         semantics=semantics,
         semantic_diagnostic_code=(semantic_issues[0].split(":", 1)[0] if semantic_issues else ""),
         missing_reason_counts=(
-            (("not_published", 1),) if df is None or df.empty else ()
+            (("suspended", len(suspended)),) if len(suspended) else ()
         ),
         anomaly_counts=tuple((key, value) for key, value in (
             ("duplicate_time", duplicate_rows),
@@ -2803,8 +2846,7 @@ def _repair_history_locked(
     *, renew: bool = False, reference: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Stage one explicitly selected Tushare repair; never splice conflicting evidence."""
-    def check_cancelled() -> None:
-        _check_refresh_cancelled(cancelled)
+    check_cancelled = partial(_check_refresh_cancelled, cancelled)
 
     check_cancelled()
     cached = store.get(symbol)
@@ -2818,6 +2860,15 @@ def _repair_history_locked(
         raise HistoryRepairError(symbol, "所选来源不支持该标的")
     source = factories[0]()
 
+    def assess(frame: pd.DataFrame, left: str, right: str) -> BarDataQuality:
+        # Resolve no-trade evidence before coverage/boundary checks reject a
+        # legitimate long suspension. Publication still waits for every gate.
+        _require_repair_coverage(
+            symbol, frame, cached, left, right, source,
+            renew=renew, check_cancelled=check_cancelled,
+        )
+        return _repair_candidate_quality(symbol, frame, left, right, source.name)
+
     def fetch(left: str, right: str) -> tuple[pd.DataFrame, BarDataQuality]:
         check_cancelled()
         # Provider cache TTL and session floor remain authoritative. In
@@ -2825,13 +2876,13 @@ def _repair_history_locked(
         with data_priority(priority), bypass_endpoint_cache(False):
             frame = source.daily(symbol, left, right)
         check_cancelled()
-        return frame, _repair_candidate_quality(symbol, frame, max(left, owned_start), right, source.name)
+        return frame, assess(frame, max(left, owned_start), right)
 
     local = source.cached_daily(symbol, full_start, full_end)
     if local is not None:
         fetch_start, fetch_end = full_start, full_end
         frame = local
-        quality = _repair_candidate_quality(symbol, frame, owned_start, full_end, source.name)
+        quality = assess(frame, owned_start, full_end)
     else:
         frame, quality = fetch(fetch_start, fetch_end)
     candidate = _compatible_repair_increment(cached, meta, frame, quality, source.name)
@@ -2846,10 +2897,6 @@ def _repair_history_locked(
         candidate = candidate.loc[owned_start:].copy()
     if not _is_complete_refresh(candidate, cached, owned_start, full_end, symbol=symbol):
         raise HistoryRepairError(symbol, "新响应缺失旧交易日或完整历史范围")
-    _require_repair_coverage(
-        symbol, candidate, cached, start, end, source,
-        renew=renew, check_cancelled=check_cancelled,
-    )
     _validate_local_overlap(symbol, reference, candidate)
     if renew:
         # Reassess the whole retained generation instead of OR-ing a previous
@@ -2876,6 +2923,8 @@ def _require_repair_coverage(
     symbol: str, candidate: pd.DataFrame, cached: pd.DataFrame | None,
     start: str, end: str, source: Any, *, renew: bool, check_cancelled: Callable[[], None],
 ) -> None:
+    if cached is not None and not cached.loc[start:end].index.difference(candidate.index).empty:
+        raise HistoryRepairError(symbol, "新响应缺失旧交易日或完整历史范围")
     effective_start, effective_end = _instrument_range(symbol, pd.Timestamp(start), pd.Timestamp(end))
     if renew and cached is not None and not cached.empty:
         # AUTO may retain pre-existing internal gaps, never lose old dates or
@@ -2891,8 +2940,6 @@ def _require_repair_coverage(
             effective_start.date().isoformat(), effective_end.date().isoformat(),
         )
         missing = sessions.difference(candidate.index)
-        if missing.empty:
-            return
         from quantmaster.data.instrument_snapshots import load_or_fetch_suspension_snapshot
 
         for day in missing:
@@ -2900,6 +2947,9 @@ def _require_repair_coverage(
             snapshot = load_or_fetch_suspension_snapshot(source, day.date().isoformat())
             if symbol not in snapshot["full_day_symbols"]:
                 raise HistoryRepairError(symbol, "目标区间缺少交易日或独立日历证据")
+        candidate.attrs["repair_calendar_range"] = [
+            effective_start.date().isoformat(), effective_end.date().isoformat(),
+        ]
 
 
 def _require_repair_extensions(

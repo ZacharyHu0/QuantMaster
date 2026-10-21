@@ -559,6 +559,22 @@ class TushareSource(DataSource):
             "trade_cal", ttl, exchange=exchange, start_date=start.replace("-", ""),
             end_date=end.replace("-", ""), fields="exchange,cal_date,is_open,pretrade_date",
         )
+        return self._calendar_sessions(frame, start, end, exchange)
+
+    def cached_trade_calendar(
+        self, start: str, end: str, exchange: str = "SSE",
+    ) -> pd.DatetimeIndex | None:
+        """Read and validate the complete cached calendar without network I/O."""
+        frame = self.cache.get("trade_cal", {
+            "exchange": exchange, "start_date": start.replace("-", ""),
+            "end_date": end.replace("-", ""), "fields": "exchange,cal_date,is_open,pretrade_date",
+        }, _cache_ttl(end, get_config().data.tushare_cache_days))
+        return None if frame is None else self._calendar_sessions(frame, start, end, exchange)
+
+    @staticmethod
+    def _calendar_sessions(
+        frame: pd.DataFrame, start: str, end: str, exchange: str,
+    ) -> pd.DatetimeIndex:
         _validate_tushare_frame(
             "trade_cal", {"exchange": exchange}, frame, required_nonempty=True,
             required_columns=("exchange", "cal_date", "is_open"),

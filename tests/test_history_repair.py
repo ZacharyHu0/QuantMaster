@@ -249,6 +249,68 @@ def test_explicit_repair_accepts_verified_full_day_suspension(repair_setup, monk
     assert result.data.index.max() == pd.Timestamp(END)
 
 
+@pytest.mark.parametrize("gap", ["head", "internal"])
+@pytest.mark.parametrize("evidence", ["full_day", "partial_day", "absent"])
+def test_repair_publishes_only_evidence_backed_suspension_gaps(
+    repair_setup, monkeypatch, gap, evidence,
+):
+    from quantmaster.data.maintenance import DataRefreshManager
+
+    store, source, _, state, _ = repair_setup
+    start = "2023-11-01" if gap == "head" else START
+    if gap == "internal":
+        state["fault"] = "missing_gap"
+
+    def calendar(**params):
+        days = pd.date_range(params["start_date"], params["end_date"])
+        return pd.DataFrame({
+            "exchange": "SSE", "cal_date": days.strftime("%Y%m%d"),
+            "is_open": (days.dayofweek < 5).astype(int), "pretrade_date": "",
+        })
+
+    def suspensions(**params):
+        rows = [] if evidence == "absent" else [{
+            "ts_code": SYMBOL, "trade_date": params["trade_date"],
+            "suspend_timing": "" if evidence == "full_day" else "10:00-11:00",
+            "suspend_type": "S",
+        }]
+        return pd.DataFrame(rows, columns=["ts_code", "trade_date", "suspend_timing", "suspend_type"])
+
+    monkeypatch.setattr(source._api, "trade_cal", calendar)
+    monkeypatch.setattr(source._api, "suspend_d", suspensions, raising=False)
+    cached_calendar = source.cached_trade_calendar
+    monkeypatch.setattr(TushareSource, "cached_trade_calendar", lambda self, *args: cached_calendar(*args))
+    original, metadata = store._path(SYMBOL).read_bytes(), store.metadata(SYMBOL)
+    if evidence != "full_day":
+        with pytest.raises(HistoryRepairError):
+            registry.refresh_history(SYMBOL, start, END, store=store, source_name="tushare",
+                                     repair_incompatible=True)
+        assert store._path(SYMBOL).read_bytes() == original
+        assert store.metadata(SYMBOL) == metadata
+        return
+    result = registry.refresh_history(SYMBOL, start, END, store=store, source_name="tushare",
+                                      repair_incompatible=True)
+    assert result.quality.coverage_ratio == 1
+    assert dict(result.quality.missing_reason_counts)["suspended"] > 0
+    assert not result.quality.formal_eligible
+    assert len(result.data) == (14 if gap == "head" else 13)
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: pytest.fail("warm cache network"))
+    read = registry.read_history(SYMBOL, start, END, store=store)
+    assert read.quality.coverage_ratio == 1
+    outcome = DataRefreshManager._refresh_one(store, SYMBOL, start, END)
+    assert outcome["code"] == "formal_evidence_missing" and "warning" in outcome
+    if gap == "head":
+        monkeypatch.setattr(TushareSource, "cached_trade_calendar", lambda *args: None)
+        assert registry.read_history(SYMBOL, start, END, store=store).quality.status == "unavailable"
+
+
+def test_cached_calendar_cold_read_does_not_create_storage(tmp_path, isolated_config):
+    root = tmp_path / "absent-calendar"
+    source = TushareSource(EndpointFrameCache(root=root, read_only=True))
+    assert source.cached_trade_calendar(START, END) is None
+    assert not root.exists()
+
+
 def test_explicit_repair_cancels_between_suspension_checks(repair_setup, monkeypatch):
     store, source, _, _, _ = repair_setup
     daily = source.daily
@@ -727,7 +789,7 @@ def test_auto_missing_tail_reports_rejection_without_rewriting_cache(repair_setu
     before, original = store.metadata(SYMBOL), store._path(SYMBOL).read_bytes()
     outcome = DataRefreshManager._refresh_one(store, SYMBOL, START, END)
     assert outcome["code"] == "history_repair_rejected"
-    assert "响应质量校验失败" in outcome["error"]
+    assert "缺少交易日" in outcome["error"]
     assert store.metadata(SYMBOL) == before
     assert store._path(SYMBOL).read_bytes() == original
 
