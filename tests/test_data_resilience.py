@@ -1705,3 +1705,46 @@ def test_yahoo_daily_many_uses_one_batch_and_restores_symbol_mapping(monkeypatch
     assert set(FakeYF.calls[0][0]) == {"^GSPC", "^N225"}
     assert result["SPX.INDEX"].iloc[-1]["close"] == 102.0
     assert result["N225.INDEX"].iloc[-1]["close"] == 204.0
+
+
+@pytest.mark.parametrize("endpoint", ["trade_cal", "index_weight"])
+def test_tushare_columnless_failure_is_recoverable_not_a_schema_change(
+    tmp_path, isolated_config, monkeypatch, endpoint,
+):
+    isolated_config.data.provider_retry_attempts = 1
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    source = TushareSource(EndpointFrameCache("tushare", root=tmp_path))
+    response = pd.DataFrame()
+
+    class API:
+        def __getattr__(self, name):
+            return lambda **params: response
+
+    source._api = API()
+    lane = f"tushare:{endpoint}"
+    with pytest.raises(EmptyProviderResponse):
+        source._call(endpoint, 1, fields="value")
+    health = PROVIDER_HEALTH.status(lane)[lane]
+    assert health["failure_class"] == "empty_response"
+    assert health["state"] != "disabled"
+    assert not list(source.cache.root.glob("*.parquet"))
+
+    PROVIDER_HEALTH.reset(lane)
+    response = pd.DataFrame({"value": [1]})
+    pd.testing.assert_frame_equal(source._call(endpoint, 1, fields="value"), response)
+    assert PROVIDER_HEALTH.status(lane)[lane]["state"] == "closed"
+
+
+def test_tushare_empty_schema_and_malformed_rows_remain_distinct():
+    from quantmaster.data.tushare_source import _validate_tushare_frame
+
+    params = {"fields": "value"}
+    _validate_tushare_frame(
+        "optional", params, pd.DataFrame(columns=["value"]),
+        required_nonempty=False, required_columns=(),
+    )
+    with pytest.raises(ProviderContractChanged):
+        _validate_tushare_frame(
+            "required", params, pd.DataFrame({"unexpected": [1]}),
+            required_nonempty=True, required_columns=("value",),
+        )
