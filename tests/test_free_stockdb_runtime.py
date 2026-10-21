@@ -319,7 +319,7 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
     runtime = FreeStockDBRuntime()
     launches = 0
     listening = iter((False, True))
-    monotonic = iter((0.0, 11.0, 20.0, 21.0))
+    monotonic = iter((0.0, 61.0, 70.0, 71.0))
 
     class Process:
         pid = 22
@@ -346,6 +346,44 @@ def test_bootstrap_binary_replacement_is_relaunched(tmp_path, monkeypatch) -> No
 
     assert runtime._start_service() is True
     assert launches == 2
+
+
+@pytest.mark.parametrize("ready_after,expected", [(24, True), (90, False)])
+def test_managed_service_allows_cold_start_but_bounds_wait(
+    tmp_path, monkeypatch, ready_after, expected,
+):
+    root = tmp_path / "stockdb"
+    root.mkdir()
+    executable = root / "stockdb.exe"
+    executable.write_bytes(b"vendor")
+    (root / "stockdb.conf").write_text("server:\n\tport: 7899\n")
+    (root / "data").mkdir()
+    runtime = FreeStockDBRuntime()
+    elapsed = [0.0]
+    terminated = []
+
+    class Process:
+        pid = 22
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(runtime, "_paths", lambda: (root, executable, root / "updater.exe"))
+    monkeypatch.setattr(runtime, "_listening", lambda: elapsed[0] >= ready_after)
+    monkeypatch.setattr(runtime, "_launch_service_process", lambda *_args: Process())
+    monkeypatch.setattr(runtime, "_record_process_owner", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_clear_process_owner", lambda: None)
+    monkeypatch.setattr(runtime, "_terminate_process", lambda *_args, **_kw: terminated.append(True))
+    monkeypatch.setattr("quantmaster.data.free_stockdb_runtime._monotonic", lambda: elapsed[0])
+
+    def wait(seconds):
+        elapsed[0] += seconds
+        return False
+
+    monkeypatch.setattr(runtime._stop, "wait", wait)
+    assert runtime._start_service() is expected
+    assert elapsed[0] == (24 if expected else 60)
+    assert bool(terminated) is not expected
 
 
 def test_vendor_notice_parser_extracts_notice_date_and_version() -> None:
