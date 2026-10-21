@@ -826,7 +826,7 @@ class FreeStockDBRuntime:
                 ):
                     official = official or "always" not in stripped.split()[1:]
                     host = "ah.123128.xyz" if origin.hostname == "a.123128.xyz" else (
-                        "ad.123128.xyz" if origin.hostname == "dns.novapi.cc" else origin.hostname
+                        "ad.123128.xyz" if origin.hostname == "dns.novapi.cc" else origin.netloc
                     )
                     old_url = stripped.split()[0]
                     new_url = origin._replace(scheme="http", netloc=host).geturl()
