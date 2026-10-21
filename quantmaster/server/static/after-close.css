@@ -18,6 +18,7 @@
 .after-close-source-status[data-tone="error"] { color:var(--bad); }
 .after-close-source-status > button { flex:0 0 auto; }
 .after-close-progress { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px 16px; padding:12px 0; }
+.after-close-progress[hidden], .after-close-progress button[hidden] { display:none; }
 .after-close-progress > div:first-child { display:flex; justify-content:space-between; color:var(--ink-2); font-size:12px; }
 .after-close-progress .load-track { grid-column:1; }
 .after-close-progress button { grid-column:2; grid-row:1 / span 2; }
