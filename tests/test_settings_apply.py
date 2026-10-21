@@ -125,6 +125,20 @@ def test_catalog_refresh_runs_as_durable_worker_job(settings_worker, monkeypatch
     assert calls == [{"force": True}]
     assert jobs.runtime_for(task["id"]) is jobs.apply_runtime
 
+    from fastapi.testclient import TestClient
+
+    from quantmaster.server.app import app
+
+    client = TestClient(app)
+    detail = client.get(f"/api/v1/jobs/{task['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == result["status"]
+    listed = client.get("/api/v1/jobs", params={"domain": "settings"})
+    assert any(value["id"] == task["id"] for value in listed.json()["items"])
+    events = client.get(f"/api/v1/jobs/{task['id']}/events")
+    assert events.status_code == 200
+    assert events.json()["items"]
+
 
 def test_catalog_refresh_route_only_queues_background_work(isolated_config, monkeypatch):
     from types import SimpleNamespace
