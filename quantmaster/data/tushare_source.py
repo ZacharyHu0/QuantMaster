@@ -30,6 +30,7 @@ from quantmaster.data.index_source_access import register_index_source
 from quantmaster.data.instrument_source_access import register_instrument_source
 from quantmaster.data.resilience import (
     TUSHARE_LIMITER,
+    EmptyProviderResponse,
     EndpointFrameCache,
     ProviderContractChanged,
     bypass_endpoint_cache,
@@ -105,6 +106,10 @@ def _validate_tushare_frame(
     required_nonempty: bool,
     required_columns: tuple[str, ...],
 ) -> None:
+    # The SDK returns a columnless empty frame when HTTP status is an error.
+    # It carries no schema evidence and must not permanently disable a lane.
+    if frame.empty and len(frame.columns) == 0:
+        raise EmptyProviderResponse(f"{endpoint} 未返回数据或字段")
     declared = tuple(
         item.strip() for item in str(params.get("fields") or "").split(",") if item.strip()
     )
@@ -114,8 +119,6 @@ def _validate_tushare_frame(
             f"{endpoint} 响应缺少必需列: {', '.join(dict.fromkeys(missing))}"
         )
     if required_nonempty and frame.empty:
-        from quantmaster.data.resilience import EmptyProviderResponse
-
         raise EmptyProviderResponse(f"{endpoint} 返回空数据")
     if frame.empty:
         return
