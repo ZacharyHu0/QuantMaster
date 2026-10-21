@@ -1135,12 +1135,14 @@ class EndpointFrameCache:
         root: Path | None = None,
         *,
         config_revision: str | None = None,
+        read_only: bool = False,
     ):
         base = Path(root) if root else get_config().data_root / "api_cache"
         self.provider = provider
         self.config_revision = config_revision or _provider_revision(provider)
         self.root = base / provider
-        self.root.mkdir(parents=True, exist_ok=True)
+        if not read_only:
+            self.root.mkdir(parents=True, exist_ok=True)
 
     def _digest(self, endpoint: str, params: dict) -> str:
         payload = json.dumps(
