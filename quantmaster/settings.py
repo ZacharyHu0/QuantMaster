@@ -105,7 +105,7 @@ class DataSettings(StrictModel):
     free_stockdb_update_time: str = Field(default="18:30", pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
     free_stockdb_online_enabled: bool = False
     free_stockdb_online_url: str = Field(
-        default="http://8.138.149.215:7899",
+        default="http://106.75.217.246:7899",
         max_length=2048,
     )
     free_stockdb_online_timeout: float = Field(default=4.0, ge=0.5, le=30.0)

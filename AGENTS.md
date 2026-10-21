@@ -26,6 +26,22 @@ These rules are hard gates for every AI session, including sessions working in p
 - “继续” never authorizes bypassing these gates. If the repository state is dirty, detached,
   mid-merge, ACL-blocked, or ambiguous, stop and report the exact stable error code.
 
+## End-to-end completion contract
+
+- Carry each authorized task through clarified expectations, implementation, regression tests,
+  real runtime verification, exact-commit CI, squash merge to `main`, and local immutable-slot
+  staging, activation and health verification. A Draft PR or a local passing test is not completion.
+- Recoverable network failures and partial completion of separate commands are not stop conditions.
+  Inspect local and remote state, preserve completed evidence, and retry the unfinished step with
+  bounded timeouts. Never repeat a merge or other completed mutation blindly.
+- Stop writes only while the affected state or ownership is ambiguous, or an actual integrity,
+  permission or destructive-action gate cannot be satisfied. Resolve what can be resolved locally;
+  report the remaining blocker and resumable step without claiming completion.
+- Keep the task checkout and validation evidence until the merged main slot has been staged and
+  activated with the existing lifecycle tools. Then run task cleanup and verify its receipt.
+- This completion policy authorizes normal task integration and local activation; it does not
+  authorize Git tags, GitHub Releases, irreversible migrations or unrelated task changes.
+
 Owner-authorized goal: keep correctness gates, but make the Codex + GPT development loop fast.
 When a checked-in script can answer a question, run the script and trust its output; do not
 re-derive policy from prose or chat context.
@@ -86,9 +102,12 @@ re-derive policy from prose or chat context.
    the full CI matrix. After that exact commit is green, `tasks.py ready --accept-ci` records the
    authoritative full gate. Without GitHub/CI access, run `tasks.py ready` locally (with `--ui` /
    `--rust` / `--package` when those lanes changed).
-7. **Merge and clean up.** Resolve review, confirm the integration gate passed, squash-merge, then
-   immediately `tasks.py finish <slug> --pr <number>` from the primary checkout and finish with
-   `github_sync.py reconcile --apply`.
+7. **Merge, activate and clean up.** Resolve review, confirm the integration gate passed, and
+   squash-merge. Synchronize clean local `main`, stage the exact merged tree with
+   `scripts/dev/live.py stage --from-task <slug>` (retain required package evidence), activate
+   through the existing installed-slot command, and verify runtime identity, health and the
+   affected real workflow. Then run `tasks.py finish <slug> --pr <number>` from the primary
+   checkout, verify `tasks.py status --require-clean`, and run `github_sync.py reconcile --apply`.
 
 ## Validation layers (do not duplicate)
 
@@ -136,7 +155,7 @@ re-derive policy from prose or chat context.
 
 Stop and report the exact repository state before any further write when you see: unmerged files
 or an in-progress merge/rebase/cherry-pick; detached or unexpected HEAD; an unexpectedly dirty
-checkout the next write would affect; partial command success; or unrelated changes in a task
+checkout the next write would affect; an ambiguous partial mutation; or unrelated changes in a task
 worktree. For any Git write against another worktree, verify
 `git -C <absolute-worktree> branch --show-current` and `git -C <absolute-worktree> status --short`
 first, and use `git -C <absolute-worktree>` in the write command itself.

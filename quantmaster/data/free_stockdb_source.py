@@ -1424,10 +1424,10 @@ class FreeStockDBOnlineSource(FreeStockDBSource):
 
     def __init__(self):
         cfg = get_config().data
-        super().__init__(
-            base_url=cfg.free_stockdb_online_url,
-            timeout=cfg.free_stockdb_online_timeout,
-        )
+        origin = cfg.free_stockdb_online_url.strip().rstrip("/")
+        if origin == "http://8.138.149.215:7899":
+            origin = "http://106.75.217.246:7899"
+        super().__init__(base_url=origin, timeout=cfg.free_stockdb_online_timeout)
 
     def official_trade_days(self, start: date, end: date) -> list[str]:
         """Read the official online calendar exported by stock_sdk."""
@@ -1435,6 +1435,9 @@ class FreeStockDBOnlineSource(FreeStockDBSource):
         if not parsed.hostname:
             raise FreeStockDBProviderError("free-stockdb-online 地址缺少主机名")
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        # The published native database and online SDK use distinct ports.
+        if parsed.hostname == "106.75.217.246" and port == 7899:
+            port = 12328
         endpoint = f"{parsed.hostname}:{port}"
         key = json.dumps({
             "endpoint": endpoint,

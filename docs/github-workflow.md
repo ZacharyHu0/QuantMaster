@@ -80,6 +80,9 @@ SciPy 基准无法决定去留。决策帖包含候选方案、实测证据、�
 - [ ] Draft PR 使用 `Closes #<issue>`，按模板填写验证与回滚证据；
 - [ ] Draft 快检与 Ready 后完整 CI 均绿；`tasks.py ready --accept-ci`（或本地 ready）已记录；
 - [ ] PR Ready 后 squash merge，Issue/Project 状态已同步；
+- [ ] 本地 clean main 已同步，合并后的精确 SHA 已构建为不可变槽并通过 package smoke；
+- [ ] 已通过槽位生命周期入口激活，运行身份、健康检查和受影响的真实业务流程均已验证；
+      staging 与激活通过前保留任务 worktree 和验证证据；
 - [ ] 已调用 `tasks.py finish <slug> --pr <number>` 保存合并凭据并清理；
       `checkout_pending_cleanup` 与 `pending_cleanup` 分别表示 checkout 和工件待重试，
       两者都不是清理完成。`status --require-clean` 通过后才可声称残余清零；

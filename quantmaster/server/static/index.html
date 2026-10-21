@@ -1349,7 +1349,7 @@
             <label class="toggle-field"><span><strong>小石历史分钟线</strong><small>下载 1 分钟底座后在本地按交易时段聚合。</small></span><input name="data.xiaoshi_minute_enabled" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>小石全球新闻</strong><small>使用 after_id 增量水位，不用页码扫描历史。</small></span><input name="data.xiaoshi_news_enabled" type="checkbox" role="switch"></label>
             <label class="toggle-field"><span><strong>小石金融时间轴</strong><small>未来因子仅作为金融事件研究输入；旧事件走 R2 归档。</small></span><input name="data.xiaoshi_timeline_enabled" type="checkbox" role="switch"></label>
-            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required placeholder="http://8.138.149.215:7899"><small>参考服务当前提供远程 stock_sdk 通道；高频或正式研究应使用本地库。</small></label>
+            <label class="field-wide">free-stockdb-online 地址<input name="data.free_stockdb_online_url" type="url" required placeholder="http://106.75.217.246:7899"><small>参考服务当前提供远程 stock_sdk 通道；高频或正式研究应使用本地库。</small></label>
             <label>free-stockdb-online 超时（秒）<input name="data.free_stockdb_online_timeout" type="number" min="0.5" max="30" step="0.5" required></label>
             <label>主 A 股数据源<select name="data.primary_provider" required><option value="free-stockdb">free-stockdb（默认）</option><option value="akshare">AKShare</option><option value="tushare">Tushare</option></select><small>主源不可用时自动尝试其他来源与本地缓存。</small></label>
             <label>数据源硬超时（秒）<input name="data.provider_timeout" type="number" min="1" max="300" step="1" required><small>包含同源排队；超时后快速切换缓存或备用源。</small></label>

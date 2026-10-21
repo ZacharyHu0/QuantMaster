@@ -144,7 +144,7 @@ def test_free_stockdb_settings_validate_schedule_and_root() -> None:
     assert settings.free_stockdb_auto_update is True
     assert settings.free_stockdb_update_time == "18:30"
     assert settings.free_stockdb_online_enabled is False
-    assert settings.free_stockdb_online_url == "http://8.138.149.215:7899"
+    assert settings.free_stockdb_online_url == "http://106.75.217.246:7899"
 
     with pytest.raises(ValueError):
         DataSettings(free_stockdb_update_time="25:00")
@@ -400,7 +400,7 @@ def test_vendor_target_does_not_advance_marker_when_validation_fails(
     assert runtime._last_update_date() == "2026-08-12"
 
 
-def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> None:
+def test_local_reader_fallback_never_nominates_update_target(monkeypatch) -> None:
     runtime = FreeStockDBRuntime()
     monkeypatch.setattr(
         runtime, "check_vendor_notice",
@@ -413,7 +413,7 @@ def test_notice_update_date_does_not_override_trusted_resolver(monkeypatch) -> N
         ),
     )
 
-    assert runtime._target_session() == ("2026-08-13", "stockdb:validated")
+    assert runtime._target_session() == ("", "unavailable")
 
 
 def test_update_target_uses_latest_closed_official_session_over_reader_fallback(
@@ -1718,3 +1718,130 @@ def test_next_daily_budget_resolves_target_again(isolated_config, monkeypatch):
     monkeypatch.setattr(runtime, "update_now", update)
     runtime._scheduler()
     assert calls == [("schedule", {"target_session": "2026-08-10", "attempt": 1})]
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xef\xbb\xbf"])
+def test_upstream_repair_migrates_official_sources_once(tmp_path, bom):
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"custom updater")
+    config = tmp_path / "sync_url.txt"
+    config.write_bytes(bom + (
+        b"# https://dns.novapi.cc\r\nhttps://a.123128.xyz\r\n"
+        b"https://ad.123128.xyz always\r\nhttps://dns.novapi.cc/ always\r\n"
+        b"http://private.example:1234 custom\r\n"
+    ))
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    disable = data / "disable"
+    disable.write_bytes(b"Initial synchronization completed.")
+
+    FreeStockDBRuntime._prepare_updater(updater, tmp_path)
+
+    assert config.read_bytes() == bom + (
+        b"# https://dns.novapi.cc\r\nhttp://ah.123128.xyz\r\n"
+        b"http://ad.123128.xyz always\r\nhttp://ad.123128.xyz/ always\r\n"
+        b"http://private.example:1234 custom\r\n"
+    )
+    assert not disable.exists()
+    receipt = tmp_path / ".quantmaster-disable-before-20261006"
+    assert receipt.read_bytes() == b"Initial synchronization completed."
+    disable.write_bytes(b"new sync completed")
+    first = config.stat().st_mtime_ns
+    FreeStockDBRuntime._prepare_updater(updater, tmp_path)
+    assert config.stat().st_mtime_ns == first
+    assert disable.read_bytes() == b"new sync completed"
+
+
+def test_upstream_repair_preserves_custom_sources_and_sentinel(tmp_path):
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"custom updater")
+    config = tmp_path / "sync_url.txt"
+    original = (b"http://private.example\nhttps://dns.novapi.cc:1234/custom\n"
+                b"http://ad.123128.xyz always\n")
+    config.write_bytes(original)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    disable = tmp_path / "data" / "disable"
+    disable.touch()
+    FreeStockDBRuntime._prepare_updater(updater, tmp_path)
+    assert config.read_bytes() == original
+    assert disable.exists()
+    assert updater.read_bytes() == b"custom updater"
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_upstream_repair_checks_download_before_replacing_legacy_updater(
+    tmp_path, monkeypatch, valid,
+):
+    import hashlib
+    import io
+    import zipfile
+
+    import quantmaster.data.free_stockdb_runtime as module
+
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"legacy")
+    monkeypatch.setattr(module, "_LEGACY_UPDATER_SHA256", hashlib.sha256(b"legacy").hexdigest())
+    monkeypatch.setattr(module, "_UPDATER_SHA256", hashlib.sha256(b"release").hexdigest())
+    package = io.BytesIO()
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("stockdb/数据更新.exe", b"release" if valid else b"unexpected")
+    response = SimpleNamespace(content=package.getvalue(), raise_for_status=lambda: None)
+    monkeypatch.setattr(module.httpx.Client, "get", lambda *_a, **_kw: response)
+    if valid:
+        FreeStockDBRuntime._prepare_updater(updater, tmp_path)
+        assert updater.read_bytes() == b"release"
+    else:
+        with pytest.raises(ValueError, match="校验失败"):
+            FreeStockDBRuntime._prepare_updater(updater, tmp_path)
+        assert updater.read_bytes() == b"legacy"
+
+
+@pytest.mark.parametrize("local_ready", [False, True])
+def test_upstream_preparation_failure_never_stops_service_or_launches_updater(
+    tmp_path, monkeypatch, local_ready,
+):
+    updater = tmp_path / "updater.exe"
+    updater.write_bytes(b"fixture")
+    runtime = FreeStockDBRuntime()
+    monkeypatch.setattr(runtime, "_paths", lambda: (tmp_path, tmp_path / "service.exe", updater))
+    monkeypatch.setattr(runtime, "_marker_path", lambda: tmp_path / "update.json")
+    monkeypatch.setattr(runtime, "_listening", lambda: False)
+    monkeypatch.setattr(runtime, "_is_managed", lambda: True)
+    validation = {"accepted": local_ready, "complete": local_ready, "issues": [], "warnings": []}
+    monkeypatch.setattr(runtime, "_validate_data", lambda _: validation)
+    monkeypatch.setattr(runtime, "_emit_update_event", lambda *a, **kw: None)
+
+    def prepare(*args):
+        assert not local_ready, "fresh local data must not require upstream access"
+        raise OSError("private upstream repair detail")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("must not stop service or launch updater")
+
+    monkeypatch.setattr(runtime, "_prepare_updater", prepare)
+    monkeypatch.setattr(runtime, "_stop_service", forbidden)
+    monkeypatch.setattr(runtime, "_run_updater", forbidden)
+    assert runtime.update_now(target_session="2026-10-20") is local_ready
+    if not local_ready:
+        assert "上游更新准备失败" in runtime._status["message"]
+        assert "private" not in runtime._status["message"]
+
+
+def test_update_target_recovers_official_calendar_after_primary_failure(
+    isolated_config, monkeypatch,
+):
+    runtime = FreeStockDBRuntime()
+    isolated_config.data.free_stockdb_online_enabled = True
+    monkeypatch.setattr(runtime, "check_vendor_notice", lambda **kw: {})
+    monkeypatch.setattr("quantmaster.trading_sessions.resolve_session_target", lambda: SimpleNamespace(
+        ready=True, session="2026-09-30", source="stockdb:validated",
+        completion="current_session_complete", coverage={"official_dates": []},
+    ))
+    monkeypatch.setattr("quantmaster.trading_sessions.market_now", lambda: datetime(
+        2026, 10, 21, 14, tzinfo=ZoneInfo("Asia/Shanghai"),
+    ))
+    monkeypatch.setattr(
+        "quantmaster.data.free_stockdb_source.FreeStockDBOnlineSource.official_trade_days",
+        lambda *a: ["2026-10-20", "2026-10-21"],
+    )
+    assert runtime._target_session() == ("2026-10-20", "free-stockdb-online:calendar")

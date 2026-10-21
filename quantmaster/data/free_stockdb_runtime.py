@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import io
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -44,6 +46,8 @@ def _monotonic() -> float:
 _VENDOR_HOME = "https://dns.novapi.cc/"
 _VENDOR_NOTICE_URL = f"{_VENDOR_HOME}tabs/notice.html"
 _VENDOR_NOTICE_TTL = 6 * 60 * 60
+_LEGACY_UPDATER_SHA256 = "7ebe7ebee9367400e2910c33af85bdc462a5289c28d5601cb38e6f5a1be08d32"
+_UPDATER_SHA256 = "ee833769e9b2d8765e5919d93c73cb0f5f7732b4971ee31746eb6e733b910fc8"
 _CONTROL_PATH_ENV = "QM_FREE_STOCKDB_CONTROL_PATH"
 _AUTO_MAX_ATTEMPTS = 3
 _AUTO_RETRY_SECONDS = 15 * 60
@@ -782,6 +786,66 @@ class FreeStockDBRuntime:
             self._clear_process_owner()
         return stopped
 
+    @staticmethod
+    def _prepare_updater(updater: Path, root: Path) -> None:
+        """Apply the vendor's September/October 2026 update transport repair.
+
+        Only the observed legacy executable is replaced. Custom binaries and
+        origins remain user-owned; downloaded executable bytes must match the
+        inspected official v0.3.5-more-power Windows release.
+        """
+        if hashlib.sha256(updater.read_bytes()).hexdigest() == _LEGACY_UPDATER_SHA256:
+            url = f"{_VENDOR_HOME}downloads/free-stockdb-windows-v0.3.5-more-power.zip"
+            with httpx.Client(timeout=60, follow_redirects=True) as client:
+                response = client.get(url)
+                response.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                executable = archive.read("stockdb/数据更新.exe")
+            if hashlib.sha256(executable).hexdigest() != _UPDATER_SHA256:
+                raise ValueError("官方更新器校验失败，请核对官网发行包")
+            temporary = updater.with_suffix(".exe.quantmaster-pending")
+            temporary.write_bytes(executable)
+            temporary.replace(updater)
+
+        config = root / "sync_url.txt"
+        if not config.is_file():
+            return
+        original = config.read_bytes()
+        text = original.decode("utf-8-sig")
+        official = False
+        lines = []
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                origin = urlsplit(stripped.split()[0])
+                if (
+                    origin.scheme in {"http", "https"}
+                    and origin.netloc in {"dns.novapi.cc", "a.123128.xyz",
+                                          "ah.123128.xyz", "ad.123128.xyz"}
+                    and origin.path in {"", "/"} and not origin.query and not origin.fragment
+                ):
+                    official = official or "always" not in stripped.split()[1:]
+                    host = "ah.123128.xyz" if origin.hostname == "a.123128.xyz" else (
+                        "ad.123128.xyz" if origin.hostname == "dns.novapi.cc" else origin.netloc
+                    )
+                    old_url = stripped.split()[0]
+                    new_url = origin._replace(scheme="http", netloc=host).geturl()
+                    line = line.replace(old_url, new_url, 1)
+            lines.append(line)
+        encoded = "".join(lines).encode("utf-8")
+        if original.startswith(b"\xef\xbb\xbf"):
+            encoded = b"\xef\xbb\xbf" + encoded
+        if encoded != original:
+            temporary = config.with_suffix(".txt.quantmaster-pending")
+            temporary.write_bytes(encoded)
+            temporary.replace(config)
+        # Preserve the old sentinel as a one-time repair receipt. Never touch
+        # custom-source sentinels or repeatedly reset a completed full sync.
+        disable = root / "data" / "disable"
+        receipt = root / ".quantmaster-disable-before-20261006"
+        if official and disable.is_file() and not receipt.exists():
+            disable.rename(receipt)
+
     def _run_updater(
         self, updater: Path, root: Path, *, trigger: str, target: str,
     ) -> int:
@@ -1095,11 +1159,26 @@ class FreeStockDBRuntime:
                 getattr(expectation, "completion", "")
                 == "current_session_closed_waiting_provider"
             )
-            if expectation.session and (expectation.ready or calendar_target):
+            if expectation.session and calendar_target:
                 return expectation.session, expectation.source
+            if get_config().data.free_stockdb_online_enabled:
+                return self._online_update_target()
         except (ImportError, OSError, RuntimeError, TypeError, ValueError):
             logger.info("无法解析 free-stockdb 目标交易日", exc_info=True)
         return "", "unavailable"
+
+    @staticmethod
+    def _online_update_target() -> tuple[str, str]:
+        """A read fallback session cannot prove that no newer update is due."""
+        from quantmaster.data.free_stockdb_source import FreeStockDBOnlineSource
+        from quantmaster.trading_sessions import SessionExpectationResolver, market_now
+
+        now = market_now()
+        sessions = FreeStockDBOnlineSource().official_trade_days(
+            (now - timedelta(days=45)).date(), now.date(),
+        )
+        closed = SessionExpectationResolver._closed_sessions(sessions, now)
+        return (max(closed), "free-stockdb-online:calendar") if closed else ("", "unavailable")
 
     def _validate_data(self, target_session: str) -> dict[str, Any]:
         """Validate a target-date full-market slice without publishing research."""
@@ -1429,6 +1508,16 @@ class FreeStockDBRuntime:
             return self._finish_failure(
                 target=target, validation=preflight, code=-1, attempt=attempt,
                 trigger=trigger, message=message, allow_retry=False,
+            )
+        try:
+            self._prepare_updater(updater, root)
+        except (OSError, ValueError, KeyError, zipfile.BadZipFile, httpx.HTTPError) as exc:
+            logger.exception("StockDB upstream repair failed")
+            return self._finish_failure(
+                target=target, validation=preflight, code=-1, attempt=attempt,
+                trigger=trigger,
+                message=f"上游更新准备失败（{type(exc).__name__}），请核对官网客户端与同步源",
+                allow_retry=False,
             )
         self._set_status(
             "updating", "正在停止本地数据库", phase="stopping",
