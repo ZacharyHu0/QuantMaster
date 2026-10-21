@@ -45,3 +45,11 @@ the latter returned the October 21 trading session. Update targets now require a
 official closed-session calendar, use the enabled online calendar if primary evidence
 is unavailable, and never certify a historical reader fallback as the newest target.
 Only the obsolete official online origin is migrated; custom endpoints are preserved.
+
+Post-sync live verification found a second timing failure: the current official
+native executable opened the corrected local partitions and began listening after
+24 seconds. The managed ten-second startup deadline terminated that healthy cold
+start. Allow up to 60 seconds, retain cancellation and termination on expiry, and
+cover both the observed 24-second startup and a server exceeding the deadline.
+The online trial daily sample still ended on September 30 although its calendar
+included October 21; only post-sync local coverage validation can certify freshness.
