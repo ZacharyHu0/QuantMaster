@@ -2591,10 +2591,12 @@ def _load_history_locked(
         ):
             # A new local generation must replace the whole qfq history and its
             # lineage. Neither a TTL hit nor a tail merge can renew old evidence.
+            # Keep automatic fallback available if the local history is incomplete;
+            # only an explicit caller selection may pin the rebuild to StockDB.
             return _full_refresh(
                 symbol, min(start, str(cached.index.min().date())),
                 max(end, str(cached.index.max().date())), cached, store, priority,
-                "free-stockdb",
+                provider,
             ).loc[start:end]
     try:
         cached_quality = json.loads(str(meta.get("quality_json") or "{}"))

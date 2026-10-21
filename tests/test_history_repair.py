@@ -532,6 +532,97 @@ def _auto_sources(monkeypatch, source, native):
     })
 
 
+@pytest.fixture
+def accepted_generation_sources(repair_setup, isolated_config, monkeypatch):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    store, source, calls, state, old = repair_setup
+    isolated_config.data.primary_provider = "free-stockdb"
+    acceptance = SimpleNamespace(session=END, updated_at=datetime(2024, 1, 19, 10, tzinfo=UTC))
+    monkeypatch.setattr(
+        "quantmaster.stockdb_acceptance.read_stockdb_session_acceptance", lambda _: acceptance,
+    )
+    native = old.reindex(pd.bdate_range(START, END)).ffill()
+    native.attrs = {
+        "instrument": SYMBOL, "adjustment": "qfq", "provider_interface": "stock_sdk:daily",
+        "unit_status": "verified_local_stockdb_schema_v1",
+        "units": dict(registry._unit_contract(SYMBOL)[0]), "factor_coverage": "unconfirmed",
+        "stockdb_accepted_session": END,
+        "stockdb_accepted_at": acceptance.updated_at.isoformat(),
+    }
+    local_calls = []
+
+    class Local:
+        name = "free-stockdb"
+
+        def daily(self, symbol, start, end):
+            local_calls.append((symbol, start, end))
+            fault = state.get("local_fault", "")
+            if fault == "network":
+                raise OSError("local history unavailable")
+            frame = native.loc[start:end].copy()
+            if fault == "empty":
+                return frame.iloc[:0]
+            if fault == "missing_old":
+                return frame.iloc[1:]
+            return frame
+
+    def factories(**kwargs):
+        provider = kwargs.get("provider", "")
+        choices = {"free-stockdb": [Local], "tushare": [lambda: source]}
+        return {registry.Market.CN: choices.get(provider, [Local, lambda: source])}
+
+    monkeypatch.setattr(registry, "_request_factories", factories)
+    return store, calls, state, old, local_calls
+
+
+@pytest.mark.parametrize("fault", ["", "missing_old", "empty", "network"])
+def test_new_stockdb_generation_uses_fallback_only_for_missing_history(
+    accepted_generation_sources, fault,
+):
+    store, calls, state, old, local_calls = accepted_generation_sources
+    state["local_fault"] = fault
+    result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert local_calls == [(SYMBOL, START, END)]
+    assert bool(calls) == bool(fault)
+    assert result.data.index.max() == pd.Timestamp(END)
+    assert old.index.difference(result.data.index).empty
+    assert not result.quality.stale
+    assert store.metadata(SYMBOL)["last_source"] == ("tushare" if fault else "free-stockdb")
+    if fault:
+        assert result.data.loc[START, "close"] == 5.0
+        assert result.data.attrs["factor_coverage"] == "complete"
+
+
+def test_new_stockdb_generation_preserves_explicit_local_selection(accepted_generation_sources):
+    store, calls, state, old, _ = accepted_generation_sources
+    state["local_fault"] = "missing_old"
+    original = store._path(SYMBOL).read_bytes()
+    result = registry.refresh_history(
+        SYMBOL, START, END, store=store, mode="auto", source_name="free-stockdb",
+    )
+    assert calls == []
+    assert result.quality.stale
+    assert result.data.index.equals(old.index)
+    assert store._path(SYMBOL).read_bytes() == original
+
+
+@pytest.mark.parametrize("fault", ["network", "missing_old", "factor"])
+def test_new_stockdb_generation_rejected_fallback_preserves_cache(
+    accepted_generation_sources, fault,
+):
+    store, calls, state, old, _ = accepted_generation_sources
+    state.update(local_fault="missing_old", fault=fault)
+    original = store._path(SYMBOL).read_bytes()
+    result = registry.refresh_history(SYMBOL, START, END, store=store, mode="auto")
+    assert calls
+    assert result.quality.stale
+    assert result.data.index.equals(old.index)
+    assert store._path(SYMBOL).read_bytes() == original
+    assert store.metadata(SYMBOL)["last_source"] == "free-stockdb"
+
+
 @pytest.mark.parametrize("fault", ["", "old_date", "tail", "raw", "identity", "unit"])
 def test_auto_tries_complete_local_before_same_source_repair(repair_setup, monkeypatch, fault):
     store, source, calls, _, old = repair_setup
