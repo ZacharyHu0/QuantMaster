@@ -83,7 +83,7 @@ class TestBasics:
 
         assert initial_names == {
             "brand-intro.css", "brand-intro.js", "app.css", "app.js", "data-state.js",
-            "ink-theme.css", "theme.js", "workspace-loader.js",
+            "ink-theme.css", "theme.js", "workspace-loader.js", "data-update.js",
         }
         assert '<script type="module" src="/static/workspace-loader.js"></script>' in page
         assert all(
@@ -639,8 +639,8 @@ class TestBasics:
         assert "/api/v1/market/ashare-fear-greed" in market_script
         assert "/api/v1/market/temperature" in market_script
         assert "/api/v1/rotation/overview" in market_script
-        assert "/api/v1/settings/free-stockdb/update" in app_script
-        assert "/api/v1/after-close/scan" in app_script
+        assert "QuantMasterDataUpdate.start()" in app_script
+        assert "waitForMarketStockdbUpdate" not in app_script
         assert "createDecisionStreamRenderer" in app_script
         assert "controllers.get(owner)?.abort()" in market_script
         assert "QuantCharts?.dispose('market-board-chart')" in market_script

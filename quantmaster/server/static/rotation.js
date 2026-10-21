@@ -1485,22 +1485,7 @@ const rotationFeature = (() => {
   }
 
   async function refresh(scope, button) {
-    if (activeJob) return;
-    const idle = button.textContent;
-    button.disabled = true;
-    button.textContent = '正在创建任务…';
-    try {
-      const allowed = new Set(['all','market','industries','themes','etf']);
-      const selected = allowed.has(scope) ? scope : 'all';
-      const job = await post('/api/v1/market/analytics/refresh',{scope:selected,mode:'incremental',source:'auto',purpose:'current_analysis'});
-      await monitorRefresh(job,selected,button,idle);
-    } catch (error) {
-      clearActiveJob();
-      button.disabled = false;
-      button.textContent = '刷新失败';
-      refreshResult(scope,'刷新任务创建失败',error?.message || '请稍后重试','error');
-      reportLocalError('板块联动','刷新任务未能创建',error);
-    }
+    await window.QuantMasterDataUpdate.start();
   }
 
   function refreshButton(scope) {

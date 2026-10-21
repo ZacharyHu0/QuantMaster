@@ -279,3 +279,9 @@ window.addEventListener('hashchange', () => {
 
 const initial = routeFromHash() || {workspace: 'today', page: 'market', query: ''};
 void activate(initial.workspace, initial.page, {replace: !routeFromHash(), query: initial.query});
+
+// Both automatic maintenance and manual updates publish fresh local results.
+document.addEventListener('quantmaster:data-updated', () => {
+  transitions = transitions.then(() => active?.adapter?.refresh?.())
+    .catch(error => console.warn('页面读取新数据失败', error));
+});

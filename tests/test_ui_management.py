@@ -6413,3 +6413,60 @@ def test_settings_remount_resumes_only_active_research_and_migrations(live_serve
         page.wait_for_timeout(2_100)
         assert all(polls[name] > paused[name] for name in polls), {"before": paused, "after": polls}
         browser.close()
+
+
+def test_data_update_survives_long_wait_reload_and_partial_completion(live_server, tmp_path):
+    url, _ = live_server
+    job = None
+    posts = []
+
+    def update_route(route):
+        nonlocal job
+        if route.request.method == "POST":
+            posts.append(route.request.url)
+            job = {"id": "update-plan", "type": "data.update", "status": "interrupted",
+                   "waiting_on": "data_dependencies", "detail": "后台任务仍在执行"}
+            route.fulfill(json=job)
+        else:
+            route.fulfill(json={"job": job, "tasks": [job] if job else [], "automatic": {
+                "enabled": True, "cache_enabled": True, "worker_available": True,
+                "data_as_of": "2026-10-20", "target_session": "2026-10-20",
+            }})
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _install_market_workbench_routes(page)
+        page.route("**/api/v1/data/update", update_route)
+        page.goto(url)
+        page.wait_for_load_state("networkidle")
+        page.clock.install()
+        page.evaluate("Promise.all([QuantMasterDataUpdate.start(), QuantMasterDataUpdate.start()])")
+        playwright_sync.expect(page.locator("#data-update-start")).to_be_disabled()
+        page.clock.fast_forward(80000)
+        playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("后台任务仍在执行")
+        assert len(posts) == 1
+        page.reload()
+        page.wait_for_load_state("networkidle")
+        playwright_sync.expect(page.locator("#data-update-start")).to_be_disabled()
+        assert len(posts) == 1
+        page.evaluate("""window.__published = 0;
+            document.addEventListener('quantmaster:data-updated', () => window.__published++);""")
+        job.update(status="failed", waiting_on="", outcome="partial", finished_at="now",
+                   detail="更新部分完成；请查看各阶段缺口",
+                   steps={"stockdb": {"status": "completed", "detail": "已验收"},
+                          "analysis": {"status": "partial", "detail": "分析证据不足"}})
+        page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+        playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("更新部分完成")
+        playwright_sync.expect(page.locator("#data-update-start")).to_be_enabled()
+        assert page.evaluate("window.__published") == 1
+        page.locator("#data-update-details").evaluate("node => node.open = true")
+        page.screenshot(path=str(tmp_path / "update-desktop.png"))
+        page.set_viewport_size({"width": 390, "height": 844})
+        panel = page.locator(".data-update-panel")
+        assert panel.evaluate("node => node.scrollWidth <= node.clientWidth")
+        page.screenshot(path=str(tmp_path / "update-narrow.png"))
+        assert errors == []
+        browser.close()

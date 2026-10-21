@@ -238,6 +238,7 @@ def _apply_domain_projection(public: dict[str, Any], domain: str, value: dict[st
                 "total", "total_known", "planning", "succeeded", "failed", "failures", "current_symbol",
                 "can_cancel", "can_retry",
                 "waiting_on", "next_retry_at", "outcome", "warnings", "warning_count",
+                "target_session", "steps", "children", "results",
             )
             if key in value
         })

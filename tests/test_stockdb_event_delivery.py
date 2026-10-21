@@ -54,7 +54,7 @@ def test_available_event_queues_market_refresh():
         reset_after_close=lambda: None,
         reset_etf_research=lambda: None,
         data_refresh_manager=SimpleNamespace(
-            create=lambda **kwargs: calls.append(kwargs) or {"id": "job-1"},
+            maintain_consumed=lambda: calls.append("consumed") or [],
         ),
     )
 
@@ -63,7 +63,7 @@ def test_available_event_queues_market_refresh():
         {"target_session": "2026-08-10"},
     ))
 
-    assert calls == [{"scope": "market"}]
+    assert calls == ["consumed"]
 
 
 def test_complete_event_dispatches_all_real_consumers(isolated_config):

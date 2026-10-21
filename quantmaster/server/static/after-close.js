@@ -244,16 +244,7 @@ const afterCloseFeature = (() => {
   }
 
   async function updateScanData() {
-    const button = document.getElementById('after-close-update-data');
-    button.disabled = true;
-    button.textContent = '正在提交更新…';
-    try {
-      const status = await post('/api/v1/settings/free-stockdb/update', {});
-      renderStockdbUpdate(status);
-      state.stockdbPoll = setTimeout(() => void pollStockdbUpdate(), 250);
-    } catch (error) {
-      renderStockdbUpdate({state:'degraded', update_result:'failed', message:error.message});
-    }
+    await window.QuantMasterDataUpdate.start();
   }
 
   function syncScanControls() {

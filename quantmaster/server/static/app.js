@@ -513,7 +513,7 @@ const globalJobPoller = (() => {
           entry.polls += 1;
           entry.last = value;
           notify(entry, 'onUpdate', value);
-          if (terminal.has(String(value.status || ''))) {
+          if (terminal.has(String(value.status || '')) && !value.waiting_on && !value.backoff?.waiting_on) {
             entries.delete(entry.id);
             notify(entry, 'onTerminal', value);
             return;
@@ -1774,7 +1774,7 @@ let marketColdRetryTimer = null;
 let marketColdRetryCount = 0;
 let marketStreamCycle = 0;
 let marketFearGreed = null;
-let marketAfterCloseSyncing = false;
+
 let marketAshareFearGreed = null;
 const MARKET_TONES = {up:'#e66767',down:'#24a06b',neutral:'#aaa89f'};
 let todayChartsPromise = null;
@@ -2066,87 +2066,25 @@ function renderMarketStaleBanner(data, snapshot) {
   const staleCount = marketGroupCount(data, 'stale');
   const partial = quality.partial === true
     || ['partial', 'degraded', 'unavailable'].includes(String(quality.status || ''));
-  if (!stale && !unavailable && !staleCount && !partial && !marketAfterCloseSyncing) {
+  if (!stale && !unavailable && !staleCount && !partial) {
     banner.hidden = true;
     return;
   }
   const asOf = snapshot?.as_of || data?.meta?.as_of || '';
   const title = document.getElementById('market-stale-title');
   const detail = document.getElementById('market-stale-detail');
-  if (title) title.textContent = marketAfterCloseSyncing
-    ? '正在更新盘后行情与研究快照'
-    : stale ? '当前行情来自陈旧快照' : '当前行情证据不完整';
+  if (title) title.textContent = stale ? '当前行情来自陈旧快照' : '当前行情证据不完整';
   const parts = [];
-  if (marketAfterCloseSyncing) parts.push('正在执行 free-stockdb 更新，完成后自动运行盘后扫描。');
   if (asOf) parts.push(`当前数据截至 ${asOf}`);
   if (staleCount) parts.push(`${staleCount} 只使用陈旧缓存`);
   if (unavailable) parts.push(`${unavailable} 只暂不可用`);
   if (!parts.length && partial) parts.push('部分数据源尚未完成，暂不应据此形成正式判断。');
-  if (!marketAfterCloseSyncing) parts.push('点击“同步盘后数据”更新全市场行情。');
+  parts.push('点击“更新数据与分析”，可在顶部查看各阶段进度。');
   if (detail) detail.textContent = parts.join('；');
   banner.hidden = false;
   ['market-after-close-sync', 'market-stale-sync'].forEach(id => {
     const button = document.getElementById(id);
-    if (button) button.disabled = marketAfterCloseSyncing;
-  });
-}
-
-function showMarketAfterCloseProgress(message) {
-  const stamp = document.getElementById('mkt-stamp');
-  if (stamp) stamp.textContent = message;
-  const banner = document.getElementById('market-stale-banner');
-  const title = document.getElementById('market-stale-title');
-  const detail = document.getElementById('market-stale-detail');
-  if (banner) banner.hidden = false;
-  if (title) title.textContent = '正在更新盘后行情与研究快照';
-  if (detail) detail.textContent = message;
-}
-
-function marketStockdbIsActive(status) {
-  return ['queued', 'updating', 'restarting'].includes(status?.state)
-    || ['queued', 'stopping', 'syncing', 'restarting', 'validating', 'retry_wait']
-      .includes(status?.phase)
-    || ['queued', 'running', 'validating', 'retry_wait'].includes(status?.update_result);
-}
-
-function marketStockdbFailure(status) {
-  return ['error', 'degraded'].includes(status?.state)
-    || ['failed', 'manual_required'].includes(status?.update_result);
-}
-
-function waitMs(milliseconds) {
-  return new Promise(resolve => window.setTimeout(resolve, milliseconds));
-}
-
-async function waitForMarketStockdbUpdate(initial) {
-  let status = initial;
-  for (let attempt = 0; attempt < 90; attempt += 1) {
-    if (marketStockdbFailure(status)) {
-      throw new Error(status.message || 'free-stockdb 更新未完成');
-    }
-    if (!marketStockdbIsActive(status)) {
-      if (status.update_result === 'success') return status;
-      throw new Error(status.message || 'free-stockdb 更新未启动或未完成');
-    }
-    const session = status.target_session ? ` · 目标 ${status.target_session}` : '';
-    showMarketAfterCloseProgress(
-      `正在更新全市场 free-stockdb${session} · 第 ${attempt + 1} 次检查`,
-    );
-    await waitMs(800);
-    status = await api('/api/v1/settings/free-stockdb');
-  }
-  throw new Error('free-stockdb 更新等待超时；可到盘后扫描查看详细状态。');
-}
-
-function waitForMarketAfterCloseScan(job) {
-  return new Promise(resolve => {
-    let unwatch = () => {};
-    unwatch = globalJobPoller.watch(job, {
-      onUpdate: current => showMarketAfterCloseProgress(
-        `正在运行盘后扫描 · ${current.phase || '扫描中'} · ${current.progress || 0}%`,
-      ),
-      onTerminal: current => { unwatch(); resolve(current); },
-    });
+    if (button) button.disabled = false;
   });
 }
 
@@ -2157,34 +2095,7 @@ function openAfterCloseWorkspace() {
 }
 
 async function runMarketAfterCloseSync() {
-  if (marketAfterCloseSyncing) return;
-  marketAfterCloseSyncing = true;
-  ['market-after-close-sync', 'market-stale-sync'].forEach(id => {
-    const button = document.getElementById(id);
-    if (button) button.disabled = true;
-  });
-  showMarketAfterCloseProgress('正在提交全市场 free-stockdb 更新…');
-  try {
-    const status = await post('/api/v1/settings/free-stockdb/update', {});
-    await waitForMarketStockdbUpdate(status);
-    showMarketAfterCloseProgress('全市场行情已更新，正在运行盘后扫描…');
-    const job = await post('/api/v1/after-close/scan', {as_of: '', force: false});
-    const current = await waitForMarketAfterCloseScan(job);
-    if (!String(current?.status || '').startsWith('completed')) {
-      throw new Error(current?.message || '盘后扫描未完成');
-    }
-    invalidateKlineSeriesCache();
-    marketAfterCloseSyncing = false;
-    await loadMarket();
-  } catch (error) {
-    showMarketAfterCloseProgress(`盘后同步失败：${error.message}`);
-    const title = document.getElementById('market-stale-title');
-    if (title) title.textContent = '盘后同步失败';
-  } finally {
-    marketAfterCloseSyncing = false;
-    document.getElementById('market-after-close-sync')?.removeAttribute('disabled');
-    document.getElementById('market-stale-sync')?.removeAttribute('disabled');
-  }
+  await window.QuantMasterDataUpdate.start();
 }
 function acceptAshareMarketFearGreed(data) {
   marketAshareFearGreed = data || {
@@ -2615,26 +2526,10 @@ async function loadMarket() {
   }
 }
 
-async function waitForMarketRefresh(job) {
-  const current = await globalJobPoller.wait(job);
-  const status = String(current?.status || '');
-  if (status.startsWith('completed')) {
-    invalidateKlineSeriesCache();
-    await loadMarket();
-  }
-}
 const marketRefreshForm = document.getElementById('mkt-refresh');
 if (marketRefreshForm) marketRefreshForm.onsubmit = async e => {
-  e.preventDefault(); busy(e.target, true, '已提交…');
-  try {
-    const job = await post('/api/v1/data/refresh', {scope:'market'});
-    const button = e.target.querySelector('button.primary');
-    if (button) button.textContent = job.coalesced ? '正在复用同步…' : '后台同步中…';
-    void waitForMarketRefresh(job).finally(() => busy(e.target, false));
-  } catch (error) {
-    busy(e.target, false);
-    throw error;
-  }
+  e.preventDefault();
+  await window.QuantMasterDataUpdate.start();
 };
 document.getElementById('market-after-close-sync')?.addEventListener(
   'click', () => void runMarketAfterCloseSync(),
@@ -3766,3 +3661,5 @@ window.QuantMasterShell = Object.freeze({
   loadLedger,
   disposeToday: disposeMarketSparks,
 });
+
+document.addEventListener('quantmaster:data-updated', invalidateKlineSeriesCache);
