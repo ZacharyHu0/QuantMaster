@@ -1140,6 +1140,13 @@ class FreeStockDBRuntime:
         temp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         temp.replace(path)
 
+    def update_target(self) -> str:
+        """Use the updater's calendar contract, never the read fallback date."""
+        target, _source = self._target_session()
+        if not target:
+            raise ValueError("更新目标交易日无法确认；请恢复官方日历后重试，旧验收日期不代表最新数据")
+        return target
+
     def _target_session(self, *, force_notice: bool = False) -> tuple[str, str]:
         self.check_vendor_notice(force=force_notice)
         try:

@@ -1,6 +1,7 @@
 """Application-level update orchestration over existing worker services."""
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from quantmaster.config import get_config
@@ -24,8 +25,10 @@ def _source_step(state: dict[str, Any], target: str) -> dict[str, Any] | None:
 
     status = free_stockdb_runtime.status()
     if str(status.get("validated_session") or "") >= target:
+        warnings = (status.get("validation") or {}).get("warnings") or []
         return {
-            "status": "completed", "detail": "本地行情库已通过目标交易日验收，复用已有数据",
+            "status": "partial" if warnings else "completed",
+            "detail": "；".join(warnings) or "本地行情库已通过目标交易日验收，复用已有数据",
             "data_as_of": status["validated_session"],
         }
     if not state.get("stockdb_requested"):
@@ -103,7 +106,7 @@ def _finish_update(
 def _wait_update(context: JobContext, state: dict[str, Any], detail: str) -> JobOutcome:
     context.write_checkpoint(UPDATE_STATE, context.spec_hash, state)
     context.progress(20 if "consumers" not in state["steps"] else 65, "更新数据", detail)
-    return JobOutcome("interrupted", detail, retry_delay_seconds=5, waiting_on="data_dependencies")
+    return JobOutcome("interrupted", detail, retry_delay_seconds=30, waiting_on="data_dependencies")
 
 
 def _prepare_source(context: JobContext, state: dict[str, Any], target: str) -> JobOutcome | None:
@@ -128,15 +131,25 @@ def run_update(context: JobContext, spec: dict[str, Any], manager: Any) -> JobOu
     """Yield between dependencies, so child jobs can use the same worker pool."""
     state = context.load_checkpoint(UPDATE_STATE, context.spec_hash) or {
         "target_session": spec["target_session"], "steps": {}, "children": [],
+        "plan_started_at": time.time(),
     }
     steps = state["steps"]
     if context.cancelled():
         return JobOutcome("cancelled", "已停止后续更新；已提交的共享数据任务继续运行")
+    # Dependency yields create new runtime attempts; bound the whole plan as well.
+    if time.time() - state.setdefault("plan_started_at", time.time()) >= context.deadline_seconds:
+        for stage in ("stockdb", "consumers", "analysis"):
+            if steps.get(stage, {}).get("status") not in {"completed", "partial"}:
+                steps[stage] = {
+                    "status": "blocked", "detail": "依赖等待已到期限；保留已有结果，可稍后重新更新",
+                }
+        return _finish_update(context, state, False, "更新等待已到期限；请查看来源和子任务状态后重试")
     waiting = _prepare_source(context, state, spec["target_session"])
     if waiting:
         return waiting
     if "consumers" not in steps:
-        jobs = manager.maintain_consumed(manual=True) if spec.get("include_cache", True) else []
+        jobs = (manager.maintain_consumed(manual=True, end=spec["target_session"])
+                if spec.get("include_cache", True) else [])
         state["children"] = [{"id": job["id"], "kind": "行情缓存"} for job in jobs]
         steps["consumers"] = {
             "status": "running",

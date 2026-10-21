@@ -413,7 +413,7 @@ def test_disabled_auto_and_stale_owner_are_explicit(manager, owner, isolated_con
     owner("syncing", age=90)
     assert "失联" in manager._stockdb_wait_reason()
     isolated_config.data.repair_enabled = False
-    assert manager.maintain_consumed() == []
+    assert manager.maintain_consumed(end="2026-09-17") == []
     assert not manager.list()
     isolated_config.data.free_stockdb_managed = False
     assert not manager._stockdb_wait_reason()
@@ -480,12 +480,12 @@ def test_repeated_automatic_ticks_only_queue_one_job_per_scope(manager, owner, i
     monkeypatch.setattr(manager, "_resolve_symbols",
                         lambda scope, *args: ["AAPL.US"] if scope == "market" else ["600000.SH"])
     for _ in range(3):
-        for job in manager.maintain_consumed():
+        for job in manager.maintain_consumed(end="2026-09-17"):
             run_due(manager, job["id"])
     assert len(manager.list()) == 3
     assert len([job for job in manager.list() if job["waiting_on"]]) == 2
     owner("completed", "success")
-    for job in manager.maintain_consumed():
+    for job in manager.maintain_consumed(end="2026-09-17"):
         run_due(manager, job["id"])
 
 

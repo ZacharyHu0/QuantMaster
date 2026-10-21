@@ -22,6 +22,7 @@
     summary.textContent = current ? (current.detail || (active(current) ? '已排队，后台继续执行' : states[current.status] || current.status)) : '尚未手动更新；可查看自动维护状态';
     const a = value.automatic || {};
     summary.textContent = `行情库至 ${a.data_as_of || '尚未验收'} · ${summary.textContent}`;
+    if (current?.target_session) summary.textContent += ` · 本次目标 ${current.target_session}`;
     summary.title = summary.textContent;
     document.getElementById('data-update-current').textContent = summary.textContent;
     auto.textContent = `行情库自动更新：${a.enabled ? '已开启' : '已关闭'}；缓存自动维护：${a.cache_enabled ? '已开启' : '已关闭'}。后台：${a.worker_available ? '在线' : '离线，自动维护暂不可执行'}。行情已验收到 ${a.data_as_of || '尚无证据'}（目标 ${a.target_session || '待确认'}）。下一次 ${a.next_retry_at || a.next_update_at || '尚未安排'}。${a.detail || ''}`;

@@ -6425,7 +6425,8 @@ def test_data_update_survives_long_wait_reload_and_partial_completion(live_serve
         if route.request.method == "POST":
             posts.append(route.request.url)
             job = {"id": "update-plan", "type": "data.update", "status": "interrupted",
-                   "waiting_on": "data_dependencies", "detail": "后台任务仍在执行"}
+                   "waiting_on": "data_dependencies", "detail": "后台任务仍在执行",
+                   "target_session": "2026-10-20"}
             route.fulfill(json=job)
         else:
             route.fulfill(json={"job": job, "tasks": [job] if job else [], "automatic": {
@@ -6447,6 +6448,7 @@ def test_data_update_survives_long_wait_reload_and_partial_completion(live_serve
         playwright_sync.expect(page.locator("#data-update-start")).to_be_disabled()
         page.clock.fast_forward(80000)
         playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("后台任务仍在执行")
+        playwright_sync.expect(page.locator("#data-update-summary")).to_contain_text("本次目标 2026-10-20")
         assert len(posts) == 1
         page.reload()
         page.wait_for_load_state("networkidle")
