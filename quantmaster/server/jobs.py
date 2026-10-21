@@ -55,7 +55,7 @@ _RETRYABLE = frozenset({
 _UNIFIED_DOMAIN_TYPES: dict[str, frozenset[str]] = {
     "after_close": frozenset({"after_close.scan"}),
     "news": frozenset({"news.crawl", "news.source_run", "news.reanalyze"}),
-    "settings": frozenset({"settings.apply", "settings.diagnostic"}),
+    "settings": frozenset({"settings.apply", "settings.diagnostic", "settings.catalog_refresh"}),
     "lab": LAB_JOB_TYPES | frozenset({"lab.cloud_suggestion"}),
     "rotation": frozenset({"rotation.refresh", "rotation.etf.scan"}),
     "backtests": frozenset({BACKTEST_TASK_TYPE}),
