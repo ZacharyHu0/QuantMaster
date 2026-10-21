@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pandas as pd
 import pytest
 
 from quantmaster.ai.news_providers import fetch_xiaoshi
@@ -15,6 +17,7 @@ from quantmaster.data.xiaoshi_source import (
     XiaoshiError,
     XiaoshiPublicationStore,
     XiaoshiRateLimited,
+    XiaoshiSource,
 )
 
 
@@ -223,31 +226,103 @@ def test_client_waits_for_retry_after_without_reporting_a_bug():
     assert sleeps == [2.0]
 
 
-def test_r2_download_has_no_api_authorization_header(monkeypatch):
-    body = b"verified parquet bytes"
-    observed: dict = {}
+def test_history_uses_cli_and_requires_verified_provenance(tmp_path, monkeypatch):
+    import quantmaster.data.xiaoshi_source as module
 
-    def fake_get(url, **kwargs):
-        observed.update(kwargs)
-        return httpx.Response(200, content=body, request=httpx.Request("GET", url))
+    monkeypatch.setattr(module, "get_config", lambda: SimpleNamespace(
+        data_root=tmp_path, data=SimpleNamespace(provider_timeout=30),
+    ))
+    calls = []
+    frame = pd.DataFrame({"symbol": ["600519"], "close": [1263.0]})
 
-    monkeypatch.setattr(httpx, "get", fake_get)
-    client = XiaoshiClient("secret-value", publications=_ReadyPublications())
-    session = {"files": {
-        "url": "https://bucket.r2.cloudflarestorage.com/file",
-        "size": len(body),
-        "sha256": hashlib.sha256(body).hexdigest(),
-    }}
+    def cli(*args):
+        calls.append(args)
+        if args[0] == "verify":
+            root = Path(args[args.index("--data-dir") + 1])
+            root.mkdir(parents=True, exist_ok=True)
+            frame.to_parquet(root / "data.parquet")
+            (root / "verify.json").write_text(json.dumps({
+                "valid": True, "provenance_verified": True,
+                "files": [{"path": "data.parquet"}],
+            }))
+        return ""
 
-    assert client.download_files(session)[0][1] == body
-    assert "headers" not in observed
+    client = XiaoshiClient(api_key="", publications=_ReadyPublications())
+    monkeypatch.setattr(client, "_history_cli", cli)
+    result = client.history_frame("daily-stock", market="CN", code="600519", year=2026, adjust="qfq")
+    assert result["close"].tolist() == [1263.0]
+    assert [call[0] for call in calls] == ["download", "verify"]
+    assert all("--api-key" not in call for call in calls)
+    report = Path(calls[-1][calls[-1].index("--output") + 1])
+    report.write_text(json.dumps({"valid": True, "provenance_verified": False}))
+    monkeypatch.setattr(client, "_history_cli", lambda *_args: "")
+    with pytest.raises(XiaoshiError, match="校验"):
+        client.history_frame("daily-stock", market="CN", code="000001", year=2026, adjust="qfq")
+
+
+def test_cli_passes_secret_only_in_environment(tmp_path, monkeypatch):
+    import quantmaster.data.xiaoshi_source as module
+
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+    command = tmp_path / ".local/share/xiaoshi-agent-tools-managed/bin" / (
+        "xiaoshi-data.cmd" if module.os.name == "nt" else "xiaoshi-data"
+    )
+    command.parent.mkdir(parents=True)
+    command.touch()
+    client = XiaoshiClient(api_key=bytes(range(65, 73)).decode(), publications=_ReadyPublications())
+    observed = {}
+
+    def run(argv, **kwargs):
+        observed.update(argv=argv, **kwargs)
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert client._history_cli("verify", "--data-dir", str(tmp_path)) == "ok"
+    assert client.api_key not in " ".join(observed["argv"])
+    assert observed["env"]["XIAOSHI_API_KEY"] == client.api_key
+    assert observed["timeout"] == 180
+
+
+@pytest.mark.parametrize("minute", [False, True])
+def test_canonical_history_filters_identity_adjustment_and_time(monkeypatch, minute):
+    import quantmaster.data.xiaoshi_source as module
+
+    monkeypatch.setattr(module, "get_config", lambda: SimpleNamespace(data=SimpleNamespace(
+        xiaoshi_history_enabled=True, xiaoshi_minute_enabled=True,
+    )))
+    date = "2026-10-09 09:31:00+08:00" if minute else "2026-10-09"
+    frame = pd.DataFrame({
+        "canonical_schema_version": ["history-canonical-v2"] * 3,
+        "symbol": ["600519", "000001", "600519"], "market": ["CN"] * 3,
+        "adjustment": ["raw" if minute else "qfq", "raw" if minute else "qfq", "hfq"],
+        "trade_time" if minute else "trade_date": [date] * 3,
+        "open": [10, 20, 30], "high": [11, 21, 31], "low": [9, 19, 29],
+        "close": [10.5, 20.5, 30.5], "volume": [100, 200, 300],
+    })
+    calls = []
+
+    def history(dataset, **dimensions):
+        calls.append((dataset, dimensions))
+        return frame
+
+    source = XiaoshiSource(SimpleNamespace(history_frame=history))
+    result = (source.intraday("600519.SH", "2026-10-09 09:30", "2026-10-09 10:00", "1m")
+              if minute else source.daily("600519.SH", "2026-10-09", "2026-10-09"))
+    assert result["close"].tolist() == [10.5]
+    assert result.index[0] == pd.Timestamp("2026-10-09 09:31" if minute else "2026-10-09")
+    assert calls[0][0] == ("cn-minute" if minute else "daily-stock")
+    if minute:
+        assert calls[0][1] == {"code": "600519"}
+    frame.drop(columns="canonical_schema_version", inplace=True)
+    with pytest.raises(XiaoshiError, match="canonical"):
+        source.daily("600519.SH", "2026-10-09", "2026-10-09")
 
 
 def test_history_and_timeline_contracts_reject_guessed_dimensions():
     client = XiaoshiClient("secret-value", publications=_ReadyPublications())
 
     with pytest.raises(ValueError, match="数据集"):
-        client.history_session("guessed-dataset")
+        client.history_frame("guessed-dataset")
     with pytest.raises(ValueError, match="31 天"):
         client.financial_timeline(since="2026-01-01", to="2026-03-01")
     with pytest.raises(ValueError, match="market"):

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -40,7 +40,6 @@ _RESOURCE_FIELDS = {
 }
 _MARKETS = {"CN", "HK", "US"}
 _INSTRUMENTS = {"stock", "index", "etf"}
-_R2_HOST_SUFFIX = ".r2.cloudflarestorage.com"
 
 
 class XiaoshiError(RuntimeError):
@@ -510,65 +509,64 @@ class XiaoshiClient:
             params["until"] = until
         return self.json("GET", "/api/v3/news", params=params)
 
-    def history_session(self, dataset: str, **dimensions: Any) -> dict[str, Any]:
-        allowed = {
-            "daily-stock", "daily-date", "daily", "global-daily", "min1",
-            "min1-market", "event-archive", "sector-constituents",
-        }
-        if dataset not in allowed:
-            raise ValueError("不支持的小石历史数据集")
-        return self.json(
-            "GET",
-            "/api/v3/history/download-session",
-            params={"dataset": dataset, **dimensions},
+    def _history_cli(self, *args: str) -> str:
+        command = Path.home() / ".local/share/xiaoshi-agent-tools-managed/bin" / (
+            "xiaoshi-data.cmd" if os.name == "nt" else "xiaoshi-data"
         )
-
-    @staticmethod
-    def _file_records(session: dict[str, Any]) -> list[dict[str, Any]]:
-        files = session.get("files")
-        if isinstance(files, dict):
-            files = [files]
-        if not isinstance(files, list) or not files or not all(isinstance(item, dict) for item in files):
-            raise XiaoshiError("小石历史下载会话没有文件")
-        return files
-
-    def download_files(self, session: dict[str, Any]) -> list[tuple[dict[str, Any], bytes]]:
-        result = []
-        for item in self._file_records(session):
-            url = str(item.get("url") or "")
-            parsed = urlparse(url)
-            if parsed.scheme != "https" or not (
-                str(parsed.hostname or "").endswith(_R2_HOST_SUFFIX)
-                or parsed.hostname == "kline.shizixi.com"
-            ):
-                raise XiaoshiError("小石 R2 下载地址不可信")
-            response = httpx.get(url, timeout=get_config().data.provider_timeout, follow_redirects=False)
-            response.raise_for_status()
-            body = response.content
-            expected_size = int(item.get("size") or item.get("bytes") or 0)
-            expected_hash = str(item.get("sha256") or "")
-            if expected_size and len(body) != expected_size:
-                raise XiaoshiError("小石 R2 文件大小校验失败")
-            if (
-                not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
-                or hashlib.sha256(body).hexdigest() != expected_hash
-            ):
-                raise XiaoshiError("小石 R2 文件校验和失败")
-            result.append((item, body))
-        return result
+        if not command.is_file():
+            raise XiaoshiError("尚未安装小石官方 CLI，请先完成受管工具安装")
+        try:
+            result = subprocess.run(
+                [str(command), *args], capture_output=True, text=True, encoding="utf-8",
+                env={**os.environ, "XIAOSHI_API_KEY": self.api_key, "PYTHONUTF8": "1"},
+                timeout=180, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise XiaoshiError("小石 CLI 执行失败或超时；请检查网络与稳定入口") from exc
+        if result.returncode:
+            raise XiaoshiError("小石 CLI 下载或校验失败；已停止，不自动重试")
+        return result.stdout
 
     def history_frame(self, dataset: str, **dimensions: Any) -> pd.DataFrame:
-        session = self.history_session(dataset, **dimensions)
-        frames = [pd.read_parquet(io.BytesIO(body)) for _item, body in self.download_files(session)]
-        if not frames:
-            return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True)
+        allowed = {"daily-stock", "global-daily", "cn-minute", "event-timeline", "sector-constituents"}
+        if dataset not in allowed or set(dimensions) - {
+            "market", "code", "year", "adjust", "date", "event_type",
+        }:
+            raise ValueError("不支持的小石历史数据集规格")
+        if any(not re.fullmatch(r"[A-Za-z0-9_.:-]+", str(v)) for v in dimensions.values()):
+            raise ValueError("小石历史数据维度无效")
+        partition = {"dataset": dataset, **dimensions}
+        # Canonical CN daily files cover a market/year, shared across symbols.
+        if dataset == "daily-stock" and dimensions.get("market") == "CN":
+            partition.pop("code", None)
+        spec = json.dumps(partition, sort_keys=True)
+        root = get_config().data_root / "xiaoshi" / "history" / hashlib.sha256(spec.encode()).hexdigest()
+        # The official CLI owns sessions, local receipts, reuse and file verification.
+        download = ["download", "--dataset", dataset, "--data-dir", str(root)]
+        for key, value in dimensions.items():
+            download.extend(["--" + key.replace("_", "-"), str(value)])
+        self._history_cli(*download)
+        report = root / "verify.json"
+        self._history_cli("verify", "--data-dir", str(root), "--output", str(report))
+        try:
+            verified = json.loads(report.read_text(encoding="utf-8"))
+            if verified.get("valid") is not True or verified.get("provenance_verified") is not True:
+                raise ValueError("invalid verification")
+            frames = []
+            for item in verified["files"]:
+                path = (root / item["path"]).resolve()
+                if not path.is_relative_to(root.resolve()):
+                    raise ValueError("file outside verified root")
+                frames.append(pd.read_parquet(path))
+            return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        except (KeyError, OSError, ValueError, TypeError) as exc:
+            raise XiaoshiError("小石 CLI 未提供有效的文件校验证据") from exc
 
     def archived_events(self, date: str, event_type: str = "") -> pd.DataFrame:
         dimensions = {"date": date}
         if event_type:
             dimensions["event_type"] = event_type
-        return self.history_frame("event-archive", **dimensions)
+        return self.history_frame("event-timeline", **dimensions)
 
     def sector_constituents(self, date: str) -> pd.DataFrame:
         return self.history_frame("sector-constituents", date=date)
@@ -619,10 +617,25 @@ def _symbol_identity(symbol: str) -> tuple[str, str, str]:
     raise ValueError("小石当前仅支持 CN/HK/US 股票")
 
 
-def _matching_minutes(frame: pd.DataFrame, code: str, canonical: str) -> pd.DataFrame:
-    if "ts_code" not in frame:
+def _canonical_bars(
+    frame: pd.DataFrame, code: str, market: str, adjustment: str, *, minute: bool = False,
+) -> pd.DataFrame:
+    if frame.empty:
         return frame
-    return frame[frame["ts_code"].astype(str).str.upper().isin({code, canonical})]
+    time_column = "trade_time" if minute else "trade_date"
+    required = {"canonical_schema_version", "symbol", "market", "adjustment", time_column}
+    if not required <= set(frame):
+        raise XiaoshiError("小石历史文件缺少当前 canonical 字段，请重新下载并校验")
+    if not frame["canonical_schema_version"].eq("history-canonical-v2").all():
+        raise XiaoshiError("小石历史文件 schema 版本不受支持")
+    selected = frame.loc[
+        frame["symbol"].astype(str).str.upper().eq(code)
+        & frame["market"].eq(market) & frame["adjustment"].eq(adjustment)
+    ].copy()
+    selected["date"] = pd.to_datetime(selected[time_column], errors="raise")
+    if selected["date"].dt.tz is not None:
+        selected["date"] = selected["date"].dt.tz_localize(None)
+    return normalize_bars(selected)
 
 
 def _resample_cn_minutes(minute: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -672,23 +685,20 @@ class XiaoshiSource(DataSource):
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         if not get_config().data.xiaoshi_history_enabled:
             raise XiaoshiError("小石历史行情已在设置中关闭")
-        code, market, canonical = _symbol_identity(symbol)
+        code, market, _canonical = _symbol_identity(symbol)
         adjust = "qfq" if market == "CN" else "raw"
-        frames = []
-        for year in range(pd.Timestamp(start).year, pd.Timestamp(end).year + 1):
-            frame = self.client.history_frame(
-                "daily-stock", market=market, code=code, adjust=adjust, year=year,
+        frames = [
+            _canonical_bars(
+                self.client.history_frame(
+                    "daily-stock", market=market, code=code, adjust=adjust, year=year,
+                ), code, market, adjust,
             )
-            if frame.empty:
-                continue
-            if "market" in frame:
-                frame = frame[frame["market"].astype(str).str.upper() == market]
-            if "code" in frame:
-                frame = frame[frame["code"].astype(str).str.upper().isin({code, canonical})]
-            frames.append(frame)
-        if not frames:
+            for year in range(pd.Timestamp(start).year, pd.Timestamp(end).year + 1)
+        ]
+        nonempty = [frame for frame in frames if not frame.empty]
+        if not nonempty:
             return pd.DataFrame()
-        result = normalize_bars(pd.concat(frames, ignore_index=True))
+        result = pd.concat(nonempty).sort_index()
         return result.loc[pd.Timestamp(start):pd.Timestamp(end)]
 
     def intraday(self, symbol: str, start: str, end: str, frequency: str = "5m") -> pd.DataFrame:
@@ -697,19 +707,14 @@ class XiaoshiSource(DataSource):
         normalized = validate_frequency(frequency)
         if normalized == "1d":
             return self.daily(symbol, start, end)
-        code, market, canonical = _symbol_identity(symbol)
+        code, market, _canonical = _symbol_identity(symbol)
         if market != "CN":
-            raise XiaoshiError("港美历史分钟线尚未发布为 R2 历史数据集")
-        frames = []
-        for year in range(pd.Timestamp(start).year, pd.Timestamp(end).year + 1):
-            frame = self.client.history_frame("min1", code=code, year=year)
-            frames.append(_matching_minutes(frame, code, canonical))
-        if not frames:
-            return pd.DataFrame()
-        raw = pd.concat(frames, ignore_index=True)
-        if "trade_time" in raw:
-            raw = raw.rename(columns={"trade_time": "date", "vol": "volume"})
-        minute = normalize_bars(raw)
+            raise XiaoshiError("港美历史分钟线尚未发布为历史数据集")
+        minute = _canonical_bars(
+            self.client.history_frame("cn-minute", code=code), code, market, "raw", minute=True,
+        )
+        if minute.empty:
+            return minute
         minute = minute[~minute.index.duplicated(keep="last")]
         if normalized != "1m":
             minute = _resample_cn_minutes(minute, normalized)
