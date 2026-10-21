@@ -5218,6 +5218,50 @@ def test_stock_analysis_progressive_restore_and_reduced_motion(live_server):
         browser.close()
 
 
+def test_after_close_separates_current_quality_and_historical_attempts(live_server):
+    url, _ = live_server
+    snapshot = {
+        "snapshot_id": "ac_123abc", "as_of_date": "2026-10-21", "score_version": "QM_AFTER_CLOSE_V1",
+        "input_hash": "fixture", "coverage": {}, "sectors": [], "candidates": [],
+        "attempts": {"latest": {
+            "purpose": "historical_replay", "status": "rejected", "as_of_date": "2026-10-21",
+            "reason": "板块目录缺少合法点时生效日期", "created_at": "2026-10-21T16:00:00+00:00",
+        }},
+    }
+
+    def route_api(route):
+        path = urlsplit(route.request.url).path
+        if path == "/api/v1/after-close/snapshots/latest":
+            route.fulfill(json={"snapshot": snapshot, "labels": []})
+        else:
+            route.fallback()
+
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route("**/api/v1/**", route_api)
+        page.goto(f"{url}/#today/after-close")
+        page.get_by_text("历史重算未完成", exact=True).wait_for()
+        assert "完整性通过" in page.locator("#after-close-asof").inner_text()
+        assert page.locator("#after-close-stale").is_hidden()
+        assert "点时生效日期" in page.locator("#after-close-replay-status").inner_text()
+        snapshot["staleness"] = {"stale": True, "reason": "当前行情覆盖不足"}
+        page.reload()
+        page.locator("#after-close-stale").wait_for(state="visible")
+        assert "当前行情覆盖不足" in page.locator("#after-close-stale").inner_text()
+        assert page.locator("#after-close-replay-status").is_visible()
+        snapshot.pop("staleness")
+        snapshot["attempts"]["latest"]["purpose"] = "unknown"
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.reload()
+        page.get_by_text("最近扫描用途未记录", exact=True).wait_for()
+        assert page.locator("#after-close-stale").is_hidden()
+        assert not errors
+        browser.close()
+
+
 def test_after_close_scan_recovers_poll_navigation_and_reload(live_server):
     url, _ = live_server
     state = {"started": False, "failed_once": False, "complete": False, "interrupted": False}
