@@ -17,7 +17,9 @@ from quantmaster.after_close.models import (
     SHADOW_SCORE_VERSION,
     AfterCloseSnapshot,
     ResearchCandidate,
+    ScanPurpose,
     SectorRank,
+    resolve_scan_purpose,
 )
 from quantmaster.after_close.store import AfterCloseStore
 from quantmaster.config import get_config
@@ -734,10 +736,43 @@ class AfterCloseService:
         }
         return sector_results, candidates, shadow_candidates, dict(sorted(excluded.items())), diagnostics
 
+    @staticmethod
+    def _catalog_preflight(boards: list[dict[str, Any]], target: date, historical: bool) -> None:
+        if not boards:
+            raise DataGateRejected(["板块目录为空；请在设置中刷新板块目录后重新更新"], {}, target.isoformat())
+        if not historical:
+            return
+        invalid: list[str] = []
+        future: list[str] = []
+        for item in boards:
+            code = str(item.get("code") or "未知板块")
+            raw = str(item.get("effective_date") or item.get("as_of_date") or "")
+            try:
+                effective = date.fromisoformat(raw[:10])
+            except ValueError:
+                invalid.append(f"{code}={raw or '缺失'}")
+                continue
+            if effective > target:
+                future.append(f"{code}={effective.isoformat()}")
+        reasons = []
+        if invalid:
+            reasons.append("板块目录缺少合法点时生效日期：" + "、".join(invalid[:10]))
+        if future:
+            reasons.append(
+                f"板块目录包含晚于历史目标日 {target.isoformat()} 的分类：" + "、".join(future[:10])
+            )
+        if reasons:
+            reasons.append(
+                "不能用当前分类强制重算历史；请直接重放已冻结快照或提供目标日前已生效的板块目录；"
+                "当前分析请使用更新数据与分析"
+            )
+            raise DataGateRejected(reasons, {}, target.isoformat())
+
     def scan(
         self,
         *,
         as_of: str = "",
+        purpose: ScanPurpose | None = None,
         force: bool = False,
         progress: Progress | None = None,
         cancelled: Cancelled | None = None,
@@ -745,7 +780,9 @@ class AfterCloseService:
         cfg = get_config().data
         if not cfg.after_close_enabled:
             raise RuntimeError("盘后研究扫描已在设置中停用")
-        if as_of and not force:
+        purpose = resolve_scan_purpose(as_of, purpose)
+        historical = purpose == "historical_replay"
+        if historical and not force:
             frozen = self.store.for_date(as_of)
             if frozen is not None:
                 return frozen
@@ -756,8 +793,8 @@ class AfterCloseService:
             raise RuntimeError("证券主数据中没有可扫描的 A 股普通股")
         symbols = [item.symbol for item in instruments]
         instrument_map = {item.symbol: item for item in instruments}
-        expectation = resolve_session_target(as_of) if as_of else expected_session()
-        if not expectation.ready and not as_of:
+        expectation = resolve_session_target(as_of) if historical else expected_session()
+        if not expectation.ready and not historical:
             expectation = self._fallback_source_session(symbols)
         if not expectation.ready or not expectation.session:
             raise DataGateRejected(
@@ -766,6 +803,11 @@ class AfterCloseService:
                 as_of,
             )
         target = date.fromisoformat(expectation.session)
+        if as_of and not historical and as_of != target.isoformat():
+            raise DataGateRejected(
+                [f"当前分析目标 {as_of} 与最近已完成交易日 {target.isoformat()} 不同；"
+                 "请重新更新，或选择历史重放"], {}, as_of,
+            )
         start = target - timedelta(
             days=max(
                 cfg.free_stockdb_stock_initial_lookback_days,
@@ -787,6 +829,7 @@ class AfterCloseService:
                 ),
                 progress=progress,
                 cancelled=cancelled,
+                catalog_validator=lambda boards: self._catalog_preflight(boards, target, historical),
             )
             actual_as_of = ingest_snapshot.as_of_date
             coverage = dict(ingest_snapshot.coverage)
@@ -800,39 +843,7 @@ class AfterCloseService:
                 coverage=exc.coverage,
             )
             raise DataGateRejected(exc.reasons, exc.coverage, exc.as_of_date) from None
-        if as_of:
-            invalid_dates: list[str] = []
-            future_dates: list[str] = []
-            for item in boards:
-                code = str(item.get("code") or "未知板块")
-                raw = str(item.get("effective_date") or item.get("as_of_date") or "")
-                if not raw:
-                    invalid_dates.append(f"{code}=缺失")
-                    continue
-                try:
-                    effective = date.fromisoformat(raw[:10])
-                except ValueError:
-                    invalid_dates.append(f"{code}={raw}")
-                    continue
-                if effective > target:
-                    future_dates.append(f"{code}={effective.isoformat()}")
-            reasons = []
-            if invalid_dates:
-                reasons.append(
-                    "板块目录缺少合法点时生效日期：" + "、".join(invalid_dates[:10])
-                )
-            if future_dates:
-                reasons.append(
-                    f"板块目录包含晚于历史目标日 {target.isoformat()} 的分类："
-                    + "、".join(future_dates[:10])
-                )
-            if reasons:
-                reasons.append(
-                    "不能用当前分类强制重算历史；请直接重放已冻结快照或提供目标日前已生效的板块目录"
-                )
-                self.store.record_failure(reasons, as_of_date=actual_as_of, coverage=coverage)
-                raise DataGateRejected(reasons, coverage, actual_as_of)
-        if as_of and actual_as_of > as_of:
+        if historical and actual_as_of > as_of:
             frame = frame.loc[pd.to_datetime(frame["date"]).dt.date <= date.fromisoformat(as_of)]
             actual_as_of, coverage = self._gate(
                 frame,
@@ -863,6 +874,7 @@ class AfterCloseService:
             )
             raise
         filters = {
+            "purpose": purpose,
             "universe": "all_cn_stocks",
             "include_bj": cfg.after_close_include_bj,
             "exclude_st": True,
@@ -962,6 +974,8 @@ class AfterCloseService:
             filters=filters,
             coverage=coverage,
             provenance={
+                "taxonomy_purpose": purpose,
+                "taxonomy_observed_at": ingest_snapshot.created_at,
                 "source": self.source.name,
                 "upstream": "vendor-declared-unverified",
                 "upstream_evidence": "not_provided",

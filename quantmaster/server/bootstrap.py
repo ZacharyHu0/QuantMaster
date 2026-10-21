@@ -107,7 +107,7 @@ class StockDBEventDelivery:
                 and cfg.data.after_close_enabled
                 and cfg.data.after_close_auto_run
             ):
-                self.after_close_jobs.submit(as_of=target, force=False)
+                self.after_close_jobs.submit(as_of=target, force=False, purpose="current_analysis")
                 logger.info("free-stockdb 验收完成，已提交 %s 盘后研究扫描", target)
             # Partial or provider-published sessions have no formal research
             # panel yet.  Refresh current-analysis snapshots from the accepted

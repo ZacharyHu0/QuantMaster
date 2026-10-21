@@ -2,11 +2,21 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 SCHEMA_VERSION = "1.2"
 SCORE_VERSION = "QM_AFTER_CLOSE_V1"
 SHADOW_SCORE_VERSION = "QM_AFTER_CLOSE_V2_SHADOW"
+ScanPurpose = Literal["current_analysis", "historical_replay"]
+
+
+def resolve_scan_purpose(as_of: str, purpose: ScanPurpose | None = None) -> ScanPurpose:
+    value = purpose or ("historical_replay" if as_of else "current_analysis")
+    if value not in {"current_analysis", "historical_replay"}:
+        raise ValueError("盘后扫描用途必须是当前分析或历史重放")
+    if value == "historical_replay" and not as_of:
+        raise ValueError("历史重放必须指定目标日期")
+    return value
 
 
 def utc_now() -> str:

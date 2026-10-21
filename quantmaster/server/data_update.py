@@ -87,7 +87,9 @@ def _submit_analysis(state: dict[str, Any], spec: dict[str, Any]) -> None:
     job = rotation.submit(RotationJobSpec(scope="all", source="auto", as_of=spec["target_session"]))
     state["children"].append({"id": job["id"], "kind": "市场与板块分析"})
     if spec.get("include_scan", get_config().data.after_close_enabled):
-        job, _created = get_after_close_jobs().submit(as_of=spec["target_session"], force=False)
+        job, _created = get_after_close_jobs().submit(
+            as_of=spec["target_session"], force=False, purpose="current_analysis",
+        )
         state["children"].append({"id": job["id"], "kind": "盘后扫描"})
 
 
