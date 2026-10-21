@@ -10,6 +10,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
@@ -93,6 +94,8 @@ class DataRefreshManager:
         self._fixed_runtime = runtime is not None
         self._stop = threading.Event()
         self._scheduler: threading.Thread | None = None
+        self.consumed_symbols: Callable[[], list[str]] = list
+        self.update_handler: Callable[[JobContext, dict[str, Any]], JobOutcome] | None = None
 
     @staticmethod
     def _owns_runtime() -> bool:
@@ -117,6 +120,9 @@ class DataRefreshManager:
                 dispatch=self._owns_runtime(),
             )
             self._runtime.register(DATA_REFRESH_TASK_TYPE, self._handle)
+            from quantmaster.data.update import UPDATE_TASK
+
+            self._runtime.register(UPDATE_TASK, self._handle_update)
             return self._runtime
 
     def _read_store(self) -> UnifiedJobStore:
@@ -200,6 +206,30 @@ class DataRefreshManager:
         preview = self.preview(scope, universe, start)
         with self._lock:
             return self._submit(scope, universe, str(preview["start"]), str(preview["end"]))
+
+    def create_update(self, *, manual: bool = True, as_of: str = "") -> dict[str, Any]:
+        from quantmaster.data.update import UPDATE_TASK
+
+        target = resolve_session_target(as_of)
+        if not target.ready or not target.session:
+            raise ValueError("交易日目标尚未确认，无法安全更新")
+        runtime = self._ensure_runtime()
+        job, _created = runtime.submit(
+            UPDATE_TASK, {
+                "target_session": target.session,
+                "include_cache": manual or get_config().data.repair_enabled,
+                "include_scan": get_config().data.after_close_enabled and (
+                    manual or get_config().data.after_close_auto_run
+                ),
+            },
+            algorithm_version="1", deadline_seconds=3600, max_attempts=2,
+        )
+        return self.get(str(job["id"]))
+
+    def _handle_update(self, context: JobContext, spec: dict[str, Any]) -> JobOutcome:
+        if self.update_handler is None:
+            raise RuntimeError("数据更新编排尚未绑定到后台 worker")
+        return self.update_handler(context, spec)
 
     @staticmethod
     def _fingerprint(symbols: list[str]) -> str:
@@ -627,6 +657,10 @@ class DataRefreshManager:
         return dict(checkpoint or {})
 
     def _project(self, store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
+        from quantmaster.data.update import UPDATE_TASK, project_update
+
+        if job.get("type") == UPDATE_TASK:
+            return project_update(store, job)
         if str(job.get("type")) != DATA_REFRESH_TASK_TYPE:
             raise KeyError(str(job.get("id") or ""))
         spec = dict(job["spec"])
@@ -670,13 +704,25 @@ class DataRefreshManager:
         values = self.list(1)
         return values[0] if values else None
 
+    def latest_update(self) -> dict[str, Any] | None:
+        try:
+            store = self._read_store()
+            values = store.list(1, job_type="data.update")
+            return self._project(store, values[0]) if values else None
+        except (FileNotFoundError, sqlite3.Error):
+            return None
+
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
         try:
             store = self._read_store()
             return [
                 self._project(store, job)
-                for job in store.list(limit, job_type=DATA_REFRESH_TASK_TYPE)
-            ]
+                for job in sorted(
+                    [*store.list(limit, job_type=DATA_REFRESH_TASK_TYPE),
+                     *store.list(limit, job_type="data.update")],
+                    key=lambda item: item["created_at"], reverse=True,
+                )
+            ][:limit]
         except (FileNotFoundError, sqlite3.Error):
             return []
 
@@ -714,16 +760,17 @@ class DataRefreshManager:
                         )
                         self._scheduler.start()
 
-    def maintain_consumed(self) -> builtins.list[dict[str, Any]]:
+    def maintain_consumed(self, *, manual: bool = False) -> builtins.list[dict[str, Any]]:
         """Worker-only intake; page reads remain strictly local and read-only."""
         cfg = get_config()
-        if not cfg.data.repair_enabled:
+        if not manual and not cfg.data.repair_enabled:
             return []
         jobs = [self.create("market")]
-        if cfg.automation.watchlist:
+        watched = sorted(set([*cfg.automation.watchlist, *self.consumed_symbols()]))
+        if watched:
             jobs.append(self._submit(
                 "watchlist", "", str(market_date() - timedelta(days=365)),
-                str(market_date()), cfg.automation.watchlist,
+                str(market_date()), watched,
             ))
         universes = {cfg.automation.primary_universe}
         if cfg.lab.enabled:
@@ -732,6 +779,8 @@ class DataRefreshManager:
             try:
                 jobs.append(self.create("universe", universe=universe))
             except (OSError, RuntimeError, TypeError, ValueError):
+                if manual:
+                    raise
                 logger.warning("消费范围暂不可用，保留缺口并等待下次检查: %s", universe, exc_info=True)
         return jobs
 

@@ -10,10 +10,23 @@ import pytest
 from quantmaster.ai.news_providers import fetch_xiaoshi
 from quantmaster.data.xiaoshi_source import (
     API_BASE,
+    XiaoshiBulkDownloadRequired,
     XiaoshiClient,
     XiaoshiError,
     XiaoshiPublicationStore,
+    XiaoshiRateLimited,
 )
+
+
+def _v3_manifest(capabilities: bytes) -> dict:
+    return {
+        "contract": "xiaoshi-agent-contract/v1",
+        "platform_version": "2026-09-05.4",
+        "prompt_version": "2026-09-06.1",
+        "capabilities_url": f"{API_BASE}/api/v3/capabilities",
+        "bootstrap_url": f"{API_BASE}/api/v3/bootstrap",
+        "capabilities_sha256": hashlib.sha256(capabilities).hexdigest(),
+    }
 
 
 class _ReadyPublications:
@@ -65,6 +78,65 @@ def test_publications_check_manifest_once_and_skip_unchanged_bodies(tmp_path):
     assert calls.count("/skill") == 1
     assert calls.count("/schema") == 1
     assert next(tmp_path.glob("*.SKILL.md")).read_bytes() == b"skill"
+
+
+def test_v3_manifest_stores_hashed_capabilities_and_bootstrap(tmp_path):
+    capabilities = json.dumps({"contract": "xiaoshi-agent-contract/v1"}).encode()
+    manifest = _v3_manifest(capabilities)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/v3/manifest":
+            return httpx.Response(200, json=manifest)
+        if request.url.path == "/api/v3/capabilities":
+            return httpx.Response(200, content=capabilities)
+        return httpx.Response(200, json={"contract": "xiaoshi-agent-bootstrap/v1"})
+
+    store = XiaoshiPublicationStore(
+        tmp_path,
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert store.capabilities()["contract"] == "xiaoshi-agent-contract/v1"
+    assert store.bootstrap()["contract"] == "xiaoshi-agent-bootstrap/v1"
+    assert calls.count("/api/v3/manifest") == 1
+    assert calls.count("/api/v3/capabilities") == 1
+
+
+def test_default_rate_limit_stops_without_retry():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if request.url.path.endswith("api-key/check"):
+            return httpx.Response(200, json={"valid": True})
+        return httpx.Response(429, headers={"Retry-After": "4"}, json={})
+
+    client = XiaoshiClient(
+        "secret-value",
+        client=httpx.Client(base_url=API_BASE, transport=httpx.MockTransport(handler)),
+        publications=_ReadyPublications(),
+    )
+    with pytest.raises(XiaoshiRateLimited) as error:
+        client.quote("AAPL", market="US", instrument="stock")
+    assert error.value.retry_after == 4
+    assert calls == 2
+
+
+def test_bulk_download_required_is_a_cli_handoff():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("api-key/check"):
+            return httpx.Response(200, json={"valid": True})
+        return httpx.Response(409, json={"code": "bulk_download_required"})
+
+    client = XiaoshiClient(
+        "secret-value",
+        client=httpx.Client(base_url=API_BASE, transport=httpx.MockTransport(handler)),
+        publications=_ReadyPublications(),
+    )
+    with pytest.raises(XiaoshiBulkDownloadRequired, match="xiaoshi-data"):
+        client.query_dataset("daily")
 
 
 def test_publication_failure_keeps_last_verified_version(tmp_path):

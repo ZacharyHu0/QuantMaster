@@ -1034,6 +1034,41 @@ def rollback_contract_migration(run_id: str, request: Request) -> dict:
     raise _public_error(409, "回滚仅允许离线维护命令", "回滚历史合同迁移失败")
 
 
+@router.post("/data/update", status_code=202)
+def update_consumed_data(request: Request) -> dict:
+    _require_csrf(request)
+    worker, result = _data_refresh_worker_command("data.refresh.update", {})
+    return {**result, "worker": worker}
+
+
+@router.get("/data/update")
+def data_update_status() -> dict:
+    from quantmaster.data.free_stockdb_runtime import free_stockdb_runtime
+    from quantmaster.data.maintenance import data_refresh_manager
+    from quantmaster.runtime.worker import runtime_worker_status
+
+    jobs = data_refresh_manager.list(20)
+    latest = data_refresh_manager.latest_update()
+    status = free_stockdb_runtime.status()
+    cfg = get_config().data
+    return {
+        "job": latest,
+        "automatic": {
+            "worker_available": bool(runtime_worker_status().get("available")),
+            "enabled": cfg.free_stockdb_auto_update,
+            "cache_enabled": cfg.repair_enabled,
+            "next_update_at": status.get("next_update_at") if cfg.free_stockdb_auto_update else "",
+            "last_success_at": status.get("last_update_at", ""),
+            "data_as_of": status.get("validated_session", ""),
+            "target_session": status.get("target_session", ""),
+            "next_retry_at": status.get("next_retry_at", ""),
+            "detail": status.get("message", "状态尚未观测"),
+            "state": status.get("state", "unknown"),
+        },
+        "tasks": jobs[:20],
+    }
+
+
 class DataRefreshRequest(ContractModel):
     scope: Literal["market", "universe", "all_cached"] = "market"
     universe: str = Field(default="", max_length=80)
