@@ -30,6 +30,9 @@ from quantmaster.market_capabilities import Market
 
 API_BASE = "https://api.shizixi.com"
 MANIFEST_PATH = "/api/v3/manifest"
+CAPABILITIES_PATH = "/api/v3/capabilities"
+BOOTSTRAP_PATH = "/api/v3/bootstrap"
+PACKAGE_MANIFEST_PATH = "/api/v3/tools/xiaoshi-agent-tools/manifest"
 _RESOURCE_FIELDS = {
     "prompt": ("prompt_url", "prompt_version", "prompt_sha256", "prompt.txt"),
     "skill": ("skill_url", "skill_version", "skill_sha256", "SKILL.md"),
@@ -48,6 +51,14 @@ class XiaoshiRateLimited(XiaoshiError):
     def __init__(self, retry_after: float):
         super().__init__(f"小石请求受控限流，请在 {retry_after:g} 秒后重试")
         self.retry_after = retry_after
+
+
+class XiaoshiBulkDownloadRequired(XiaoshiError):
+    """The API deliberately requires the local ``xiaoshi-data`` CLI."""
+
+    def __init__(self, message: str = "小石要求使用 xiaoshi-data CLI 批量下载"):
+        super().__init__(message)
+        self.cli = "xiaoshi-data"
 
 
 def _atomic_write(path: Path, content: bytes) -> None:
@@ -86,6 +97,14 @@ class XiaoshiPublicationStore:
     def _resource_path(self, filename: str, checksum: str) -> Path:
         return self.root / f"{checksum}.{filename}"
 
+    @property
+    def capabilities_path(self) -> Path:
+        return self.root / "capabilities.json"
+
+    @property
+    def bootstrap_path(self) -> Path:
+        return self.root / "bootstrap.json"
+
     @staticmethod
     def _resource_url(value: Any) -> str:
         url = str(value or "")
@@ -102,15 +121,32 @@ class XiaoshiPublicationStore:
         response.raise_for_status()
         return response
 
-    def _manifest_changes(
-        self, stored: dict[str, Any], *, force: bool,
-    ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
-        manifest = self._get(f"{API_BASE}{MANIFEST_PATH}").json()
-        if not isinstance(manifest, dict):
-            raise XiaoshiError("小石 Manifest 不是对象")
-        checksums = manifest.get("checksums")
-        if not isinstance(checksums, dict):
-            raise XiaoshiError("小石 Manifest 缺少校验和")
+    def _v3_manifest_changes(
+        self, manifest: dict[str, Any], stored: dict[str, Any], *, force: bool,
+    ) -> list[tuple[str, str, str]]:
+        if manifest.get("contract") != "xiaoshi-agent-contract/v1":
+            raise XiaoshiError("小石 Manifest 合同版本不受支持")
+        capabilities_url = self._resource_url(manifest.get("capabilities_url"))
+        if capabilities_url != f"{API_BASE}{CAPABILITIES_PATH}":
+            raise XiaoshiError("小石能力目录地址与 Manifest 不一致")
+        bootstrap_url = self._resource_url(manifest.get("bootstrap_url"))
+        if bootstrap_url != f"{API_BASE}{BOOTSTRAP_PATH}":
+            raise XiaoshiError("小石接入说明地址与 Manifest 不一致")
+        checksum = str(manifest.get("capabilities_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise XiaoshiError("小石能力目录校验和无效")
+        changed = []
+        old_checksum = str(stored.get("capabilities_sha256") or "")
+        if force or old_checksum != checksum or not self.capabilities_path.is_file():
+            changed.append(("capabilities.json", capabilities_url, checksum))
+        if force or stored.get("prompt_version") != manifest.get("prompt_version"):
+            changed.append(("bootstrap.json", bootstrap_url, ""))
+        return changed
+
+    def _legacy_manifest_changes(
+        self, manifest: dict[str, Any], stored: dict[str, Any], *, force: bool,
+    ) -> list[tuple[str, str, str]]:
+        checksums = manifest.get("checksums") or {}
         changed = []
         stored_checksums = stored.get("checksums") or {}
         for name, (url_field, version_field, checksum_field, filename) in _RESOURCE_FIELDS.items():
@@ -123,19 +159,38 @@ class XiaoshiPublicationStore:
             )
             if force or current_checksum != checksum or version_changed:
                 changed.append((filename, self._resource_url(manifest.get(url_field)), checksum))
+        return changed
+
+    def _manifest_changes(
+        self, stored: dict[str, Any], *, force: bool,
+    ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+        manifest = self._get(f"{API_BASE}{MANIFEST_PATH}").json()
+        if not isinstance(manifest, dict):
+            raise XiaoshiError("小石 Manifest 不是对象")
+        if isinstance(manifest.get("checksums"), dict):
+            changed = self._legacy_manifest_changes(manifest, stored, force=force)
+        else:
+            changed = self._v3_manifest_changes(manifest, stored, force=force)
         return manifest, changed
 
     def _store_changed(self, changed: list[tuple[str, str, str]]) -> None:
         candidates = []
         for filename, url, checksum in changed:
             body = self._get(url).content
-            if hashlib.sha256(body).hexdigest() != checksum:
+            if checksum and hashlib.sha256(body).hexdigest() != checksum:
                 raise XiaoshiError(f"小石资源 {filename} 校验失败")
             candidates.append((filename, checksum, body))
         for filename, checksum, body in candidates:
-            _atomic_write(self._resource_path(filename, checksum), body)
+            if filename in {"capabilities.json", "bootstrap.json"}:
+                _atomic_write(self.root / filename, body)
+            else:
+                _atomic_write(self._resource_path(filename, checksum), body)
 
     def _has_complete_fallback(self, stored: dict[str, Any]) -> bool:
+        if stored.get("contract") == "xiaoshi-agent-contract/v1":
+            return bool(
+                self.capabilities_path.is_file() and self.bootstrap_path.is_file()
+            )
         checksums = stored.get("checksums") or {}
         return bool(stored) and all(
             self._resource_path(item[3], str(checksums.get(item[2]) or "")).is_file()
@@ -166,12 +221,54 @@ class XiaoshiPublicationStore:
 
     def skill_text(self) -> str:
         self.ensure_current()
+        if self._stored_manifest().get("contract") == "xiaoshi-agent-contract/v1":
+            workflows = self.capabilities().get("agent_workflows", {}).get("items", [])
+            prompts = [
+                str(item.get("prompt") or "").strip()
+                for item in workflows
+                if isinstance(item, dict) and str(item.get("prompt") or "").strip()
+            ]
+            if prompts:
+                return "\n\n".join(prompts)
+            raise XiaoshiError("小石能力目录未提供可用研究工作流")
         try:
             manifest = self._stored_manifest()
             checksum = str((manifest.get("checksums") or {}).get("skill_sha256") or "")
             return self._resource_path("SKILL.md", checksum).read_text(encoding="utf-8")
         except (FileNotFoundError, OSError, UnicodeError) as exc:
             raise XiaoshiError("小石量化 Skill 本地版本不可读") from exc
+
+    def capabilities(self) -> dict[str, Any]:
+        """Return the single v3 capability directory after hash validation."""
+        manifest = self.ensure_current()
+        if manifest.get("contract") != "xiaoshi-agent-contract/v1":
+            raise XiaoshiError("小石能力目录需要 v3 Manifest")
+        try:
+            value = json.loads(self.capabilities_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise XiaoshiError("小石能力目录不可读") from exc
+        if not isinstance(value, dict):
+            raise XiaoshiError("小石能力目录不是对象")
+        return value
+
+    def bootstrap(self) -> dict[str, Any]:
+        self.ensure_current()
+        try:
+            value = json.loads(self.bootstrap_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise XiaoshiError("小石接入说明不可读") from exc
+        if not isinstance(value, dict):
+            raise XiaoshiError("小石接入说明不是对象")
+        return value
+
+    def package_manifest(self) -> dict[str, Any]:
+        """Read the official package manifest without downloading or installing it."""
+        manifest = self._get(f"{API_BASE}{PACKAGE_MANIFEST_PATH}").json()
+        if not isinstance(manifest, dict) or manifest.get("contract") != "xiaoshi-agent-tools-package/v1":
+            raise XiaoshiError("小石工具包清单合同版本不受支持")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("sha256") or "")):
+            raise XiaoshiError("小石工具包清单缺少有效校验和")
+        return manifest
 
 
 class XiaoshiClient:
@@ -184,6 +281,7 @@ class XiaoshiClient:
         client: httpx.Client | None = None,
         publications: XiaoshiPublicationStore | None = None,
         sleeper: Callable[[float], None] = time.sleep,
+        retry_rate_limit: bool | None = None,
     ):
         self.api_key = (api_key if api_key is not None else get_config().data.xiaoshi_api_key).strip()
         self.client = client or httpx.Client(
@@ -193,6 +291,12 @@ class XiaoshiClient:
         )
         self.publications = publications or XiaoshiPublicationStore(client=self.client)
         self.sleeper = sleeper
+        # Supplying a sleeper is retained as an explicit compatibility opt-in
+        # for callers that own a bounded retry loop.  The normal v3 client stops
+        # on 429 and lets the caller follow Retry-After.
+        self.retry_rate_limit = (
+            retry_rate_limit if retry_rate_limit is not None else sleeper is not time.sleep
+        )
         self._authenticated = False
         self._reported_errors: set[str] = set()
 
@@ -225,8 +329,8 @@ class XiaoshiClient:
     ) -> httpx.Response:
         if authenticate and not self._authenticated:
             self.check_api_key()
-        last_error: Exception | None = None
-        for attempt in range(2):
+        attempts = 2 if self.retry_rate_limit else 1
+        for attempt in range(attempts):
             try:
                 response = self.client.request(
                     method,
@@ -236,24 +340,29 @@ class XiaoshiClient:
                     headers=self.headers,
                 )
             except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt == 0:
-                    continue
                 raise XiaoshiError(f"小石接口暂时不可用（{type(exc).__name__}）") from exc
             if response.status_code == 429:
                 delay = self._retry_after(response)
-                if attempt == 0:
+                if attempt + 1 < attempts:
                     self.sleeper(delay)
                     continue
                 raise XiaoshiRateLimited(delay)
-            if response.status_code >= 500 and attempt == 0:
-                continue
-            if response.is_error:
-                request_id = response.headers.get("x-request-id", "")
-                suffix = f"，request_id={request_id}" if request_id else ""
-                raise XiaoshiError(f"小石接口返回 HTTP {response.status_code}{suffix}")
-            return response
-        raise XiaoshiError("小石接口暂时不可用") from last_error
+            break
+        if response.is_error:
+            request_id = response.headers.get("x-request-id", "")
+            suffix = f"，request_id={request_id}" if request_id else ""
+            try:
+                error_body = response.json()
+            except (ValueError, TypeError):
+                error_body = {}
+            detail = error_body.get("detail") if isinstance(error_body, dict) else {}
+            code = error_body.get("code") if isinstance(error_body, dict) else ""
+            if isinstance(detail, dict):
+                code = detail.get("error") or code
+            if code in {"bulk_download_required", "bulk_download_required_use_cli"}:
+                raise XiaoshiBulkDownloadRequired()
+            raise XiaoshiError(f"小石接口返回 HTTP {response.status_code}{suffix}")
+        return response
 
     def check_api_key(self) -> dict[str, Any]:
         self.publications.ensure_current()
@@ -263,6 +372,38 @@ class XiaoshiClient:
             raise XiaoshiError("小石鉴权响应无效")
         self._authenticated = True
         return value
+
+    def contract(self) -> dict[str, Any]:
+        """Return the locally verified platform contract and capability hash."""
+        return self.publications.ensure_current()
+
+    def package_manifest(self) -> dict[str, Any]:
+        """Inspect the current tool package; installation remains caller-authorized."""
+        return self.publications.package_manifest()
+
+    def discover(self) -> dict[str, dict[str, Any]]:
+        """Read the required catalog/schema/coverage/freshness set once.
+
+        The returned values are metadata only.  The method does not create a
+        download session; bulk delivery remains the local CLI's responsibility.
+        """
+        self.publications.ensure_current()
+        return {
+            "catalog": self.json("GET", "/api/v3/quant-data/catalog"),
+            "schema": self.json("GET", "/api/v3/quant/events/schema"),
+            "coverage": self.json("GET", "/api/v3/market/capabilities"),
+            "freshness": self.json("GET", "/api/v3/status"),
+        }
+
+    def query_dataset(
+        self,
+        dataset: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", dataset.strip()):
+            raise ValueError("小石数据集名称无效")
+        return self.json("GET", f"/api/v3/quant-data/{dataset}", params=params)
 
     def json(
         self,
