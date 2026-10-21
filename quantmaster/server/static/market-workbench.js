@@ -85,7 +85,7 @@ const marketWorkbench = (() => {
     return `<div class="market-workbench">
       <header class="market-workbench-head">
         <div><span class="market-kicker">MARKET PANORAMA</span><h1>市场全景</h1><p>从市场状态进入板块，再下钻到成分股；历史曲线仅在选中后读取。</p></div>
-        <div class="market-head-actions"><span id="market-refresh-progress" role="status">本地快照</span><button type="button" data-market-refresh>刷新指数</button></div>
+        <div class="market-head-actions"><span id="market-refresh-progress" role="status">本地快照</span><button type="button" data-market-refresh>更新数据与分析</button></div>
       </header>
       <section class="market-decision-strip" id="market-decision-strip" aria-label="今日市场决策条">
         <div class="market-loading-line"><i></i><span>正在读取本地决策快照…</span></div>
@@ -401,26 +401,7 @@ const marketWorkbench = (() => {
   }
 
   async function refreshIndexes(button) {
-    if (button.disabled) return;
-    button.disabled = true;
-    const progress = document.getElementById('market-refresh-progress');
-    try {
-      let job = await post('/api/v1/market/analytics/refresh',{scope:'indexes',mode:'incremental',source:'auto',purpose:'current_analysis'});
-      while (['queued','running','cancelling'].includes(String(job.status || ''))) {
-        progress.textContent = `${job.phase || '刷新指数'} · ${Math.round(Number(job.progress || 0))}%`;
-        await new Promise(resolve => setTimeout(resolve,1000));
-        job = await api(`/api/v1/jobs/${encodeURIComponent(job.id)}`);
-        if (!mounted) return;
-      }
-      if (!String(job.status || '').startsWith('completed')) throw new Error(job.message || job.detail || '指数刷新未完成');
-      progress.textContent = '指数快照已更新';
-      responseCache.clear();
-      await Promise.all([loadDecisionStrip(generation),loadBoardList()]);
-    } catch (error) {
-      progress.textContent = `刷新失败 · ${error.message}`;
-    } finally {
-      button.disabled = false;
-    }
+    await window.QuantMasterDataUpdate.start();
   }
 
   function activateAdjacent(target, selector, direction) {
@@ -510,7 +491,7 @@ const marketWorkbench = (() => {
     if (root) { root.onclick = null; root.oninput = null; root.onkeydown = null; }
   }
 
-  return {mount,unmount,refresh:() => Promise.all([loadDecisionStrip(generation),loadBoardList()])};
+  return {mount,unmount,refresh:() => { responseCache.clear(); return Promise.all([loadDecisionStrip(generation),loadBoardList()]); }};
 })();
 
 export const {mount,unmount,refresh} = marketWorkbench;

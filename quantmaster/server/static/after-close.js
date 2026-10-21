@@ -244,22 +244,7 @@ const afterCloseFeature = (() => {
   }
 
   async function updateScanData() {
-    const button = document.getElementById('after-close-update-data');
-    button.disabled = true;
-    button.textContent = '正在提交更新…';
-    try {
-      const status = await post('/api/v1/settings/free-stockdb/update', {});
-      renderStockdbUpdate(status);
-      state.stockdbPoll = setTimeout(() => void pollStockdbUpdate(), 250);
-    } catch (error) {
-      renderStockdbUpdate({state:'degraded', update_result:'failed', message:error.message});
-    }
-  }
-
-  function syncScanControls() {
-    const disabled = state.stockdbActive || Boolean(state.jobId) || state.discovering || state.submitting;
-    document.querySelector('#after-close-scan-form button.primary').disabled = disabled;
-    document.getElementById('after-close-rerun').disabled = disabled;
+    await window.QuantMasterDataUpdate.start();
   }
 
   async function pollJob(epoch = state.epoch) {

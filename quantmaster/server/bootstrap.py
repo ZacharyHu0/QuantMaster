@@ -76,6 +76,18 @@ class StockDBEventDelivery:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    def _refresh_consumers(self, kind: str, target: str) -> None:
+        if self.data_refresh_manager is None:
+            return
+        try:
+            if kind == "update_succeeded":
+                self.data_refresh_manager.create_update(manual=False, as_of=target)
+            else:
+                self.data_refresh_manager.maintain_consumed()
+            logger.info("free-stockdb %s，已提交消费范围自动刷新", target or "事件")
+        except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+            logger.warning("free-stockdb 事件触发消费范围自动刷新失败", exc_info=True)
+
     def deliver(self, event: StockDBUpdateEvent) -> None:
         kind = event.kind
         payload = event.payload
@@ -86,12 +98,7 @@ class StockDBEventDelivery:
             from quantmaster.rotation.contracts import RotationJobSpec
 
             target = str(payload.get("target_session") or "")
-            if self.data_refresh_manager is not None:
-                try:
-                    self.data_refresh_manager.create(scope="market")
-                    logger.info("free-stockdb %s，已提交市场数据自动刷新", target or "事件")
-                except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
-                    logger.warning("free-stockdb 事件触发市场数据自动刷新失败", exc_info=True)
+            self._refresh_consumers(kind, target)
             if kind in {"update_succeeded", "market_session_partial"}:
                 self.reset_after_close()
                 self.reset_etf_research()
@@ -285,6 +292,12 @@ class _DefaultWorkerPlan:
         self.ashare_fear_greed_refresher = get_ashare_fear_greed_refresher()
         self.paper_automation_worker = get_paper_automation_worker()
         self.data_refresh_manager = data_refresh_manager
+        from quantmaster.server.data_update import consumed_symbols, run_update
+
+        self.data_refresh_manager.consumed_symbols = consumed_symbols
+        self.data_refresh_manager.update_handler = lambda context, spec: run_update(
+            context, spec, self.data_refresh_manager,
+        )
         self.free_stockdb_runtime = free_stockdb_runtime
         self.stockdb_event_delivery = StockDBEventDelivery(
             free_stockdb_runtime,
@@ -437,6 +450,8 @@ class _DefaultWorkerPlan:
     def handle_command(
         self, operation: str, payload: dict[str, Any],
     ) -> dict[str, Any]:
+        if operation == "data.refresh.update":
+            return self.data_refresh_manager.create_update()
         if operation == "data.refresh.preview":
             return self.data_refresh_manager.preview(
                 cast(RefreshScope, str(payload.get("scope") or "market")),

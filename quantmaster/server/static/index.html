@@ -26,6 +26,10 @@
     <button data-workspace="account" type="button">账户</button>
     <button data-workspace="runtime" type="button">运行</button>
   </nav>
+<section class="data-update-panel" aria-label="数据更新">
+  <div class="data-update-heading"><button type="button" class="primary" id="data-update-start">更新数据与分析</button><span id="data-update-summary" role="status" aria-live="polite">正在读取更新状态…</span></div>
+  <details id="data-update-details"><summary>更新状态</summary><p id="data-update-current"></p><p id="data-update-auto"></p><ol id="data-update-steps"></ol><p>更新先检查本地行情库，再补齐市场、自选、关注、持仓及研究候选，最后重算分析。可以离开页面，后台会继续；完成后当前页面自动读取结果。CNN 为独立来源。</p></details>
+</section>
   <div class="header-version-stack">
     <button class="release-trigger" id="release-trigger" type="button" aria-label="查看版本与更新日志" aria-haspopup="dialog" aria-expanded="false" aria-controls="release-popover" data-version="%%QM_VERSION%%" data-release-date="%%QM_RELEASE_DATE%%">
       <span id="release-version">版本</span>
@@ -125,6 +129,7 @@
 </header>
 <main>
 
+
 <!-- ================= 运维 ================= -->
 <section class="tab" id="tab-operations">
   <div class="operations-shell">
@@ -163,7 +168,7 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">MARKET BREADTH</span><h2>市场温度</h2>
         <p>用全市场个股趋势分层计算扩散比例，同时展示证据缺口与样本覆盖；折线不是 K 线。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
+      <dl class="rotation-asof" data-rotation-asof="temperature"><dt>快照</dt><dd>等待刷新</dd><dt>算法</dt><dd>等待快照</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">更新数据与分析</button>
     </div>
     <div id="market-temperature-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
@@ -171,21 +176,21 @@
     <div class="rotation-masthead">
       <div><span class="rotation-eyebrow">COHORT STRUCTURE</span><h2>市场风格</h2>
         <p>比较强势与低位样本的收益分布，以 0.25 个百分点死区过滤噪声，连续三日才确认状态。</p></div>
-      <dl class="rotation-asof" data-rotation-asof="structure"><dt>快照</dt><dd>等待刷新</dd><dt>确认</dt><dd>连续 3 日</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">刷新分析</button>
+      <dl class="rotation-asof" data-rotation-asof="structure"><dt>快照</dt><dd>等待刷新</dd><dt>确认</dt><dd>连续 3 日</dd></dl><button class="rotation-refresh" type="button" data-rotation-refresh="market">更新数据与分析</button>
     </div>
     <div id="market-style-content" aria-live="polite"><div class="rotation-skeleton"><span></span><span></span><span></span></div></div>
   </section>
   <div id="market-quotes-view" data-market-view="quotes" role="tabpanel" aria-labelledby="market-quotes-tab" hidden>
   <form class="controls" id="mkt-refresh">
-    <button class="primary" type="submit">同步观察行情</button>
-    <button class="ghost" id="market-after-close-sync" type="button">同步盘后数据</button>
+    <button class="primary" type="submit">更新数据与分析</button>
+
     <button class="text-button" id="market-after-close-open" type="button">查看盘后扫描</button>
     <span class="hint" id="mkt-stamp" style="align-self:center"></span>
-    <span class="hint">同步观察行情仅刷新本页、自选及参考标的缓存，不更新全市场 free-stockdb；CNN 需单独刷新，盘后数据使用“同步盘后数据”。</span>
+    <span class="hint">一次更新行情库、常用行情缓存和分析快照；后台持续执行，无需重复点击。CNN 为独立的美股参考来源。</span>
   </form>
   <aside class="market-stale-banner" id="market-stale-banner" role="status" aria-live="polite" hidden>
     <div class="market-stale-copy"><strong id="market-stale-title">当前行情证据不完整</strong><p id="market-stale-detail"></p></div>
-    <div class="market-stale-actions"><button class="ghost" id="market-stale-sync" type="button">同步盘后数据</button><button class="text-button" id="market-stale-open" type="button">查看盘后扫描</button></div>
+    <div class="market-stale-actions"><button class="ghost" id="market-stale-sync" type="button">更新数据与分析</button><button class="text-button" id="market-stale-open" type="button">查看盘后扫描</button></div>
   </aside>
   <section class="panel market-sentiment-panel" id="market-fear-greed" aria-live="polite">
     <div class="market-sentiment-head">
@@ -395,7 +400,7 @@
     <form id="after-close-scan-form">
       <label>历史重放截止日<input id="after-close-as-of" type="date" aria-label="历史重放截止日"></label>
       <button class="primary" type="submit">运行全市场扫描</button>
-      <button class="ghost" id="after-close-update-data" type="button" title="更新盘后扫描使用的全市场行情库">更新扫描数据</button>
+      <button class="ghost" id="after-close-update-data" type="button" title="更新行情库、常用缓存及盘后分析">更新数据与分析</button>
       <button class="text-button after-close-recompute" id="after-close-rerun" type="button" title="忽略该日期已有快照，使用当前扫描数据重新计算" hidden>按当前数据重新计算</button>
     </form>
     <div class="after-close-actions">
@@ -1642,6 +1647,7 @@
 
 <script src="/static/data-state.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/data-update.js"></script>
 <script type="module" src="/static/workspace-loader.js"></script>
 </body>
 </html>
