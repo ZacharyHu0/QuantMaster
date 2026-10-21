@@ -1377,12 +1377,15 @@ def refresh_universe_names(request: Request, value: UniverseNameRefresh) -> dict
 
 
 @router.post("/settings/instruments/refresh")
-def refresh_instruments(request: Request) -> dict:
-    """Refresh external security catalogs only after an explicit local request."""
+def refresh_instruments(request: Request, response: Response) -> dict:
+    """Queue an explicit catalog refresh outside the page-read boundary."""
     _require_csrf(request)
-    from quantmaster.data.instruments import refresh_instrument_master
+    from quantmaster.server.settings_jobs import get_settings_jobs
 
-    return refresh_instrument_master(force=True)
+    jobs = get_settings_jobs()
+    task, created = jobs.submit_catalog_refresh()
+    response.status_code = 202
+    return {"status": "queued", "created": created, "task": jobs.public(task)}
 
 
 @router.post("/settings/universes")

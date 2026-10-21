@@ -23,7 +23,7 @@ SCHEMA_VERSION = 2
 SUSPENSION_SCHEMA_VERSION = 2
 SUSPENSION_CONTRACT = "tushare-suspend_d-trade-date-v1"
 SUSPENSION_SOURCE = "tushare:suspend_d"
-MEMBERSHIP_CONTRACT = "tushare-lifecycle-membership-v1"
+MEMBERSHIP_CONTRACT = "tushare-lifecycle-membership-v2"
 TUSHARE_CATALOG_QUERY: dict[str, Any] = {
     "stock_basic": {"list_status": ["L", "D", "P"]},
     "fund_basic": {"market": "E", "status": ["L", "D"]},
@@ -545,10 +545,10 @@ def _active_counts(records: Iterable[dict[str, Any]], *, as_of: date) -> dict[st
             # even when the provider omits a newly listed fund's list_date.
             # The raw omission remains frozen and historical readers still
             # reject this row outside the observation date.
-            if delisted is None or as_of <= delisted:
+            if delisted is None or as_of < delisted:
                 active.append(row)
             continue
-        if listed <= as_of and (delisted is None or as_of <= delisted):
+        if listed <= as_of and (delisted is None or as_of < delisted):
             active.append(row)
     return _counts(active)
 
@@ -790,13 +790,13 @@ def snapshot_symbols(
         if status in {"L", "LISTED", "ACTIVE"}:
             if listed is None:
                 if target == observation:
-                    if delisted is None or target <= delisted:
+                    if delisted is None or target < delisted:
                         result.add(str(row["symbol"]))
                     continue
                 raise InstrumentCatalogEvidenceError(
                     f"证券目录 {row['symbol']} 缺少历史可用的 list_date"
                 )
-            if listed <= target and (delisted is None or target <= delisted):
+            if listed <= target and (delisted is None or target < delisted):
                 result.add(str(row["symbol"]))
             continue
 
@@ -812,9 +812,9 @@ def snapshot_symbols(
                 raise InstrumentCatalogEvidenceError(
                     f"证券目录 {row['symbol']} 缺少历史可用的 delist_date"
                 )
-            if target > delisted:
+            if target >= delisted:
                 continue
-        elif delisted is not None and target > delisted:
+        elif delisted is not None and target >= delisted:
             continue
         if listed is None:
             raise InstrumentCatalogEvidenceError(

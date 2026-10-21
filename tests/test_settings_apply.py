@@ -104,3 +104,44 @@ def test_load_failure_does_not_confirm_worker(settings_worker, monkeypatch):
     task, _ = jobs.submit_apply(saved)
     assert jobs.apply_runtime.wait(task["id"], timeout=10)["status"] == "failed"
     assert public_state(manager.path)["components"]["runtime-worker"]["effective_revision"] == 0
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_catalog_refresh_runs_as_durable_worker_job(settings_worker, monkeypatch, success):
+    from quantmaster.data import instruments
+
+    _manager, jobs, _saved = settings_worker
+    calls = []
+
+    def refresh(**kwargs):
+        calls.append(kwargs)
+        return {"sources": {"tushare:catalog": {"status": "success" if success else "error"}}}
+
+    monkeypatch.setattr(instruments, "refresh_instrument_master", refresh)
+    task, created = jobs.submit_catalog_refresh()
+    assert created
+    result = jobs.apply_runtime.wait(task["id"], timeout=10)
+    assert result["status"] == ("completed" if success else "failed")
+    assert calls == [{"force": True}]
+    assert jobs.runtime_for(task["id"]) is jobs.apply_runtime
+
+
+def test_catalog_refresh_route_only_queues_background_work(isolated_config, monkeypatch):
+    from types import SimpleNamespace
+
+    from starlette.responses import Response
+
+    from quantmaster.server import management, settings_jobs
+
+    monkeypatch.setattr(management, "_require_csrf", lambda request: None)
+    calls = []
+    jobs = SimpleNamespace(
+        submit_catalog_refresh=lambda: (calls.append("queued") or {"id": "catalog-job"}, True),
+        public=lambda task: task,
+    )
+    monkeypatch.setattr(settings_jobs, "get_settings_jobs", lambda: jobs)
+    response = Response()
+    result = management.refresh_instruments(SimpleNamespace(), response)
+    assert response.status_code == 202
+    assert result["task"]["id"] == "catalog-job"
+    assert calls == ["queued"]
