@@ -1748,3 +1748,30 @@ def test_tushare_empty_schema_and_malformed_rows_remain_distinct():
             "required", params, pd.DataFrame({"unexpected": [1]}),
             required_nonempty=True, required_columns=("value",),
         )
+
+
+def test_tushare_settings_probe_does_not_mark_blank_sdk_response_healthy(
+    isolated_config, monkeypatch,
+):
+    import sys
+    from types import SimpleNamespace
+
+    from quantmaster.server.settings_checks import check_tushare
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    response = pd.DataFrame()
+    monkeypatch.setitem(sys.modules, "tushare", SimpleNamespace(
+        pro_api=lambda token: SimpleNamespace(trade_cal=lambda **kwargs: response),
+    ))
+    result = check_tushare("test-token")
+    assert result["status"] != "success"
+    health = PROVIDER_HEALTH.status("tushare:trade_cal")["tushare:trade_cal"]
+    assert health["failure_class"] == "empty_response"
+    assert health["state"] != "disabled"
+
+    response = pd.DataFrame({
+        "exchange": ["SSE", "SSE"], "cal_date": ["20240102", "20240103"],
+        "is_open": [1, 1],
+    })
+    assert check_tushare("test-token")["status"] == "success"
+    assert PROVIDER_HEALTH.status("tushare:trade_cal")["tushare:trade_cal"]["state"] == "closed"
