@@ -54,6 +54,7 @@ from quantmaster.data.resilience import (
 )
 from quantmaster.data.semantics import NumericSemantics, PriceType, SemanticContractError
 from quantmaster.data.storage import BarStore, IntradayBarStore
+from quantmaster.data.tushare_source import daily_endpoint
 from quantmaster.market_capabilities import guess_market
 from quantmaster.runtime.sqlite import connect_sqlite
 from quantmaster.trading_sessions import SessionExpectation, market_date, market_now, resolve_session_target
@@ -2680,6 +2681,7 @@ def _load_history_locked(
         mode == RefreshMode.AUTO and not provider
         and cached is not None and not cached.empty
         and meta.get("last_source") == "tushare"
+        and daily_endpoint(symbol) == "daily"
         and (failed_refresh or missing_tail or not covers_start)
     ):
         return _renew_tushare_cache(

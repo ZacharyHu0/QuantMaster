@@ -415,6 +415,10 @@ class DataRefreshManager:
         ):
             return False
         if quality.sources == ("tushare",):
+            from quantmaster.data.tushare_source import daily_endpoint
+
+            if daily_endpoint(symbol) != "daily":
+                return False
             # Reuse the same identity/unit/factor checks that admitted an
             # explicit same-source repair; company/PIT evidence stays separate.
             from quantmaster.data.registry import _repair_candidate_quality

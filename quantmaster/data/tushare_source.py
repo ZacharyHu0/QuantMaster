@@ -183,6 +183,15 @@ def _is_a_share_index(symbol: str) -> bool:
     )
 
 
+def daily_endpoint(symbol: str) -> str:
+    """Share instrument routing with callers that need equity-only repairs."""
+    if _is_a_share_index(symbol):
+        return "index_daily"
+    if _instrument_type(symbol) in {"etf", "fund"}:
+        return "fund_daily"
+    return "daily"
+
+
 def _cache_ttl(end: str | None, default_days: int) -> int:
     """已结束的历史区间长期缓存；包含近期日期的请求按配置刷新。"""
     if end:
@@ -334,14 +343,15 @@ class TushareSource(DataSource):
         start_c, end_c = start.replace("-", ""), end.replace("-", "")
         ttl = _cache_ttl(end, get_config().data.tushare_cache_days)
         fields = "ts_code,trade_date,open,high,low,close,vol,amount"
-        if _is_a_share_index(symbol):
+        endpoint = daily_endpoint(symbol)
+        if endpoint == "index_daily":
             raw = self._call(
                 "index_daily", ttl, ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
             )
             return self._normalize_market_frame(raw).loc[start:end]
 
-        if _instrument_type(symbol) in {"etf", "fund"}:
+        if endpoint == "fund_daily":
             raw = self._call(
                 "fund_daily", ttl, ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
@@ -430,13 +440,14 @@ class TushareSource(DataSource):
             return self.cache.get(endpoint, clean, ttl, min_mtime=floor)
 
         fields = "ts_code,trade_date,open,high,low,close,vol,amount"
-        if _is_a_share_index(symbol):
+        endpoint = daily_endpoint(symbol)
+        if endpoint == "index_daily":
             raw = local(
                 "index_daily", ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
             )
             return None if raw is None else self._normalize_market_frame(raw).loc[start:end]
-        if _instrument_type(symbol) in {"etf", "fund"}:
+        if endpoint == "fund_daily":
             raw = local(
                 "fund_daily", ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
