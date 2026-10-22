@@ -261,7 +261,7 @@ class DataRefreshManager:
         # Bound reuse by a short freshness epoch as well as actual local inputs.
         # A worker restart must not turn an old success into permanent freshness.
         inputs = {
-            "reference_routes": "index-points-v1",
+            "reference_routes": "reference-prices-v1",
             "epoch": int(time.time() // min(3600, max(60, cfg.cache_days * 86400))),
             "day": str(market_date()),
             "after_close": (market_now().hour, market_now().minute) >= (15, 30),
@@ -459,7 +459,7 @@ class DataRefreshManager:
     @staticmethod
     def _refresh_one(store: BarStore, symbol: str, start: str, end: str) -> dict[str, Any] | None:
         try:
-            from quantmaster.data.reference_market import index_contract
+            from quantmaster.data.reference_market import reference_contract
 
             envelope = refresh_history(
                 symbol, start, end, store=store,
@@ -467,16 +467,21 @@ class DataRefreshManager:
             )
             envelope.require_data()
             if (
-                (symbol == "US10Y.RATE" or index_contract(envelope.data, symbol))
+                (symbol == "US10Y.RATE" or reference_contract(envelope.data, symbol))
                 and not envelope.quality.stale
                 and envelope.quality.status == "degraded"
-                and dict(envelope.quality.units).get("close") in {"point", "percent_points"}
+                and dict(envelope.quality.units).get("close") in {
+                    "point", "percent_points", "provider_quote", "CNY/USD",
+                }
                 and not any(item.get("diagnostic_code") in {
                     "provenance_missing", "provenance_incomplete",
                 } for item in envelope.provenance)
             ):
                 return {
-                    "warning": "境外参考已检查；按实际观测日期展示，发布时间与完整日历未证实，不能证明已最新",
+                    "warning": (
+                        "参考行情已检查；按实际观测日期展示。"
+                        "成交单位、换月、发布时间与日历未证实，不能证明已最新"
+                    ),
                     "code": "reference_only", "formal_eligible": False,
                 }
             if envelope.quality.status != "verified":
