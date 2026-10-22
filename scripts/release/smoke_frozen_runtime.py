@@ -45,6 +45,13 @@ def frozen_provider_smoke() -> dict[str, object]:
     """
     if not getattr(sys, "frozen", False):
         raise RuntimeError("provider smoke requires a frozen executable")
+    from py_mini_racer import MiniRacer
+
+    # MiniRacer owns an asyncio loop with a local socketpair on Windows.
+    # Execute only a literal expression before guarding provider network IO.
+    with MiniRacer() as engine:
+        if engine.eval("JSON.parse('[100,101,99,100.5]')[3]") != 100.5:
+            raise RuntimeError("packaged Sina JavaScript decoder failed")
     reached: list[str] = []
 
     def stop_request(_session, method, url, **kwargs):
@@ -84,6 +91,7 @@ def frozen_provider_smoke() -> dict[str, object]:
         "frozen": True,
         "package_versions": versions,
         "akshare_resources_read": True,
+        "sina_javascript_executed": True,
         "us10y_network_boundary": reached[0],
         "network_requests_sent": 0,
         "market_data_returned": False,

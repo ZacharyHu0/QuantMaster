@@ -174,34 +174,46 @@ def _normalize(raw: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
     return frame.loc[start:end]
 
 
+def _akshare_reference_call(*args, **kwargs):
+    try:
+        from py_mini_racer import LibNotFoundError
+    except ModuleNotFoundError:
+        return akshare_call(*args, **kwargs)
+    try:
+        return akshare_call(*args, **kwargs)
+    except LibNotFoundError as exc:
+        raise ImportError("新浪历史解码所需的 JavaScript 原生运行库不可用") from exc
+
+
 def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFrame]] | None:
     try:
         import akshare as ak
     except ModuleNotFoundError:
         return None
+
     if symbol in _SINA_US:
-        return "sina:us-index", lambda: akshare_call(
+        return "sina:us-index", lambda: _akshare_reference_call(
             f"index_us_stock_sina({_SINA_US[symbol]})",
             ak.index_us_stock_sina,
             symbol=_SINA_US[symbol],
             lane="akshare:sina-reference",
         )
     if symbol in _SINA_HK:
-        return "sina:hk-index", lambda: akshare_call(
+        return "sina:hk-index", lambda: _akshare_reference_call(
             f"stock_hk_index_daily_sina({_SINA_HK[symbol]})",
             ak.stock_hk_index_daily_sina,
             symbol=_SINA_HK[symbol],
             lane="akshare:sina-reference",
         )
     if symbol in _SINA_GLOBAL:
-        return "sina:global-index", lambda: akshare_call(
+        return "sina:global-index", lambda: _akshare_reference_call(
             f"index_global_hist_sina({_SINA_GLOBAL[symbol]})",
             ak.index_global_hist_sina,
             symbol=_SINA_GLOBAL[symbol],
             lane="akshare:sina-reference",
         )
     if symbol in _SINA_FUTURES:
-        return "sina:foreign-futures", lambda: akshare_call(
+        return "sina:foreign-futures", lambda: _akshare_reference_call(
             f"futures_foreign_hist({_SINA_FUTURES[symbol]})",
             ak.futures_foreign_hist,
             symbol=_SINA_FUTURES[symbol],
@@ -209,14 +221,14 @@ def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFr
         )
     if symbol == "US10Y.RATE":
         compact = pd.Timestamp(start).strftime("%Y%m%d")
-        return "akshare:us-treasury", lambda: akshare_call(
+        return "akshare:us-treasury", lambda: _akshare_reference_call(
             f"bond_zh_us_rate({compact})",
             ak.bond_zh_us_rate,
             start_date=compact,
             lane="akshare:bond-reference",
         )
     if symbol == "DXY.INDEX":
-        return "akshare:global-index", lambda: akshare_call(
+        return "akshare:global-index", lambda: _akshare_reference_call(
             "index_global_hist_em(美元指数)",
             ak.index_global_hist_em,
             symbol="美元指数",

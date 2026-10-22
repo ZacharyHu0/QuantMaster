@@ -340,6 +340,13 @@ def test_stage_rejects_untrusted_main_or_task_evidence(
         task_sha = _task_sha(primary)
         _git(target, "reset", "--hard", task_sha)
         if case == "different-task-tree":
+            # A merge may have the same tree as its first parent. Construct
+            # the mismatch this case promises instead of assuming HEAD differs.
+            (target / "staging-mismatch.txt").write_text("different tree\n", encoding="utf-8")
+            _git(target, "add", "staging-mismatch.txt")
+            _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "-m", "test: construct mismatching tree")
+            task_sha = _git(target, "rev-parse", "HEAD")
             evidence["commit"] = task_sha
             evidence["base"] = sha
             evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
