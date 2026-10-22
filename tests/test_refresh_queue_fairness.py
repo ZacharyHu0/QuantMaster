@@ -44,7 +44,7 @@ def test_market_overtakes_bulk_backlog_and_history_resumes_once(isolated_config,
         release.set()
         assert runtime.wait(market["id"], 8, until_terminal=True)["status"] == "completed"
         assert time.monotonic() - started < 5
-        assert calls.index("M0") <= 2
+        assert calls.index("M0") <= 4
         assert runtime.wait(first["id"], 12, until_terminal=True)["status"] == "completed"
         assert runtime.wait(second["id"], 12, until_terminal=True)["status"] == "completed"
         assert Counter(calls) == Counter([*[f"A{i}" for i in range(6)], "B0", "B1", "B2", "M0"])

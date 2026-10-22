@@ -542,7 +542,7 @@ def test_incremental_refresh_job_limits_per_job_parallelism(isolated_config, mon
     isolated_config.data.free_stockdb_managed = False
     manager = DataRefreshManager()
     manager.initialize()
-    symbols = [f"{index:06d}.SZ" for index in range(16)]
+    symbols = [f"{index:06d}.SZ" for index in range(32)]
     monkeypatch.setattr(manager, "_resolve_symbols", lambda *args: symbols)
     monkeypatch.setattr(manager, "_start", lambda job_id: None)
     monkeypatch.setattr(manager, "_publish_market_snapshot", lambda: None)
@@ -586,11 +586,18 @@ def test_incremental_refresh_job_limits_per_job_parallelism(isolated_config, mon
     job = manager.create("market")
     manager._run(job["id"])
 
-    completed = manager.get(job["id"])
-    assert completed["status"] == "completed"
-    assert completed["next_index"] == len(symbols)
-    assert peak_active > 1
-    assert peak_active <= manager.MAX_PARALLEL_SYMBOLS
+    batch = manager.get(job["id"])
+    assert batch["status"] == "interrupted" and batch["waiting_on"] == "refresh_batch"
+    assert batch["next_index"] == manager.MAX_PARALLEL_SYMBOLS * 2
+    runtime = manager._ensure_runtime()
+    try:
+        runtime.start()
+        assert runtime.wait(job["id"], 10, until_terminal=True)["status"] == "completed"
+        assert manager.get(job["id"])["next_index"] == len(symbols)
+        assert peak_active > 1
+        assert peak_active <= manager.MAX_PARALLEL_SYMBOLS
+    finally:
+        manager.shutdown()
 
 
 def test_refresh_manager_creates_schema_after_hot_root_switch(isolated_config, tmp_path):

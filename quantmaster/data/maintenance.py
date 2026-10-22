@@ -586,7 +586,7 @@ class DataRefreshManager:
         completed = set(state["completed_symbols"])
         remaining = iter(islice(
             (symbol for symbol in state["symbols"] if symbol not in completed),
-            self.MAX_PARALLEL_SYMBOLS,
+            self.MAX_PARALLEL_SYMBOLS * 2,
         ))
         waiting = ""
         with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL_SYMBOLS,
