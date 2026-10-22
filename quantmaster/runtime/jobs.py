@@ -49,6 +49,7 @@ TERMINAL_STATUSES = frozenset(
     }
 )
 DEFAULT_LEASE_SECONDS = 30.0
+HEARTBEAT_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNTIME_DRAIN_SECONDS = 5.0
 INLINE_ARTIFACT_LIMIT = 128 * 1024
 _CPU_JOB_GATE = threading.Semaphore(1)
@@ -755,10 +756,18 @@ class UnifiedJobStore:
             )
 
     def recover_expired(self) -> builtins.list[str]:
-        now = time.time()
+        # Most dispatcher ticks have nothing to recover. Do not compete with
+        # checkpoints and heartbeats for a write lock on those ticks.
+        with self._conn() as connection:
+            if connection.execute(
+                "SELECT 1 FROM runtime_jobs WHERE status IN ('running','cancelling') "
+                "AND lease_expires<=? LIMIT 1", (time.time(),),
+            ).fetchone() is None:
+                return []
         recovered: list[str] = []
         with self._conn() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = time.time()
             rows = connection.execute(
                 "SELECT id,attempt,max_attempts FROM runtime_jobs WHERE status IN ('running','cancelling') "
                 "AND lease_expires<=?",
@@ -835,22 +844,27 @@ class UnifiedJobStore:
     def interrupt_legacy_llm(self) -> int:
         """Mark unrevisioned legacy provider work for an explicit manual retry."""
         with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 "SELECT * FROM runtime_jobs WHERE llm_scope='' AND status "
                 "IN ('queued','interrupted') AND phase<>'需要手动重试'"
             ).fetchall()
+        candidates = [row for row in rows if self._legacy_llm_without_revision(row)]
+        if not candidates:
+            return 0
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             affected: list[str] = []
-            for row in rows:
-                if not self._legacy_llm_without_revision(row):
-                    continue
-                connection.execute(
+            for row in candidates:
+                cursor = connection.execute(
                     "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
                     "phase='需要手动重试',"
                     "detail='legacy LLM job has no execution revision',"
-                    "updated_at=? WHERE id=?",
+                    "updated_at=? WHERE id=? AND llm_scope='' "
+                    "AND status IN ('queued','interrupted') AND phase<>'需要手动重试'",
                     (_utc_now(), row["id"]),
                 )
+                if cursor.rowcount != 1:
+                    continue
                 self._append_event_conn(
                     connection, str(row["id"]), int(row["attempt"]), "job_interrupted",
                     {"reason": "legacy_llm_job_missing_revision"},
@@ -876,22 +890,33 @@ class UnifiedJobStore:
 
         coordinator = get_llm_execution_coordinator()
         with self._conn() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 "SELECT id,attempt,llm_scope,llm_revision FROM runtime_jobs "
                 "WHERE llm_scope<>'' AND status IN ('queued','interrupted') "
                 "AND phase<>'需要手动重试'"
             ).fetchall()
+        # Revision reads use another ledger; never hold the job write lock
+        # while waiting on it. Revalidate each candidate before mutation.
+        candidates = [
+            row for row in rows
+            if not coordinator.current(str(row["llm_scope"]), str(row["llm_revision"]))
+        ]
+        if not candidates:
+            return 0
+        with self._conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             affected: list[str] = []
-            for row in rows:
-                if coordinator.current(str(row["llm_scope"]), str(row["llm_revision"])):
-                    continue
-                connection.execute(
+            for row in candidates:
+                cursor = connection.execute(
                     "UPDATE runtime_jobs SET status='interrupted',owner='',lease_token='',lease_expires=0,"
                     "cancel_requested=0,phase='需要手动重试',"
-                    "detail='LLM configuration revision is stale',updated_at=? WHERE id=?",
-                    (_utc_now(), row["id"]),
+                    "detail='LLM configuration revision is stale',updated_at=? WHERE id=? "
+                    "AND llm_scope=? AND llm_revision=? AND status IN ('queued','interrupted') "
+                    "AND phase<>'需要手动重试'",
+                    (_utc_now(), row["id"], row["llm_scope"], row["llm_revision"]),
                 )
+                if cursor.rowcount != 1:
+                    continue
                 self._append_event_conn(
                     connection, str(row["id"]), int(row["attempt"]), "job_interrupted",
                     {"reason": "stale_llm_revision"},
@@ -977,8 +1002,11 @@ class UnifiedJobStore:
         lease_token: str,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
     ) -> bool:
-        now = time.time()
         with self._conn() as connection:
+            # Check expiry after acquiring the write lock. A timestamp taken
+            # before SQLite's busy wait could revive an already expired owner.
+            connection.execute("BEGIN IMMEDIATE")
+            now = time.time()
             cursor = connection.execute(
                 "UPDATE runtime_jobs SET lease_expires=?,heartbeat_at=?,updated_at=? "
                 "WHERE id=? AND owner=? AND lease_token=? "
@@ -2152,12 +2180,47 @@ class UnifiedJobRuntime:
         lease_token: str,
         stopped: threading.Event,
         lease_alive: threading.Event,
+        expires_at: float,
     ) -> None:
-        while not stopped.wait(5.0):
-            if self.store.heartbeat(job_id, self.identity.value, lease_token):
-                continue
+        delay = HEARTBEAT_INTERVAL_SECONDS
+        delayed = False
+        try:
+            while not stopped.wait(min(delay, max(0.0, expires_at - time.time()))):
+                if time.time() >= expires_at:
+                    logger.error("Job heartbeat lease expired job_id=%s", job_id)
+                    return
+                renewed_at = time.time()
+                try:
+                    renewed = self.store.heartbeat(job_id, self.identity.value, lease_token)
+                except sqlite3.OperationalError as exc:
+                    if getattr(exc, "sqlite_errorcode", 0) & 0xFF not in {
+                        sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED,
+                    }:
+                        logger.exception("Job heartbeat failed job_id=%s", job_id)
+                        return
+                    if not delayed:
+                        logger.warning(
+                            "JOB_LEDGER_BUSY job_id=%s: heartbeat renewal delayed; "
+                            "retrying automatically before lease expiry", job_id,
+                            extra={
+                                "error_code": "JOB_LEDGER_BUSY", "item_type": "job",
+                                "item_id": job_id, "retryable": True,
+                                "impact": "任务续租延迟；租约到期前自动重试，无需重复提交",
+                            },
+                        )
+                    delayed = True
+                    delay = min(1.0, HEARTBEAT_INTERVAL_SECONDS)
+                    continue
+                if not renewed:
+                    return
+                if delayed:
+                    logger.info("Job heartbeat recovered after SQLite contention job_id=%s", job_id)
+                delayed = False
+                expires_at = renewed_at + DEFAULT_LEASE_SECONDS
+                delay = HEARTBEAT_INTERVAL_SECONDS
+        finally:
+            # Expiry and every unexpected failure must fence the handler too.
             lease_alive.clear()
-            return
 
     def _run_process_handler(
         self,
@@ -2336,7 +2399,7 @@ class UnifiedJobRuntime:
                 return
             heartbeat = threading.Thread(
                 target=self._heartbeat,
-                args=(job_id, lease_token, heartbeat_stop, lease_alive),
+                args=(job_id, lease_token, heartbeat_stop, lease_alive, float(job["lease_expires"])),
                 name=f"unified-heartbeat-{job_id[-8:]}",
                 daemon=True,
             )
