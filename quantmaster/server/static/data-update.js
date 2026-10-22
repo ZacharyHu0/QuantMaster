@@ -46,8 +46,11 @@
     const childIds = new Set((current?.children || []).map(j => j.id));
     rows.push(...(value.tasks || []).filter(j => j.type === 'data.refresh' && !childIds.has(j.id)).map(j => ({
       kind:`自动维护 · ${j.universe_name || j.scope || '行情缓存'}`,
-      status:j.failed || j.warning_count ? 'partial' : j.status,
-      detail:j.detail || `缺口 ${j.failed || 0}，证据警告 ${j.warning_count || 0}`,
+      status:!active(j) && (j.failed || j.warning_count) ? 'partial' : j.status,
+      detail:j.waiting_on === 'refresh_batch' ? j.detail
+        : j.status === 'queued' ? ((j.queue?.blockers || []).length
+          ? '等待当前批次完成后执行，无需重复刷新' : '已排队，后台自动领取')
+          : j.detail || `缺口 ${j.failed || 0}，证据警告 ${j.warning_count || 0}`,
     })));
     for (const row of rows) {
       const li = document.createElement('li');

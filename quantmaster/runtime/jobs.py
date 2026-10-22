@@ -1821,12 +1821,15 @@ class UnifiedJobRuntime:
         *,
         max_workers: int = 2,
         dispatch: bool | None = None,
+        scheduling_key: Callable[[dict[str, Any]], tuple[Any, ...]] | None = None,
     ):
         self.store = store or UnifiedJobStore()
         self.identity = WorkerIdentity.create("unified-jobs")
         self._handlers: dict[str, _HandlerRegistration] = {}
+        self._max_workers = max(1, min(8, int(max_workers)))
+        self._scheduling_key = scheduling_key
         self._executor = ThreadPoolExecutor(
-            max_workers=max(1, min(8, int(max_workers))),
+            max_workers=self._max_workers,
             thread_name_prefix="qm-unified-job",
         )
         self._active: set[tuple[str, int]] = set()
@@ -1956,7 +1959,13 @@ class UnifiedJobRuntime:
         self.store.recover_expired()
         self.store.interrupt_legacy_llm()
         self.store.interrupt_stale_llm()
-        for job in self.store.list(1000, job_type=job_type):
+        jobs = self.store.list(
+            1000, job_type=job_type,
+            statuses=("queued", "interrupted") if self._scheduling_key is not None else (),
+        )
+        if self._scheduling_key is not None:
+            jobs.sort(key=self._scheduling_key)
+        for job in jobs:
             if (
                 job["status"] in {"queued", "interrupted"}
                 and float(job.get("next_retry_at") or 0) <= time.time()
@@ -2041,7 +2050,10 @@ class UnifiedJobRuntime:
         )
         self.start()
         if self._dispatch_enabled and job["status"] in {"queued", "interrupted"}:
-            self._schedule(job["id"])
+            if self._scheduling_key is None:
+                self._schedule(job["id"])
+            else:
+                self._dispatch_pending()
         return job, created
 
     def dispatch_job(self, job_id: str) -> dict[str, Any]:
@@ -2056,7 +2068,9 @@ class UnifiedJobRuntime:
             self._schedule(job_id)
         return self.store.get(job_id)
 
-    def wait(self, job_id: str, timeout: float = 30.0) -> dict[str, Any]:
+    def wait(
+        self, job_id: str, timeout: float = 30.0, *, until_terminal: bool = False,
+    ) -> dict[str, Any]:
         """Wait for one scheduled job to leave the active lifecycle states."""
 
         deadline = time.monotonic() + max(0.0, float(timeout))
@@ -2064,7 +2078,9 @@ class UnifiedJobRuntime:
             while True:
                 job = self.store.get(job_id)
                 scheduled = any(active_id == job_id for active_id, _generation in self._active)
-                if not scheduled:
+                if not scheduled and (
+                    not until_terminal or job["status"] not in ACTIVE_STATUSES or self.stopping
+                ):
                     return job
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -2094,6 +2110,10 @@ class UnifiedJobRuntime:
             if key in self._active:
                 if reschedule_after_active:
                     self._reschedule_after_active.add(key)
+                return
+            # Keep waiting work in the durable ledger so the domain can reorder
+            # admission. ThreadPoolExecutor's private FIFO cannot be reprioritized.
+            if self._scheduling_key is not None and len(self._active) >= self._max_workers:
                 return
             self._active.add(key)
             try:
