@@ -5776,6 +5776,8 @@ def test_settings_refresh_tracks_queue_and_honest_terminal_result(
     current = {
         "id": "refresh-contract", "status": "queued", "next_index": 0, "total": 2,
         "succeeded": 0, "failed": 0, "can_cancel": True, "can_retry": False,
+        "planning": True,
+        "queue": {"blockers": [{"scope": "all_cached", "progress": 40}]},
     }
     polls = []
 
@@ -5800,6 +5802,7 @@ def test_settings_refresh_tracks_queue_and_honest_terminal_result(
         page.locator("#settings-config-path").wait_for(state="visible")
         page.locator('[data-settings-section="local-data"]').click()
         playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("等待同步")
+        playwright_sync.expect(page.locator("[data-refresh-failures]")).to_contain_text("等待 all_cached 40%")
         playwright_sync.expect(page.locator("#data-refresh-cancel")).to_be_visible()
         page.wait_for_timeout(950)
         assert len(polls) >= 2
@@ -5810,7 +5813,7 @@ def test_settings_refresh_tracks_queue_and_honest_terminal_result(
         paused = len(polls)
         page.wait_for_timeout(950)
         assert len(polls) == paused
-        current["status"] = "running"
+        current.update(status="running", planning=False)
         page.get_by_role("button", name="设置", exact=True).click()
         page.wait_for_url(re.compile(r"#runtime/settings$"))
         playwright_sync.expect(page.locator("[data-refresh-phase]")).to_contain_text("增量同步中")
