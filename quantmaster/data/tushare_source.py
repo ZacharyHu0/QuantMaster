@@ -36,6 +36,7 @@ from quantmaster.data.resilience import (
     bypass_endpoint_cache,
     endpoint_cache_bypassed,
     provider_call,
+    remote_io_allowed,
 )
 from quantmaster.data.temporal import (
     ProviderDateFormat,
@@ -167,7 +168,7 @@ def _instrument_type(symbol: str) -> str:
     try:
         from quantmaster.data.instruments import InstrumentStore
 
-        instrument = InstrumentStore().get(symbol)
+        instrument = InstrumentStore(read_only=not remote_io_allowed()).get(symbol)
         return instrument.asset_type if instrument else ""
     except (ImportError, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
         return ""
@@ -349,7 +350,7 @@ class TushareSource(DataSource):
                 "index_daily", ttl, ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
             )
-            return self._normalize_market_frame(raw).loc[start:end]
+            return self._index_frame(symbol, start, end, raw, fetch_calendar=True)
 
         if endpoint == "fund_daily":
             raw = self._call(
@@ -369,6 +370,42 @@ class TushareSource(DataSource):
         if raw.empty or factors.empty:
             return pd.DataFrame()
         return self._qfq_frame(symbol, start, end, raw, factors)
+
+    def _index_frame(
+        self, symbol: str, start: str, end: str, raw: pd.DataFrame, *, fetch_calendar: bool,
+    ) -> pd.DataFrame:
+        # https://tushare.pro/document/2?doc_id=95: points, lots, thousand CNY.
+        # Validate original identity before the common normalizer drops ts_code.
+        _validate_tushare_frame(
+            "index_daily", {"ts_code": symbol, "start_date": start.replace("-", ""),
+                            "end_date": end.replace("-", "")}, raw,
+            required_nonempty=True,
+            required_columns=("ts_code", "trade_date", "open", "high", "low", "close", "vol", "amount"),
+        )
+        if raw["ts_code"].isna().any() or raw["trade_date"].duplicated().any():
+            raise ProviderContractChanged("Tushare index_daily 身份缺失或交易日重复")
+        amount = pd.to_numeric(raw["amount"], errors="coerce")
+        if not (amount.map(math.isfinite) & amount.ge(0)).all():
+            raise ProviderContractChanged("Tushare index_daily 成交额无效")
+        result = self._normalize_market_frame(raw).loc[start:end]
+        result.attrs.update({
+            "instrument": symbol, "provider_interface": "tushare:index_daily",
+            "adjustment": "raw", "unit_status": "tushare_index_daily_v1",
+            "units": {**dict.fromkeys(("open", "high", "low", "close"), "point"),
+                      "volume": "share", "amount": "CNY"},
+        })
+        # Reuse the official natural-day calendar; publication instants are not
+        # supplied by this endpoint and must never be fabricated from fetch time.
+        try:
+            with bypass_endpoint_cache(False):
+                sessions = self.cached_trade_calendar(start, end)
+                if sessions is None and fetch_calendar:
+                    sessions = self.trade_calendar(start, end)
+            if sessions is not None:
+                result.attrs["repair_calendar_range"] = [start, end]
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.warning("指数日历暂不可用，保留可用行情并明确覆盖限制")
+        return result
 
     def _qfq_frame(
         self, symbol: str, start: str, end: str,
@@ -446,7 +483,7 @@ class TushareSource(DataSource):
                 "index_daily", ts_code=symbol, start_date=start_c,
                 end_date=end_c, fields=fields,
             )
-            return None if raw is None else self._normalize_market_frame(raw).loc[start:end]
+            return None if raw is None else self._index_frame(symbol, start, end, raw, fetch_calendar=False)
         if endpoint == "fund_daily":
             raw = local(
                 "fund_daily", ts_code=symbol, start_date=start_c,

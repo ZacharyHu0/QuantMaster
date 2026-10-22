@@ -502,6 +502,21 @@ def _assess_daily_frame(
         )
         if all(unit != "unknown" for _field, unit in resolved):
             units, unit_issue = resolved, ""
+    index_contract = bool(
+        df is not None and source == "tushare"
+        and df.attrs.get("instrument") == symbol
+        and df.attrs.get("provider_interface") == "tushare:index_daily"
+        and df.attrs.get("unit_status") == "tushare_index_daily_v1"
+        and daily_endpoint(symbol) == "index_daily"
+    )
+    if index_contract and df is not None:
+        expected_units = {**dict.fromkeys(("open", "high", "low", "close"), "point"),
+                          "volume": "share", "amount": "CNY"}
+        if df.attrs.get("units") == expected_units:
+            units, unit_issue = tuple(expected_units.items()), ""
+    wrong_index_identity = source.startswith("free-stockdb") and daily_endpoint(symbol) == "index_daily"
+    if wrong_index_identity:
+        issues.append("INSTRUMENT_IDENTITY_CONFLICT: StockDB 裸股票代码不能证明指数身份，等待指数源重建")
     if unit_issue:
         issues.append(unit_issue)
     if df is None or df.empty:
@@ -649,7 +664,7 @@ def _assess_daily_frame(
                 "等待 cutoff 前的本地摄取与完整覆盖证据"
             )
     blocking = bool(
-        (is_yield and not valid_yield)
+        (is_yield and not valid_yield) or wrong_index_identity
         or duplicate_rows or future_rows or sparse_cadence or missing_columns
         or invalid_numeric or invalid_semantics
         or any("响应起点" in item or "响应终点" in item or "覆盖率仅" in item for item in issues)
@@ -1763,6 +1778,7 @@ def _full_refresh(
     store: BarStore,
     priority: str,
     provider: str = "",
+    *, refresh_provider_cache: bool = True,
 ) -> pd.DataFrame:
     if symbol == "US10Y.RATE":
         fresh, reference_errors, succeeded = _fetch_segment(
@@ -1804,7 +1820,7 @@ def _full_refresh(
     ).get(market, []):
         try:
             source = factory()
-            with data_priority(priority), bypass_endpoint_cache():
+            with data_priority(priority), bypass_endpoint_cache(refresh_provider_cache):
                 frame = source.daily(symbol, start, end)
             if frame is None or frame.empty:
                 errors.append(f"{factory.__name__}: 返回空数据")
@@ -2017,6 +2033,18 @@ def _fetch_segment(
                 )
                 return store.get(symbol), errors, True
             merged = frame if cached is None or cached.empty else _align_increment(cached, frame, direction)
+            if source.name == "tushare" and merged.attrs.get("unit_status") == "tushare_index_daily_v1":
+                # The retained and new portions need a calendar for their whole
+                # union, not just the incremental request's overlapping tail.
+                left, right = str(merged.index.min().date()), str(merged.index.max().date())
+                try:
+                    from quantmaster.data.tushare_source import TushareSource
+
+                    with bypass_endpoint_cache(False):
+                        cast(TushareSource, source).trade_calendar(left, right)
+                    merged.attrs["repair_calendar_range"] = [left, right]
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    logger.warning("指数增量日历暂不可用，保留行情及覆盖限制")
             fresh_latest = pd.Timestamp(frame.index.max()).normalize()
             evaluated = evaluate(source, frame)
             if prefer_extension and cached_latest is not None and fresh_latest <= cached_latest:
@@ -2621,6 +2649,22 @@ def _load_history_locked(
         ).loc[start:end]
 
     meta = store.metadata(symbol) or {}
+    if (
+        cached is not None and not cached.empty
+        and (guess_market(symbol) == Market.CN or symbol.upper().endswith(".CSI"))
+        and daily_endpoint(symbol) == "index_daily"
+        and (cached.attrs.get("unit_status") != "tushare_index_daily_v1"
+             or cached.attrs.get("instrument") != symbol)
+    ):
+        # Rebuild legacy/contaminated index bytes through the validated endpoint.
+        # Its raw response cache is still reusable; never invent a new contract
+        # for old bars or align stock prices onto an index via an overlap ratio.
+        polluted = str(meta.get("last_source") or "").startswith("free-stockdb")
+        return _full_refresh(
+            symbol, min(start, str(cached.index.min().date())),
+            max(end, str(cached.index.max().date())), None if polluted else cached,
+            store, priority, provider, refresh_provider_cache=False,
+        ).loc[start:end]
     if (
         cached is not None and not cached.empty
         and meta.get("last_source") == "free-stockdb"

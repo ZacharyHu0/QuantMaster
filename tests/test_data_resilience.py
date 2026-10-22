@@ -506,6 +506,7 @@ def test_tushare_index_uses_index_daily_only(tmp_path, isolated_config, monkeypa
     api = FakePro()
     source = TushareSource(EndpointFrameCache("tushare", root=tmp_path / "cache"))
     source._api = api
+    monkeypatch.setattr(source, "trade_calendar", lambda start, end: pd.bdate_range(start, end))
     frame = source.daily("000300.SH", "2024-01-02", "2024-01-02")
     assert not frame.empty
     assert api.calls == ["index_daily"]
@@ -735,6 +736,7 @@ def test_incremental_refresh_bypasses_cached_tushare_tail(
     cache = EndpointFrameCache("tushare", root=tmp_path / "api-cache")
     warm = TushareSource(cache)
     warm._api = api
+    monkeypatch.setattr(TushareSource, "trade_calendar", lambda self, start, end: pd.bdate_range(start, end))
     old = warm.daily("000300.SH", "2024-01-02", "2024-01-03")
     assert str(old.index.max().date()) == "2024-01-02"
 

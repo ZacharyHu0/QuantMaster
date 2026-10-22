@@ -75,8 +75,11 @@ class DataRefreshManager:
     @staticmethod
     def _uses_stockdb(symbol: str) -> bool:
         from quantmaster.data.registry import _factories
+        from quantmaster.data.tushare_source import daily_endpoint
         from quantmaster.market_capabilities import guess_market
 
+        if daily_endpoint(symbol) == "index_daily":
+            return False
         try:
             market = guess_market(symbol)
         except ValueError:
@@ -417,6 +420,13 @@ class DataRefreshManager:
         if quality.sources == ("tushare",):
             from quantmaster.data.tushare_source import daily_endpoint
 
+            if daily_endpoint(symbol) == "index_daily":
+                return bool(
+                    getattr(quality, "analysis_eligible", False)
+                    and frame.attrs.get("instrument") == symbol
+                    and frame.attrs.get("provider_interface") == "tushare:index_daily"
+                    and frame.attrs.get("unit_status") == "tushare_index_daily_v1"
+                )
             if daily_endpoint(symbol) != "daily":
                 return False
             # Reuse the same identity/unit/factor checks that admitted an

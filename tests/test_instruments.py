@@ -213,6 +213,7 @@ def test_tushare_routes_etf_and_csi_index(monkeypatch):
         })
 
     monkeypatch.setattr(source, "_call", fake_call)
+    monkeypatch.setattr(source, "trade_calendar", lambda start, end: pd.bdate_range(start, end))
     assert not source.daily("589160.SH", "2026-07-27", "2026-07-27").empty
     assert not source.daily("931743.CSI", "2026-07-27", "2026-07-27").empty
     assert calls == [("fund_daily", "589160.SH"), ("index_daily", "931743.CSI")]

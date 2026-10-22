@@ -41,6 +41,7 @@ def test_auto_non_equity_refresh_preserves_history_and_quality_gates(
 
     source = TushareSource(EndpointFrameCache("tushare", root=tmp_path / "endpoints"))
     source._api = SimpleNamespace(**{endpoint: fetch})
+    monkeypatch.setattr(source, "trade_calendar", lambda start, end: days)
     monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
     monkeypatch.setattr(
         "quantmaster.data.tushare_source.provider_call", lambda lane, key, fetch, **kw: fetch(),
@@ -70,9 +71,8 @@ def test_auto_non_equity_refresh_preserves_history_and_quality_gates(
         assert not result.quality.formal_eligible
     else:
         assert result.data.index.max() == days[-1]
-        assert result.quality.status == ("verified" if asset_type == "etf" else "degraded")
-        if asset_type == "index":
-            assert not result.quality.formal_eligible  # Missing index units stay explicit.
+        assert result.quality.status == "verified"
+        assert result.quality.formal_eligible
         assert not result.quality.stale
         # An already-fresh request reuses the local result with no extra provider calls.
         registry.refresh_history(symbol, "2024-01-02", "2024-01-12", store=store)
@@ -93,3 +93,89 @@ def test_non_equity_maintenance_does_not_relabel_gaps_as_stock_factor_failure(
     assert not DataRefreshManager._prepared_with_formal_gaps(
         envelope, "000300.SH", "2024-01-02", "2024-01-12",
     )
+
+
+def test_index_refresh_replaces_colliding_stockdb_cache(isolated_config, monkeypatch):
+    from quantmaster.data.free_stockdb_source import FreeStockDBProviderError, FreeStockDBSource
+
+    symbol = "000001.SH"
+    assert not DataRefreshManager._uses_stockdb(symbol)
+    source = FreeStockDBSource()
+    monkeypatch.setattr(source, "_sdk_data", lambda *a, **kw: pytest.fail("index queried bare stock code"))
+    with pytest.raises(FreeStockDBProviderError, match="指数"):
+        source.daily(symbol, "2024-01-02", "2024-01-04")
+    days = pd.bdate_range("2024-01-02", "2024-01-04")
+    wrong = pd.DataFrame(dict(open=10., high=11., low=9., close=10., volume=100.), index=days)
+    wrong.index.name = "date"
+    store = BarStore()
+    store.put(symbol, wrong, replace=True, source="free-stockdb")
+    local = registry.read_history(symbol, "2024-01-02", "2024-01-04", store=store)
+    assert not local.quality.analysis_eligible
+    index_source = TushareSource()
+    raw = pd.DataFrame(dict(ts_code=symbol, trade_date=days.strftime("%Y%m%d"),
+                            open=3000., high=3100., low=2900., close=3000., vol=100., amount=1000.))
+    monkeypatch.setattr(index_source, "_call", lambda *a, **kw: raw)
+    monkeypatch.setattr(index_source, "trade_calendar", lambda start, end: days)
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: {
+        registry.Market.CN: [lambda: source, lambda: index_source],
+    })
+    monkeypatch.setattr(registry, "_local_sessions", lambda start, end: (days, "test-calendar"))
+    result = registry.refresh_history(symbol, "2024-01-02", "2024-01-04", store=store)
+    assert result.require_data().close.tolist() == [3000.] * 3
+    assert result.quality.formal_eligible
+    assert store.get(symbol).attrs["provider_interface"] == "tushare:index_daily"
+    # A clean local page read and an actual calculation must use the repaired index.
+    local = registry.read_history(symbol, "2024-01-02", "2024-01-04", store=store)
+    assert local.require_data().close.pct_change().dropna().eq(0).all()
+    assert local.quality.formal_eligible
+
+
+def test_index_contract_rejects_identity_and_unit_conflicts(isolated_config, monkeypatch):
+    from quantmaster.data.resilience import ProviderContractChanged
+
+    source = TushareSource()
+    monkeypatch.setattr(source, "cached_trade_calendar", lambda *a: None)
+    monkeypatch.setattr(source, "trade_calendar", lambda *a: (_ for _ in ()).throw(RuntimeError("offline")))
+    raw = pd.DataFrame(dict(ts_code=["399001.SZ"], trade_date=["20240102"],
+                            open=[3000.], high=[3100.], low=[2900.], close=[3000.], vol=[10.], amount=[20.]))
+    with pytest.raises(ProviderContractChanged):
+        source._index_frame("000300.SH", "2024-01-02", "2024-01-02", raw, fetch_calendar=True)
+    result = source._index_frame("399001.SZ", "2024-01-02", "2024-01-02", raw, fetch_calendar=True)
+    assert result.volume.iloc[0] == 1000 and result.amount.iloc[0] == 20000
+    quality = registry._assess_daily_frame(
+        result, "2024-01-02", "2024-01-02", symbol="399001.SZ", source="tushare",
+    )
+    assert quality.analysis_eligible and not quality.formal_eligible
+    result.attrs["units"]["volume"] = "lot"
+    quality = registry._assess_daily_frame(
+        result, "2024-01-02", "2024-01-02", symbol="399001.SZ", source="tushare",
+    )
+    assert dict(quality.units)["volume"] == "unknown" and not quality.formal_eligible
+
+
+def test_index_increment_keeps_whole_history_calendar(isolated_config, monkeypatch):
+    symbol = "399001.SZ"
+    days = pd.bdate_range("2024-01-02", "2024-01-12")
+    raw = pd.DataFrame(dict(ts_code=symbol, trade_date=days.strftime("%Y%m%d"),
+                            open=3000., high=3100., low=2900., close=3000., vol=100., amount=1000.))
+    def daily(**params):
+        return raw[raw.trade_date.between(params["start_date"], params["end_date"])].copy()
+    def calendar(**params):
+        dates = pd.date_range(params["start_date"], params["end_date"])
+        return pd.DataFrame(dict(exchange="SSE", cal_date=dates.strftime("%Y%m%d"),
+                                 is_open=(dates.dayofweek < 5).astype(int), pretrade_date=""))
+    source = TushareSource()
+    source._api = SimpleNamespace(index_daily=daily, trade_cal=calendar)
+    monkeypatch.setattr("quantmaster.data.tushare_source.TUSHARE_LIMITER.wait", lambda: None)
+    monkeypatch.setattr(
+        "quantmaster.data.tushare_source.provider_call", lambda lane, key, fetch, **kw: fetch(),
+    )
+    monkeypatch.setattr(registry, "_request_factories", lambda **kw: {registry.Market.CN: [lambda: source]})
+    monkeypatch.setattr(registry, "_local_sessions", lambda start, end: (pd.DatetimeIndex([]), "unavailable"))
+    store = BarStore()
+    first = registry.refresh_history(symbol, "2024-01-02", "2024-01-05", store=store)
+    assert first.quality.formal_eligible
+    extended = registry.refresh_history(symbol, "2024-01-02", "2024-01-12", store=store)
+    assert extended.quality.formal_eligible
+    assert first.data.index.difference(extended.data.index).empty
+    assert registry.read_history(symbol, "2024-01-02", "2024-01-12", store=store).quality.formal_eligible

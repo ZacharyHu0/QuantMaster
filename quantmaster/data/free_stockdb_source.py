@@ -606,6 +606,12 @@ class FreeStockDBSource(DataSource):
         return frame
 
     def daily(self, symbol: str, start: str, end: str) -> pd.DataFrame:
+        from quantmaster.data.tushare_source import daily_endpoint
+
+        # The native daily table keys are bare equity codes: 000001 is a stock,
+        # not the Shanghai Composite. Never relabel those bytes as an index.
+        if daily_endpoint(symbol) == "index_daily":
+            raise FreeStockDBProviderError("StockDB 股票日线表不提供带市场身份的指数，请使用指数数据源")
         code = symbol.partition(".")[0].zfill(6)
         begin = _compact_time(start, intraday=False)
         finish = _compact_time(end, intraday=False)
