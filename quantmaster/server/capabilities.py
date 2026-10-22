@@ -516,6 +516,12 @@ def market_history(
 ) -> dict:
     from quantmaster import data as data_api
     from quantmaster.data.base import validate_frequency, validate_symbol
+    from quantmaster.data.reference_market import INDEX_TIMEZONES, index_contract
+
+    if end is None and frequency == "1d" and symbol in INDEX_TIMEZONES:
+        from quantmaster.trading_sessions import market_now
+
+        end = pd.Timestamp(market_now()).tz_convert(INDEX_TIMEZONES[symbol]).date().isoformat()
 
     if end is None and symbol == "US10Y.RATE":
         from quantmaster.data.reference_market import yield_request_end
@@ -550,8 +556,6 @@ def market_history(
     loaded = time.perf_counter()
     positions = {column: offset + 1 for offset, column in enumerate(df.columns)}
     volume_position = positions.get("volume")
-    from quantmaster.data.reference_market import index_contract
-
     reference_index = index_contract(df, symbol)
     is_yield = symbol == "US10Y.RATE"
     kline = [

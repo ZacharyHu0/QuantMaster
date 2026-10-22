@@ -410,6 +410,27 @@ def test_index_increment_does_not_rebase_old_points_or_relabel_provider_history(
     assert not rebuilt.quality.stale
 
 
+@pytest.mark.parametrize(("symbol", "expected"), [("SPX.INDEX", "2026-07-23"), ("HSI.INDEX", "2026-07-24")])
+def test_overseas_chart_default_date_does_not_require_cn_calendar(symbol, expected, tmp_path, monkeypatch):
+    from quantmaster.data import registry
+    from quantmaster.server.capabilities import market_history
+
+    monkeypatch.setattr("quantmaster.data.reference_market._akshare_route",
+                        lambda *_: ("sina:us-index", _frame))
+    store = BarStore(tmp_path / "bars")
+    envelope = registry.refresh_history(symbol, "2026-07-20", "2026-07-24", store=store)
+    calls = []
+    monkeypatch.setattr("quantmaster.trading_sessions.market_now",
+                        lambda: pd.Timestamp("2026-07-24T09:00:00+08:00").to_pydatetime())
+    monkeypatch.setattr("quantmaster.server.capabilities.default_close_data_end",
+                        lambda: pytest.fail("CN calendar must not gate overseas charts"))
+    monkeypatch.setattr("quantmaster.data.read_bars",
+                        lambda *args, **_kwargs: calls.append(args) or envelope)
+    result = market_history(symbol)
+    assert result["symbol"] == symbol
+    assert calls[0][2] == expected
+
+
 def test_refresh_reference_panel_isolates_sdk_capability_failure(tmp_path, monkeypatch):
     ready, failed = "SPX.INDEX", "DXY.INDEX"
     frame = _frame().assign(volume=0.0).set_index("date")
