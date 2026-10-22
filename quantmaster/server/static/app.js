@@ -2686,6 +2686,20 @@ function renderKlineSeries(chart, data) {
   const closes = data.kline.map(k => k[2]);
   const categories = data.kline.map(k => k[0]);
   const ma5 = rollingMean(closes,5), ma20 = rollingMean(closes,20);
+  if (data.series_type === 'close') {
+    chart.setOption(baseOpt({
+      tooltip:{trigger:'axis'},
+      legend:{textStyle:{color:INK2},data:['收盘价参考','MA5','MA20']},
+      xAxis:{type:'category',data:categories},
+      yAxis:valAxis(),
+      series:[
+        {name:'收盘价参考',type:'line',data:closes,showSymbol:false},
+        {name:'MA5',type:'line',data:ma5,showSymbol:false,lineStyle:{width:1.5}},
+        {name:'MA20',type:'line',data:ma20,showSymbol:false,lineStyle:{width:1.5}},
+      ],
+    }), {notMerge:true});
+    return;
+  }
   const priceAxis = valAxis();
   priceAxis.axisLabel = {...priceAxis.axisLabel, fontSize:compact ? 10 : 12};
   const volumeAxis = valAxis(v => v >= 1e8

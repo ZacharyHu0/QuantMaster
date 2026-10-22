@@ -46,12 +46,36 @@ _TUSHARE_GLOBAL = {
     "HSTECH.INDEX": "HKTECH",
 }
 _SINA_FUTURES = {"GC.CONTINUOUS": "GC", "CL.CONTINUOUS": "CL", "HG.CONTINUOUS": "HG"}
+_SINA_DOMESTIC = {symbol: symbol.partition(".")[0] for symbol in (
+    "AG0.SHF", "AU0.SHF", "CU0.SHF", "RB0.SHF", "SC0.INE", "M0.DCE", "TA0.CZC",
+)}
+PRICE_REFERENCES = frozenset((*_SINA_DOMESTIC, *_SINA_FUTURES, "USD-CNY.FX"))
 INDEX_TIMEZONES = {
     **dict.fromkeys((*_SINA_US, "DXY.INDEX"), "America/New_York"),
     **dict.fromkeys(_SINA_HK, "Asia/Hong_Kong"),
     "N225.INDEX": "Asia/Tokyo", "KS11.INDEX": "Asia/Seoul",
 }
-_REFERENCE_SYMBOLS = frozenset((*INDEX_TIMEZONES, *_SINA_FUTURES, "USD-CNY.FX", "US10Y.RATE"))
+_REFERENCE_SYMBOLS = frozenset((*INDEX_TIMEZONES, *PRICE_REFERENCES, "US10Y.RATE"))
+
+
+def reference_contract(frame: pd.DataFrame, symbol: str) -> bool:
+    """Provider-bound reference prices; no assertion of tradable contract units."""
+    if symbol in INDEX_TIMEZONES:
+        return index_contract(frame, symbol)
+    expected_source = (
+        "sina:domestic-futures" if symbol in _SINA_DOMESTIC else
+        "sina:foreign-futures" if symbol in _SINA_FUTURES else "sina:USDCNY"
+    )
+    return bool(
+        symbol in PRICE_REFERENCES
+        and frame.attrs.get("instrument") == symbol
+        and frame.attrs.get("unit_status") == "reference_price_v1"
+        and frame.attrs.get("provider_interface") == expected_source
+        and frame.attrs.get("quote_unit") == ("CNY/USD" if symbol == "USD-CNY.FX" else "provider_quote")
+        and frame.attrs.get("observation_time") == "provider_observation_date"
+        and (list(frame.columns) == ["close"] if symbol in _SINA_FUTURES else
+             all(field in frame for field in ("open", "high", "low", "close")))
+    )
 
 
 def index_contract(frame: pd.DataFrame, symbol: str) -> bool:
@@ -144,34 +168,25 @@ def is_reference_symbol(symbol: str) -> bool:
     return symbol.upper() in _REFERENCE_SYMBOLS
 
 
-def _normalize(raw: pd.DataFrame, start: str, end: str) -> pd.DataFrame:
-    if raw is None or raw.empty:
-        return pd.DataFrame()
-    value = raw.copy().rename(columns={
-        "最新价": "close",
-        "收盘价": "close",
-        "bid_open": "open",
-        "bid_high": "high",
-        "bid_low": "low",
-        "bid_close": "close",
-        "trade_date": "date",
-    })
-    frame = normalize_daily(value)
-    if "close" not in frame:
-        return pd.DataFrame()
-    frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-    frame = frame[frame["close"].notna() & (frame["close"] > 0)].copy()
-    if frame.empty:
-        return frame
-    for column in ("open", "high", "low"):
-        if column not in frame:
-            frame[column] = frame["close"]
-        else:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(frame["close"])
-    if "volume" not in frame:
-        frame["volume"] = 0.0
-    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
-    return frame.loc[start:end]
+def _normalize_price(raw: pd.DataFrame, symbol: str, source: str, start: str, end: str) -> pd.DataFrame:
+    if raw.attrs.get("instrument", symbol) != symbol:
+        raise ValueError("参考响应身份与请求不符")
+    frame = normalize_daily(raw).loc[start:end].copy()
+    if frame.index.hasnans or frame.index.has_duplicates:
+        raise ValueError("参考响应日期无效或重复")
+    if symbol in _SINA_FUTURES:
+        # The real Sina continuous feed has O/H/L conflicts (including an
+        # apparent previous close in `open`). Admit only its actual close;
+        # never repair those fields or present them as validated candles.
+        frame = frame[["close"]].copy()
+    frame.attrs.update(
+        instrument=symbol, provider_interface=source, unit_status="reference_price_v1",
+        quote_unit="CNY/USD" if symbol == "USD-CNY.FX" else "provider_quote",
+        observation_time="provider_observation_date", provider_published_at="",
+    )
+    if not reference_contract(frame, symbol) or not covers_requested_range(frame, start, end, symbol=symbol):
+        raise ValueError("参考响应身份、频率或真实 OHLC 校验失败")
+    return frame
 
 
 def _akshare_reference_call(*args, **kwargs):
@@ -212,6 +227,12 @@ def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFr
             symbol=_SINA_GLOBAL[symbol],
             lane="akshare:sina-reference",
         )
+    if symbol in _SINA_DOMESTIC:
+        return "sina:domestic-futures", lambda: _akshare_reference_call(
+            f"futures_zh_daily_sina({_SINA_DOMESTIC[symbol]})",
+            ak.futures_zh_daily_sina, symbol=_SINA_DOMESTIC[symbol],
+            lane="akshare:sina-reference",
+        )
     if symbol in _SINA_FUTURES:
         return "sina:foreign-futures", lambda: _akshare_reference_call(
             f"futures_foreign_hist({_SINA_FUTURES[symbol]})",
@@ -237,23 +258,7 @@ def _akshare_route(symbol: str, start: str) -> tuple[str, Callable[[], pd.DataFr
     return None
 
 
-def _tushare_cny(start: str, end: str) -> pd.DataFrame:
-    from quantmaster.data.tushare_source import TushareSource
-
-    return TushareSource()._call(
-        "fx_daily",
-        1,
-        provider_lane="tushare:fx-reference",
-        required_nonempty=True,
-        required_columns=("trade_date",),
-        ts_code="USDCNH.FXCM",
-        start_date=pd.Timestamp(start).strftime("%Y%m%d"),
-        end_date=pd.Timestamp(end).strftime("%Y%m%d"),
-        fields="ts_code,trade_date,bid_open,bid_close,bid_high,bid_low",
-    )
-
-
-def _sina_dollar_index() -> pd.DataFrame:
+def _sina_dollar_index(symbol: str = "DINIW") -> pd.DataFrame:
     """Decode the DINIW daily feed used by Sina's own forex chart.
 
     The official datas/k.js decoder specifies date/open/low/high/close.
@@ -263,7 +268,7 @@ def _sina_dollar_index() -> pd.DataFrame:
 
     response = requests.get(
         "https://vip.stock.finance.sina.com.cn/forex/api/jsonp.php/quantmaster/NewForexService.getDayKLine",
-        params={"symbol": "DINIW"}, timeout=15,
+        params={"symbol": symbol}, timeout=15,
     )
     response.raise_for_status()
     prefix, suffix = "quantmaster(", ");"
@@ -303,7 +308,7 @@ def _normalize_reference(raw: pd.DataFrame, symbol: str, source: str, start: str
         return frame
     if symbol == "US10Y.RATE":
         return _normalize_yield(raw, start, end)
-    return _normalize(raw, start, end)
+    return _normalize_price(raw, symbol, source, start, end)
 
 
 def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
@@ -316,7 +321,9 @@ def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
     if symbol in _TUSHARE_GLOBAL:
         routes.append(("tushare:global-index", lambda: _tushare_index(symbol, start, end)))
     if symbol == "USD-CNY.FX":
-        routes.append(("tushare:fx", lambda: _tushare_cny(start, end)))
+        routes.append(("sina:USDCNY", lambda: provider_call(
+            "sina:fx-reference", "USDCNY:daily", lambda: _sina_dollar_index("USDCNY"), empty_opens=True,
+        )))
     if symbol == "DXY.INDEX":
         routes.append(("sina:dollar-index", lambda: provider_call(
             "sina:dollar-reference", "DINIW:daily", _sina_dollar_index, empty_opens=True,
@@ -324,7 +331,7 @@ def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
 
     from quantmaster.data.yfinance_source import YFinanceSource
 
-    if symbol != "US10Y.RATE":
+    if symbol != "US10Y.RATE" and symbol not in PRICE_REFERENCES:
         routes.append(("yfinance", lambda: YFinanceSource().daily(symbol, start, end)))
     for source, operation in routes:
         try:
@@ -386,7 +393,7 @@ def refresh_reference_panel(
 
     def sync_one(symbol: str, fetch_start: str) -> None:
         try:
-            if symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES:
+            if is_reference_symbol(symbol):
                 from quantmaster.data.market_data_access import refresh_history
 
                 envelope = refresh_history(symbol, start, end, store=store, mode=refresh)

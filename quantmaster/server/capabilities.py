@@ -516,7 +516,10 @@ def market_history(
 ) -> dict:
     from quantmaster import data as data_api
     from quantmaster.data.base import validate_frequency, validate_symbol
-    from quantmaster.data.reference_market import INDEX_TIMEZONES, index_contract
+    from quantmaster.data.reference_market import INDEX_TIMEZONES, PRICE_REFERENCES, reference_contract
+
+    if end is None and frequency == "1d" and symbol in PRICE_REFERENCES:
+        end = market_date().isoformat()
 
     if end is None and frequency == "1d" and symbol in INDEX_TIMEZONES:
         from quantmaster.trading_sessions import market_now
@@ -556,15 +559,17 @@ def market_history(
     loaded = time.perf_counter()
     positions = {column: offset + 1 for offset, column in enumerate(df.columns)}
     volume_position = positions.get("volume")
-    reference_index = index_contract(df, symbol)
+    reference_index = reference_contract(df, symbol)
     is_yield = symbol == "US10Y.RATE"
+    close_only = is_yield or (reference_index and list(df.columns) == ["close"])
+    price_precision = 6 if symbol == "USD-CNY.FX" else 3
     kline = [
         [
             str(values[0].date()) if frequency == "1d" else str(values[0]),
-            None if is_yield else round(values[positions["open"]], 3),
-            round(values[positions["close"]], 3),
-            None if is_yield else round(values[positions["low"]], 3),
-            None if is_yield else round(values[positions["high"]], 3),
+            None if close_only else round(values[positions["open"]], price_precision),
+            round(values[positions["close"]], price_precision),
+            None if close_only else round(values[positions["low"]], price_precision),
+            None if close_only else round(values[positions["high"]], price_precision),
             (
                 None if is_yield or reference_index else round(values[volume_position], 0)
                 if volume_position is not None else 0.0
@@ -588,7 +593,7 @@ def market_history(
         "symbol": symbol,
         "frequency": frequency,
         "kline": kline,
-        "series_type": "yield" if is_yield else "ohlcv",
+        "series_type": "yield" if is_yield else "close" if close_only else "ohlcv",
         "data_quality": market_envelope.quality.to_dict(),
         "provenance": list(market_envelope.provenance),
     }

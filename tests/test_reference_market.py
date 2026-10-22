@@ -65,24 +65,23 @@ def test_reference_market_falls_back_per_symbol_and_records_attempt(monkeypatch)
     assert result.frame.index.max() == pd.Timestamp("2026-07-24")
 
 
-def test_reference_market_normalizes_tushare_fx_trade_date(monkeypatch):
+def test_reference_market_requests_onshore_cny_not_offshore_cnh(monkeypatch):
     raw = pd.DataFrame([{
-        "trade_date": "20260730",
-        "bid_open": 6.74,
-        "bid_high": 6.76,
-        "bid_low": 6.73,
-        "bid_close": 6.75,
+        "date": "2026-07-30", "open": 6.74, "high": 6.76, "low": 6.73, "close": 6.75,
     }])
     monkeypatch.setattr(
         "quantmaster.data.reference_market._akshare_route", lambda symbol, start: None,
     )
     monkeypatch.setattr(
-        "quantmaster.data.reference_market._tushare_cny", lambda start, end: raw,
+        "quantmaster.data.reference_market._sina_dollar_index",
+        lambda symbol: raw if symbol == "USDCNY" else pytest.fail(symbol),
     )
 
     result = fetch_reference("USD-CNY.FX", "2026-07-01", "2026-07-31")
 
-    assert result.source == "tushare:fx"
+    assert result.source == "sina:USDCNY"
+    assert result.frame.attrs["quote_unit"] == "CNY/USD"
+    assert "volume" not in result.frame
     assert result.frame.index.tolist() == [pd.Timestamp("2026-07-30")]
     assert result.frame.iloc[0]["close"] == 6.75
 
@@ -118,8 +117,11 @@ def test_refresh_reference_symbol_uses_dedicated_route_and_writes_cache(tmp_path
     calls: list[tuple[str, str, str]] = []
 
     def reference(symbol: str, start: str, end: str):
+        from quantmaster.data.reference_market import _normalize_price
+
         calls.append((symbol, start, end))
-        return type("Fetch", (), {"frame": raw, "source": "sina:foreign-futures"})()
+        frame = _normalize_price(raw, symbol, "sina:foreign-futures", start, end)
+        return ReferenceFetch(frame, "sina:foreign-futures", ())
 
     monkeypatch.setattr(registry, "fetch_reference", reference, raising=False)
     monkeypatch.setattr(

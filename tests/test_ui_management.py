@@ -6540,3 +6540,34 @@ def test_data_update_survives_long_wait_reload_and_partial_completion(live_serve
         page.screenshot(path=str(tmp_path / "update-narrow.png"))
         assert errors == []
         browser.close()
+
+
+def test_reference_close_chart_preserves_prices_and_moving_averages(live_server):
+    url, _ = live_server
+    with playwright_sync.sync_playwright() as manager:
+        browser = manager.chromium.launch(headless=True)
+        for width in (1440, 390):
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            _install_market_workbench_routes(page)
+            page.goto(f"{url}/#today/quotes", wait_until="networkidle")
+            page.wait_for_function("typeof renderKlineSeries === 'function'")
+            result = page.evaluate("""async () => {
+              const {loadAdvancedCharts} = await import('/static/advanced-charts.js');
+              await loadAdvancedCharts();
+              document.getElementById('kline-panel').style.display = '';
+              const chart = mkChart('kline', false);
+              const data = {symbol:'CL.CONTINUOUS',series_type:'close',kline:
+                Array.from({length:25}, (_, i) => ['2026-07-' + (i+1),null,100+i,null,null,null])};
+              renderKlineSeries(chart,data);
+              const option = chart.getOption();
+              return {types:option.series.map(s => s.type),
+                names:option.series.map(s => s.name),
+                last:option.series.map(s => s.data.at(-1)),
+                labels:option.yAxis[0].axisLabel.formatter?.(124) ?? '124'};
+            }""")
+            assert result["types"] == ["line"] * 3
+            assert result["names"] == ["收盘价参考", "MA5", "MA20"]
+            assert result["last"] == [124, 122, 114.5]
+            assert "%" not in str(result["labels"])
+            page.close()
+        browser.close()
