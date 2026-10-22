@@ -434,8 +434,8 @@ def test_overseas_chart_default_date_does_not_require_cn_calendar(symbol, expect
 def test_missing_sina_native_runtime_falls_through_to_compatible_provider(monkeypatch):
     from pathlib import Path
 
-    import akshare
-    from py_mini_racer import LibNotFoundError
+    akshare = pytest.importorskip("akshare")
+    LibNotFoundError = pytest.importorskip("py_mini_racer").LibNotFoundError
 
     from quantmaster.data.reference_market import fetch_reference
 
