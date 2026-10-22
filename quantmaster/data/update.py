@@ -13,10 +13,11 @@ UPDATE_STATE = "data.update.plan"
 ACTIVE = {"queued", "running", "cancelling", "interrupted"}
 
 
-def _queue_status(store: UnifiedJobStore, job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+def queue_status(store: UnifiedJobStore, job: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     end = datetime.fromisoformat(job["finished_at"]).timestamp() if job.get("finished_at") else time.time()
     elapsed = max(0, round(end - datetime.fromisoformat(job["created_at"]).timestamp()))
-    waiting = [job] if job["status"] == "queued" else []
+    queued = job["status"] == "queued" or job.get("waiting_on") == "refresh_batch"
+    waiting = [job] if queued else []
     if job["status"] in ACTIVE:
         waiting.extend(
             child for item in state.get("children", [])[:10]
@@ -41,7 +42,7 @@ def _queue_status(store: UnifiedJobStore, job: dict[str, Any], state: dict[str, 
         "remaining_seconds": max(0, round(float(job["deadline_seconds"]) - elapsed)),
         "overdue": job["status"] in ACTIVE and elapsed >= float(job["deadline_seconds"]),
         "phase": ("waiting_for_slot" if blockers else
-                  "queued" if job["status"] == "queued" else
+                  "queued" if queued else
                   "dependencies" if job.get("waiting_on") else job["status"]),
         "blockers": list(blockers.values())[:10],
     }
@@ -53,7 +54,7 @@ def project_update(store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any
         **UnifiedJobRuntime.public(job),
         "target_session": job["spec"]["target_session"], **state,
         "waiting_on": str(job.get("waiting_on") or ""), "can_retry": False,
-        "queue": _queue_status(store, job, state),
+        "queue": queue_status(store, job, state),
     }
 
 

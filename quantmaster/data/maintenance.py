@@ -14,6 +14,7 @@ from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
+from itertools import islice
 from pathlib import Path
 from typing import Any, Literal
 
@@ -57,6 +58,15 @@ class DataRefreshManager:
     """Plan refresh work and project its domain result from one runtime ledger."""
 
     MAX_PARALLEL_SYMBOLS = 8
+
+    @staticmethod
+    def _scheduling_key(job: dict[str, Any]) -> tuple[Any, ...]:
+        # Plans yield while their dependencies run; current market/watchlist work
+        # takes precedence over bulk history. Bulk batches rotate by last service.
+        spec = job["spec"]
+        priority = (0 if job["type"] == "data.update" else
+                    1 if spec.get("scope") in {"market", "watchlist"} else 2)
+        return priority, job["updated_at"], job["created_at"], job["id"]
 
     @staticmethod
     def _stockdb_wait_reason() -> str:
@@ -121,6 +131,7 @@ class DataRefreshManager:
             self._runtime = UnifiedJobRuntime(
                 UnifiedJobStore(path), max_workers=1,
                 dispatch=self._owns_runtime(),
+                scheduling_key=self._scheduling_key,
             )
             self._runtime.register(DATA_REFRESH_TASK_TYPE, self._handle)
             from quantmaster.data.update import UPDATE_TASK
@@ -573,7 +584,10 @@ class DataRefreshManager:
         state["attempt"] = context.attempt
         store = BarStore()
         completed = set(state["completed_symbols"])
-        remaining = iter(symbol for symbol in state["symbols"] if symbol not in completed)
+        remaining = iter(islice(
+            (symbol for symbol in state["symbols"] if symbol not in completed),
+            self.MAX_PARALLEL_SYMBOLS,
+        ))
         waiting = ""
         with ThreadPoolExecutor(max_workers=self.MAX_PARALLEL_SYMBOLS,
                                 thread_name_prefix="data-refresh") as executor:
@@ -645,6 +659,11 @@ class DataRefreshManager:
             state["stockdb_waiting"] = True
             context.write_checkpoint(REFRESH_CHECKPOINT, context.spec_hash, state)
             return self._waiting(waiting)
+        if len(state["completed_symbols"]) < len(symbols):
+            return JobOutcome(
+                "interrupted", "本批同步已保存，等待下一批；市场与自选更新优先，随后自动继续",
+                retry_delay_seconds=1, waiting_on="refresh_batch",
+            )
         failures = [*state["blocked_failures"], *state["failures"]]
         outcome = "completed_with_warnings" if failures or state.get("warnings") else "completed"
         result = {
@@ -677,7 +696,7 @@ class DataRefreshManager:
         return dict(checkpoint or {})
 
     def _project(self, store: UnifiedJobStore, job: dict[str, Any]) -> dict[str, Any]:
-        from quantmaster.data.update import UPDATE_TASK, project_update
+        from quantmaster.data.update import UPDATE_TASK, project_update, queue_status
 
         if job.get("type") == UPDATE_TASK:
             return project_update(store, job)
@@ -706,6 +725,7 @@ class DataRefreshManager:
             "outcome": str(state.get("outcome") or ""),
             "waiting_on": str(job.get("waiting_on") or ""),
             "next_retry_at": float(job.get("next_retry_at") or 0),
+            "queue": queue_status(store, job, state),
         })
         value["can_retry"] = not value["waiting_on"] and bool(value["can_retry"]) and (
             job["status"] in {"failed", "cancelled", "interrupted"}
