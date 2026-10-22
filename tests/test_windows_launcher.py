@@ -615,6 +615,7 @@ def test_pyinstaller_spec_loads_identity_policy_outside_project_sys_path(
     hooks = ModuleType("PyInstaller.utils.hooks")
     hooks.collect_submodules = lambda *_args, **_kwargs: []
     hooks.collect_data_files = lambda *_args, **_kwargs: []
+    hooks.collect_dynamic_libs = lambda *_args, **_kwargs: []
     hooks.copy_metadata = lambda *_args, **_kwargs: []
     monkeypatch.setitem(sys.modules, "PyInstaller", ModuleType("PyInstaller"))
     monkeypatch.setitem(sys.modules, "PyInstaller.utils", ModuleType("PyInstaller.utils"))

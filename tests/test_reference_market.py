@@ -431,6 +431,27 @@ def test_overseas_chart_default_date_does_not_require_cn_calendar(symbol, expect
     assert calls[0][2] == expected
 
 
+def test_missing_sina_native_runtime_falls_through_to_compatible_provider(monkeypatch):
+    from pathlib import Path
+
+    import akshare
+    from py_mini_racer import LibNotFoundError
+
+    from quantmaster.data.reference_market import fetch_reference
+
+    def missing_runtime(**_kwargs):
+        raise LibNotFoundError(Path("missing-native-library"))
+
+    monkeypatch.setattr(akshare, "index_us_stock_sina", missing_runtime)
+    monkeypatch.setattr("quantmaster.data.reference_market.akshare_call",
+                        lambda _label, function, **kwargs: function(symbol=kwargs["symbol"]))
+    monkeypatch.setattr("quantmaster.data.reference_market._tushare_index", lambda *_: _frame())
+    fetched = fetch_reference("SPX.INDEX", "2026-07-20", "2026-07-24")
+    assert fetched.source == "tushare:global-index"
+    assert fetched.attempts[0]["code"] == "ImportError"
+    assert "missing-native-library" not in fetched.attempts[0]["detail"]
+
+
 def test_refresh_reference_panel_isolates_sdk_capability_failure(tmp_path, monkeypatch):
     ready, failed = "SPX.INDEX", "DXY.INDEX"
     frame = _frame().assign(volume=0.0).set_index("date")

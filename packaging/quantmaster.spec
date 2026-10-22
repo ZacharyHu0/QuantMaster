@@ -7,7 +7,7 @@ import runpy
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
 package_layout = os.environ.get("QM_DESKTOP_LAYOUT", "onefile")
 if package_layout not in {"onefile", "onedir-measurement"}:
@@ -67,6 +67,8 @@ datas = [
 ]
 # AKShare opens calendars at import time and JS/ZIP resources through its loaders.
 datas += collect_data_files("akshare")
+# Sina's compressed daily bars execute JavaScript through this native runtime.
+datas += collect_data_files("py_mini_racer")
 # Provider revisions use distribution metadata, not module __version__ values.
 for provider in ("akshare", "tushare", "yfinance"):
     datas += copy_metadata(provider)
@@ -100,6 +102,7 @@ a = Analysis(
     [str(project_root / "packaging/entry.py")],
     pathex=[str(project_root)],
     datas=datas,
+    binaries=collect_dynamic_libs("py_mini_racer"),
     runtime_hooks=[str(runtime_identity_hook)],
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",

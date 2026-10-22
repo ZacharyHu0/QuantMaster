@@ -42,7 +42,21 @@ def test_provider_probe_runs_real_adapter_to_replaced_network_boundary(monkeypat
     assert result["network_requests_sent"] == 0
     assert result["market_data_returned"] is False
     assert result["us10y_network_boundary"] == "requests.Session.request"
+    assert result["sina_javascript_executed"] is True
     assert all(result["package_versions"].values())
+
+
+def test_provider_probe_rejects_missing_javascript_runtime(monkeypatch):
+    mini_racer = pytest.importorskip("py_mini_racer")
+    pytest.importorskip("akshare")
+    monkeypatch.setattr(smoke_frozen_runtime.sys, "frozen", True, raising=False)
+
+    def missing_runtime():
+        raise mini_racer.LibNotFoundError(Path("missing-native-library"))
+
+    monkeypatch.setattr(mini_racer, "MiniRacer", missing_runtime)
+    with pytest.raises(mini_racer.LibNotFoundError):
+        smoke_frozen_runtime.frozen_provider_smoke()
 
 
 def test_provider_probe_rejects_missing_resource(monkeypatch, tmp_path):
