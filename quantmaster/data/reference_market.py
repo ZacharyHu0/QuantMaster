@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 import time
 from collections.abc import Callable
@@ -13,7 +15,7 @@ import pandas as pd
 from quantmaster.config import get_config
 from quantmaster.data.base import normalize_daily
 from quantmaster.data.frame_quality_access import assess_daily_frame, covers_requested_range
-from quantmaster.data.resilience import akshare_call
+from quantmaster.data.resilience import akshare_call, provider_call
 from quantmaster.data.storage import BarStore
 
 
@@ -39,8 +41,55 @@ class ReferenceMarketUnavailable(RuntimeError):
 _SINA_US = {"SPX.INDEX": ".INX", "IXIC.INDEX": ".IXIC", "DJI.INDEX": ".DJI"}
 _SINA_HK = {"HSI.INDEX": "HSI", "HSTECH.INDEX": "HSTECH"}
 _SINA_GLOBAL = {"N225.INDEX": "日经225指数", "KS11.INDEX": "首尔综合指数"}
+_TUSHARE_GLOBAL = {
+    **{symbol: symbol.partition(".")[0] for symbol in (*_SINA_US, *_SINA_GLOBAL, "HSI.INDEX")},
+    "HSTECH.INDEX": "HKTECH",
+}
 _SINA_FUTURES = {"GC.CONTINUOUS": "GC", "CL.CONTINUOUS": "CL", "HG.CONTINUOUS": "HG"}
-_REFERENCE_SYMBOLS = frozenset((*_SINA_FUTURES, "USD-CNY.FX", "US10Y.RATE"))
+INDEX_TIMEZONES = {
+    **dict.fromkeys((*_SINA_US, "DXY.INDEX"), "America/New_York"),
+    **dict.fromkeys(_SINA_HK, "Asia/Hong_Kong"),
+    "N225.INDEX": "Asia/Tokyo", "KS11.INDEX": "Asia/Seoul",
+}
+_REFERENCE_SYMBOLS = frozenset((*INDEX_TIMEZONES, *_SINA_FUTURES, "USD-CNY.FX", "US10Y.RATE"))
+
+
+def index_contract(frame: pd.DataFrame, symbol: str) -> bool:
+    """Only newly acquired, provider-bound index points qualify as references."""
+    return bool(
+        symbol in INDEX_TIMEZONES
+        and frame.attrs.get("instrument") == symbol
+        and frame.attrs.get("unit_status") == "reference_index_points_v1"
+        and frame.attrs.get("quote_unit") == "point"
+        and frame.attrs.get("timezone") == INDEX_TIMEZONES[symbol]
+        and frame.attrs.get("provider_interface") in {
+            "sina:us-index", "sina:hk-index", "sina:global-index",
+            "akshare:global-index", "sina:dollar-index", "tushare:global-index", "yfinance",
+        }
+    )
+
+
+def _normalize_index(raw: pd.DataFrame, symbol: str, source: str, start: str, end: str) -> pd.DataFrame:
+    if raw.attrs.get("instrument", symbol) != symbol:
+        raise ValueError("指数响应身份与请求不符")
+    frame = normalize_daily(raw.rename(columns={
+        "开": "open", "高": "high", "低": "low", "最新价": "close", "收盘价": "close",
+    }))
+    if frame.index.hasnans or frame.index.has_duplicates:
+        raise ValueError("指数响应日期无效或重复")
+    frame = frame.loc[start:end].copy()
+    # Keep actual provider fields. Missing OHLC/turnover must never be invented.
+    prices = ["open", "high", "low", "close"]
+    if any(field not in frame for field in prices):
+        raise ValueError("指数响应缺少真实 OHLC")
+    if not frame[prices].map(lambda v: math.isfinite(v) and v > 0).all().all():
+        raise ValueError("指数响应价格非有限或非正")
+    frame.attrs.update(
+        instrument=symbol, provider_interface=source, quote_unit="point",
+        unit_status="reference_index_points_v1", timezone=INDEX_TIMEZONES[symbol],
+        observation_time="provider_observation_date", provider_published_at="",
+    )
+    return frame
 
 
 def yield_request_end(end: str, now: object) -> str:
@@ -192,6 +241,59 @@ def _tushare_cny(start: str, end: str) -> pd.DataFrame:
     )
 
 
+def _sina_dollar_index() -> pd.DataFrame:
+    """Decode the DINIW daily feed used by Sina's own forex chart.
+
+    The official datas/k.js decoder specifies date/open/low/high/close.
+    Its empty volume field is absent evidence, never zero turnover.
+    """
+    import requests
+
+    response = requests.get(
+        "https://vip.stock.finance.sina.com.cn/forex/api/jsonp.php/quantmaster/NewForexService.getDayKLine",
+        params={"symbol": "DINIW"}, timeout=15,
+    )
+    response.raise_for_status()
+    prefix, suffix = "quantmaster(", ");"
+    text = response.text.strip()
+    offset = text.find(prefix)
+    if offset < 0 or not text.endswith(suffix):
+        raise ValueError("DINIW 响应格式无效")
+    value = json.loads(text[offset + len(prefix):-len(suffix)])
+    if not isinstance(value, str):
+        raise ValueError("DINIW 响应类型无效")
+    rows = [row.split(",") for row in value.split("|")]
+    if any(len(row) < 5 for row in rows):
+        raise ValueError("DINIW 日线缺少价格字段")
+    return pd.DataFrame([row[:5] for row in rows], columns=["date", "open", "low", "high", "close"])
+
+
+def _tushare_index(symbol: str, start: str, end: str) -> pd.DataFrame:
+    from quantmaster.data.tushare_source import TushareSource
+
+    alias = _TUSHARE_GLOBAL[symbol]
+    raw = TushareSource()._call(
+        "index_global", 1, provider_lane="tushare:global-index", required_nonempty=True,
+        required_columns=("ts_code", "trade_date", "open", "high", "low", "close"),
+        ts_code=alias, start_date=pd.Timestamp(start).strftime("%Y%m%d"),
+        end_date=pd.Timestamp(end).strftime("%Y%m%d"),
+    )
+    if set(raw["ts_code"].dropna().astype(str)) != {alias}:
+        raise ValueError("国际指数响应代码与请求不符")
+    return raw.rename(columns={"trade_date": "date", "vol": "volume"})
+
+
+def _normalize_reference(raw: pd.DataFrame, symbol: str, source: str, start: str, end: str) -> pd.DataFrame:
+    if symbol in INDEX_TIMEZONES:
+        frame = _normalize_index(raw, symbol, source, start, end)
+        if not covers_requested_range(frame, start, end, symbol=symbol):
+            raise ValueError("指数响应边界、频率或价格结构校验失败")
+        return frame
+    if symbol == "US10Y.RATE":
+        return _normalize_yield(raw, start, end)
+    return _normalize(raw, start, end)
+
+
 def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
     """Fetch one reference without letting another symbol's failure block it."""
     attempts: list[dict[str, str]] = []
@@ -199,8 +301,14 @@ def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
     akshare_route = _akshare_route(symbol, start)
     if akshare_route is not None:
         routes.append(akshare_route)
+    if symbol in _TUSHARE_GLOBAL:
+        routes.append(("tushare:global-index", lambda: _tushare_index(symbol, start, end)))
     if symbol == "USD-CNY.FX":
         routes.append(("tushare:fx", lambda: _tushare_cny(start, end)))
+    if symbol == "DXY.INDEX":
+        routes.append(("sina:dollar-index", lambda: provider_call(
+            "sina:dollar-reference", "DINIW:daily", _sina_dollar_index, empty_opens=True,
+        )))
 
     from quantmaster.data.yfinance_source import YFinanceSource
 
@@ -208,14 +316,11 @@ def fetch_reference(symbol: str, start: str, end: str) -> ReferenceFetch:
         routes.append(("yfinance", lambda: YFinanceSource().daily(symbol, start, end)))
     for source, operation in routes:
         try:
-            frame = (
-                _normalize_yield(operation(), start, end) if symbol == "US10Y.RATE"
-                else _normalize(operation(), start, end)
-            )
+            frame = _normalize_reference(operation(), symbol, source, start, end)
             if frame.empty:
                 raise ValueError("返回空数据或缺少有效收盘价")
             return ReferenceFetch(frame=frame, source=source, attempts=tuple(attempts))
-        except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (AttributeError, ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
             from quantmaster.logging_config import redact_sensitive_text
 
             attempts.append({
@@ -269,13 +374,13 @@ def refresh_reference_panel(
 
     def sync_one(symbol: str, fetch_start: str) -> None:
         try:
-            if symbol == "US10Y.RATE":
+            if symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES:
                 from quantmaster.data.market_data_access import refresh_history
 
                 envelope = refresh_history(symbol, start, end, store=store, mode=refresh)
                 envelope.require_data()
                 if envelope.quality.stale:
-                    raise ValueError("US10Y 刷新失败，正在显示旧参考数据")
+                    raise ValueError("刷新失败，正在显示旧参考数据")
                 return
             with data_priority("interactive"):
                 fetched = fetch_reference(symbol, fetch_start, end)

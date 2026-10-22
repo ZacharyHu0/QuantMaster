@@ -84,8 +84,10 @@ _MARKET_TIMEZONES: dict[Market, str] = {
 
 def _market_timezone(symbol: str) -> ZoneInfo | None:
     """Return only an IANA timezone proved by the symbol's market identity."""
+    from quantmaster.data.reference_market import INDEX_TIMEZONES
+
     try:
-        name = _MARKET_TIMEZONES.get(guess_market(symbol))
+        name = INDEX_TIMEZONES.get(symbol) or _MARKET_TIMEZONES.get(guess_market(symbol))
     except ValueError:
         return None
     if not name:
@@ -464,9 +466,16 @@ def _assess_daily_frame(
     stale: bool = False,
     extra_issues: tuple[str, ...] = (),
 ) -> BarDataQuality:
-    from quantmaster.data.reference_market import yield_contract, yield_request_end
+    from quantmaster.data.reference_market import (
+        INDEX_TIMEZONES,
+        index_contract,
+        yield_contract,
+        yield_request_end,
+    )
 
     is_yield = symbol == "US10Y.RATE"
+    is_index_reference = symbol in INDEX_TIMEZONES
+    valid_reference = is_index_reference and df is not None and index_contract(df, symbol)
     try:
         market = guess_market(symbol) if symbol else Market.CN
     except ValueError:
@@ -489,6 +498,12 @@ def _assess_daily_frame(
         issues.append("REFERENCE_ONLY: 收益率参考序列，发布时间及完整发布日历未证实")
     elif is_yield:
         issues.append("US10Y_UNIT_CONTRACT_MISSING: 缺少收益率来源/单位/身份契约")
+    if valid_reference:
+        units = tuple((field, "point") for field in ("open", "high", "low", "close"))
+        unit_issue = ""
+        issues.append("REFERENCE_ONLY: 境外指数点数参考，成交单位、发布时间及完整日历未证实")
+    elif is_index_reference:
+        issues.append("INDEX_REFERENCE_CONTRACT_MISSING: 缺少境外指数来源/单位/身份契约")
     stockdb_units = df.attrs.get("units") if df is not None else None
     if (
         source.startswith("free-stockdb")
@@ -549,7 +564,7 @@ def _assess_daily_frame(
         sparse_cadence = median_gap_days > 2
         if sparse_cadence:
             issues.append(f"日频观测间隔中位数异常：{median_gap_days:.1f} 天")
-    required_columns = ["close"] if is_yield else OHLCV_COLUMNS
+    required_columns = ["close"] if is_yield else OHLCV_COLUMNS[:-1] if valid_reference else OHLCV_COLUMNS
     missing_columns = [column for column in required_columns if column not in df]
     if missing_columns:
         issues.append("缺少必需列：" + "、".join(missing_columns))
@@ -561,7 +576,7 @@ def _assess_daily_frame(
         if invalid_numeric:
             issues.append("收益率存在非有限数值")
     elif not missing_columns:
-        numeric = df[OHLCV_COLUMNS].apply(pd.to_numeric, errors="coerce")
+        numeric = df[required_columns].apply(pd.to_numeric, errors="coerce")
         finite = numeric.map(math.isfinite).all(axis=1)
         invalid_numeric = int((~finite).sum())
         if invalid_numeric:
@@ -571,6 +586,10 @@ def _assess_daily_frame(
         prices = numeric[["open", "high", "low", "close"]]
         scale = prices.abs().max(axis=1).clip(lower=1.0)
         tolerance = scale.mul(1e-8)
+        if valid_reference and df.attrs.get("provider_interface") == "sina:hk-index":
+            # Sina quotes HK O/H/L to 2 decimals and closes to 5; a half
+            # quoted point-cent is rounding uncertainty, not a price repair.
+            tolerance = tolerance.clip(lower=0.005)
         future_family = symbol.upper().split(".", 1)[0].rstrip("0123456789")
         energy_future = (
             guess_market(symbol) == Market.FUTURES
@@ -582,7 +601,7 @@ def _assess_daily_frame(
             & numeric["high"].add(tolerance).ge(prices[["open", "close"]].max(axis=1))
             & numeric["low"].sub(tolerance).le(prices[["open", "close"]].min(axis=1))
             & numeric["high"].add(tolerance).ge(numeric["low"])
-            & numeric["volume"].ge(0)
+            & (numeric["volume"].ge(0) if "volume" in numeric else True)
         )
         invalid_semantics = int((finite & ~semantic).sum())
         if invalid_semantics:
@@ -598,6 +617,12 @@ def _assess_daily_frame(
             currency="", price_unit="percent_points", volume_unit="not_applicable",
             amount_unit="not_applicable", exchange="US TREASURY",
             quote_unit="percent_points", intended_use="display",
+        )
+    if valid_reference:
+        semantics = replace(
+            semantics, observation_time="provider_observation_date",
+            price_unit="point", quote_unit="point", intended_use="display",
+            volume_unit="unknown", amount_unit="unknown",
         )
     issues.extend(semantic_issues)
     adjustment = semantics.price_type.value
@@ -636,7 +661,11 @@ def _assess_daily_frame(
         issues.append("缺少权威交易日历，仅完成边界与结构校验")
     else:
         partial = True
-        issues.append("MARKET_SESSION_UNSUPPORTED: 缺少该交易所/产品的已验证时区与交易时段模板")
+        issues.append(
+            "REFERENCE_CALENDAR_UNCONFIRMED: 缺少独立交易日历和发布时间；按实际观测日期展示"
+            if valid_reference else
+            "MARKET_SESSION_UNSUPPORTED: 缺少该交易所/产品的已验证时区与交易时段模板"
+        )
     if not calendar_complete and market in {Market.HK, Market.US}:
         partial = True
         issues.append("交易日仅由已返回 bar 观测，缺少独立节假日日历，不能证明区间完整")
@@ -664,7 +693,7 @@ def _assess_daily_frame(
                 "等待 cutoff 前的本地摄取与完整覆盖证据"
             )
     blocking = bool(
-        (is_yield and not valid_yield) or wrong_index_identity
+        (is_yield and not valid_yield) or (is_index_reference and not valid_reference) or wrong_index_identity
         or duplicate_rows or future_rows or sparse_cadence or missing_columns
         or invalid_numeric or invalid_semantics
         or any("响应起点" in item or "响应终点" in item or "覆盖率仅" in item for item in issues)
@@ -1209,7 +1238,9 @@ def _with_daily_freshness(
     metadata: dict[str, Any],
     purpose: CachePurpose | str,
 ) -> BarDataQuality:
-    if symbol == "US10Y.RATE":
+    from quantmaster.data.reference_market import INDEX_TIMEZONES
+
+    if symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES:
         freshness = assess_daily_freshness(
             symbol=symbol, frame=frame, requested_end=end,
             checked_at=float(metadata.get("checked_at") or 0), purpose=purpose,
@@ -1780,7 +1811,9 @@ def _full_refresh(
     provider: str = "",
     *, refresh_provider_cache: bool = True,
 ) -> pd.DataFrame:
-    if symbol == "US10Y.RATE":
+    from quantmaster.data.reference_market import INDEX_TIMEZONES
+
+    if symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES:
         fresh, reference_errors, succeeded = _fetch_segment(
             symbol, start, end, "initial", None, store, priority, provider=provider,
         )
@@ -1945,32 +1978,52 @@ def _fetch_segment(
             request_end=end,
             source=storage_source,
             quality=quality.to_dict(),
+            replace_coverage=direction == "initial" and symbol in INDEX_TIMEZONES,
         )
         return store.get(symbol), errors, True
 
-    # These canonical reference symbols intentionally retain their ``.US``
-    # suffix, so the generic market classifier would otherwise send them
-    # through the US-equity lane.  Use their dedicated routes first: they
-    # validate the provider ticker (Sina GC/CL/HG or Tushare USDCNH) and make
-    # the per-symbol Yahoo fallback explicit.  A failure remains local to this
-    # symbol and the generic candidates below can still be tried.
+    # Dedicated references must never fall through domestic index/equity APIs.
     from quantmaster.data.reference_market import (
+        INDEX_TIMEZONES,
         ReferenceMarketUnavailable,
         fetch_reference,
+        index_contract,
         is_reference_symbol,
     )
     if is_reference_symbol(symbol):
         try:
             reference = fetch_reference(symbol, start, end)
             frame = reference.frame
+            if (
+                symbol in INDEX_TIMEZONES and cached is not None and not cached.empty
+                and cached.attrs.get("provider_interface") != frame.attrs.get("provider_interface")
+            ):
+                # A provider switch replaces the whole proven history; it may
+                # not relabel old rows or apply an equity adjustment ratio.
+                start = min(start, str(cached.index.min().date()))
+                end = max(end, str(cached.index.max().date()))
+                reference = fetch_reference(symbol, start, end)
+                frame, cached, direction = reference.frame, None, "initial"
             if not _covers_requested_range(frame, start, end, symbol=symbol):
                 errors.append("reference-market: 响应内部过于稀疏")
             else:
-                if symbol == "US10Y.RATE" and cached is not None and not cached.empty:
+                if symbol in INDEX_TIMEZONES and direction == "initial":
+                    previous = store.get(symbol)
+                    if not _is_complete_refresh(frame, previous, start, end, symbol=symbol):
+                        raise ValueError("指数完整重建缺少已有观测日，保留原缓存")
+                if (
+                    (symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES)
+                    and cached is not None and not cached.empty
+                ):
                     from quantmaster.data.reference_market import yield_contract
 
-                    if not yield_contract(cached):
-                        raise ValueError("US10Y 旧缓存缺少单位契约，需显式完整重建")
+                    compatible = (
+                        index_contract(cached, symbol)
+                        if symbol in INDEX_TIMEZONES else yield_contract(cached)
+                    )
+                    if not compatible:
+                        raise ValueError("参考旧缓存缺少单位契约，需完整重建")
+                    # Index points/yields are never adjusted by an overlap ratio.
                     merged = pd.concat([cached, frame])
                     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
                     merged.attrs = frame.attrs.copy()
@@ -1987,7 +2040,7 @@ def _fetch_segment(
                     reference.source,
                 )
                 if (
-                    symbol != "US10Y.RATE" and prefer_extension
+                    symbol != "US10Y.RATE" and symbol not in INDEX_TIMEZONES and prefer_extension
                     and cached_latest is not None and fresh_latest <= cached_latest
                 ):
                     errors.append(
@@ -2003,8 +2056,8 @@ def _fetch_segment(
         except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             errors.append(f"reference-market: {exc}")
 
-        if symbol == "US10Y.RATE":
-            return cached, errors or ["US10Y 参考来源不可用"], False
+        if symbol == "US10Y.RATE" or symbol in INDEX_TIMEZONES:
+            return cached, errors or ["参考来源不可用"], False
 
     for factory in _request_factories(
         priority=priority, allow_online=True, provider=provider,
@@ -2095,7 +2148,9 @@ def _session_refresh_due(
     now: pd.Timestamp | None = None,
 ) -> bool:
     """Return true once an early-day CN check crosses the market-close boundary."""
-    if guess_market(symbol) not in {Market.CN, Market.INDEX}:
+    from quantmaster.data.reference_market import INDEX_TIMEZONES
+
+    if symbol in INDEX_TIMEZONES or guess_market(symbol) not in {Market.CN, Market.INDEX}:
         return False
     if cached is None or cached.empty or not checked_at:
         return False
@@ -2649,6 +2704,16 @@ def _load_history_locked(
         ).loc[start:end]
 
     meta = store.metadata(symbol) or {}
+    from quantmaster.data.reference_market import INDEX_TIMEZONES, index_contract
+
+    if (
+        cached is not None and not cached.empty
+        and symbol in INDEX_TIMEZONES and not index_contract(cached, symbol)
+    ):
+        return _full_refresh(
+            symbol, min(start, str(cached.index.min().date())),
+            end, cached, store, priority, provider,
+        ).loc[start:end]
     if (
         cached is not None and not cached.empty
         and (guess_market(symbol) == Market.CN or symbol.upper().endswith(".CSI"))
@@ -3111,7 +3176,12 @@ def read_history(
         frame = _cached_slice(cached, start, end)
         if frame is None:
             frame = pd.DataFrame(columns=OHLCV_COLUMNS)
-        return _bar_envelope(
+        from quantmaster.data.reference_market import index_contract
+
+        requested_start = start
+        if str(purpose) == CachePurpose.DISPLAY.value and index_contract(frame, symbol) and not frame.empty:
+            start = max(start, str(frame.index.min().date()))
+        envelope = _bar_envelope(
             frame,
             symbol=symbol,
             start=start,
@@ -3120,6 +3190,15 @@ def read_history(
             frequency="1d",
             purpose=purpose,
         )
+        if start != requested_start:
+            return replace(envelope, quality=replace(
+                envelope.quality, requested_start=requested_start, partial=True,
+                issues=(
+                    *envelope.quality.issues,
+                    "REFERENCE_HISTORY_PARTIAL: 仅展示已有参考历史，未覆盖请求起点",
+                ),
+            ))
+        return envelope
 
 
 def read_bars(
